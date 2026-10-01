@@ -1,0 +1,131 @@
+// Wire format shared with crates/rm-protocol:
+//   u32 BE length | u8 channel | payload     (length counts channel byte + payload)
+// Control/metadata/input payloads are JSON; the Video channel is binary (see VideoPacket).
+import Foundation
+
+enum Chan: UInt8 { case input = 0, control = 1, windowMetadata = 2, video = 3, clipboard = 4, files = 5, telemetry = 6 }
+
+func channel(forType t: String) -> Chan {
+    switch t {
+    case "mouse_move", "mouse_button", "scroll", "key", "text_input": return .input
+    case "window_created", "window_destroyed", "window_moved", "window_title_changed": return .windowMetadata
+    case "ping", "pong": return .telemetry
+    default: return .control
+    }
+}
+
+struct WireError: Error, CustomStringConvertible { let description: String }
+
+final class Conn {
+    let fd: Int32
+    private let writeLock = NSLock()
+    init(fd: Int32) { self.fd = fd }
+
+    static func connect(hostPort: String) throws -> Conn {
+        guard let idx = hostPort.lastIndex(of: ":"), let port = Int(hostPort[hostPort.index(after: idx)...]) else {
+            throw WireError(description: "bad relay address \(hostPort)")
+        }
+        let host = String(hostPort[..<idx])
+        var hints = addrinfo(); hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM
+        var res: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, String(port), &hints, &res) == 0, let first = res else { throw WireError(description: "resolve \(host) failed") }
+        defer { freeaddrinfo(res) }
+        var p: UnsafeMutablePointer<addrinfo>? = first
+        while let ai = p {
+            let fd = socket(ai.pointee.ai_family, ai.pointee.ai_socktype, ai.pointee.ai_protocol)
+            if fd >= 0 {
+                if Darwin.connect(fd, ai.pointee.ai_addr, ai.pointee.ai_addrlen) == 0 {
+                    var one: Int32 = 1
+                    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, socklen_t(MemoryLayout<Int32>.size))
+                    return Conn(fd: fd)
+                }
+                close(fd)
+            }
+            p = ai.pointee.ai_next
+        }
+        throw WireError(description: "connect \(hostPort) failed")
+    }
+
+    func writeAll(_ data: Data) throws {
+        writeLock.lock(); defer { writeLock.unlock() }
+        try data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            var off = 0
+            while off < raw.count {
+                let n = Darwin.write(fd, raw.baseAddress! + off, raw.count - off)
+                if n <= 0 { throw WireError(description: "write failed errno=\(errno)") }
+                off += n
+            }
+        }
+    }
+
+    /// Reads exactly n bytes; nil on clean EOF before the first byte.
+    func readExact(_ n: Int) throws -> Data? {
+        var buf = Data(count: n)
+        var off = 0
+        try buf.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) in
+            while off < n {
+                let r = Darwin.read(fd, raw.baseAddress! + off, n - off)
+                if r == 0 { if off == 0 { return } else { throw WireError(description: "eof mid-frame") } }
+                if r < 0 { if errno == EINTR { continue }; throw WireError(description: "read failed errno=\(errno)") }
+                off += r
+            }
+        }
+        return off == n ? buf : nil
+    }
+
+    func readLine(maxLen: Int = 64) throws -> String {
+        var bytes = [UInt8](); var b = [UInt8](repeating: 0, count: 1)
+        while bytes.last != 10 {
+            if bytes.count > maxLen { throw WireError(description: "line too long") }
+            let r = Darwin.read(fd, &b, 1)
+            if r <= 0 { throw WireError(description: "relay closed") }
+            bytes.append(b[0])
+        }
+        return String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func frame(_ ch: Chan, _ payload: Data) -> Data {
+        var d = Data(); var len = UInt32(payload.count + 1).bigEndian
+        withUnsafeBytes(of: &len) { d.append(contentsOf: $0) }
+        d.append(ch.rawValue); d.append(payload)
+        return d
+    }
+
+    func send(_ msg: [String: Any]) throws {
+        let t = msg["type"] as? String ?? ""
+        let json = try JSONSerialization.data(withJSONObject: msg)
+        try writeAll(frame(channel(forType: t), json))
+    }
+
+    func sendVideo(_ v: VideoPacket) throws { try writeAll(frame(.video, v.payload())) }
+
+    /// Next frame: (channel, payload) or nil on EOF.
+    func readFrame() throws -> (Chan, Data)? {
+        guard let head = try readExact(4) else { return nil }
+        let len = Int(head.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) })
+        if len == 0 || len > 16 << 20 { throw WireError(description: "bad frame length \(len)") }
+        guard let body = try readExact(len), let ch = Chan(rawValue: body[0]) else { throw WireError(description: "bad channel") }
+        return (ch, body.dropFirst())
+    }
+}
+
+struct VideoPacket {
+    var windowID: UInt64, ptsMicros: UInt64, keyframe: Bool, width: UInt16, height: UInt16, data: Data
+    func payload() -> Data {
+        var d = Data()
+        func be<T: FixedWidthInteger>(_ v: T) { var x = v.bigEndian; withUnsafeBytes(of: &x) { d.append(contentsOf: $0) } }
+        be(windowID); be(ptsMicros); d.append(keyframe ? 1 : 0); d.append(1 /* H.264 */); be(width); be(height)
+        d.append(data)
+        return d
+    }
+}
+
+func num(_ v: Any?) -> Double { (v as? NSNumber)?.doubleValue ?? 0 }
+func int(_ v: Any?) -> Int { (v as? NSNumber)?.intValue ?? 0 }
+
+func joinRelay(_ conn: Conn, session: String, token: String) throws {
+    let line = try JSONSerialization.data(withJSONObject: ["session_id": session, "role": "agent", "token": token])
+    try conn.writeAll(line + Data([10]))
+    let reply = try conn.readLine()
+    if reply != "READY" { throw WireError(description: "relay refused: \(reply)") }
+}

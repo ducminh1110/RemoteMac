@@ -2,7 +2,9 @@
 //! built yet: it is gated on docs/SPEC.md §2 (feasibility gate).
 
 use rm_core::{Event, SessionState};
-use rm_protocol::{negotiate, read_message, write_message, AppInfo, CapabilityReport, Hello, Message, Negotiated, ProtocolError};
+use rm_protocol::{negotiate, read_frame, read_message, write_message, AppInfo, CapabilityReport, Frame, Hello, Message, Negotiated, ProtocolError};
+
+pub mod e2e;
 use std::io::{Read, Write};
 
 pub struct Session<S: Read + Write> {
@@ -60,6 +62,15 @@ impl<S: Read + Write> Session<S> {
             Message::AppLaunched { pid, .. } => Ok(pid),
             m => Err(unexpected(m)),
         }
+    }
+
+    pub fn send(&mut self, m: &Message) -> Result<(), ProtocolError> {
+        write_message(&mut self.stream, m)
+    }
+
+    /// Next frame of any kind (control message or video).
+    pub fn recv(&mut self) -> Result<Option<Frame>, ProtocolError> {
+        read_frame(&mut self.stream)
     }
 
     pub fn terminate(&mut self, application_id: &str) -> Result<(), ClientError> {

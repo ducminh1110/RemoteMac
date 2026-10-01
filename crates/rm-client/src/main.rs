@@ -2,25 +2,37 @@ use rm_client::Session;
 use rm_relay::Role;
 
 fn usage() -> ! {
-    eprintln!("usage: remote-mac --relay HOST:PORT --session ID [--launch APP_ID]\n       token from $RM_SESSION_TOKEN");
+    eprintln!("usage: remote-mac --relay HOST:PORT --session ID [--launch APP_ID | --e2e APP_ID]\n       token from $RM_SESSION_TOKEN");
     std::process::exit(2)
 }
 
 fn main() {
-    let (mut relay, mut session, mut launch) = (None, None, None);
+    let (mut relay, mut session, mut launch, mut e2e) = (None, None, None, None);
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--relay" => relay = args.next(),
             "--session" => session = args.next(),
             "--launch" => launch = args.next(),
+            "--e2e" => e2e = args.next(),
             _ => usage(),
         }
     }
     let (Some(relay), Some(session)) = (relay, session) else { usage() };
     let token = std::env::var("RM_SESSION_TOKEN").unwrap_or_else(|_| usage());
     let stream = rm_relay::join(&relay, &session, Role::Client, &token).unwrap_or_else(|e| fail("relay", e));
+    if e2e.is_some() {
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(1))).ok();
+    }
     let mut s = Session::handshake(stream).unwrap_or_else(|e| fail("handshake", e));
+    if let Some(app) = e2e {
+        let r = rm_client::e2e::run(&mut s, &app);
+        let secs = 5.0_f64;
+        println!("E2E {}: {}/{} checks passed; frames={} keyframes={} bytes={} approxFps(first {}s window)~{:.1} firstFrameMs={:?} titles={:?}",
+            if r.all_ok() { "PASS" } else { "FAIL" }, r.checks.iter().filter(|c| c.1).count(), r.checks.len(),
+            r.video_frames, r.keyframes, r.video_bytes, secs, r.video_frames as f64 / secs, r.first_frame_ms, r.titles);
+        std::process::exit(if r.all_ok() { 0 } else { 1 });
+    }
     println!("connected (protocol v{})", s.negotiated.version);
     println!("capabilities: {}", serde_json::to_string_pretty(&s.capabilities).unwrap());
     if !s.capabilities.can_stream_apps() {

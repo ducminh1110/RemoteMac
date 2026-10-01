@@ -29,6 +29,12 @@ Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { _ in
     hue = (hue + 0.01).truncatingRemainder(dividingBy: 1)
     ticker.layer?.backgroundColor = NSColor(hue: hue, saturation: 1, brightness: 1, alpha: 1).cgColor
 }
+final class TitleMirror: NSObject, NSTextViewDelegate {
+    func textDidChange(_ notification: Notification) { win.title = "RM Test App [\(tv.string.count) chars]" }
+}
+let mirror = TitleMirror()
+tv.delegate = mirror
+win.title = "RM Test App [0 chars]"
 win.makeKeyAndOrderFront(nil)
 win.makeFirstResponder(tv)
 app.activate(ignoringOtherApps: true)

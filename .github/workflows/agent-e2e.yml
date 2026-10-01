@@ -1,0 +1,30 @@
+name: Agent E2E (macOS)
+
+# Builds the Swift agent and the Rust client on a real macOS runner and drives
+# TextEdit-like app end to end: launch, window, H.264 frames, keyboard, mouse.
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/inspiring-einstein-er2d37]
+    paths: [agent/**, crates/**, probe/macos/testapp.swift, scripts/e2e-macos.sh, .github/workflows/agent-e2e.yml, Cargo.*]
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run end-to-end
+        run: ./scripts/e2e-macos.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-${{ matrix.runner }}
+          path: out/*.log out/e2e.txt

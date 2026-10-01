@@ -327,6 +327,120 @@ pub fn read_message<R: Read>(r: &mut R) -> Result<Option<Message>, ProtocolError
     serde_json::from_slice(&payload).map(Some).map_err(|e| ProtocolError::Malformed(e.to_string()))
 }
 
+
+// ---------------------------------------------------------------- video frames
+
+pub const CODEC_H264: u8 = 1;
+pub const VIDEO_HEADER_LEN: usize = 8 + 8 + 1 + 1 + 2 + 2;
+
+/// One encoded frame of one remote window. `data` is H.264 in Annex-B form;
+/// keyframes carry SPS/PPS in-band so a decoder can start from any keyframe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoFrame {
+    pub window_id: u64,
+    pub pts_us: u64,
+    pub keyframe: bool,
+    pub codec: u8,
+    pub width: u16,
+    pub height: u16,
+    pub data: Vec<u8>,
+}
+
+impl VideoFrame {
+    pub fn encode_payload(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(VIDEO_HEADER_LEN + self.data.len());
+        v.extend_from_slice(&self.window_id.to_be_bytes());
+        v.extend_from_slice(&self.pts_us.to_be_bytes());
+        v.push(self.keyframe as u8);
+        v.push(self.codec);
+        v.extend_from_slice(&self.width.to_be_bytes());
+        v.extend_from_slice(&self.height.to_be_bytes());
+        v.extend_from_slice(&self.data);
+        v
+    }
+
+    pub fn decode_payload(p: &[u8]) -> Result<Self, ProtocolError> {
+        if p.len() < VIDEO_HEADER_LEN {
+            return Err(ProtocolError::Malformed("video header truncated".into()));
+        }
+        let be64 = |o: usize| u64::from_be_bytes(p[o..o + 8].try_into().unwrap());
+        let be16 = |o: usize| u16::from_be_bytes(p[o..o + 2].try_into().unwrap());
+        if p[16] > 1 {
+            return Err(ProtocolError::Malformed("bad keyframe flag".into()));
+        }
+        Ok(Self {
+            window_id: be64(0),
+            pts_us: be64(8),
+            keyframe: p[16] == 1,
+            codec: p[17],
+            width: be16(18),
+            height: be16(20),
+            data: p[VIDEO_HEADER_LEN..].to_vec(),
+        })
+    }
+
+    /// True when the Annex-B payload starts with a start code (cheap sanity check).
+    pub fn has_start_code(&self) -> bool {
+        self.data.starts_with(&[0, 0, 0, 1])
+    }
+
+    /// NAL unit types present (Annex-B, 4-byte start codes), e.g. 7=SPS 8=PPS 5=IDR 1=non-IDR.
+    pub fn nal_types(&self) -> Vec<u8> {
+        let d = &self.data;
+        let mut out = vec![];
+        let mut i = 0;
+        while i + 4 < d.len() {
+            if d[i..i + 4] == [0, 0, 0, 1] {
+                out.push(d[i + 4] & 0x1f);
+                i += 4;
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+}
+
+pub fn encode_video(f: &VideoFrame) -> Result<Vec<u8>, ProtocolError> {
+    encode_raw(Channel::Video, &f.encode_payload())
+}
+
+/// Anything that can arrive on the wire.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Frame {
+    Msg(Message),
+    Video(VideoFrame),
+}
+
+/// Blocking read of one frame of either kind. `Ok(None)` on clean EOF.
+pub fn read_frame<R: Read>(r: &mut R) -> Result<Option<Frame>, ProtocolError> {
+    let mut head = [0u8; 4];
+    match r.read(&mut head[..1])? {
+        0 => return Ok(None),
+        _ => r.read_exact(&mut head[1..])?,
+    }
+    let len = u32::from_be_bytes(head) as usize;
+    if len == 0 {
+        return Err(ProtocolError::EmptyFrame);
+    }
+    if len > MAX_BULK_FRAME {
+        return Err(ProtocolError::FrameTooLarge(len, MAX_BULK_FRAME));
+    }
+    let mut ch = [0u8; 1];
+    r.read_exact(&mut ch)?;
+    let channel = Channel::from_u8(ch[0])?;
+    if len > channel.max_frame() {
+        return Err(ProtocolError::FrameTooLarge(len, channel.max_frame()));
+    }
+    let mut payload = vec![0u8; len - 1];
+    r.read_exact(&mut payload)?;
+    if channel == Channel::Video {
+        VideoFrame::decode_payload(&payload).map(|v| Some(Frame::Video(v)))
+    } else {
+        serde_json::from_slice(&payload).map(|m| Some(Frame::Msg(m))).map_err(|e| ProtocolError::Malformed(e.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,5 +566,32 @@ mod tests {
         assert!(!r.can_stream_apps());
         r.input = ok;
         assert!(r.can_stream_apps());
+    }
+
+    #[test]
+    fn video_roundtrip_and_mixed_stream() {
+        let f = VideoFrame { window_id: 42, pts_us: 123_456, keyframe: true, codec: CODEC_H264, width: 480, height: 348,
+            data: vec![0, 0, 0, 1, 0x67, 1, 2, 0, 0, 0, 1, 0x68, 3, 0, 0, 0, 1, 0x65, 9, 9] };
+        assert_eq!(f.nal_types(), vec![7, 8, 5]);
+        assert!(f.has_start_code());
+        let mut wire = encode(&Message::ListApps).unwrap();
+        wire.extend(encode_video(&f).unwrap());
+        wire.extend(encode(&Message::Ping { nonce: 5 }).unwrap());
+        let mut cur = std::io::Cursor::new(wire);
+        assert_eq!(read_frame(&mut cur).unwrap().unwrap(), Frame::Msg(Message::ListApps));
+        assert_eq!(read_frame(&mut cur).unwrap().unwrap(), Frame::Video(f));
+        assert_eq!(read_frame(&mut cur).unwrap().unwrap(), Frame::Msg(Message::Ping { nonce: 5 }));
+        assert!(read_frame(&mut cur).unwrap().is_none());
+    }
+
+    #[test]
+    fn video_rejects_truncated_header_and_bad_flag() {
+        assert!(VideoFrame::decode_payload(&[0u8; VIDEO_HEADER_LEN - 1]).is_err());
+        let mut p = vec![0u8; VIDEO_HEADER_LEN];
+        p[16] = 2;
+        assert!(VideoFrame::decode_payload(&p).is_err());
+        // a video frame over the bulk limit is refused on encode
+        let big = VideoFrame { window_id: 1, pts_us: 0, keyframe: false, codec: 1, width: 1, height: 1, data: vec![0; MAX_BULK_FRAME] };
+        assert!(matches!(encode_video(&big), Err(ProtocolError::FrameTooLarge(..))));
     }
 }
