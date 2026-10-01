@@ -12,6 +12,8 @@ import ApplicationServices
 import VideoToolbox
 import ScreenCaptureKit
 import AppKit
+import CoreMedia
+import CoreVideo
 
 struct Gate { let id: String; let name: String; var status: String; var detail: String }
 var gates: [Gate] = []
@@ -271,6 +273,204 @@ let inputOK = primary.input, inputDetail = primary.inputDetail
 // Real-world target, informational: TextEdit on a fresh runner may sit behind a first-run dialog.
 // (No file argument: passing a temp-file path made TextEdit raise "document could not be opened".)
 _ = await exercise(prefix: "T", label: "textedit", path: "/System/Applications/TextEdit.app/Contents/MacOS/TextEdit", args: [], dismissFirstRun: true)
+
+
+// =====================================================================
+// M1 gates: continuous capture, encode+decode, mouse/unicode, resize/close
+// =====================================================================
+func rectOf(_ w: [String: Any]) -> CGRect {
+    guard let d = w[kCGWindowBounds as String] as? NSDictionary, let r = CGRect(dictionaryRepresentation: d as CFDictionary) else { return .zero }
+    return r
+}
+func onscreenWindow(_ pid: pid_t) -> [String: Any]? {
+    windows(ofPid: pid).filter { rectOf($0).width >= 64 && rectOf($0).height >= 64 && ($0[kCGWindowIsOnscreen as String] as? Bool) == true }
+        .sorted { rectOf($0).width * rectOf($0).height > rectOf($1).width * rectOf($1).height }.first
+}
+func axWindow(_ pid: pid_t) -> AXUIElement? {
+    (axAttr(AXUIElementCreateApplication(pid), kAXWindowsAttribute as String) as? [AXUIElement])?.first
+}
+func percentile(_ v: [Double], _ p: Double) -> Double {
+    guard !v.isEmpty else { return 0 }
+    let s = v.sorted(); return s[min(s.count - 1, Int(Double(s.count - 1) * p))]
+}
+
+/// Receives ScreenCaptureKit frames, feeds each into a VideoToolbox H.264 encoder.
+final class Recorder: NSObject, SCStreamOutput {
+    let lock = NSLock()
+    var frames = 0, dropped = 0, encBytes = 0, keyframes = 0, encErrors = 0
+    var arrival: [Double] = [], encLatencyMs: [Double] = []
+    var encoded: [CMSampleBuffer] = []
+    var session: VTCompressionSession?
+    var encW = 0, encH = 0
+
+    func setup(_ w: Int, _ h: Int) {
+        var s: VTCompressionSession?
+        let st = VTCompressionSessionCreate(allocator: nil, width: Int32(w), height: Int32(h), codecType: kCMVideoCodecType_H264,
+                                            encoderSpecification: nil, imageBufferAttributes: nil, compressedDataAllocator: nil,
+                                            outputCallback: nil, refcon: nil, compressionSessionOut: &s)
+        guard st == noErr, let s = s else { encErrors += 1; return }
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Main_AutoLevel)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: 8_000_000 as CFNumber)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 2 as CFNumber)
+        VTCompressionSessionPrepareToEncodeFrames(s)
+        session = s; encW = w; encH = h
+    }
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen, sb.isValid,
+              let atts = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
+              let raw = atts.first?[.status] as? Int, raw == SCFrameStatus.complete.rawValue,
+              let pb = CMSampleBufferGetImageBuffer(sb) else { return }
+        lock.lock(); frames += 1; arrival.append(CFAbsoluteTimeGetCurrent()); lock.unlock()
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
+        if session == nil { setup(w, h) }
+        guard let s = session, w == encW, h == encH else { lock.lock(); dropped += 1; lock.unlock(); return }
+        let t0 = CFAbsoluteTimeGetCurrent()
+        let st = VTCompressionSessionEncodeFrame(s, imageBuffer: pb, presentationTimeStamp: CMSampleBufferGetPresentationTimeStamp(sb),
+                                                 duration: .invalid, frameProperties: nil, infoFlagsOut: nil) { [self] status, _, out in
+            lock.lock(); defer { lock.unlock() }
+            guard status == noErr, let out = out, CMSampleBufferDataIsReady(out) else { encErrors += 1; return }
+            encLatencyMs.append((CFAbsoluteTimeGetCurrent() - t0) * 1000)
+            encBytes += CMSampleBufferGetTotalSampleSize(out)
+            let a = CMSampleBufferGetSampleAttachmentsArray(out, createIfNecessary: false) as? [[CFString: Any]]
+            if (a?.first?[kCMSampleAttachmentKey_NotSync] as? Bool) != true { keyframes += 1 }
+            encoded.append(out)
+        }
+        if st != noErr { lock.lock(); encErrors += 1; lock.unlock() }
+    }
+    func finish() { if let s = session { VTCompressionSessionCompleteFrames(s, untilPresentationTimeStamp: .invalid); VTCompressionSessionInvalidate(s) } }
+}
+
+func decodeAll(_ samples: [CMSampleBuffer]) -> (ok: Int, w: Int, h: Int, err: String) {
+    guard let first = samples.first, let fd = CMSampleBufferGetFormatDescription(first) else { return (0, 0, 0, "no samples") }
+    var dsess: VTDecompressionSession?
+    let attrs: CFDictionary = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA] as CFDictionary
+    let st = VTDecompressionSessionCreate(allocator: nil, formatDescription: fd, decoderSpecification: nil, imageBufferAttributes: attrs,
+                                          outputCallback: nil, decompressionSessionOut: &dsess)
+    guard st == noErr, let s = dsess else { return (0, 0, 0, "decoder create status \(st)") }
+    let lock = NSLock(); var ok = 0, dw = 0, dh = 0
+    for sb in samples {
+        VTDecompressionSessionDecodeFrame(s, sampleBuffer: sb, flags: [], infoFlagsOut: nil) { status, _, img, _, _ in
+            guard status == noErr, let img = img else { return }
+            lock.lock(); ok += 1; dw = CVPixelBufferGetWidth(img); dh = CVPixelBufferGetHeight(img); lock.unlock()
+        }
+    }
+    VTDecompressionSessionWaitForAsynchronousFrames(s)
+    VTDecompressionSessionInvalidate(s)
+    return (ok, dw, dh, "")
+}
+
+func launchTestApp() -> (Process, pid_t)? {
+    let proc = Process(); proc.executableURL = URL(fileURLWithPath: testApp)
+    do { try proc.run() } catch { return nil }
+    return (proc, proc.processIdentifier)
+}
+
+func postMouse(_ type: CGEventType, _ p: CGPoint, pid: pid_t?) {
+    guard let e = CGEvent(mouseEventSource: CGEventSource(stateID: .hidSystemState), mouseType: type, mouseCursorPosition: p, mouseButton: .left) else { return }
+    e.setIntegerValueField(.mouseEventClickState, value: 1)
+    if let pid = pid { e.postToPid(pid) } else { e.post(tap: .cghidEventTap) }
+}
+func click(_ p: CGPoint, pid: pid_t?) {
+    postMouse(.mouseMoved, p, pid: pid); usleep(30_000)
+    postMouse(.leftMouseDown, p, pid: pid); usleep(40_000)
+    postMouse(.leftMouseUp, p, pid: pid); usleep(40_000)
+}
+func typeUnicode(_ s: String, pid: pid_t?) {
+    for ch in s {
+        let units = Array(String(ch).utf16)
+        for down in [true, false] {
+            guard let e = CGEvent(keyboardEventSource: CGEventSource(stateID: .hidSystemState), virtualKey: 0, keyDown: down) else { continue }
+            e.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+            if let pid = pid { e.postToPid(pid) } else { e.post(tap: .cghidEventTap) }
+            usleep(20_000)
+        }
+    }
+}
+
+func runM1() async {
+    // ---- M1a + M1b: continuous capture while the app animates, encode every frame, decode them back
+    guard let (proc, pid) = launchTestApp() else { for id in ["M1a", "M1b", "M1c", "M1d"] { record(id, "m1", false, "testapp launch failed") }; return }
+    defer { proc.terminate() }
+    for _ in 0..<40 { if onscreenWindow(pid) != nil { break }; Thread.sleep(forTimeInterval: 0.5) }
+    Thread.sleep(forTimeInterval: 1.5)
+    guard let win = onscreenWindow(pid), let wn = win[kCGWindowNumber as String] as? UInt32 else {
+        for id in ["M1a", "M1b", "M1c", "M1d"] { record(id, "m1", false, "no window") }; return
+    }
+    NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
+    let seconds = 5.0
+    let rec = Recorder()
+    var streamErr = ""
+    do {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let w = content.windows.first(where: { $0.windowID == CGWindowID(wn) }) else { throw NSError(domain: "rm", code: 1, userInfo: [NSLocalizedDescriptionKey: "window not shareable"]) }
+        let cfg = SCStreamConfiguration()
+        cfg.width = Int(w.frame.width); cfg.height = Int(w.frame.height)
+        cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+        cfg.pixelFormat = kCVPixelFormatType_32BGRA
+        cfg.queueDepth = 6; cfg.showsCursor = false
+        let stream = SCStream(filter: SCContentFilter(desktopIndependentWindow: w), configuration: cfg, delegate: nil)
+        try stream.addStreamOutput(rec, type: .screen, sampleHandlerQueue: DispatchQueue(label: "rm.frames"))
+        try await stream.startCapture()
+        try await Task.sleep(nanoseconds: UInt64(seconds * 1e9))
+        try await stream.stopCapture()
+    } catch { streamErr = "\(error)" }
+    rec.finish()
+    rec.lock.lock()
+    let gaps = zip(rec.arrival.dropFirst(), rec.arrival).map { ($0 - $1) * 1000 }
+    let fps = Double(rec.frames) / seconds
+    let a = "frames=\(rec.frames) fps=\(String(format: "%.1f", fps)) gapP50=\(String(format: "%.1f", percentile(gaps, 0.5)))ms gapP95=\(String(format: "%.1f", percentile(gaps, 0.95)))ms gapMax=\(String(format: "%.0f", gaps.max() ?? 0))ms size=\(rec.encW)x\(rec.encH)"
+    let encodedCopy = rec.encoded
+    let b1 = "encoded=\(encodedCopy.count) keyframes=\(rec.keyframes) errors=\(rec.encErrors) dropped=\(rec.dropped) bitrate=\(String(format: "%.2f", Double(rec.encBytes) * 8 / seconds / 1e6))Mbps encLatP50=\(String(format: "%.1f", percentile(rec.encLatencyMs, 0.5)))ms encLatP95=\(String(format: "%.1f", percentile(rec.encLatencyMs, 0.95)))ms"
+    rec.lock.unlock()
+    record("M1a", "continuous SCStream of one window (>=20 fps while animating)", streamErr.isEmpty && fps >= 20, streamErr.isEmpty ? a : streamErr)
+    let dec = decodeAll(encodedCopy)
+    record("M1b", "H.264 encode every captured frame, decode them back", !encodedCopy.isEmpty && dec.ok >= encodedCopy.count * 9 / 10 && dec.w == rec.encW && dec.h == rec.encH,
+           b1 + " decoded=\(dec.ok) decodedSize=\(dec.w)x\(dec.h) \(dec.err)")
+
+    // ---- M1c: unicode text + mouse click that moves the caret
+    var routeUsed = "none", c_ok = false, c_detail = ""
+    for (name, target) in [("postToPid", Optional(pid)), ("hidTap", Optional<pid_t>.none)] {
+        guard let w = onscreenWindow(pid) else { break }
+        let r = rectOf(w)
+        // reset the field through Cmd+A, Delete so each route starts clean
+        press(0, .maskCommand, pid: target); usleep(100_000); press(51, pid: target); Thread.sleep(forTimeInterval: 0.3)
+        let text = "alpha beta \u{e9}\u{4e2d}"
+        typeUnicode(text, pid: target); Thread.sleep(forTimeInterval: 0.6)
+        let typed = axFocused(pid)?.value ?? "nil"
+        click(CGPoint(x: r.minX + 3, y: r.minY + 40), pid: target); Thread.sleep(forTimeInterval: 0.4)
+        typeUnicode("X", pid: target); Thread.sleep(forTimeInterval: 0.6)
+        let after = axFocused(pid)?.value ?? "nil"
+        let unicodeOK = typed == text
+        let caretMoved = after.contains("X") && !after.hasSuffix("X")
+        c_detail += "[\(name) typed=\"\(typed)\" unicodeOK=\(unicodeOK) afterClick=\"\(after)\" caretMoved=\(caretMoved)] "
+        if unicodeOK && caretMoved { c_ok = true; routeUsed = name; break }
+        NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps]); Thread.sleep(forTimeInterval: 0.5)
+    }
+    record("M1c", "unicode text input + mouse click (caret moved)", c_ok, "route=\(routeUsed) " + c_detail)
+
+    // ---- M1d: resize, move, close through the window server / AX
+    guard let aw = axWindow(pid) else { record("M1d", "resize/move/close", false, "no AX window"); return }
+    var size = CGSize(width: 640, height: 440), pos = CGPoint(x: 120, y: 120)
+    let rs = AXUIElementSetAttributeValue(aw, kAXSizeAttribute as CFString, AXValueCreate(.cgSize, &size)!)
+    let ps = AXUIElementSetAttributeValue(aw, kAXPositionAttribute as CFString, AXValueCreate(.cgPoint, &pos)!)
+    var moved = CGRect.zero
+    for _ in 0..<20 { Thread.sleep(forTimeInterval: 0.2); if let w = onscreenWindow(pid) { moved = rectOf(w); if abs(moved.width - 640) < 4 && abs(moved.height - 440) < 4 { break } } }
+    let (img, _) = await captureWindow(CGWindowID(wn))
+    let resizedOK = abs(moved.width - 640) < 4 && abs(moved.height - 440) < 4
+    let movedOK = abs(moved.minX - 120) < 4 && abs(moved.minY - 120) < 4
+    let captureFollows = img != nil && abs(img!.width - 640) <= 4
+    var closed = false, closeStatus = "no close button"
+    if let cb = axAttr(aw, kAXCloseButtonAttribute as String) {
+        closeStatus = "\(AXUIElementPerformAction(cb as! AXUIElement, kAXPressAction as CFString).rawValue)"
+        for _ in 0..<20 { Thread.sleep(forTimeInterval: 0.2); if onscreenWindow(pid) == nil { closed = true; break } }
+    }
+    record("M1d", "resize + move + close window via Accessibility", resizedOK && movedOK && captureFollows && closed,
+           "setSize=\(rs.rawValue) setPos=\(ps.rawValue) now=\(Int(moved.width))x\(Int(moved.height))@\(Int(moved.minX)),\(Int(moved.minY)) captureFollows=\(captureFollows) closePress=\(closeStatus) closed=\(closed)")
+}
+await runM1()
 
 var hwOK: Bool? = nil, hwDetail = ""
 

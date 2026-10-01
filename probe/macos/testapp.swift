@@ -9,7 +9,9 @@ app.setActivationPolicy(.regular)
 let win = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 480, height: 320),
                    styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
 win.title = "RM Test App"
-let scroll = NSScrollView(frame: win.contentView!.bounds)
+let content = win.contentView!.bounds
+let stripH: CGFloat = 24
+let scroll = NSScrollView(frame: NSRect(x: 0, y: stripH, width: content.width, height: content.height - stripH))
 scroll.autoresizingMask = [.width, .height]
 scroll.hasVerticalScroller = true
 let tv = NSTextView(frame: scroll.bounds)
@@ -17,6 +19,16 @@ tv.autoresizingMask = [.width, .height]
 tv.font = NSFont.systemFont(ofSize: 22)
 scroll.documentView = tv
 win.contentView!.addSubview(scroll)
+// 60 Hz animated strip: gives ScreenCaptureKit a steady stream of damaged frames.
+let ticker = NSView(frame: NSRect(x: 0, y: 0, width: content.width, height: stripH))
+ticker.autoresizingMask = [.width, .maxYMargin]
+ticker.wantsLayer = true
+win.contentView!.addSubview(ticker)
+var hue: CGFloat = 0
+Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { _ in
+    hue = (hue + 0.01).truncatingRemainder(dividingBy: 1)
+    ticker.layer?.backgroundColor = NSColor(hue: hue, saturation: 1, brightness: 1, alpha: 1).cgColor
+}
 win.makeKeyAndOrderFront(nil)
 win.makeFirstResponder(tv)
 app.activate(ignoringOtherApps: true)

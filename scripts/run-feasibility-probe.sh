@@ -18,5 +18,10 @@ required=["G1","G3","G4","G5","G6","G7"]
 bad=[k for k in required if st.get(k)!="pass"]
 print("\nINFO (TextEdit, not required):", {k:v for k,v in st.items() if k.startswith("T")})
 print("\nGATE VERDICT:", "GO" if not bad else "NO-GO (failed/inconclusive: %s)"%", ".join(bad))
-sys.exit(0 if not bad else 1)
+m1=["M1a","M1b","M1c","M1d"]
+bad1=[k for k in m1 if st.get(k)!="pass"]
+print("M1 VERDICT:", "GO" if not bad1 else "NO-GO (failed/inconclusive: %s)"%", ".join(bad1))
+for g in d["gates"]:
+    if g["id"] in m1: print("  ", g["id"], g["status"], "-", g["detail"])
+sys.exit(0 if not bad and not bad1 else 1)
 PY
