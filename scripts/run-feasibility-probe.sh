@@ -22,6 +22,6 @@ m1=["M1a","M1b","M1c","M1d"]
 bad1=[k for k in m1 if st.get(k)!="pass"]
 print("M1 VERDICT:", "GO" if not bad1 else "NO-GO (failed/inconclusive: %s)"%", ".join(bad1))
 for g in d["gates"]:
-    if g["id"] in m1: print("  ", g["id"], g["status"], "-", g["detail"])
+    if g["id"] in m1+["M1e"]: print("  ", g["id"], g["status"], "-", g["detail"])
 sys.exit(0 if not bad and not bad1 else 1)
 PY

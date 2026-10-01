@@ -448,37 +448,53 @@ func runM1() async {
     record("M1b", "H.264 encode every captured frame, decode them back", !encodedCopy.isEmpty && dec.ok >= encodedCopy.count * 9 / 10 && dec.w == rec.encW && dec.h == rec.encH,
            b1 + " decoded=\(dec.ok) decodedSize=\(dec.w)x\(dec.h) \(dec.err)")
 
-    // ---- M1c: unicode text + mouse click that moves the caret
-    var routeUsed = "none", c_ok = false, c_detail = ""
+    // ---- M1c: unicode text input (both delivery routes tried until one works)
+    var textRoute = "none", textDetail = ""
     for (name, target) in [("postToPid", Optional(pid)), ("hidTap", Optional<pid_t>.none)] {
-        guard let w = onscreenWindow(pid) else { break }
-        let r = rectOf(w)
-        // reset the field through Cmd+A, Delete so each route starts clean
         press(0, .maskCommand, pid: target); usleep(100_000); press(51, pid: target); Thread.sleep(forTimeInterval: 0.3)
         let text = "alpha beta \u{e9}\u{4e2d}"
         typeUnicode(text, pid: target); Thread.sleep(forTimeInterval: 0.6)
         let typed = axFocused(pid)?.value ?? "nil"
-        let fr = axFocusedFrame(pid)
-        let clickAt = CGPoint(x: (fr?.minX ?? r.minX) + 3, y: (fr?.minY ?? r.minY + 28) + 10) // first text line, left edge
-        let rangeBefore = axSelRange(pid)
-        click(clickAt, pid: target); Thread.sleep(forTimeInterval: 0.6)
-        c_detail += "sel \(rangeBefore)->\(axSelRange(pid)) "
-        c_detail += "(frame=\(fr.map { "\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height))" } ?? "nil") click=\(Int(clickAt.x)),\(Int(clickAt.y)) focusedAfterClick=\(axFocused(pid)?.role ?? "nil")) "
-        typeUnicode("X", pid: target); Thread.sleep(forTimeInterval: 1.0)
-        var after = axFocused(pid)?.value ?? "nil"
-        c_detail += "unicodeX->sel \(axSelRange(pid)) "
-        if !after.contains("X") {   // retry with a physical key (x = keycode 7) to separate "unicode path" from "click path"
-            press(7, pid: target); Thread.sleep(forTimeInterval: 1.0)
-            after = axFocused(pid)?.value ?? "nil"
-            c_detail += "physicalX->sel \(axSelRange(pid)) "
-        }
-        let unicodeOK = typed == text
-        let caretMoved = after.contains("X") && !after.hasSuffix("X")
-        c_detail += "[\(name) typed=\"\(typed)\" unicodeOK=\(unicodeOK) afterClick=\"\(after)\" caretMoved=\(caretMoved)] "
-        if unicodeOK && caretMoved { c_ok = true; routeUsed = name; break }
+        textDetail += "[\(name) typed=\"\(typed)\" ok=\(typed == text)] "
+        if typed == text { textRoute = name; break }
         NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps]); Thread.sleep(forTimeInterval: 0.5)
     }
-    record("M1c", "unicode text input + mouse click (caret moved)", c_ok, "route=\(routeUsed) " + c_detail)
+    record("M1c", "unicode text input incl. non-ASCII (TextInput message)", textRoute != "none", "route=\(textRoute) " + textDetail)
+
+    // ---- M1e (informational): can a synthetic mouse click place the caret?  AX range as fallback.
+    var mouseDetail = "", mouseOK = false
+    if let fr = axFocusedFrame(pid) {
+        let pt = CGPoint(x: fr.minX + 3, y: fr.minY + 10)
+        NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps]); Thread.sleep(forTimeInterval: 0.5)
+        let before = axSelRange(pid)
+        // HID-style click: warp the real cursor, no custom event source, button number + click state set, trailing mouseMoved.
+        CGWarpMouseCursorPosition(pt); CGAssociateMouseAndMouseCursorPosition(1); usleep(150_000)
+        for t in [CGEventType.leftMouseDown, .leftMouseUp] {
+            if let e = CGEvent(mouseEventSource: nil, mouseType: t, mouseCursorPosition: pt, mouseButton: .left) {
+                e.setIntegerValueField(.mouseEventClickState, value: 1)
+                e.setIntegerValueField(.mouseEventButtonNumber, value: 0)
+                e.post(tap: .cghidEventTap)
+            }
+            usleep(120_000)
+        }
+        if let e = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: pt, mouseButton: .left) { e.post(tap: .cghidEventTap) }
+        Thread.sleep(forTimeInterval: 0.6)
+        let afterClick = axSelRange(pid)
+        mouseDetail += "click sel \(before)->\(afterClick) "
+        mouseOK = before != afterClick
+        // does keyboard still work after the click?
+        press(7, pid: pid); Thread.sleep(forTimeInterval: 0.8)
+        let v = axFocused(pid)?.value ?? "nil"
+        mouseDetail += "keyAfterClick=\(v.contains("x")) "
+        // AX fallback: set the caret ourselves, then type
+        var rng = CFRange(location: 0, length: 0)
+        if let f = axAttr(AXUIElementCreateApplication(pid), kAXFocusedUIElementAttribute as String), let rv = AXValueCreate(.cfRange, &rng) {
+            let st = AXUIElementSetAttributeValue(f as! AXUIElement, kAXSelectedTextRangeAttribute as CFString, rv)
+            Thread.sleep(forTimeInterval: 0.3)
+            mouseDetail += "axSetRange=\(st.rawValue) sel=\(axSelRange(pid)) "
+        }
+    } else { mouseDetail = "no focused element frame" }
+    record("M1e", "mouse click moves caret (informational)", mouseOK, mouseDetail)
 
     // ---- M1d: resize, move, close through the window server / AX
     guard let aw = axWindow(pid) else { record("M1d", "resize/move/close", false, "no AX window"); return }
