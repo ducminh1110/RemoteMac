@@ -11,6 +11,7 @@ import CoreGraphics
 import ApplicationServices
 import VideoToolbox
 import ScreenCaptureKit
+import AppKit
 
 struct Gate { let id: String; let name: String; var status: String; var detail: String }
 var gates: [Gate] = []
@@ -86,6 +87,75 @@ func captureWindow(_ windowID: CGWindowID) async -> (CGImage?, String) {
     } catch { return (nil, "\(error)") }
 }
 
+var notes: [String] = []
+func note(_ s: String) {
+    notes.append(s)
+    FileHandle.standardError.write(Data("[NOTE] \(s)\n".utf8))
+}
+
+func axAttr(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
+    var v: CFTypeRef?
+    return AXUIElementCopyAttributeValue(el, name as CFString, &v) == .success ? v : nil
+}
+func axStr(_ el: AXUIElement, _ name: String) -> String? { axAttr(el, name) as? String }
+
+/// Text of the app's focused UI element, read through the Accessibility API.
+func axFocused(_ pid: pid_t) -> (role: String, value: String)? {
+    let app = AXUIElementCreateApplication(pid)
+    guard let f = axAttr(app, kAXFocusedUIElementAttribute as String) else { return nil }
+    let el = f as! AXUIElement
+    return (axStr(el, kAXRoleAttribute as String) ?? "?", axStr(el, kAXValueAttribute as String) ?? "")
+}
+
+/// Human-readable inventory of what the app currently shows (CG windows + AX windows).
+func describeApp(_ pid: pid_t, _ label: String) {
+    let all = (CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? [])
+        .filter { ($0[kCGWindowOwnerPID as String] as? Int32) == pid }
+    for w in all {
+        var r = "?"
+        if let d = w[kCGWindowBounds as String] as? NSDictionary, let rect = CGRect(dictionaryRepresentation: d as CFDictionary) {
+            r = "\(Int(rect.width))x\(Int(rect.height))@\(Int(rect.minX)),\(Int(rect.minY))"
+        }
+        note("\(label) CG window id=\(w[kCGWindowNumber as String] ?? "?") layer=\(w[kCGWindowLayer as String] ?? "?") onscreen=\(w[kCGWindowIsOnscreen as String] ?? "no") name=\"\(w[kCGWindowName as String] ?? "")\" \(r)")
+    }
+    let app = AXUIElementCreateApplication(pid)
+    let wins = axAttr(app, kAXWindowsAttribute as String) as? [AXUIElement] ?? []
+    note("\(label) AX windows=\(wins.count)")
+    for w in wins {
+        note("\(label)   AX title=\"\(axStr(w, kAXTitleAttribute as String) ?? "")\" role=\(axStr(w, kAXRoleAttribute as String) ?? "?") subrole=\(axStr(w, kAXSubroleAttribute as String) ?? "?")")
+    }
+    if let f = axFocused(pid) { note("\(label) AX focused role=\(f.role) valueLen=\(f.value.count)") } else { note("\(label) AX focused element: none") }
+}
+
+func press(_ code: CGKeyCode, _ flags: CGEventFlags = [], pid: pid_t?) {
+    let src = CGEventSource(stateID: .hidSystemState)
+    for down in [true, false] {
+        guard let e = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: down) else { continue }
+        e.flags = flags
+        if let pid = pid { e.postToPid(pid) } else { e.post(tap: .cghidEventTap) }
+        usleep(25_000)
+    }
+}
+
+/// Type "hik hi" and decide whether it visibly reached the app. Two independent observations:
+/// pixels changed beyond the no-input noise floor, or the focused AX text value changed.
+func tryTyping(_ method: String, pid: pid_t, windowID: CGWindowID, viaHID: Bool) async -> (Bool, String) {
+    let (a, _) = await captureWindow(windowID)
+    Thread.sleep(forTimeInterval: 0.8)
+    let (b, _) = await captureWindow(windowID)
+    let noise = (a != nil && b != nil) ? diffCount(a!, b!) : -1
+    let before = axFocused(pid)
+    for k: CGKeyCode in [4, 34, 40, 49, 4, 34] { press(k, pid: viaHID ? nil : pid) }
+    Thread.sleep(forTimeInterval: 1.5)
+    let (c, d) = await captureWindow(windowID)
+    let after = axFocused(pid)
+    let px = (b != nil && c != nil) ? diffCount(b!, c!) : -1
+    let pixelOK = px > max(50, noise * 3)
+    let axOK = after != nil && (before?.value ?? "") != after!.value
+    let detail = "method=\(method) pixelsChanged=\(px) noise=\(noise) pixelOK=\(pixelOK) axRole=\(after?.role ?? "none") axBeforeLen=\(before?.value.count ?? -1) axAfter=\"\(String((after?.value ?? "").suffix(24)))\" axChanged=\(axOK)" + (c == nil ? " recapture=\(d)" : "")
+    return (pixelOK || axOK, detail)
+}
+
 // ---- G0: environment ------------------------------------------------------
 let osv = ProcessInfo.processInfo.operatingSystemVersionString
 let arch = sh("/usr/bin/uname", ["-m"]).1.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -124,23 +194,30 @@ if launched {
         guard let d = w[kCGWindowBounds as String] as? NSDictionary, let r = CGRect(dictionaryRepresentation: d as CFDictionary) else { return 0 }
         return r.width >= 64 && r.height >= 64 ? r.width * r.height : 0 // ignore 0x0 / tiny placeholder windows
     }
-    var found: [[String: Any]] = []
-    for _ in 0..<40 {
-        found = windows(ofPid: pid).filter { area($0) > 0 }.sorted { area($0) > area($1) }
-        if !found.isEmpty { break }
-        Thread.sleep(forTimeInterval: 0.5)
+    func largestWindow() -> [String: Any]? {
+        windows(ofPid: pid).filter { area($0) > 0 }.sorted { area($0) > area($1) }.first
     }
-    if let first = found.first, let n = first[kCGWindowNumber as String] as? UInt32 {
+    for _ in 0..<40 { if largestWindow() != nil { break }; Thread.sleep(forTimeInterval: 0.5) }
+    Thread.sleep(forTimeInterval: 2.0) // let the app finish its launch UI
+    describeApp(pid, "after-launch")
+
+    // Make sure there is an untitled document: dismiss any Open panel, then Cmd+N.
+    press(53, pid: pid)                       // Escape
+    Thread.sleep(forTimeInterval: 1.0)
+    press(45, .maskCommand, pid: pid)         // Cmd+N
+    Thread.sleep(forTimeInterval: 2.0)
+    describeApp(pid, "after-cmd-n")
+
+    if let first = largestWindow(), let n = first[kCGWindowNumber as String] as? UInt32 {
         winID = CGWindowID(n)
         record("G3", "launch GUI app by executable path + enumerate its windows", true,
-               "pid=\(pid) usableWindows=\(found.count) largest=\(first[kCGWindowBounds as String] ?? "?")")
+               "pid=\(pid) id=\(n) name=\"\(first[kCGWindowName as String] ?? "")\" bounds=\(first[kCGWindowBounds as String] ?? "?")")
     } else {
-        let all = windows(ofPid: pid).map { "\($0[kCGWindowBounds as String] ?? "?")" }
-        record("G3", "launch GUI app by executable path + enumerate its windows", false, "no window >=64x64 for pid \(pid) after 20s; seen: \(all)")
+        record("G3", "launch GUI app by executable path + enumerate its windows", false, "no window >=64x64 for pid \(pid)")
     }
 
-    // ---- G4: per-window capture ------------------------------------------
     if let id = winID {
+        // ---- G4: per-window capture ----------------------------------------
         let (img, d) = await captureWindow(id)
         if let img = img {
             let s = imageStats(img)
@@ -149,26 +226,17 @@ if launched {
         } else { capOK = false; capDetail = d }
         record("G4", "capture ONE window via ScreenCaptureKit (not whole screen)", capOK, capDetail)
 
-        // ---- G5: input injection + visible effect -------------------------
-        // Control first: two captures with NO input, to measure caret blink / animation noise.
+        // ---- G5: input injection, two delivery routes ------------------------
+        let (okA, detA) = await tryTyping("postToPid", pid: pid, windowID: id, viaHID: false)
+        record("G5a", "keyboard via CGEvent.postToPid (info)", okA, detA)
+        NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
         Thread.sleep(forTimeInterval: 1.0)
-        let (ctl, _) = await captureWindow(id)
-        let noise = (img != nil && ctl != nil) ? diffCount(img!, ctl!) : -1
-        let src = CGEventSource(stateID: .hidSystemState)
-        for ch: UInt16 in [4, 34, 40, 49, 4, 34] { // h i k space h i  (ANSI virtual keys)
-            CGEvent(keyboardEventSource: src, virtualKey: ch, keyDown: true)?.postToPid(pid)
-            CGEvent(keyboardEventSource: src, virtualKey: ch, keyDown: false)?.postToPid(pid)
-        }
-        Thread.sleep(forTimeInterval: 1.5)
-        let (img2, d2) = await captureWindow(id)
-        if let base = ctl ?? img, let i2 = img2 {
-            let changed = diffCount(base, i2)
-            // typed glyphs change many pixels; caret blink changes few. Require clearly more than the noise floor.
-            let threshold = max(50, noise * 3)
-            inputOK = changed > threshold
-            inputDetail = "pixelsChangedAfterInput=\(changed) noiseFloorNoInput=\(noise) threshold=\(threshold)" + (changed < 0 ? " (size changed)" : "")
-        } else { inputOK = nil; inputDetail = "re-capture failed: \(d2)" }
-        record("G5", "inject keyboard input into the app and observe effect in captured window", inputOK, inputDetail)
+        let (okB, detB) = await tryTyping("activate+cghidEventTap", pid: pid, windowID: id, viaHID: true)
+        record("G5b", "keyboard via activate + HID event tap (info)", okB, detB)
+        inputOK = okA || okB
+        inputDetail = "postToPid=\(okA) hidTap=\(okB)"
+        record("G5", "inject keyboard input into the app and observe effect (either route)", inputOK, inputDetail)
+        describeApp(pid, "after-typing")
     } else {
         record("G4", "capture ONE window via ScreenCaptureKit", false, "skipped: no window")
         record("G5", "inject input and observe effect", false, "skipped: no window")
@@ -213,6 +281,7 @@ let report: [String: Any] = [
 let out: [String: Any] = [
     "report": report,
     "gates": gates.map { ["id": $0.id, "name": $0.name, "status": $0.status, "detail": $0.detail] },
+    "notes": notes,
 ]
 let data = try JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys])
 print(String(data: data, encoding: .utf8)!)
