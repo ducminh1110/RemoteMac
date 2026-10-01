@@ -47,6 +47,28 @@ func imageStats(_ img: CGImage) -> (distinct: Int, hash: UInt64) {
     return (seen.count, hash)
 }
 
+func pixels(_ img: CGImage) -> [UInt8] {
+    let w = img.width, h = img.height
+    var buf = [UInt8](repeating: 0, count: max(1, w * h * 4))
+    guard w > 0, h > 0, let ctx = CGContext(data: &buf, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                            space: CGColorSpaceCreateDeviceRGB(),
+                                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return buf }
+    ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
+    return buf
+}
+
+/// Number of pixels that differ between two same-sized images (-1 if sizes differ).
+func diffCount(_ a: CGImage, _ b: CGImage) -> Int {
+    guard a.width == b.width, a.height == b.height else { return -1 }
+    let pa = pixels(a), pb = pixels(b)
+    var n = 0, i = 0
+    while i + 3 < pa.count {
+        if pa[i] != pb[i] || pa[i+1] != pb[i+1] || pa[i+2] != pb[i+2] { n += 1 }
+        i += 4
+    }
+    return n
+}
+
 func windows(ofPid pid: pid_t) -> [[String: Any]] {
     let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
     return list.filter { ($0[kCGWindowOwnerPID as String] as? Int32) == pid && ($0[kCGWindowLayer as String] as? Int) == 0 }
@@ -98,14 +120,23 @@ var hwOK: Bool? = nil, hwDetail = ""
 
 if launched {
     let pid = proc.processIdentifier
+    func area(_ w: [String: Any]) -> CGFloat {
+        guard let d = w[kCGWindowBounds as String] as? NSDictionary, let r = CGRect(dictionaryRepresentation: d as CFDictionary) else { return 0 }
+        return r.width >= 64 && r.height >= 64 ? r.width * r.height : 0 // ignore 0x0 / tiny placeholder windows
+    }
     var found: [[String: Any]] = []
-    for _ in 0..<40 { found = windows(ofPid: pid); if !found.isEmpty { break }; Thread.sleep(forTimeInterval: 0.5) }
+    for _ in 0..<40 {
+        found = windows(ofPid: pid).filter { area($0) > 0 }.sorted { area($0) > area($1) }
+        if !found.isEmpty { break }
+        Thread.sleep(forTimeInterval: 0.5)
+    }
     if let first = found.first, let n = first[kCGWindowNumber as String] as? UInt32 {
         winID = CGWindowID(n)
         record("G3", "launch GUI app by executable path + enumerate its windows", true,
-               "pid=\(pid) windows=\(found.count) first=\(first[kCGWindowBounds as String] ?? "?")")
+               "pid=\(pid) usableWindows=\(found.count) largest=\(first[kCGWindowBounds as String] ?? "?")")
     } else {
-        record("G3", "launch GUI app by executable path + enumerate its windows", false, "no layer-0 window for pid \(pid) after 20s")
+        let all = windows(ofPid: pid).map { "\($0[kCGWindowBounds as String] ?? "?")" }
+        record("G3", "launch GUI app by executable path + enumerate its windows", false, "no window >=64x64 for pid \(pid) after 20s; seen: \(all)")
     }
 
     // ---- G4: per-window capture ------------------------------------------
@@ -119,18 +150,23 @@ if launched {
         record("G4", "capture ONE window via ScreenCaptureKit (not whole screen)", capOK, capDetail)
 
         // ---- G5: input injection + visible effect -------------------------
-        let before = img.map { imageStats($0).hash }
+        // Control first: two captures with NO input, to measure caret blink / animation noise.
+        Thread.sleep(forTimeInterval: 1.0)
+        let (ctl, _) = await captureWindow(id)
+        let noise = (img != nil && ctl != nil) ? diffCount(img!, ctl!) : -1
         let src = CGEventSource(stateID: .hidSystemState)
-        for ch: UInt16 in [4, 34, 40] { // h, i, k  (ANSI virtual keys)
+        for ch: UInt16 in [4, 34, 40, 49, 4, 34] { // h i k space h i  (ANSI virtual keys)
             CGEvent(keyboardEventSource: src, virtualKey: ch, keyDown: true)?.postToPid(pid)
             CGEvent(keyboardEventSource: src, virtualKey: ch, keyDown: false)?.postToPid(pid)
         }
         Thread.sleep(forTimeInterval: 1.5)
         let (img2, d2) = await captureWindow(id)
-        if let a = before, let i2 = img2 {
-            let changed = a != imageStats(i2).hash
-            inputOK = changed
-            inputDetail = changed ? "window pixels changed after postToPid key events" : "no pixel change after key events (no permission, or not focused)"
+        if let base = ctl ?? img, let i2 = img2 {
+            let changed = diffCount(base, i2)
+            // typed glyphs change many pixels; caret blink changes few. Require clearly more than the noise floor.
+            let threshold = max(50, noise * 3)
+            inputOK = changed > threshold
+            inputDetail = "pixelsChangedAfterInput=\(changed) noiseFloorNoInput=\(noise) threshold=\(threshold)" + (changed < 0 ? " (size changed)" : "")
         } else { inputOK = nil; inputDetail = "re-capture failed: \(d2)" }
         record("G5", "inject keyboard input into the app and observe effect in captured window", inputOK, inputDetail)
     } else {
@@ -156,9 +192,11 @@ hwDetail = hw == noErr ? "hardware H.264 encoder available" : (sw == noErr ? "on
 record("G6", "H.264 encoder (hardware preferred; software acceptable on VM)", sw == noErr, hwDetail)
 
 // ---- G7: outbound network -------------------------------------------------
-let relayURL = ProcessInfo.processInfo.environment["RM_PROBE_URL"] ?? "https://api.github.com/zen"
+let relayURL = ProcessInfo.processInfo.environment["RM_PROBE_URL"] ?? "https://github.com/robots.txt"
 let (code, body) = sh("/usr/bin/curl", ["-sS", "-m", "10", "-o", "/dev/null", "-w", "%{http_code}", relayURL])
-record("G7", "outbound HTTPS from runner", code == 0 && body.hasPrefix("2"), "\(relayURL) -> \(body.prefix(80))")
+// Any HTTP status (even 403/429 rate limiting) proves outbound HTTPS works; 000 = no connection.
+let httpCode = String(body.suffix(3))
+record("G7", "outbound HTTPS from runner", code == 0 && httpCode != "000", "\(relayURL) -> HTTP \(httpCode) (curl exit \(code))")
 
 // ---- emit -----------------------------------------------------------------
 func cap(_ ok: Bool?, _ yes: String, _ no: String) -> [String: String] {
