@@ -50,9 +50,9 @@ khởi chạy bằng đường dẫn executable). TextEdit chạy song song làm
 | G2 Screen Recording / Accessibility | đã cấp sẵn (`true`/`true`) | đã cấp sẵn | đã cấp sẵn |
 | G4 chụp 1 cửa sổ (app test) | 480×348, 80 màu | 480×348, 81 màu | 480×352, 80 màu |
 | G5 gõ phím vào app test | pass | pass (cả 2 đường) | pass |
-| T* TextEdit: cửa sổ / chụp | 601×491, 197 màu | 601×491, 143 màu | 603×505 |
-| T5a `postToPid` (pixel đổi / nhiễu) | 1116 / 28; AX = "Hik hi" | 1095 / 0; AX = "Hik hi" | pass (AX đổi) |
-| T5b activate + HID tap (pixel đổi) | 304; AX = "Hik hihik hi" | 289 | pass |
+| T* TextEdit: cửa sổ / chụp | 601×491, 197 màu | 601×491, 143 màu | 603×505, chụp pass |
+| T5a `postToPid` (pixel đổi / nhiễu) | 1116 / 28; AX = "Hik hi" | 1095 / 0; AX = "Hik hi" | pass (log không in số pixel) |
+| T5b activate + HID tap (pixel đổi) | 304; AX = "Hik hihik hi" | 289 | pass (log không in số pixel) |
 | G6 H.264 | **phần cứng** | **chỉ phần mềm** (`-12908`) | **phần cứng** |
 | G7 HTTPS ra ngoài | 200 | 200 | 200 |
 
