@@ -390,6 +390,16 @@ func typeUnicode(_ s: String, pid: pid_t?) {
     }
 }
 
+/// Screen frame (global, top-left origin) of the app's focused UI element, via Accessibility.
+func axFocusedFrame(_ pid: pid_t) -> CGRect? {
+    guard let f = axAttr(AXUIElementCreateApplication(pid), kAXFocusedUIElementAttribute as String) else { return nil }
+    let el = f as! AXUIElement
+    var pt = CGPoint.zero, sz = CGSize.zero
+    guard let pv = axAttr(el, kAXPositionAttribute as String), let sv = axAttr(el, kAXSizeAttribute as String),
+          AXValueGetValue(pv as! AXValue, .cgPoint, &pt), AXValueGetValue(sv as! AXValue, .cgSize, &sz) else { return nil }
+    return CGRect(origin: pt, size: sz)
+}
+
 func runM1() async {
     // ---- M1a + M1b: continuous capture while the app animates, encode every frame, decode them back
     guard let (proc, pid) = launchTestApp() else { for id in ["M1a", "M1b", "M1c", "M1d"] { record(id, "m1", false, "testapp launch failed") }; return }
@@ -440,7 +450,10 @@ func runM1() async {
         let text = "alpha beta \u{e9}\u{4e2d}"
         typeUnicode(text, pid: target); Thread.sleep(forTimeInterval: 0.6)
         let typed = axFocused(pid)?.value ?? "nil"
-        click(CGPoint(x: r.minX + 3, y: r.minY + 40), pid: target); Thread.sleep(forTimeInterval: 0.4)
+        let fr = axFocusedFrame(pid)
+        let clickAt = CGPoint(x: (fr?.minX ?? r.minX) + 3, y: (fr?.minY ?? r.minY + 28) + 10) // first text line, left edge
+        click(clickAt, pid: target); Thread.sleep(forTimeInterval: 0.4)
+        c_detail += "(frame=\(fr.map { "\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height))" } ?? "nil") click=\(Int(clickAt.x)),\(Int(clickAt.y)) focusedAfterClick=\(axFocused(pid)?.role ?? "nil")) "
         typeUnicode("X", pid: target); Thread.sleep(forTimeInterval: 0.6)
         let after = axFocused(pid)?.value ?? "nil"
         let unicodeOK = typed == text
