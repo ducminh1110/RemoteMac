@@ -27,4 +27,6 @@ jobs:
         if: always()
         with:
           name: e2e-${{ matrix.runner }}
-          path: out/*.log out/e2e.txt
+          path: |
+            out/*.log
+            out/e2e.txt

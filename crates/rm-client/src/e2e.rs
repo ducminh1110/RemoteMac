@@ -14,11 +14,21 @@ pub struct Report {
     pub keyframes: usize,
     pub video_bytes: usize,
     pub first_frame_ms: Option<u128>,
+    pub first_pts_us: Option<u64>,
+    pub last_pts_us: u64,
     pub window: Option<(u64, Rect)>,
     pub titles: Vec<String>,
 }
 
 impl Report {
+    /// Frames per second over the span of the received frames' capture timestamps.
+    pub fn fps(&self) -> f64 {
+        match self.first_pts_us {
+            Some(f) if self.last_pts_us > f && self.video_frames > 1 => (self.video_frames - 1) as f64 * 1e6 / (self.last_pts_us - f) as f64,
+            _ => 0.0,
+        }
+    }
+
     fn check(&mut self, name: &str, ok: bool, detail: impl Into<String>) {
         let detail = detail.into();
         eprintln!("[{}] {name}: {detail}", if ok { "PASS" } else { "FAIL" });
@@ -54,6 +64,8 @@ impl<S: Read + Write> Ctx<'_, S> {
                     self.r.first_frame_ms = Some(self.started.elapsed().as_millis());
                     self.first_video = Some(v.clone());
                 }
+                self.r.first_pts_us.get_or_insert(v.pts_us);
+                self.r.last_pts_us = v.pts_us;
                 self.r.video_frames += 1;
                 self.r.keyframes += v.keyframe as usize;
                 self.r.video_bytes += v.data.len();

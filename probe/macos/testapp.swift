@@ -6,6 +6,14 @@ import AppKit
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
 
+// Minimal menu so standard key equivalents (Cmd+A) have something to dispatch to, like a real app.
+let mainMenu = NSMenu()
+let appItem = NSMenuItem(); mainMenu.addItem(appItem); appItem.submenu = NSMenu()
+let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: ""); mainMenu.addItem(editItem)
+let editMenu = NSMenu(title: "Edit"); editItem.submenu = editMenu
+editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+app.mainMenu = mainMenu
+
 let win = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 480, height: 320),
                    styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
 win.title = "RM Test App"
