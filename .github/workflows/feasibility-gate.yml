@@ -1,0 +1,36 @@
+name: Feasibility Gate (macOS runner)
+
+# Answers, empirically, whether the architecture is possible on a GitHub-hosted
+# macOS runner: GUI session, per-window capture, input injection, encoder.
+# Run it manually; nothing else in this repo should be built on assumptions
+# this job has not confirmed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner label (e.g. macos-15, macos-15-intel, macos-26)"
+        default: "macos-15"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run feasibility probe
+        run: ./scripts/run-feasibility-probe.sh
+      - name: Collect system facts
+        if: always()
+        run: |
+          mkdir -p out
+          { sw_vers; uname -a; id; echo; launchctl managername 2>&1; echo; ps -ax -o pid,comm | grep -Ei 'WindowServer|loginwindow|Finder' | head; } > out/system.txt 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: feasibility-${{ inputs.runner }}
+          path: out/

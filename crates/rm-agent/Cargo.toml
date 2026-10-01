@@ -1,0 +1,16 @@
+[package]
+name = "rm-agent"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "remote-agent"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rm-protocol = { path = "../rm-protocol" }
+rm-core = { path = "../rm-core" }
+rm-relay = { path = "../rm-relay" }
