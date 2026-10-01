@@ -62,12 +62,34 @@ Kết luận đã có bằng chứng:
 - Gửi phím bằng `CGEvent.postToPid` hoạt động **không cần activate** app (quan trọng: điều khiển nền không cần giành focus). Đường HID tap sau `activate` cũng hoạt động.
 - Runner Intel không có encoder phần cứng → phải có đường codec phần mềm; ưu tiên runner arm64.
 
-**Chưa được chứng minh bởi gate này (đừng suy diễn từ "GO"):**
-- Mới chụp **ảnh tĩnh** (`SCScreenshotManager`), chưa chạy luồng liên tục `SCStream`: FPS, độ trễ, mức dùng CPU chưa đo.
-- Chưa test chuột, cuộn, resize, đóng cửa sổ, nhiều cửa sổ/dialog con, menu popup.
-- Chưa test encode khung đã chụp → decode (mới chỉ tạo được `VTCompressionSession`).
+**Chưa được chứng minh bởi gate (đừng suy diễn từ "GO") — cập nhật sau M1:**
+- Luồng liên tục đã chạy (M1a) nhưng mới với cửa sổ nhỏ, FPS dao động 23–49; chưa đo CPU, chưa đo độ trễ input→hiển thị đầu-cuối.
+- Đã test: click, phím, Unicode, resize/move/close (M1). Chưa test: cuộn, kéo-chọn, chuột phải, nhiều cửa sổ/dialog con có quan hệ cha-con, menu popup.
+- Encode → decode khép kín đã test (M1b) trên nội dung gần tĩnh; chưa test nội dung biến động và chưa decode bằng Media Foundation trên Windows.
 - Chưa test kết nối ra relay thật (chỉ HTTPS 200 tới github.com; UDP/QUIC chưa kiểm tra), thời gian sống job, hay Xcode/Simulator.
 - Cổng chạy bằng step `run:` trong workflow; agent thật sẽ chạy trong cùng chuỗi tiến trình đó nên nhiều khả năng kế thừa quyền, nhưng cần xác nhận ở M1.
+
+### Kết quả M1 (run [36853869731](https://github.com/ducminh1110/RemoteMac/actions/runs/36853869731), commit `2d8d629`) — **GO trên cả 3 runner**
+
+Đo trên app test 480×348 có dải animation 60 Hz (cửa sổ nhỏ, một cửa sổ; chưa đại diện cho Xcode).
+
+| | `macos-15` (arm64) | `macos-15-intel` | `macos-26` (arm64) |
+|---|---|---|---|
+| M1a SCStream liên tục: FPS | 33,2 (166 khung/5 s) | 24,4 (122) | 23,0 (115) |
+| khoảng cách khung p50 / p95 / max | 19,3 / 69 / 269 ms | 33,6 / 76 / 351 ms | 16,8 / 151 / **1483** ms |
+| M1b H.264 encode: độ trễ p50 / p95 | 4,8 / 32,7 ms | **334,6 / 449,1 ms** | 8,0 / 245,6 ms |
+| bitrate (nội dung gần tĩnh) | 0,06 Mbps | 0,08 Mbps | 0,04 Mbps |
+| decode lại / số khung đã encode | 166 / 166 | 122 / 122 | 115 / 115 |
+| M1c nhập Unicode `alpha beta é中` | pass (`postToPid`) | pass (`postToPid`) | pass (`postToPid`) |
+| M1e click đặt con trỏ (13 → 0), phím gõ được sau click | pass | pass | pass |
+| M1d resize 640×440 + move + ảnh chụp theo kích thước mới + đóng cửa sổ | pass | pass | pass |
+
+Đọc kết quả cho đúng:
+- FPS dao động giữa các lượt (cùng cấu hình đã ra 26–49 FPS ở lượt trước): runner là VM dùng chung, **chưa thể cam kết 30/60 FPS**; khoảng trống tới 1,5 s đã xuất hiện trên `macos-26`. Cần đo lại với cửa sổ lớn (Xcode ~1440p) và lặp nhiều lần trước khi hứa chất lượng.
+- Encoder phần mềm trên runner Intel trễ ~335 ms/khung ở cửa sổ chỉ 480×348 → **Intel không dùng được cho tương tác**; chỉ arm64.
+- Mã hoá/giải mã khép kín 100% khung, nhưng bitrate cực thấp vì nội dung gần tĩnh; chưa đo với nội dung biến động (cuộn code, build log).
+- Bài học về chuột: click lúc đầu **không** hoạt động (con trỏ không nhúc nhích và phím sau đó bị nuốt) khi tôi dùng `CGEventSource(.hidSystemState)` + `postToPid`. Cách chạy được: `CGWarpMouseCursorPosition` tới điểm đích, tạo `CGEvent(mouseEventSource: nil, ...)`, đặt `mouseEventClickState=1` và `mouseEventButtonNumber=0`, `post(tap: .cghidEventTap)`, có nghỉ ~120 ms giữa down/up, thêm một `mouseMoved` sau cùng. Agent phải dùng đúng công thức này (chuột cần app ở foreground và con trỏ thật bị di chuyển; bàn phím thì `postToPid` không cần).
+- Đặt con trỏ qua Accessibility (`kAXSelectedTextRange`) cũng hoạt động, dùng được làm dự phòng.
 
 Bài học khi làm gate (đã sửa trong probe, giữ lại để không lặp lại):
 1. Lượt đầu `macos-15` báo GO **oan**: chọn nhầm cửa sổ 106×108 và so hash ảnh nên con trỏ nhấp nháy cũng làm "pass". Nay đo thêm nhiễu không-input và đọc giá trị ô nhập bằng Accessibility.
@@ -82,7 +104,7 @@ ngoài việc build/test/deploy dự án của repo (ví dụ dùng như máy t�
 tự đánh giá rủi ro tài khoản bị khoá trước khi dùng nghiêm túc; đây là rủi ro sản phẩm, không phải rủi ro kỹ thuật.
 Vì vậy provider abstraction (A6) và backend Mac cá nhân/cloud là đường lui, không phải tính năng "sau này".
 
-Thứ tự phụ thuộc: **Gate (ĐÃ GO) → M1 (capture liên tục + input đầy đủ) → M2 (video + client Windows native) → Xcode.**
+Thứ tự phụ thuộc: **Gate (GO) → M1 (GO) → M2 (agent thật + client Windows native) → Xcode.**
 
 ## 3. Trạng thái triển khai (trung thực)
 
@@ -93,7 +115,7 @@ Thứ tự phụ thuộc: **Gate (ĐÃ GO) → M1 (capture liên tục + input �
 | `rm-relay`: ghép cặp phiên, so sánh token constant-time, timeout, chặn id/hello bậy | Xong, có test (6). **Truyền tải là TCP thuần — chỉ để phát triển** |
 | `rm-agent` (`remote-agent`): handshake, báo capability, list/launch/terminate qua allowlist | Xong, có test (6). Chưa chạy trên Mac thật |
 | `rm-client` (`remote-mac`): handshake → `Ready`, list/launch; test end-to-end client↔relay↔agent | Xong, có test (1). Bản CLI, **chưa có cửa sổ** |
-| Probe macOS (Swift) + workflow Gate | **Đã chạy trên 3 runner thật: GO** (số liệu ở §2). Sau 4 vòng sửa lỗi của chính probe |
+| Probe macOS (Swift) + workflow Gate | **Gate G và M1 đều GO trên 3 runner thật** (số liệu ở §2). Sau nhiều vòng sửa lỗi của chính probe |
 | Capture, input injection, encode/decode, compositor Windows | **Chưa làm** — chờ Gate |
 | Mã hoá đầu-cuối (Noise/QUIC) + TLS cho relay | **Chưa làm — bắt buộc trước khi dùng thật** |
 | GitHub provider (device-flow OAuth, `workflow_dispatch`, theo dõi run, huỷ run) | **Chưa làm** — M3 (Gate hiện chạy bằng push lên nhánh) |
@@ -101,7 +123,7 @@ Thứ tự phụ thuộc: **Gate (ĐÃ GO) → M1 (capture liên tục + input �
 
 ## 4. Lộ trình sau Gate
 
-1. **M1 (Mac):** (a) `SCStream` liên tục cho 1 cửa sổ, đo FPS/độ trễ/CPU trên runner; (b) bơm chuột/cuộn/phím theo `Message::{Mouse*,Key,TextInput}` vào TextEdit; (c) resize/đóng/nhiều cửa sổ; (d) VideoToolbox encode khung thật; (e) agent kết nối ra relay thật từ runner (HTTPS/WebSocket 443, thử UDP). Mỗi mục là một gate mới trong cùng workflow.
+1. **M1 (Mac): XONG** — capture liên tục, encode/decode, input, resize/close đã chứng minh trên runner (§2). Còn lại: cuộn/kéo-chọn/menu, nhiều cửa sổ, đo với cửa sổ lớn, relay/QUIC từ runner.
 2. **M2 (video + Windows):** H.264 qua VideoToolbox → khung video trên kênh `Video`; client Windows Rust + Win32 + Direct3D11 + Media Foundation tạo cửa sổ native cho mỗi `WindowCreated`. Cần máy Windows/CI `windows-latest` để build và test.
 3. **M3:** E2E mã hoá, GitHub provider, UI chọn repo/Request Mac/Stop Mac, hiển thị thời gian còn lại.
 4. **M4:** clipboard, file grant, reconnect, DPI, đa màn hình → Xcode + Simulator.
