@@ -91,6 +91,30 @@ Kết luận đã có bằng chứng:
 - Bài học về chuột: click lúc đầu **không** hoạt động (con trỏ không nhúc nhích và phím sau đó bị nuốt) khi tôi dùng `CGEventSource(.hidSystemState)` + `postToPid`. Cách chạy được: `CGWarpMouseCursorPosition` tới điểm đích, tạo `CGEvent(mouseEventSource: nil, ...)`, đặt `mouseEventClickState=1` và `mouseEventButtonNumber=0`, `post(tap: .cghidEventTap)`, có nghỉ ~120 ms giữa down/up, thêm một `mouseMoved` sau cùng. Agent phải dùng đúng công thức này (chuột cần app ở foreground và con trỏ thật bị di chuyển; bàn phím thì `postToPid` không cần).
 - Đặt con trỏ qua Accessibility (`kAXSelectedTextRange`) cũng hoạt động, dùng được làm dự phòng.
 
+### Kết quả M2-agent (run [36855744757](https://github.com/ducminh1110/RemoteMac/actions/runs/36855744757), commit `29646ed`) — **12/12 bước pass trên 2 runner**
+
+Chạy `scripts/e2e-macos.sh` trên cùng một máy: `rm-relay` + `remote-agent-mac` + client Rust (`remote-mac --e2e testapp`) qua loopback.
+
+| Bước | `macos-15` | `macos-26` |
+|---|---|---|
+| Agent báo capability thật (GUI, Screen Recording, Accessibility, hardware H.264) | pass | pass |
+| App có trong danh sách và đã cài | pass | pass |
+| `application_id="/bin/sh"` bị từ chối (`launch_rejected`) | pass | pass |
+| Launch + `WindowCreated` (480×348 / 480×352) | pass | pass |
+| Khung đầu là keyframe có SPS+PPS+IDR, đúng Annex-B | pass (NAL 7,8,6,5) | pass (NAL 7,8,6,5) |
+| Luồng video ≥ 30 khung, không khung nào sai Annex-B | pass; thời gian tới khung đầu **1529 ms** | pass; **1983 ms** |
+| `TextInput "hello"` → tiêu đề `[5 chars]` | pass | pass |
+| Click chuột rồi gõ `X` → `[6 chars]` | pass | pass |
+| Phím vật lý `KeyA` → `[7 chars]` | pass | pass |
+| Cmd+A rồi Backspace → `[0 chars]` (modifier hoạt động) | pass | pass |
+| Terminate → `WindowDestroyed` + `AppExited` | pass | pass |
+
+Đọc cho đúng:
+- "Thời gian tới khung đầu" tính từ lúc gửi lệnh launch (gồm khởi động app, chu kỳ dò cửa sổ 100 ms, khởi tạo stream).
+- Input được kiểm chứng gián tiếp qua tiêu đề cửa sổ mà app test tự cập nhật theo số ký tự; hiệu ứng thấy được trong video chưa được so sánh.
+- Lần chạy đầu của e2e trên cùng mã này đã in FPS, nhưng công thức sai nên bị loại; công thức mới (theo timestamp khung) có trong code, **chưa có số FPS đã xác minh cho đường agent→relay→client**.
+- Chỉ là app test 480×348, relay loopback, truyền tải **chưa mã hoá**; chưa thử Xcode/TextEdit qua agent, chưa thử nhiều cửa sổ, resize qua agent, cuộn, kéo-chọn.
+
 Bài học khi làm gate (đã sửa trong probe, giữ lại để không lặp lại):
 1. Lượt đầu `macos-15` báo GO **oan**: chọn nhầm cửa sổ 106×108 và so hash ảnh nên con trỏ nhấp nháy cũng làm "pass". Nay đo thêm nhiễu không-input và đọc giá trị ô nhập bằng Accessibility.
 2. Lỗi "TextEdit không nhận phím" lúc đầu **không phải** do runner: do tôi truyền file tạm qua argv nên TextEdit hiện hộp thoại "document could not be opened". Bỏ tham số thì TextEdit mở tài liệu bình thường.
@@ -113,10 +137,11 @@ Thứ tự phụ thuộc: **Gate (GO) → M1 (GO) → M2 (agent thật + client 
 | `rm-protocol`: khung gói tin, kênh ưu tiên, negotiate phiên bản, giới hạn kích thước, từ chối gói hỏng | Xong, có test (11) |
 | `rm-core`: state machine provisioning (không thể tới `Ready` nếu chưa handshake), `ComputeProvider`, allowlist app | Xong, có test (9) |
 | `rm-relay`: ghép cặp phiên, so sánh token constant-time, timeout, chặn id/hello bậy | Xong, có test (6). **Truyền tải là TCP thuần — chỉ để phát triển** |
-| `rm-agent` (`remote-agent`): handshake, báo capability, list/launch/terminate qua allowlist | Xong, có test (6). Chưa chạy trên Mac thật |
+| `rm-agent` (`remote-agent`, Rust): bản tham chiếu control-plane, không có capture/input | Xong, có test (6). Agent chạy thật là `agent/macos` (Swift) |
 | `rm-client` (`remote-mac`): handshake → `Ready`, list/launch; test end-to-end client↔relay↔agent | Xong, có test (1). Bản CLI, **chưa có cửa sổ** |
 | Probe macOS (Swift) + workflow Gate | **Gate G và M1 đều GO trên 3 runner thật** (số liệu ở §2). Sau nhiều vòng sửa lỗi của chính probe |
-| Capture, input injection, encode/decode, compositor Windows | **Chưa làm** — chờ Gate |
+| `agent/macos` (`remote-agent-mac`, Swift): relay join, handshake, capability thật, allowlist launch, theo dõi cửa sổ, `SCStream`→H.264 Annex-B, input (phím/Unicode/chuột/modifier) | **Xong và đã chạy end-to-end trên `macos-15` và `macos-26`** (12/12 bước, xem §2 "Kết quả M2-agent") |
+| Compositor/decoder trên Windows (Media Foundation + Direct3D 11 + Win32), bắt input Windows | **Chưa làm** — M2b, cần CI `windows-latest` |
 | Mã hoá đầu-cuối (Noise/QUIC) + TLS cho relay | **Chưa làm — bắt buộc trước khi dùng thật** |
 | GitHub provider (device-flow OAuth, `workflow_dispatch`, theo dõi run, huỷ run) | **Chưa làm** — M3 (Gate hiện chạy bằng push lên nhánh) |
 | Clipboard, file transfer, audio, DPI, đa màn hình, Simulator, Xcode | Sau M2 |
@@ -124,8 +149,8 @@ Thứ tự phụ thuộc: **Gate (GO) → M1 (GO) → M2 (agent thật + client 
 ## 4. Lộ trình sau Gate
 
 1. **M1 (Mac): XONG** — capture liên tục, encode/decode, input, resize/close đã chứng minh trên runner (§2). Còn lại: cuộn/kéo-chọn/menu, nhiều cửa sổ, đo với cửa sổ lớn, relay/QUIC từ runner.
-2. **M2 (video + Windows):** H.264 qua VideoToolbox → khung video trên kênh `Video`; client Windows Rust + Win32 + Direct3D11 + Media Foundation tạo cửa sổ native cho mỗi `WindowCreated`. Cần máy Windows/CI `windows-latest` để build và test.
-3. **M3:** E2E mã hoá, GitHub provider, UI chọn repo/Request Mac/Stop Mac, hiển thị thời gian còn lại.
+2. **M2a (agent macOS): XONG** (§2). **M2b (client Windows):** Rust + Win32 + Direct3D 11 + Media Foundation H.264 decode, cửa sổ native cho mỗi `WindowCreated`, bắt chuột/phím Windows và ánh xạ sang `Message::*` (Ctrl↔Command theo §1). Cần CI `windows-latest` để build/test; decoder và renderer chỉ test được trên máy Windows thật hoặc CI có GPU/WARP.
+3. **M3 (trước khi dùng thật):** mã hoá đầu-cuối + TLS cho relay (hiện plaintext); relay công khai tới được từ runner;  E2E mã hoá, GitHub provider, UI chọn repo/Request Mac/Stop Mac, hiển thị thời gian còn lại.
 4. **M4:** clipboard, file grant, reconnect, DPI, đa màn hình → Xcode + Simulator.
 
 ## 5. Bảo mật (đã áp dụng / còn thiếu)
