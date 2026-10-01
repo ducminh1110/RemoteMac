@@ -400,6 +400,14 @@ func axFocusedFrame(_ pid: pid_t) -> CGRect? {
     return CGRect(origin: pt, size: sz)
 }
 
+/// "loc,len" of the focused text element's selection (caret position), via Accessibility.
+func axSelRange(_ pid: pid_t) -> String {
+    guard let f = axAttr(AXUIElementCreateApplication(pid), kAXFocusedUIElementAttribute as String),
+          let v = axAttr(f as! AXUIElement, kAXSelectedTextRangeAttribute as String) else { return "nil" }
+    var r = CFRange(location: -1, length: -1)
+    return AXValueGetValue(v as! AXValue, .cfRange, &r) ? "\(r.location),\(r.length)" : "?"
+}
+
 func runM1() async {
     // ---- M1a + M1b: continuous capture while the app animates, encode every frame, decode them back
     guard let (proc, pid) = launchTestApp() else { for id in ["M1a", "M1b", "M1c", "M1d"] { record(id, "m1", false, "testapp launch failed") }; return }
@@ -452,10 +460,18 @@ func runM1() async {
         let typed = axFocused(pid)?.value ?? "nil"
         let fr = axFocusedFrame(pid)
         let clickAt = CGPoint(x: (fr?.minX ?? r.minX) + 3, y: (fr?.minY ?? r.minY + 28) + 10) // first text line, left edge
-        click(clickAt, pid: target); Thread.sleep(forTimeInterval: 0.4)
+        let rangeBefore = axSelRange(pid)
+        click(clickAt, pid: target); Thread.sleep(forTimeInterval: 0.6)
+        c_detail += "sel \(rangeBefore)->\(axSelRange(pid)) "
         c_detail += "(frame=\(fr.map { "\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height))" } ?? "nil") click=\(Int(clickAt.x)),\(Int(clickAt.y)) focusedAfterClick=\(axFocused(pid)?.role ?? "nil")) "
-        typeUnicode("X", pid: target); Thread.sleep(forTimeInterval: 0.6)
-        let after = axFocused(pid)?.value ?? "nil"
+        typeUnicode("X", pid: target); Thread.sleep(forTimeInterval: 1.0)
+        var after = axFocused(pid)?.value ?? "nil"
+        c_detail += "unicodeX->sel \(axSelRange(pid)) "
+        if !after.contains("X") {   // retry with a physical key (x = keycode 7) to separate "unicode path" from "click path"
+            press(7, pid: target); Thread.sleep(forTimeInterval: 1.0)
+            after = axFocused(pid)?.value ?? "nil"
+            c_detail += "physicalX->sel \(axSelRange(pid)) "
+        }
         let unicodeOK = typed == text
         let caretMoved = after.contains("X") && !after.hasSuffix("X")
         c_detail += "[\(name) typed=\"\(typed)\" unicodeOK=\(unicodeOK) afterClick=\"\(after)\" caretMoved=\(caretMoved)] "
