@@ -2,8 +2,8 @@ name: Feasibility Gate (macOS runner)
 
 # Answers, empirically, whether the architecture is possible on a GitHub-hosted
 # macOS runner: GUI session, per-window capture, input injection, encoder.
-# Run it manually; nothing else in this repo should be built on assumptions
-# this job has not confirmed.
+# Triggers: manual (once this file is on the default branch) and pushes to the
+# working branch touching the probe, so it can be iterated without a merge.
 
 on:
   workflow_dispatch:
@@ -12,13 +12,20 @@ on:
         description: "Runner label (e.g. macos-15, macos-15-intel, macos-26)"
         default: "macos-15"
         required: true
+  push:
+    branches: [claude/inspiring-einstein-er2d37]
+    paths: [probe/**, scripts/run-feasibility-probe.sh, .github/workflows/feasibility-gate.yml]
 
 permissions:
   contents: read
 
 jobs:
   probe:
-    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', inputs.runner)) || fromJSON('["macos-15","macos-15-intel","macos-26"]') }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -32,5 +39,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: feasibility-${{ inputs.runner }}
+          name: feasibility-${{ matrix.runner }}
           path: out/
