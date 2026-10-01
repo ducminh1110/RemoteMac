@@ -131,6 +131,20 @@ func describeApp(_ pid: pid_t, _ label: String) {
     if let f = axFocused(pid) { note("\(label) AX focused role=\(f.role) valueLen=\(f.value.count)") } else { note("\(label) AX focused element: none") }
 }
 
+/// Press the first dialog button whose title is in `titles` (AXPress). Returns whether one was pressed.
+func axPress(_ pid: pid_t, titles: [String]) -> Bool {
+    let app = AXUIElementCreateApplication(pid)
+    let wins = axAttr(app, kAXWindowsAttribute as String) as? [AXUIElement] ?? []
+    for w in wins {
+        let kids = axAttr(w, kAXChildrenAttribute as String) as? [AXUIElement] ?? []
+        for k in kids where axStr(k, kAXRoleAttribute as String) == (kAXButtonRole as String)
+            && titles.contains(axStr(k, kAXTitleAttribute as String) ?? "") {
+            return AXUIElementPerformAction(k, kAXPressAction as CFString) == .success
+        }
+    }
+    return false
+}
+
 func press(_ code: CGKeyCode, _ flags: CGEventFlags = [], pid: pid_t?) {
     let src = CGEventSource(stateID: .hidSystemState)
     for down in [true, false] {
@@ -199,13 +213,22 @@ func exercise(prefix p: String, label: String, path: String, args: [String], dis
         guard let d = w[kCGWindowBounds as String] as? NSDictionary, let r = CGRect(dictionaryRepresentation: d as CFDictionary) else { return 0 }
         return r.width >= 64 && r.height >= 64 ? r.width * r.height : 0
     }
-    func largest() -> [String: Any]? { windows(ofPid: pid).filter { area($0) > 0 }.sorted { area($0) > area($1) }.first }
-    for _ in 0..<40 { if largest() != nil { break }; Thread.sleep(forTimeInterval: 0.5) }
+    // Prefer windows that are actually on screen: apps also own large invisible backing windows.
+    func isOnscreen(_ w: [String: Any]) -> Bool { (w[kCGWindowIsOnscreen as String] as? Bool) == true }
+    func largest() -> [String: Any]? {
+        let all = windows(ofPid: pid).filter { area($0) > 0 }
+        let on = all.filter(isOnscreen)
+        return (on.isEmpty ? all : on).sorted { area($0) > area($1) }.first
+    }
+    for _ in 0..<40 { if let w = largest(), isOnscreen(w) { break }; Thread.sleep(forTimeInterval: 0.5) }
     Thread.sleep(forTimeInterval: 2.0)
     describeApp(pid, "\(label)/launch")
 
     if dismissFirstRun {
-        press(53, pid: pid); Thread.sleep(forTimeInterval: 1.0)              // Escape
+        let pressed = axPress(pid, titles: ["OK", "Cancel", "Close"])         // dismiss an alert if one is up
+        note("\(label) dismissed alert via AXPress: \(pressed)")
+        Thread.sleep(forTimeInterval: 1.0)
+        press(53, pid: pid); Thread.sleep(forTimeInterval: 1.0)              // Escape (closes an Open panel)
         press(45, .maskCommand, pid: pid); Thread.sleep(forTimeInterval: 2.0) // Cmd+N
         describeApp(pid, "\(label)/after-esc-cmdn")
     }
@@ -246,9 +269,8 @@ let capOK = primary.cap, capDetail = primary.capDetail
 let inputOK = primary.input, inputDetail = primary.inputDetail
 
 // Real-world target, informational: TextEdit on a fresh runner may sit behind a first-run dialog.
-let docPath = NSTemporaryDirectory() + "rm-probe.txt"
-FileManager.default.createFile(atPath: docPath, contents: Data("probe\n".utf8))
-_ = await exercise(prefix: "T", label: "textedit", path: "/System/Applications/TextEdit.app/Contents/MacOS/TextEdit", args: [docPath], dismissFirstRun: true)
+// (No file argument: passing a temp-file path made TextEdit raise "document could not be opened".)
+_ = await exercise(prefix: "T", label: "textedit", path: "/System/Applications/TextEdit.app/Contents/MacOS/TextEdit", args: [], dismissFirstRun: true)
 
 var hwOK: Bool? = nil, hwDetail = ""
 
