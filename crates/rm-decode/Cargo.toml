@@ -1,0 +1,7 @@
+[package]
+name = "rm-decode"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+openh264 = "0.9"

@@ -27,9 +27,9 @@ fn main() {
     let mut s = Session::handshake(stream).unwrap_or_else(|e| fail("handshake", e));
     if let Some(app) = e2e {
         let r = rm_client::e2e::run(&mut s, &app);
-        println!("E2E {}: {}/{} checks passed; frames={} keyframes={} bytes={} fps={:.1} firstFrameMs={:?} titles={:?}",
+        println!("E2E {}: {}/{} checks passed; frames={} decoded={} keyframes={} bytes={} fps={:.1} firstFrameMs={:?} titles={:?}",
             if r.all_ok() { "PASS" } else { "FAIL" }, r.checks.iter().filter(|c| c.1).count(), r.checks.len(),
-            r.video_frames, r.keyframes, r.video_bytes, r.fps(), r.first_frame_ms, r.titles);
+            r.video_frames, r.decoded, r.keyframes, r.video_bytes, r.fps(), r.first_frame_ms, r.titles);
         std::process::exit(if r.all_ok() { 0 } else { 1 });
     }
     println!("connected (protocol v{})", s.negotiated.version);

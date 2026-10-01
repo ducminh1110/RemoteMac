@@ -141,4 +141,26 @@ mod tests {
         drop(sess);
         agent.join().unwrap();
     }
+
+    /// The whole client scenario (launch, window, H.264 frames decoded, keyboard, mouse,
+    /// modifiers, close) against the scripted fake agent over a real relay.
+    #[test]
+    fn e2e_scenario_against_fake_agent() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        std::thread::spawn(move || rm_relay::serve(l, Default::default()));
+        let tok = "fake-e2e-token-0123456789";
+        let a = addr.clone();
+        std::thread::spawn(move || { let _ = rm_fakeagent::serve_via_relay(&a, "fake-1", tok); });
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        let stream = join(&addr, "fake-1", Role::Client, tok).unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+        let mut sess = Session::handshake(stream).unwrap();
+        let report = crate::e2e::run(&mut sess, "testapp");
+        for c in &report.checks {
+            assert!(c.1, "check failed: {} -> {}", c.0, c.2);
+        }
+        assert!(report.decoded >= 30 && report.fps() > 5.0, "decoded={} fps={}", report.decoded, report.fps());
+    }
 }

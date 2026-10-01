@@ -72,6 +72,22 @@ let streamsLock = NSLock()
 var streams: [CGWindowID: WindowStream] = [:]
 var lastSize: [CGWindowID: CGSize] = [:]
 
+func axAttr(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
+    var v: CFTypeRef?
+    return AXUIElementCopyAttributeValue(el, name as CFString, &v) == .success ? v : nil
+}
+/// The AX window of `pid` whose frame matches the window-server rect (apps may own several windows).
+func axWindowFor(pid: pid_t, id: CGWindowID, rect: CGRect) -> AXUIElement? {
+    let wins = axAttr(AXUIElementCreateApplication(pid), kAXWindowsAttribute as String) as? [AXUIElement] ?? []
+    for w in wins {
+        var p = CGPoint.zero, s = CGSize.zero
+        if let pv = axAttr(w, kAXPositionAttribute as String), let sv = axAttr(w, kAXSizeAttribute as String),
+           AXValueGetValue(pv as! AXValue, .cgPoint, &p), AXValueGetValue(sv as! AXValue, .cgSize, &s),
+           abs(p.x - rect.minX) < 3, abs(p.y - rect.minY) < 3, abs(s.width - rect.width) < 3, abs(s.height - rect.height) < 3 { return w }
+    }
+    return wins.first
+}
+
 func send(_ m: [String: Any]) { do { try conn.send(m) } catch { log("send failed: \(error)") } }
 
 func startStream(_ id: CGWindowID) {
@@ -127,6 +143,17 @@ func handle(_ m: [String: Any]) {
         let id = m["application_id"] as? String ?? ""
         if apps.terminate(id: id) { send(["type": "app_exited", "application_id": id, "code": NSNull()]) }
         else { send(["type": "error", "code": "not_running", "message": id]) }
+    case "window_close", "window_resize_request":
+        let wid = CGWindowID(int(m["window_id"]))
+        guard let w = tracker.current(wid), let aw = axWindowFor(pid: w.pid, id: wid, rect: w.rect) else {
+            send(["type": "error", "code": "no_such_window", "message": "\(wid)"]); break
+        }
+        if type == "window_close" {
+            if let cb = axAttr(aw, kAXCloseButtonAttribute as String) { AXUIElementPerformAction(cb as! AXUIElement, kAXPressAction as CFString) }
+        } else {
+            var size = CGSize(width: num(m["width"]), height: num(m["height"]))
+            if let v = AXValueCreate(.cgSize, &size) { AXUIElementSetAttributeValue(aw, kAXSizeAttribute as CFString, v) }
+        }
     case "ping":
         send(["type": "pong", "nonce": m["nonce"] ?? 0])
     case _ where inputTypes.contains(type):

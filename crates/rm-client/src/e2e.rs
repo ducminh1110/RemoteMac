@@ -18,6 +18,10 @@ pub struct Report {
     pub last_pts_us: u64,
     pub window: Option<(u64, Rect)>,
     pub titles: Vec<String>,
+    pub decoded: usize,
+    pub decode_errors: usize,
+    /// (width, height, distinct colours) of the most recent decoded picture.
+    pub last_picture: Option<(usize, usize, usize)>,
 }
 
 impl Report {
@@ -50,6 +54,7 @@ struct Ctx<'a, S: Read + Write> {
     launched_pid: Option<u32>,
     errors: Vec<String>,
     non_annexb: usize,
+    decoder: Option<rm_decode::H264Decoder>,
 }
 
 fn is_timeout(e: &ProtocolError) -> bool {
@@ -71,6 +76,16 @@ impl<S: Read + Write> Ctx<'_, S> {
                 self.r.video_bytes += v.data.len();
                 if !v.has_start_code() {
                     self.non_annexb += 1;
+                }
+                if let Some(d) = self.decoder.as_mut() {
+                    match d.decode(&v.data) {
+                        Ok(Some(p)) => {
+                            self.r.decoded += 1;
+                            self.r.last_picture = Some((p.width, p.height, p.distinct_colors()));
+                        }
+                        Ok(None) => {}
+                        Err(_) => self.r.decode_errors += 1,
+                    }
                 }
             }
             Frame::Msg(Message::WindowCreated { window_id, bounds, title, .. }) => {
@@ -124,7 +139,8 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let caps_ok = sess.capabilities.can_stream_apps();
     let caps_dump = serde_json::to_string(&sess.capabilities).unwrap_or_default();
     let mut c = Ctx { sess, r: Report::default(), started: Instant::now(), first_video: None, last_title: String::new(),
-        destroyed: false, exited: false, launched_pid: None, errors: vec![], non_annexb: 0 };
+        destroyed: false, exited: false, launched_pid: None, errors: vec![], non_annexb: 0,
+        decoder: rm_decode::H264Decoder::new().ok() };
 
     c.r.check("agent reports capture+input+GUI", caps_ok, caps_dump);
 
@@ -165,6 +181,12 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let (n, bytes, kf, t) = (c.r.video_frames, c.r.video_bytes, c.r.keyframes, c.r.first_frame_ms);
     c.r.check("video stream flows (>=30 frames, all Annex-B)", n >= 30 && c.non_annexb == 0,
         format!("frames={n} keyframes={kf} bytes={bytes} firstFrameMs={t:?} nonAnnexB={}", c.non_annexb));
+
+    let (dec, errs, pic) = (c.r.decoded, c.r.decode_errors, c.r.last_picture);
+    let want = c.r.window.map(|(_, b)| (b.w as usize, b.h as usize));
+    let pic_ok = matches!((pic, want), (Some((w, h, colors)), Some((ww, wh))) if (w, h) == (ww, wh) && colors > 8);
+    c.r.check("frames decode to window-sized, non-blank pictures", dec >= 30 && pic_ok,
+        format!("decoded={dec} decodeErrors={errs} lastPicture(w,h,colors)={pic:?} windowBounds={want:?}"));
 
     // ---- keyboard: unicode text
     c.send(Message::TextInput { window_id: wid, text: "hello".into() });

@@ -13,6 +13,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 rm-protocol = { path = "../rm-protocol" }
 rm-core = { path = "../rm-core" }
+rm-decode = { path = "../rm-decode" }
 rm-relay = { path = "../rm-relay" }
 
 [lib]
@@ -21,3 +22,5 @@ path = "src/lib.rs"
 
 [dev-dependencies]
 rm-agent = { path = "../rm-agent" }
+rm-fakeagent = { path = "../rm-fakeagent" }
+rm-relay = { path = "../rm-relay" }

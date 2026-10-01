@@ -223,6 +223,10 @@ pub enum Message {
     WindowDestroyed { window_id: u64 },
     WindowMoved { window_id: u64, bounds: Rect },
     WindowTitleChanged { window_id: u64, title: String },
+    /// Client -> agent: the user closed the local window; ask the remote window to close.
+    WindowClose { window_id: u64 },
+    /// Client -> agent: the user resized the local window; resize the remote window (points).
+    WindowResizeRequest { window_id: u64, width: u32, height: u32 },
 
     MouseMove { window_id: u64, x: f64, y: f64 },
     MouseButton { window_id: u64, button: MouseButton, down: bool, x: f64, y: f64 },
