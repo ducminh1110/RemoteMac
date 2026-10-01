@@ -123,6 +123,10 @@ func describeApp(_ pid: pid_t, _ label: String) {
     note("\(label) AX windows=\(wins.count)")
     for w in wins {
         note("\(label)   AX title=\"\(axStr(w, kAXTitleAttribute as String) ?? "")\" role=\(axStr(w, kAXRoleAttribute as String) ?? "?") subrole=\(axStr(w, kAXSubroleAttribute as String) ?? "?")")
+        let kids = axAttr(w, kAXChildrenAttribute as String) as? [AXUIElement] ?? []
+        for k in kids.prefix(25) {
+            note("\(label)     child role=\(axStr(k, kAXRoleAttribute as String) ?? "?") title=\"\(axStr(k, kAXTitleAttribute as String) ?? "")\" desc=\"\(axStr(k, kAXDescriptionAttribute as String) ?? "")\" value=\"\(String((axStr(k, kAXValueAttribute as String) ?? "").prefix(40)))\"")
+        }
     }
     if let f = axFocused(pid) { note("\(label) AX focused role=\(f.role) valueLen=\(f.value.count)") } else { note("\(label) AX focused element: none") }
 }
@@ -175,74 +179,78 @@ let axOK = AXIsProcessTrusted()
 record("G2a", "Screen Recording permission (preflight)", screenOK, "CGPreflightScreenCaptureAccess=\(screenOK)")
 record("G2b", "Accessibility permission", axOK, "AXIsProcessTrusted=\(axOK)")
 
-// ---- launch target as a plain executable ---------------------------------
-let target = "/System/Applications/TextEdit.app/Contents/MacOS/TextEdit"
-let docPath = NSTemporaryDirectory() + "rm-probe.txt"
-FileManager.default.createFile(atPath: docPath, contents: Data("probe\n".utf8))
-let proc = Process(); proc.executableURL = URL(fileURLWithPath: target); proc.arguments = [docPath]
-var launched = false
-do { try proc.run(); launched = true } catch { record("G3", "launch GUI app by executable path", false, "\(error)") }
+// ---- exercise a GUI app launched by executable path -----------------------
+struct Outcome { var cap: Bool?; var capDetail: String; var input: Bool?; var inputDetail: String }
 
-var winID: CGWindowID? = nil
-var capOK: Bool? = nil, capDetail = "not attempted"
-var inputOK: Bool? = nil, inputDetail = "not attempted"
-var hwOK: Bool? = nil, hwDetail = ""
-
-if launched {
+/// Launch `path` from this shell, find its window, capture it, type into it.
+/// Gate ids are `<prefix>3/4/5/5a/5b`. Prefix "G" = required gates, "T" = informational.
+func exercise(prefix p: String, label: String, path: String, args: [String], dismissFirstRun: Bool) async -> Outcome {
+    var out = Outcome(cap: nil, capDetail: "not attempted", input: nil, inputDetail: "not attempted")
+    guard FileManager.default.isExecutableFile(atPath: path) else {
+        record("\(p)3", "\(label): launch by executable path", false, "not executable: \(path)")
+        return out
+    }
+    let proc = Process(); proc.executableURL = URL(fileURLWithPath: path); proc.arguments = args
+    do { try proc.run() } catch { record("\(p)3", "\(label): launch by executable path", false, "\(error)"); return out }
+    defer { proc.terminate() }
     let pid = proc.processIdentifier
+
     func area(_ w: [String: Any]) -> CGFloat {
         guard let d = w[kCGWindowBounds as String] as? NSDictionary, let r = CGRect(dictionaryRepresentation: d as CFDictionary) else { return 0 }
-        return r.width >= 64 && r.height >= 64 ? r.width * r.height : 0 // ignore 0x0 / tiny placeholder windows
+        return r.width >= 64 && r.height >= 64 ? r.width * r.height : 0
     }
-    func largestWindow() -> [String: Any]? {
-        windows(ofPid: pid).filter { area($0) > 0 }.sorted { area($0) > area($1) }.first
-    }
-    for _ in 0..<40 { if largestWindow() != nil { break }; Thread.sleep(forTimeInterval: 0.5) }
-    Thread.sleep(forTimeInterval: 2.0) // let the app finish its launch UI
-    describeApp(pid, "after-launch")
-
-    // Make sure there is an untitled document: dismiss any Open panel, then Cmd+N.
-    press(53, pid: pid)                       // Escape
-    Thread.sleep(forTimeInterval: 1.0)
-    press(45, .maskCommand, pid: pid)         // Cmd+N
+    func largest() -> [String: Any]? { windows(ofPid: pid).filter { area($0) > 0 }.sorted { area($0) > area($1) }.first }
+    for _ in 0..<40 { if largest() != nil { break }; Thread.sleep(forTimeInterval: 0.5) }
     Thread.sleep(forTimeInterval: 2.0)
-    describeApp(pid, "after-cmd-n")
+    describeApp(pid, "\(label)/launch")
 
-    if let first = largestWindow(), let n = first[kCGWindowNumber as String] as? UInt32 {
-        winID = CGWindowID(n)
-        record("G3", "launch GUI app by executable path + enumerate its windows", true,
-               "pid=\(pid) id=\(n) name=\"\(first[kCGWindowName as String] ?? "")\" bounds=\(first[kCGWindowBounds as String] ?? "?")")
-    } else {
-        record("G3", "launch GUI app by executable path + enumerate its windows", false, "no window >=64x64 for pid \(pid)")
+    if dismissFirstRun {
+        press(53, pid: pid); Thread.sleep(forTimeInterval: 1.0)              // Escape
+        press(45, .maskCommand, pid: pid); Thread.sleep(forTimeInterval: 2.0) // Cmd+N
+        describeApp(pid, "\(label)/after-esc-cmdn")
     }
 
-    if let id = winID {
-        // ---- G4: per-window capture ----------------------------------------
-        let (img, d) = await captureWindow(id)
-        if let img = img {
-            let s = imageStats(img)
-            capOK = s.distinct > 8
-            capDetail = "\(d) distinctPixels=\(s.distinct) (blank/black frames fail this)"
-        } else { capOK = false; capDetail = d }
-        record("G4", "capture ONE window via ScreenCaptureKit (not whole screen)", capOK, capDetail)
-
-        // ---- G5: input injection, two delivery routes ------------------------
-        let (okA, detA) = await tryTyping("postToPid", pid: pid, windowID: id, viaHID: false)
-        record("G5a", "keyboard via CGEvent.postToPid (info)", okA, detA)
-        NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
-        Thread.sleep(forTimeInterval: 1.0)
-        let (okB, detB) = await tryTyping("activate+cghidEventTap", pid: pid, windowID: id, viaHID: true)
-        record("G5b", "keyboard via activate + HID event tap (info)", okB, detB)
-        inputOK = okA || okB
-        inputDetail = "postToPid=\(okA) hidTap=\(okB)"
-        record("G5", "inject keyboard input into the app and observe effect (either route)", inputOK, inputDetail)
-        describeApp(pid, "after-typing")
-    } else {
-        record("G4", "capture ONE window via ScreenCaptureKit", false, "skipped: no window")
-        record("G5", "inject input and observe effect", false, "skipped: no window")
+    guard let first = largest(), let n = first[kCGWindowNumber as String] as? UInt32 else {
+        record("\(p)3", "\(label): launch by executable path + window", false, "no window >=64x64 for pid \(pid)")
+        return out
     }
-    proc.terminate()
+    let id = CGWindowID(n)
+    record("\(p)3", "\(label): launch by executable path + window", true,
+           "pid=\(pid) id=\(n) name=\"\(first[kCGWindowName as String] ?? "")\" bounds=\(first[kCGWindowBounds as String] ?? "?")")
+
+    let (img, d) = await captureWindow(id)
+    if let img = img {
+        let st = imageStats(img)
+        out.cap = st.distinct > 8
+        out.capDetail = "\(d) distinctPixels=\(st.distinct)"
+    } else { out.cap = false; out.capDetail = d }
+    record("\(p)4", "\(label): capture ONE window via ScreenCaptureKit", out.cap, out.capDetail)
+
+    let (okA, detA) = await tryTyping("postToPid", pid: pid, windowID: id, viaHID: false)
+    record("\(p)5a", "\(label): keyboard via CGEvent.postToPid", okA, detA)
+    NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
+    Thread.sleep(forTimeInterval: 1.0)
+    let (okB, detB) = await tryTyping("activate+cghidEventTap", pid: pid, windowID: id, viaHID: true)
+    record("\(p)5b", "\(label): keyboard via activate + HID event tap", okB, detB)
+    out.input = okA || okB
+    out.inputDetail = "postToPid=\(okA) hidTap=\(okB)"
+    record("\(p)5", "\(label): keyboard input has a visible effect (either route)", out.input, out.inputDetail)
+    describeApp(pid, "\(label)/after-typing")
+    return out
 }
+
+let cwd = FileManager.default.currentDirectoryPath
+let testApp = ProcessInfo.processInfo.environment["RM_TESTAPP"] ?? cwd + "/out/rm-testapp"
+let primary = await exercise(prefix: "G", label: "testapp", path: testApp, args: [], dismissFirstRun: false)
+let capOK = primary.cap, capDetail = primary.capDetail
+let inputOK = primary.input, inputDetail = primary.inputDetail
+
+// Real-world target, informational: TextEdit on a fresh runner may sit behind a first-run dialog.
+let docPath = NSTemporaryDirectory() + "rm-probe.txt"
+FileManager.default.createFile(atPath: docPath, contents: Data("probe\n".utf8))
+_ = await exercise(prefix: "T", label: "textedit", path: "/System/Applications/TextEdit.app/Contents/MacOS/TextEdit", args: [docPath], dismissFirstRun: true)
+
+var hwOK: Bool? = nil, hwDetail = ""
 
 // ---- G6: encoder ----------------------------------------------------------
 func tryEncoder(requireHW: Bool) -> OSStatus {
