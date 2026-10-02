@@ -6,6 +6,7 @@
 
 use crate::keymap::*;
 use crate::native;
+use crate::d3d;
 use crate::net::{self, Link, UiEvent};
 use rm_decode::Picture;
 use rm_protocol::{Message, MouseButton};
@@ -31,6 +32,8 @@ pub struct Options {
     pub ctrl_as_command: bool,
     pub smoke: bool,
     pub clipboard: bool,
+    /// Prefer Direct3D 11 (falls back to GDI when no device can be created).
+    pub d3d: bool,
 }
 
 const WM_UI_EVENT: u32 = WM_APP + 1;
@@ -45,6 +48,8 @@ struct Remote {
     /// Windows DIP scale of the monitor the window is on (1 Mac point = 1 DIP).
     scale: f64,
     maximized: bool,
+    /// GPU presenter; `None` means GDI.
+    presenter: Option<d3d::Presenter>,
     picture: Option<Picture>,
     frames: u32,
     high_surrogate: Option<u16>,
@@ -67,6 +72,7 @@ struct App {
     /// Text we just put on the Windows clipboard ourselves (its change notification is not echoed).
     clip_applied: Option<String>,
     clip_seq: u64,
+    d3d: bool,
 }
 
 thread_local! { static APP: RefCell<Option<App>> = const { RefCell::new(None) }; }
@@ -114,7 +120,7 @@ pub fn run(opts: Options) -> i32 {
         let smoke = opts.smoke.then(Smoke::new);
         APP.with(|a| {
             *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, smoke, exit: None, hinst: hinst.0 as isize, controller: ctl,
-                icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_seq: 0 })
+                icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_seq: 0, d3d: opts.d3d })
         });
         SetTimer(Some(controller), TIMER_ID, 100, None);
         if opts.clipboard && !native::listen_clipboard(controller) {
@@ -224,12 +230,19 @@ fn handle_event(ev: UiEvent) {
             let key = with_app(|a| {
                 let key = *a.by_id.get(&id)?;
                 let r = a.remotes.get_mut(&key)?;
-                r.picture = Some(picture);
                 r.frames += 1;
-                Some(key)
+                let gpu_ok = match r.presenter.as_mut() {
+                    Some(p) => p.present(&picture),
+                    None => false,
+                };
+                if !gpu_ok && r.presenter.take().is_some() {
+                    eprintln!("Direct3D presenter failed; falling back to GDI for window {id}");
+                }
+                r.picture = Some(picture);
+                Some((key, gpu_ok))
             })
             .flatten();
-            if let Some(k) = key {
+            if let Some((k, false)) = key {
                 unsafe { let _ = InvalidateRect(Some(hwnd_of(k)), None, false); }
             }
         }
@@ -266,7 +279,7 @@ fn create_remote_window(id: u64, app: &str, title: &str, w: u32, h: u32) {
         }
         let scale = native::dpi_scale(hwnd);
         let (cached, request) = with_app(|a| {
-            a.remotes.insert(hwnd.0 as isize, Remote { id, app: app.into(), rw: w, rh: h, scale, maximized: false, picture: None, frames: 0, high_surrogate: None });
+            a.remotes.insert(hwnd.0 as isize, Remote { id, app: app.into(), rw: w, rh: h, scale, maximized: false, presenter: None, picture: None, frames: 0, high_surrogate: None });
             a.by_id.insert(id, hwnd.0 as isize);
             let cached = a.icons.get(app).copied();
             let request = cached.is_none() && a.icons_requested.insert(app.to_string());
@@ -282,7 +295,10 @@ fn create_remote_window(id: u64, app: &str, title: &str, w: u32, h: u32) {
         }
         resize_client(hwnd, (w as f64 * scale).round() as i32, (h as f64 * scale).round() as i32);
         let _ = ShowWindow(hwnd, SW_SHOW);
-        eprintln!("window created id={id} app={app} {w}x{h}pt scale={scale} aumid={aumid} title={title:?}");
+        let presenter = if with_app(|a| a.d3d).unwrap_or(false) { d3d::Presenter::new(hwnd, w, h) } else { None };
+        let renderer = presenter.as_ref().map(|p| p.kind).unwrap_or("gdi");
+        with_app(|a| a.remotes.get_mut(&(hwnd.0 as isize)).map(|r| r.presenter = presenter));
+        eprintln!("window created id={id} app={app} renderer={renderer} {w}x{h}pt scale={scale} aumid={aumid} title={title:?}");
     }
 }
 
@@ -339,6 +355,17 @@ fn current_mods() -> Mods {
     Mods { ctrl: down(VK_CONTROL), alt: down(VK_MENU), shift: down(VK_SHIFT), win: down(VK_LWIN) || down(VK_RWIN) }
 }
 
+/// Re-present the last picture through the GPU presenter. True if handled.
+fn repaint_gpu(hwnd: HWND) -> bool {
+    with_app(|a| {
+        let r = a.remotes.get_mut(&(hwnd.0 as isize))?;
+        let (p, pic) = (r.presenter.as_mut()?, r.picture.as_ref()?);
+        Some(p.present(pic))
+    })
+    .flatten()
+    .unwrap_or(false)
+}
+
 fn paint_into(hwnd: HWND, hdc: HDC) {
     let (cw, ch) = client_size(hwnd);
     unsafe {
@@ -364,7 +391,9 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
-            paint_into(hwnd, hdc);
+            if !repaint_gpu(hwnd) {
+                paint_into(hwnd, hdc);
+            }
             let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
         }
@@ -587,7 +616,8 @@ fn smoke_tick() {
         (0, Some((hwnd, _))) if frames >= 15 => {
             std::thread::sleep(Duration::from_millis(200));
             let colors = painted_colors(hwnd);
-            finish("decoded frames are painted into the native window", colors > 100, format!("frames={frames} distinctColors={colors}"), 1);
+            let renderer = with_app(|a| a.remotes.get(&(hwnd.0 as isize)).map(|r| r.presenter.as_ref().map(|p| p.kind).unwrap_or("gdi"))).flatten().unwrap_or("?");
+            finish("decoded frames are painted into the native window", colors > 100, format!("renderer={renderer} frames={frames} distinctColors={colors}"), 1);
         }
         (1, Some((hwnd, _))) => {
             "hello".chars().for_each(|c| type_char(hwnd, c));

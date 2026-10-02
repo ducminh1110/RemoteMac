@@ -3,6 +3,8 @@
 pub mod keymap;
 pub mod net;
 #[cfg(windows)]
+pub mod d3d;
+#[cfg(windows)]
 pub mod native;
 #[cfg(windows)]
 pub mod ui;
