@@ -600,6 +600,9 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
             // rounding would add its 1px highlight in the transparent corner
             native::round_corners_off(hwnd);
             native::no_border(hwnd);
+            // the frame extended 1px into the client: DWM then renders its top frame line as
+            // part of the (transparent) composition instead of drawing it in the corners
+            native::corner_remedy(hwnd, "extend-frame", 0);
         } else {
             native::round_corners(hwnd);
         }
