@@ -4,9 +4,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 [[ "$(uname)" == "Darwin" ]] || { echo "must run on macOS" >&2; exit 2; }
 mkdir -p out
-swiftc -O probe/macos/testapp.swift -o out/rm-testapp 2>out/compile-testapp.log || { cat out/compile-testapp.log; exit 3; }
-swiftc -O agent/macos/*.swift -o out/remote-agent-mac 2>out/compile-agent.log || { cat out/compile-agent.log; echo "agent failed to compile" >&2; exit 3; }
-cat out/compile-agent.log | grep -c warning | xargs echo "agent compile warnings:"
+./scripts/build-agent-macos.sh || exit 3
 cargo build --release -p rm-relay -p rm-client 2>&1 | tail -2
 
 export RM_SESSION_TOKEN="e2e-$(uuidgen | tr -d -)"

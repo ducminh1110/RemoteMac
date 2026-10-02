@@ -293,6 +293,15 @@ pub enum Message {
     /// Client -> agent: choose the item at `path` (indices from the top of `MenuBar.menus`).
     MenuInvoke { application_id: String, path: Vec<u32> },
 
+    /// Client -> agent: give the Mac a virtual display this size (the client's monitor, in
+    /// pixels; `scale` 2 = HiDPI), so a fullscreen app gets the client's real resolution.
+    DisplayConfigure { width: u32, height: u32, scale: u32 },
+    /// Agent -> client: state of the virtual display (`width`/`height` in Mac points).
+    DisplayStatus { available: bool, display_id: u32, width: u32, height: u32, reason: Option<String> },
+    /// Client -> agent: enter / leave fullscreen for this window (on the virtual display when
+    /// there is one); the new size arrives as `WindowMoved`.
+    WindowFullscreen { window_id: u64, on: bool },
+
     /// Either direction: the clipboard now holds this text. `seq` lets each side ignore
     /// the echo of a change it applied itself.
     ClipboardSet { seq: u64, text: String },
@@ -889,5 +898,25 @@ pub mod recording {
             assert!(matches!(read_frame(&mut back[1].frame.as_slice()).unwrap(), Some(Frame::Msg(Message::Ping { nonce: 7 }))));
             assert!(read_all(&mut &b"nope"[..]).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    #[test]
+    fn display_messages_roundtrip() {
+        for m in [
+            Message::DisplayConfigure { width: 1920, height: 1080, scale: 1 },
+            Message::DisplayStatus { available: true, display_id: 7, width: 1920, height: 1080, reason: None },
+            Message::WindowFullscreen { window_id: 3, on: true },
+        ] {
+            let b = encode(&m).unwrap();
+            assert_eq!(decode(&b).unwrap().unwrap().0, m);
+            assert_eq!(m.channel(), Channel::Control);
+        }
+        let j = serde_json::to_string(&Message::WindowFullscreen { window_id: 3, on: true }).unwrap();
+        assert_eq!(j, r#"{"type":"window_fullscreen","window_id":3,"on":true}"#);
     }
 }

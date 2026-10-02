@@ -179,3 +179,12 @@ pub fn round_corners(hwnd: HWND) {
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref as *const _ as *const std::ffi::c_void, std::mem::size_of_val(&pref) as u32);
     }
 }
+
+/// Square corners (fullscreen covers the monitor edge to edge).
+pub fn round_corners_off(hwnd: HWND) {
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND};
+    let pref = DWMWCP_DONOTROUND;
+    unsafe {
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref as *const _ as *const std::ffi::c_void, std::mem::size_of_val(&pref) as u32);
+    }
+}

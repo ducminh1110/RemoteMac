@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 env:
-  RM_RELAY: 140.211.166.242:7470
+  RM_RELAY: remotemac.mooo.com:7470
   APPS: ${{ github.event.inputs.apps || 'xcode,textedit,testapp' }}
 
 jobs:

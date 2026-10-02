@@ -1,5 +1,7 @@
 # Relay server setup (by hand, on the server)
 
+Public name: `remotemac.mooo.com` (FreeDNS) -> the server; the relay listens on TCP 7470.
+
 The relay pairs one Mac agent with one Windows viewer per session and forwards their bytes. On a
 public address it only admits joins that present the admission key (`RM_RELAY_KEY`).
 

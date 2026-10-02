@@ -98,6 +98,11 @@ struct Remote {
     active: bool,
     /// Owned by its parent window (a dialog or panel with a parent): no menu, only the red light.
     owned: bool,
+    /// Fullscreen (green light / F11): covers the monitor, chrome hidden; `saved` is the window
+    /// rect to return to; `reveal` while the pointer is at the top edge (the bar slides in).
+    fullscreen: bool,
+    saved: RECT,
+    reveal: bool,
 }
 
 struct App {
@@ -132,6 +137,9 @@ struct App {
     icon_rgba: HashMap<String, (u32, Vec<u8>)>,
     /// Last menu bar seen per remote application; new windows of the app start with it.
     menus: HashMap<String, Vec<MenuNode>>,
+    /// Virtual display last asked of the Mac (DisplayConfigure), and what it answered.
+    display_req: Option<(u32, u32, u32)>,
+    display: Option<(u32, u32)>,
 }
 
 thread_local! { static APP: RefCell<Option<App>> = const { RefCell::new(None) }; }
@@ -199,7 +207,7 @@ pub fn run(opts: Options) -> i32 {
             *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, smoke, showcase, exit: None, hinst: hinst.0 as isize, controller: ctl,
                 icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_seq: 0, d3d: opts.d3d,
                 launcher, panels: HashMap::new(), uploads: HashMap::new(), next_transfer: 1, redirect_panels: opts.windows_file_picker,
-                shortcut_dir, app_names: vec![], icon_rgba: HashMap::new(), menus: HashMap::new() })
+                shortcut_dir, app_names: vec![], icon_rgba: HashMap::new(), menus: HashMap::new(), display_req: None, display: None })
         });
         SetTimer(Some(controller), TIMER_ID, 100, None);
         if opts.clipboard && !native::listen_clipboard(controller) {
@@ -419,6 +427,10 @@ fn handle_event(ev: UiEvent) {
                 set_window_menu(hwnd_of(w), &menus);
             }
         }
+        UiEvent::Display { available, width, height, reason } => {
+            eprintln!("virtual display on the Mac: available={available} {width}x{height}pt reason={reason:?}");
+            with_app(|a| a.display = available.then_some((width, height)));
+        }
         UiEvent::Uploaded { transfer_id, remote_path } => {
             with_app(|a| {
                 if let Some(panel) = a.uploads.remove(&transfer_id) {
@@ -481,7 +493,7 @@ fn handle_event(ev: UiEvent) {
                 let r = a.remotes.get_mut(&key)?;
                 r.rw = w;
                 r.rh = h;
-                Some((key, r.scale, r.maximized))
+                Some((key, r.scale, r.maximized || r.fullscreen))
             })
             .flatten();
             if let Some((key, scale, maximized)) = target {
@@ -570,7 +582,7 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         let scale = native::dpi_scale(hwnd);
         let (cached, parent_origin) = with_app(|a| {
             a.remotes.insert(hwnd.0 as isize, Remote { id, app: app.into(), role, parent, rx: x, ry: y, rw: w, rh: h, scale, maximized: false, presenter: None, picture: None, frames: 0,
-                high_surrogate: None, cmds: HashMap::new(), content: content.0 as isize, menu: 0, menu_x: vec![], open_menu: None, hover: false, pressed: None, active: false, owned });
+                high_surrogate: None, cmds: HashMap::new(), content: content.0 as isize, menu: 0, menu_x: vec![], open_menu: None, hover: false, pressed: None, active: false, owned, fullscreen: false, saved: RECT::default(), reveal: false });
             a.by_id.insert(id, hwnd.0 as isize);
             let cached = a.icons.get(app).copied();
             if cached.is_none() && a.icons_requested.insert(app.to_string()) {
@@ -642,7 +654,85 @@ fn content_of(frame: HWND) -> Option<HWND> {
 
 /// Height of the chrome (title bar, plus the menu strip when the app has a menu bar).
 fn bar_px(frame: HWND) -> i32 {
-    with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| chrome::bar_height(r.scale, r.menu != 0))).flatten().unwrap_or(0)
+    with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| if r.fullscreen && !r.reveal { 0 } else { chrome::bar_height(r.scale, r.menu != 0) })).flatten().unwrap_or(0)
+}
+
+fn is_fullscreen(frame: HWND) -> bool {
+    with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.fullscreen)).flatten().unwrap_or(false)
+}
+
+fn monitor_rect(hwnd: HWND) -> RECT {
+    unsafe {
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let _ = GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info);
+        info.rcMonitor
+    }
+}
+
+/// Slide/zoom the window from `a` to `b` (screen rects) like the Mac's fullscreen transition.
+fn animate(frame: HWND, a: RECT, b: RECT) {
+    const STEPS: u32 = 14;
+    for i in 1..=STEPS {
+        let (l, t, r, btm) = chrome::lerp_rect((a.left, a.top, a.right, a.bottom), (b.left, b.top, b.right, b.bottom), i as f64 / STEPS as f64);
+        unsafe {
+            let _ = SetWindowPos(frame, Some(HWND_TOP), l, t, r - l, btm - t, SWP_NOACTIVATE | SWP_NOCOPYBITS);
+            let _ = UpdateWindow(frame);
+        }
+        std::thread::sleep(Duration::from_millis(14));
+    }
+}
+
+/// Green light / F11: fullscreen on this monitor, with the Mac app sized to it exactly (on the
+/// Mac's virtual display of this monitor's size), and back.
+fn toggle_fullscreen(frame: HWND) {
+    let Some((on, saved, id, scale)) = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| (r.fullscreen, r.saved, r.id, r.scale))).flatten() else { return };
+    unsafe {
+        if !on {
+            let mut from = RECT::default();
+            let _ = GetWindowRect(frame, &mut from);
+            let mon = monitor_rect(frame);
+            // the Mac gets a display like this monitor (once; again if the monitor changed)
+            let req = chrome::display_request(mon.right - mon.left, mon.bottom - mon.top, scale);
+            with_app(|a| {
+                if a.display_req != Some(req) {
+                    a.display_req = Some(req);
+                    a.link.send(&Message::DisplayConfigure { width: req.0, height: req.1, scale: req.2 });
+                }
+                if let Some(r) = a.remotes.get_mut(&(frame.0 as isize)) {
+                    r.fullscreen = true;
+                    r.reveal = false;
+                    r.saved = from;
+                }
+            });
+            native::round_corners_off(frame);
+            let _ = SetWindowPos(frame, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            animate(frame, from, mon);
+            layout(frame);
+            with_app(|a| a.link.send(&Message::WindowFullscreen { window_id: id, on: true }));
+        } else {
+            let mut from = RECT::default();
+            let _ = GetWindowRect(frame, &mut from);
+            with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).map(|r| { r.reveal = true }));
+            layout(frame);
+            animate(frame, from, saved);
+            with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).map(|r| { r.fullscreen = false; r.reveal = false }));
+            let _ = SetWindowPos(frame, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            let _ = SetWindowPos(frame, None, saved.left, saved.top, saved.right - saved.left, saved.bottom - saved.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            native::round_corners(frame);
+            layout(frame);
+            with_app(|a| a.link.send(&Message::WindowFullscreen { window_id: id, on: false }));
+        }
+        let _ = InvalidateRect(Some(frame), None, false);
+    }
+}
+
+/// In fullscreen the bar slides in while the pointer is at the top edge, as the Mac's menu bar does.
+fn set_reveal(frame: HWND, reveal: bool) {
+    let changed = with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).and_then(|r| (r.fullscreen && r.reveal != reveal).then(|| r.reveal = reveal))).flatten().is_some();
+    if changed {
+        layout(frame);
+        invalidate_chrome(frame);
+    }
 }
 
 /// Place the picture window under the chrome.
@@ -661,6 +751,9 @@ fn client_points(frame: HWND) -> (u32, u32, f64) {
 }
 
 fn request_remote_resize(frame: HWND) {
+    if is_fullscreen(frame) {
+        return; // the Mac sizes a fullscreen window itself (to the virtual display)
+    }
     let (pw, ph, _) = client_points(frame);
     send_for(frame, |r, _| (pw.abs_diff(r.rw) > 2 || ph.abs_diff(r.rh) > 2).then_some(Message::WindowResizeRequest { window_id: r.id, width: pw, height: ph }));
 }
@@ -857,8 +950,7 @@ fn paint_chrome(frame: HWND, hdc: HDC) {
     struct View { scale: f64, active: bool, hover: bool, dialog: bool, menu: isize, open: Option<usize> }
     let Some(v) = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| View { scale: r.scale, active: r.active, hover: r.hover, dialog: r.owned, menu: r.menu, open: r.open_menu })).flatten() else { return };
     let (cw, _) = client_size(frame);
-    let th = chrome::title_height(v.scale);
-    let bar = chrome::bar_height(v.scale, v.menu != 0);
+    let bar = bar_px(frame);
     if cw <= 0 || bar <= 0 {
         return;
     }
@@ -868,7 +960,7 @@ fn paint_chrome(frame: HWND, hdc: HDC) {
         let bmp = CreateCompatibleBitmap(hdc, cw, bar);
         let old = SelectObject(mem, bmp.into());
         let tbg = chrome::title_bg(v.active);
-        fill(mem, RECT { left: 0, top: 0, right: cw, bottom: th }, tbg);
+        fill(mem, RECT { left: 0, top: 0, right: cw, bottom: bar }, tbg);
         // traffic lights (a dialog's minimise/zoom are greyed out, as on the Mac)
         let d = chrome::light_size(v.scale);
         for l in chrome::LIGHTS {
@@ -882,32 +974,26 @@ fn paint_chrome(frame: HWND, hdc: HDC) {
             SetDIBitsToDevice(mem, ox, oy, d as u32, d as u32, 0, 0, 0, d as u32, px.as_ptr() as *const c_void, &bmi, DIB_RGB_COLORS);
         }
         SetBkMode(mem, TRANSPARENT);
-        // centred title
-        let mut buf = [0u16; 512];
-        let n = GetWindowTextW(frame, &mut buf).max(0) as usize;
-        let font = ui_font((13.0 * v.scale).round() as i32, 600);
-        let oldf = SelectObject(mem, font.into());
-        SetTextColor(mem, rgb(chrome::title_fg(v.active)));
+        let bold = ui_font((13.0 * v.scale).round() as i32, 600);
+        let regular = ui_font((13.0 * v.scale).round() as i32, 400);
+        let oldf = SelectObject(mem, bold.into());
+        // menus right after the lights: the app's name in bold, then its menus
         let lw = chrome::lights_width(v.scale);
-        let mut rc = RECT { left: lw, top: 0, right: (cw - lw).max(lw), bottom: th };
-        DrawTextW(mem, &mut buf[..n], &mut rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-        // menu strip: the app's name in bold, then its menus
         let mut spans = vec![];
+        let mut menus_end = lw;
         if v.menu != 0 {
             let hm = HMENU(v.menu as *mut c_void);
-            fill(mem, RECT { left: 0, top: th, right: cw, bottom: bar }, chrome::MENU_BG);
-            let regular = ui_font((13.0 * v.scale).round() as i32, 400);
-            let pad = (9.0 * v.scale).round() as i32;
-            let mut x = (8.0 * v.scale).round() as i32;
+            let pad = (8.0 * v.scale).round() as i32;
+            let mut x = lw - pad / 2;
             for i in 0..GetMenuItemCount(Some(hm)).max(0) {
                 let mut t = [0u16; 128];
                 let len = GetMenuStringW(hm, i as u32, Some(&mut t), MF_BYPOSITION).max(0) as usize;
                 let text: Vec<u16> = String::from_utf16_lossy(&t[..len]).replace("&&", "&").encode_utf16().collect();
-                SelectObject(mem, if i == 0 { font.into() } else { regular.into() });
+                SelectObject(mem, if i == 0 { bold.into() } else { regular.into() });
                 let mut sz = SIZE::default();
                 let _ = GetTextExtentPoint32W(mem, &text, &mut sz);
                 let span = (x, x + sz.cx + 2 * pad);
-                if span.1 > cw {
+                if span.1 > cw - (8.0 * v.scale) as i32 {
                     break; // like the Mac, menus that do not fit are left out
                 }
                 let open = v.open == Some(i as usize);
@@ -915,26 +1001,44 @@ fn paint_chrome(frame: HWND, hdc: HDC) {
                     let b = CreateSolidBrush(rgb(chrome::MENU_HIGHLIGHT));
                     let oldb = SelectObject(mem, b.into());
                     let pen = SelectObject(mem, GetStockObject(NULL_PEN));
-                    let r = (5.0 * v.scale) as i32;
-                    let _ = RoundRect(mem, span.0, th + (2.0 * v.scale) as i32, span.1, bar - (2.0 * v.scale) as i32, r, r);
+                    let r = (12.0 * v.scale) as i32;
+                    let m = (8.0 * v.scale) as i32;
+                    let _ = RoundRect(mem, span.0, m, span.1, bar - m, r, r);
                     SelectObject(mem, pen);
                     SelectObject(mem, oldb);
                     let _ = DeleteObject(b.into());
                 }
                 let state = GetMenuState(hm, i as u32, MF_BYPOSITION);
-                let fg = if open { (255, 255, 255) } else if state & MF_GRAYED.0 != 0 { (160, 160, 160) } else { (24, 24, 24) };
-                SetTextColor(mem, rgb(fg));
+                SetTextColor(mem, rgb(chrome::menu_fg(v.active, state & MF_GRAYED.0 == 0)));
                 let mut text = text;
-                let mut rc = RECT { left: span.0, top: th, right: span.1, bottom: bar };
+                let mut rc = RECT { left: span.0, top: 0, right: span.1, bottom: bar };
                 DrawTextW(mem, &mut text, &mut rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
                 spans.push(span);
                 x = span.1;
+                menus_end = x;
             }
-            let _ = DeleteObject(regular.into());
+        }
+        // the title, centred on the window when there is room, else in the space left of the menus
+        let mut buf = [0u16; 512];
+        let n = GetWindowTextW(frame, &mut buf).max(0) as usize;
+        SelectObject(mem, bold.into());
+        let mut sz = SIZE::default();
+        let _ = GetTextExtentPoint32W(mem, &buf[..n], &mut sz);
+        let gap = (16.0 * v.scale) as i32;
+        let centred = (cw - sz.cx) / 2;
+        let mut rc = if centred > menus_end + gap {
+            RECT { left: centred, top: 0, right: centred + sz.cx + 2, bottom: bar }
+        } else {
+            RECT { left: menus_end + gap, top: 0, right: cw - gap, bottom: bar }
+        };
+        if rc.right - rc.left > (40.0 * v.scale) as i32 {
+            SetTextColor(mem, rgb(chrome::title_fg(v.active)));
+            DrawTextW(mem, &mut buf[..n], &mut rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         }
         fill(mem, RECT { left: 0, top: bar - 1, right: cw, bottom: bar }, chrome::HAIRLINE);
         SelectObject(mem, oldf);
-        let _ = DeleteObject(font.into());
+        let _ = DeleteObject(bold.into());
+        let _ = DeleteObject(regular.into());
         let _ = BitBlt(hdc, 0, 0, cw, bar, Some(mem), 0, 0, SRCCOPY);
         SelectObject(mem, old);
         let _ = DeleteObject(bmp.into());
@@ -964,7 +1068,7 @@ fn light_action(frame: HWND, l: chrome::Light) {
             chrome::Light::Close => { let _ = PostMessageW(Some(frame), WM_CLOSE, WPARAM(0), LPARAM(0)); }
             _ if dialog => {}
             chrome::Light::Minimize => { let _ = ShowWindow(frame, SW_MINIMIZE); }
-            chrome::Light::Zoom => { let _ = ShowWindow(frame, if IsZoomed(frame).as_bool() { SW_RESTORE } else { SW_MAXIMIZE }); }
+            chrome::Light::Zoom => toggle_fullscreen(frame), // like the Mac: green = fullscreen
         }
     }
 }
@@ -977,8 +1081,8 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             let p = &mut *(lp.0 as *mut NCCALCSIZE_PARAMS);
             let orig = p.rgrc[0];
             let r = DefWindowProcW(hwnd, msg, wp, lp);
-            if IsZoomed(hwnd).as_bool() {
-                p.rgrc[0] = orig; // maximised to the work area exactly (WM_GETMINMAXINFO): no borders
+            if IsZoomed(hwnd).as_bool() || is_fullscreen(hwnd) {
+                p.rgrc[0] = orig; // maximised to the work area exactly / fullscreen: no borders
             } else {
                 p.rgrc[0].top = orig.top;
             }
@@ -1005,9 +1109,11 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             let scale = with_app(|a| a.remotes.get(&(hwnd.0 as isize)).map(|r| r.scale)).flatten().unwrap_or(1.0);
             let (cw, _) = client_size(hwnd);
             let b = frame_border(hwnd);
-            let code = if !IsZoomed(hwnd).as_bool() && pt.y < b {
+            let fullscreen = is_fullscreen(hwnd);
+            let on_menu = with_app(|a| a.remotes.get(&(hwnd.0 as isize)).map(|r| r.menu_x.iter().any(|(a, b)| pt.x >= *a && pt.x < *b))).flatten().unwrap_or(false);
+            let code = if !IsZoomed(hwnd).as_bool() && !fullscreen && pt.y < b {
                 if pt.x < 2 * b { HTTOPLEFT } else if pt.x >= cw - 2 * b { HTTOPRIGHT } else { HTTOP }
-            } else if pt.y < chrome::title_height(scale) && !chrome::over_lights(pt.x, pt.y, scale) {
+            } else if pt.y < bar_px(hwnd) && !chrome::over_lights(pt.x, pt.y, scale) && !on_menu && !fullscreen {
                 HTCAPTION
             } else {
                 HTCLIENT
@@ -1056,6 +1162,12 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_MOUSE_LEAVE => {
             with_app(|a| a.remotes.get_mut(&(hwnd.0 as isize)).map(|r| r.hover = false));
             invalidate_chrome(hwnd);
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let _ = ScreenToClient(hwnd, &mut pt);
+            if pt.y > bar_px(hwnd) || pt.y < 0 {
+                set_reveal(hwnd, false);
+            }
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
@@ -1066,8 +1178,7 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     r.pressed = Some(l);
                     return Some((Some(l), None));
                 }
-                let th = chrome::title_height(r.scale);
-                let menu = (y >= th && y < chrome::bar_height(r.scale, r.menu != 0)).then(|| r.menu_x.iter().position(|(a, b)| x >= *a && x < *b)).flatten();
+                let menu = (y < chrome::bar_height(r.scale, r.menu != 0)).then(|| r.menu_x.iter().position(|(a, b)| x >= *a && x < *b)).flatten();
                 Some((None, menu))
             })
             .flatten();
@@ -1181,6 +1292,15 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         WM_ERASEBKGND => LRESULT(1),
         WM_MOUSEMOVE => {
             let (x, y) = lp_xy(lp);
+            if is_fullscreen(frame) {
+                // pointer at the top edge: the bar slides in; leaving it: it goes again
+                let revealed = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.reveal)).flatten().unwrap_or(false);
+                if !revealed && y <= 1 {
+                    set_reveal(frame, true);
+                } else if revealed && y > 4 {
+                    set_reveal(frame, false);
+                }
+            }
             let cs = client_size(hwnd);
             send_for(frame, |r, _| {
                 let (px, py) = scale_point(x, y, cs, (r.rw, r.rh));
@@ -1228,6 +1348,12 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 return LRESULT(0);
             }
             if is_modifier_vk(vk) {
+                return LRESULT(0);
+            }
+            if vk == VK_F11.0 as u32 {
+                if msg == WM_KEYDOWN {
+                    toggle_fullscreen(frame); // the Windows fullscreen key; the green light does the same
+                }
                 return LRESULT(0);
             }
             let mods = current_mods();
@@ -1636,15 +1762,53 @@ fn smoke_tick() {
         (44, Some((main, _))) => unsafe {
             if IsIconic(main).as_bool() {
                 let _ = ShowWindow(main, SW_RESTORE);
-                click_light(main, chrome::Light::Zoom);
+                let _ = SetForegroundWindow(main);
+                click_light(main, chrome::Light::Zoom); // green: fullscreen, as on the Mac
                 with_app(|a| a.smoke.as_mut().map(|s| { s.stage = 45; s.stage_started = Instant::now() }));
             }
         },
-        (45, Some((main, _))) => unsafe {
-            if IsZoomed(main).as_bool() {
-                click_light(main, chrome::Light::Zoom);
-                let restored = !IsZoomed(main).as_bool();
-                finish("yellow light minimises, green light zooms and restores", restored, "minimised, maximised, restored".into(), 33);
+        (45, Some((main, (rw, rh)))) => unsafe {
+            let mon = monitor_rect(main);
+            let scale = native::dpi_scale(main);
+            let (dw, dh, ds) = chrome::display_request(mon.right - mon.left, mon.bottom - mon.top, scale);
+            let want = (dw / ds, dh / ds);
+            if (rw, rh) == want {
+                let mut wr = RECT::default();
+                let _ = GetWindowRect(main, &mut wr);
+                let covers = (wr.left, wr.top, wr.right, wr.bottom) == (mon.left, mon.top, mon.right, mon.bottom);
+                let hidden = bar_px(main) == 0;
+                let picture = content_of(main).map(client_size) == Some((mon.right - mon.left, mon.bottom - mon.top));
+                // the bar slides in at the top edge and goes again
+                let c = content_of(main).unwrap_or(main);
+                sendmsg(c, WM_MOUSEMOVE, 0, 0);
+                let revealed = bar_px(main) > 0;
+                let c = content_of(main).unwrap_or(main);
+                sendmsg(c, WM_MOUSEMOVE, 0, (200 << 16) | 200);
+                let gone = bar_px(main) == 0;
+                let display = with_app(|a| a.display).flatten();
+                finish("green light: fullscreen on the monitor, Mac app sized to it on a virtual display", covers && hidden && picture && revealed && gone,
+                    format!("window={:?} monitor={:?} remote={rw}x{rh}pt display={display:?} barHidden={hidden} reveal={revealed}/{gone}", (wr.left, wr.top, wr.right, wr.bottom), (mon.left, mon.top, mon.right, mon.bottom)), 46);
+                let c = content_of(main).unwrap_or(main);
+                sendmsg(c, WM_KEYDOWN, VK_F11.0 as usize, 0); // F11 leaves fullscreen
+                sendmsg(c, WM_KEYUP, VK_F11.0 as usize, 0);
+            }
+        },
+        (46, Some((main, (rw, _)))) => unsafe {
+            if !is_fullscreen(main) && rw < 1000 {
+                let mut wr = RECT::default();
+                let _ = GetWindowRect(main, &mut wr);
+                let saved = with_app(|a| a.remotes.get(&(main.0 as isize)).map(|r| r.saved)).flatten().unwrap_or_default();
+                let back = (wr.left, wr.top, wr.right, wr.bottom) == (saved.left, saved.top, saved.right, saved.bottom) && bar_px(main) > 0;
+                // resizing like any window: the edges and corners give the sizing cursors
+                let at = |x: i32, y: i32| SendMessageW(main, WM_NCHITTEST, None, Some(LPARAM(((y as isize) << 16) | (x as isize & 0xffff)))).0 as u32;
+                let midy = (wr.top + wr.bottom) / 2;
+                let (left, right, bottom, corner) = (at(wr.left + 2, midy), at(wr.right - 2, midy), at((wr.left + wr.right) / 2, wr.bottom - 2), at(wr.right - 2, wr.bottom - 2));
+                SendMessageW(main, WM_SETCURSOR, Some(WPARAM(main.0 as usize)), Some(LPARAM(((WM_MOUSEMOVE as isize) << 16) | HTLEFT as isize)));
+                let cursor = GetCursor();
+                let we = LoadCursorW(None, IDC_SIZEWE).unwrap_or_default();
+                let edges = left == HTLEFT && right == HTRIGHT && bottom == HTBOTTOM && corner == HTBOTTOMRIGHT;
+                finish("leaving fullscreen restores the window; edges resize with sizing cursors", back && edges && cursor == we,
+                    format!("restored={back} hit=({left},{right},{bottom},{corner}) cursorIsSizeWE={}", cursor == we), 33);
             }
         },
         (33, Some((_, _))) => {

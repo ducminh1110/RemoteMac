@@ -66,6 +66,8 @@ struct State {
     uploads: HashMap<u64, Upload>,
     /// remote_path -> size of files that finished uploading
     files: HashMap<String, usize>,
+    /// virtual display (points), once the client configured one
+    display: Option<(u32, u32)>,
 }
 
 type Writer<W> = Arc<Mutex<W>>;
@@ -319,6 +321,33 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
                 send(&writer, &Message::WindowMoved { window_id, bounds: Rect { x: 200, y: 216, w: width, h: height } })?;
             }
             Message::WindowClose { window_id } => close_window(&writer, &st, window_id)?,
+            Message::DisplayConfigure { width, height, scale } => {
+                let (w, h) = (width / scale.max(1), height / scale.max(1));
+                st.lock().unwrap().display = Some((w, h));
+                send(&writer, &Message::DisplayStatus { available: true, display_id: 77, width: w, height: h, reason: None })?;
+            }
+            Message::WindowFullscreen { window_id, on } => {
+                let (w, h) = if on { st.lock().unwrap().display.unwrap_or((1440, 900)) } else { (WIDTH as u32, HEIGHT as u32) };
+                // the window now has that size: its video restarts at it, as the real agent's does
+                let old = st.lock().unwrap().windows.get_mut(&window_id).map(|win| {
+                    win.stop.store(true, Ordering::SeqCst);
+                    let fresh = Arc::new(AtomicBool::new(false));
+                    win.stop = fresh.clone();
+                    (win.video.take(), fresh)
+                });
+                if let Some((handle, stop)) = old {
+                    if let Some(hd) = handle {
+                        let _ = hd.join();
+                    }
+                    send(&writer, &Message::WindowMoved { window_id, bounds: Rect { x: if on { 1920 } else { 200 }, y: if on { 25 } else { 216 }, w, h } })?;
+                    let wr = writer.clone();
+                    let hue = (60 * window_id % 256) as u8;
+                    let handle = std::thread::spawn(move || video_loop(wr, window_id, w as usize, h as usize, hue, stop));
+                    if let Some(win) = st.lock().unwrap().windows.get_mut(&window_id) {
+                        win.video = Some(handle);
+                    }
+                }
+            }
             Message::AppTerminate { application_id } => {
                 let ids: Vec<u64> = st.lock().unwrap().windows.iter().filter(|(_, w)| w.app == application_id && w.parent.is_none()).map(|(k, _)| *k).collect();
                 for id in ids {

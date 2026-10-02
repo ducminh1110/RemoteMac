@@ -16,6 +16,9 @@ pub struct Report {
     pub first_frame_ms: Option<u128>,
     pub first_pts_us: Option<u64>,
     pub last_pts_us: u64,
+    /// frames of the first, unbroken stream (a stream restarted at a new size starts its clock over)
+    pub fps_frames: usize,
+    pub fps_done: bool,
     pub window: Option<(u64, Rect)>,
     pub titles: Vec<String>,
     pub decoded: usize,
@@ -28,7 +31,7 @@ impl Report {
     /// Frames per second over the span of the received frames' capture timestamps.
     pub fn fps(&self) -> f64 {
         match self.first_pts_us {
-            Some(f) if self.last_pts_us > f && self.video_frames > 1 => (self.video_frames - 1) as f64 * 1e6 / (self.last_pts_us - f) as f64,
+            Some(f) if self.last_pts_us > f && self.fps_frames > 1 => (self.fps_frames - 1) as f64 * 1e6 / (self.last_pts_us - f) as f64,
             _ => 0.0,
         }
     }
@@ -62,6 +65,10 @@ struct Ctx<'a, S: Read + Write> {
     destroyed_ids: Vec<u64>,
     uploaded: Option<String>,
     menus: Option<Vec<rm_protocol::MenuNode>>,
+    display: Option<(bool, u32, u32, Option<String>)>,
+    /// last WindowMoved size of the main window, and the last video size seen
+    moved: Option<(u32, u32)>,
+    video_size: Option<(u16, u16)>,
 }
 
 fn is_timeout(e: &ProtocolError) -> bool {
@@ -77,8 +84,16 @@ impl<S: Read + Write> Ctx<'_, S> {
                     self.first_video = Some(v.clone());
                 }
                 self.r.first_pts_us.get_or_insert(v.pts_us);
-                self.r.last_pts_us = v.pts_us;
+                if !self.r.fps_done && v.pts_us >= self.r.last_pts_us {
+                    self.r.last_pts_us = v.pts_us;
+                    self.r.fps_frames += 1;
+                } else {
+                    self.r.fps_done = true;
+                }
                 self.r.video_frames += 1;
+                if self.r.window.map(|w| w.0) == Some(v.window_id) {
+                    self.video_size = Some((v.width, v.height));
+                }
                 self.r.keyframes += v.keyframe as usize;
                 self.r.video_bytes += v.data.len();
                 if !v.has_start_code() {
@@ -119,6 +134,8 @@ impl<S: Read + Write> Ctx<'_, S> {
             Frame::Msg(Message::FileUploaded { remote_path, .. }) => self.uploaded = Some(remote_path),
             Frame::Msg(Message::FileUploadFailed { reason, .. }) => self.errors.push(format!("upload: {reason}")),
             Frame::Msg(Message::MenuBar { menus, .. }) => self.menus = Some(menus),
+            Frame::Msg(Message::DisplayStatus { available, width, height, reason, .. }) => self.display = Some((available, width, height, reason)),
+            Frame::Msg(Message::WindowMoved { window_id, bounds }) if self.r.window.map(|w| w.0) == Some(window_id) => self.moved = Some((bounds.w, bounds.h)),
             Frame::Msg(Message::AppExited { .. }) => self.exited = true,
             Frame::Msg(Message::AppLaunched { pid, .. }) => self.launched_pid = Some(pid),
             Frame::Msg(Message::ClipboardSet { text, .. }) => self.clipboard = Some(text),
@@ -163,7 +180,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let caps_dump = serde_json::to_string(&sess.capabilities).unwrap_or_default();
     let mut c = Ctx { sess, r: Report::default(), started: Instant::now(), first_video: None, last_title: String::new(),
         destroyed: false, exited: false, launched_pid: None, errors: vec![], non_annexb: 0,
-        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None };
+        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None };
 
     c.r.check("agent reports capture+input+GUI", caps_ok, caps_dump);
 
@@ -329,6 +346,19 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
         let ok = c.pump(15, |c| c.last_title.contains("[opened rm e2e upload.bin 716800 bytes]"));
         c.r.check("panel opens the uploaded file in the app", ok, c.last_title.clone());
     }
+
+    // ---- a virtual display the size of the client's monitor; fullscreen fills it exactly
+    c.send(Message::DisplayConfigure { width: 1280, height: 720, scale: 1 });
+    let got = c.pump(15, |c| c.display.is_some());
+    let d = c.display.clone();
+    c.r.check("virtual display at the client's monitor size (1280x720)", got && matches!(d, Some((true, 1280, 720, _))), format!("{d:?}"));
+    c.send(Message::WindowFullscreen { window_id: wid, on: true });
+    let ok = c.pump(12, |c| c.moved == Some((1280, 720)));
+    let ok_video = ok && c.pump(12, |c| c.video_size == Some((1280, 720)));
+    c.r.check("fullscreen: window content and video are exactly the client's monitor", ok && ok_video, format!("moved={:?} video={:?} errors={:?}", c.moved, c.video_size, c.errors));
+    c.send(Message::WindowFullscreen { window_id: wid, on: false });
+    let back = c.pump(12, |c| c.moved.is_some_and(|m| m.0 < 1000));
+    c.r.check("leaving fullscreen restores the window", back, format!("moved={:?}", c.moved));
 
     // ---- lifecycle
     c.send(Message::AppTerminate { application_id: app.into() });

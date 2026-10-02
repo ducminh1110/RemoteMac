@@ -143,6 +143,7 @@ clipboard.onLocalChange = { seq, text in send(["type": "clipboard_set", "seq": I
 clipboard.start()
 
 let uploads = UploadStore(send: send)
+let displays = DisplayManager()
 
 func keyTo(_ pid: pid_t, _ code: CGKeyCode, _ flags: CGEventFlags = []) {
     for down in [true, false] {
@@ -207,6 +208,16 @@ func handle(_ m: [String: Any]) {
         DispatchQueue.global().async { chooseInPanel(pid: w.pid, rect: w.rect, path: path) }
     case "panel_cancel":
         if let w = tracker.current(CGWindowID(int(m["window_id"]))), w.role == .open_panel || w.role == .save_panel { keyTo(w.pid, 53) }
+    case "display_configure":
+        let (w, h, sc) = (int(m["width"]), int(m["height"]), max(1, int(m["scale"])))
+        DispatchQueue.global().async { send(displays.configure(width: w, height: h, scale: sc)) }
+    case "window_fullscreen":
+        let wid = CGWindowID(int(m["window_id"]))
+        guard let w = tracker.current(wid) else { send(["type": "error", "code": "no_such_window", "message": "\(wid)"]); break }
+        let on = m["on"] as? Bool ?? true
+        DispatchQueue.global().async {
+            if !displays.fullscreen(w, on: on) { send(["type": "error", "code": "fullscreen_failed", "message": "\(wid)"]) }
+        }
     case "get_menu_bar":
         sendMenuBar(m["application_id"] as? String ?? "")
     case "menu_invoke":

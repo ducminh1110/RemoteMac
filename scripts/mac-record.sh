@@ -8,8 +8,7 @@ cd "$(dirname "$0")/.."
 [[ "$(uname)" == "Darwin" ]] || { echo "must run on macOS" >&2; exit 2; }
 APPS="${1:-xcode,textedit,testapp}"
 mkdir -p out/recording
-swiftc -O probe/macos/testapp.swift -o out/rm-testapp 2>out/compile-testapp.log || { cat out/compile-testapp.log; exit 3; }
-swiftc -O agent/macos/*.swift -o out/remote-agent-mac 2>out/compile-agent.log || { cat out/compile-agent.log; exit 3; }
+./scripts/build-agent-macos.sh || exit 3
 cargo build --release -p rm-relay -p rm-client 2>&1 | tail -1
 
 export RM_SESSION_TOKEN="rec-$(uuidgen | tr -d -)"

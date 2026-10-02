@@ -5,8 +5,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p out/mac-screens
-swiftc -O probe/macos/testapp.swift -o out/rm-testapp 2>out/compile-testapp.log || { cat out/compile-testapp.log; exit 3; }
-swiftc -O agent/macos/*.swift -o out/remote-agent-mac 2>out/compile-agent.log || { cat out/compile-agent.log; exit 3; }
+./scripts/build-agent-macos.sh || exit 3
 RM_TESTAPP="$PWD/out/rm-testapp" ./out/remote-agent-mac --relay "$RM_RELAY" --session "$RM_SESSION" 2>out/agent.log &
 AGENT=$!
 limit=$(( $(date +%s) + ${RM_WAIT_SECS:-1500} ))

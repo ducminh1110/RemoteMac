@@ -1,11 +1,10 @@
-//! Mac-style window chrome drawn by the viewer instead of the Windows caption: a title bar with
-//! the three "traffic lights" (close, minimise, zoom) and the centred title, and under it a strip
-//! with the Mac app's menu bar. Geometry, hit testing and the anti-aliased light sprites are pure
-//! functions (tested on any OS); `ui` paints them with GDI.
+//! Mac-style window chrome drawn by the viewer instead of the Windows caption, after current
+//! macOS: one light, unified bar with the three "traffic lights" (close, minimise, zoom), the
+//! Mac app's menus beside them and the title centred in the space left. Geometry, hit testing and
+//! the anti-aliased light sprites are pure functions (tested on any OS); `ui` paints them with GDI.
 
-/// Heights in DIPs (1 DIP = 1 Mac point).
-pub const TITLE_H: f64 = 28.0;
-pub const MENU_H: f64 = 24.0;
+/// Bar height in DIPs (1 DIP = 1 Mac point).
+pub const TITLE_H: f64 = 40.0;
 /// Light diameter, centre spacing and the first centre, as on macOS.
 const LIGHT_D: f64 = 12.0;
 const LIGHT_STEP: f64 = 20.0;
@@ -21,8 +20,8 @@ pub enum Light {
 pub const LIGHTS: [Light; 3] = [Light::Close, Light::Minimize, Light::Zoom];
 
 /// Pixel height of the chrome above the remote picture.
-pub fn bar_height(scale: f64, has_menu: bool) -> i32 {
-    ((TITLE_H + if has_menu { MENU_H } else { 0.0 }) * scale).round() as i32
+pub fn bar_height(scale: f64, _has_menu: bool) -> i32 {
+    (TITLE_H * scale).round() as i32
 }
 
 pub fn title_height(scale: f64) -> i32 {
@@ -138,15 +137,39 @@ pub fn light_sprite(d: i32, l: Light, active: bool, glyph: bool, bg: Rgb) -> Vec
     out
 }
 
-/// Title bar / menu strip colours (light appearance).
+/// Bar colours (light appearance): the bar is the window's own surface, as on current macOS.
 pub fn title_bg(active: bool) -> Rgb {
-    if active { (232, 232, 232) } else { (246, 246, 246) }
+    if active { (250, 250, 250) } else { (244, 244, 244) }
 }
-pub const MENU_BG: Rgb = (246, 246, 246);
-pub const HAIRLINE: Rgb = (208, 208, 208);
-pub const MENU_HIGHLIGHT: Rgb = (10, 100, 220);
+pub const HAIRLINE: Rgb = (226, 226, 226);
+/// Open menu title: a soft rounded pill.
+pub const MENU_HIGHLIGHT: Rgb = (222, 222, 224);
 pub fn title_fg(active: bool) -> Rgb {
-    if active { (77, 77, 77) } else { (172, 172, 172) }
+    if active { (60, 60, 60) } else { (170, 170, 170) }
+}
+pub fn menu_fg(active: bool, enabled: bool) -> Rgb {
+    if !enabled { (176, 176, 176) } else if active { (28, 28, 30) } else { (120, 120, 120) }
+}
+
+/// Window animation easing: ease-out cubic over `t` in 0..=1.
+pub fn ease_out(t: f64) -> f64 {
+    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
+}
+
+/// Rectangle between `a` and `b` (left, top, right, bottom) at animation progress `t`.
+pub fn lerp_rect(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32), t: f64) -> (i32, i32, i32, i32) {
+    let e = ease_out(t);
+    let l = |x: i32, y: i32| (x as f64 + (y - x) as f64 * e).round() as i32;
+    (l(a.0, b.0), l(a.1, b.1), l(a.2, b.2), l(a.3, b.3))
+}
+
+/// The Mac's virtual display for a client monitor of `w`x`h` pixels at Windows scale `scale`:
+/// (width, height, mac scale) as sent in `DisplayConfigure` (pixels at the Mac scale), so that
+/// 1 Mac point = 1 Windows DIP and HiDPI monitors get Retina sharpness.
+pub fn display_request(w: i32, h: i32, scale: f64) -> (u32, u32, u32) {
+    let mac_scale = if scale >= 1.5 { 2 } else { 1 };
+    let pts = |px: i32| (px as f64 / scale.max(1.0)).round() as u32;
+    (pts(w) * mac_scale, pts(h) * mac_scale, mac_scale)
 }
 
 #[cfg(test)]
@@ -155,23 +178,33 @@ mod tests {
 
     #[test]
     fn lights_are_where_the_mac_puts_them() {
-        assert_eq!(light_origin(Light::Close, 1.0), (14, 8));
-        assert_eq!(light_origin(Light::Zoom, 1.0), (54, 8));
-        assert_eq!(light_origin(Light::Close, 2.0), (28, 16));
-        assert_eq!(bar_height(1.0, true), 52);
-        assert_eq!(bar_height(1.5, false), 42);
+        assert_eq!(light_origin(Light::Close, 1.0), (14, 14));
+        assert_eq!(light_origin(Light::Zoom, 1.0), (54, 14));
+        assert_eq!(light_origin(Light::Close, 2.0), (28, 28));
+        assert_eq!(bar_height(1.0, true), 40);
+        assert_eq!(bar_height(1.5, false), 60);
     }
 
     #[test]
     fn hit_testing() {
-        assert_eq!(hit_light(20, 14, 1.0), Some(Light::Close));
-        assert_eq!(hit_light(40, 14, 1.0), Some(Light::Minimize));
-        assert_eq!(hit_light(60, 14, 1.0), Some(Light::Zoom));
-        assert_eq!(hit_light(30, 14, 1.0), None);
-        assert_eq!(hit_light(20, 40, 1.0), None);
-        assert!(over_lights(30, 14, 1.0));
-        assert!(!over_lights(120, 14, 1.0));
-        assert_eq!(hit_light(40, 28, 2.0), Some(Light::Close));
+        assert_eq!(hit_light(20, 20, 1.0), Some(Light::Close));
+        assert_eq!(hit_light(40, 20, 1.0), Some(Light::Minimize));
+        assert_eq!(hit_light(60, 20, 1.0), Some(Light::Zoom));
+        assert_eq!(hit_light(30, 20, 1.0), None);
+        assert_eq!(hit_light(20, 45, 1.0), None);
+        assert!(over_lights(30, 20, 1.0));
+        assert!(!over_lights(120, 20, 1.0));
+        assert_eq!(hit_light(40, 40, 2.0), Some(Light::Close));
+    }
+
+    #[test]
+    fn animation_and_display_request() {
+        assert_eq!(lerp_rect((0, 0, 100, 100), (100, 100, 300, 300), 0.0), (0, 0, 100, 100));
+        assert_eq!(lerp_rect((0, 0, 100, 100), (100, 100, 300, 300), 1.0), (100, 100, 300, 300));
+        assert!(ease_out(0.5) > 0.5, "fast start, soft landing");
+        assert_eq!(display_request(1920, 1080, 1.0), (1920, 1080, 1));
+        assert_eq!(display_request(2880, 1620, 1.5), (3840, 2160, 2));
+        assert_eq!(display_request(3840, 2160, 2.0), (3840, 2160, 2));
     }
 
     #[test]
