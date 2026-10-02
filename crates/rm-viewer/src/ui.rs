@@ -5,6 +5,7 @@
 //! Threading: everything here runs on the UI thread. The network thread only posts `WM_UI_EVENT`.
 
 use crate::keymap::*;
+use crate::native;
 use crate::net::{self, Link, UiEvent};
 use rm_decode::Picture;
 use rm_protocol::{Message, MouseButton};
@@ -29,6 +30,7 @@ pub struct Options {
     pub app: Option<String>,
     pub ctrl_as_command: bool,
     pub smoke: bool,
+    pub clipboard: bool,
 }
 
 const WM_UI_EVENT: u32 = WM_APP + 1;
@@ -36,8 +38,13 @@ const TIMER_ID: usize = 1;
 
 struct Remote {
     id: u64,
+    app: String,
+    /// Remote window size in Mac points.
     rw: u32,
     rh: u32,
+    /// Windows DIP scale of the monitor the window is on (1 Mac point = 1 DIP).
+    scale: f64,
+    maximized: bool,
     picture: Option<Picture>,
     frames: u32,
     high_surrogate: Option<u16>,
@@ -52,6 +59,14 @@ struct App {
     smoke: Option<Smoke>,
     exit: Option<i32>,
     hinst: isize,
+    controller: isize,
+    /// HICON per remote application id, shared by all its windows.
+    icons: HashMap<String, isize>,
+    icons_requested: std::collections::HashSet<String>,
+    clipboard: bool,
+    /// Text we just put on the Windows clipboard ourselves (its change notification is not echoed).
+    clip_applied: Option<String>,
+    clip_seq: u64,
 }
 
 thread_local! { static APP: RefCell<Option<App>> = const { RefCell::new(None) }; }
@@ -98,9 +113,13 @@ pub fn run(opts: Options) -> i32 {
         eprintln!("connected; waiting for windows");
         let smoke = opts.smoke.then(Smoke::new);
         APP.with(|a| {
-            *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, smoke, exit: None, hinst: hinst.0 as isize })
+            *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, smoke, exit: None, hinst: hinst.0 as isize, controller: ctl,
+                icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_seq: 0 })
         });
         SetTimer(Some(controller), TIMER_ID, 100, None);
+        if opts.clipboard && !native::listen_clipboard(controller) {
+            eprintln!("warning: clipboard listener unavailable; clipboard sync off");
+        }
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -128,8 +147,24 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             smoke_tick();
             LRESULT(0)
         }
+        WM_CLIPBOARDUPDATE => {
+            on_local_clipboard(hwnd);
+            LRESULT(0)
+        }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }
+}
+
+/// Windows clipboard changed: forward it unless we caused the change ourselves.
+fn on_local_clipboard(owner: HWND) {
+    let Some(text) = native::clipboard_text(owner) else { return };
+    with_app(|a| {
+        if !a.clipboard || a.clip_applied.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        a.clip_seq += 1;
+        a.link.send(&Message::ClipboardSet { seq: a.clip_seq, text });
+    });
 }
 
 fn drain_events() {
@@ -141,7 +176,30 @@ fn drain_events() {
 
 fn handle_event(ev: UiEvent) {
     match ev {
-        UiEvent::WindowCreated { id, title, w, h } => create_remote_window(id, &title, w, h),
+        UiEvent::WindowCreated { id, app, title, w, h } => create_remote_window(id, &app, &title, w, h),
+        UiEvent::Icon { app, size, rgba } => {
+            let Some(icon) = native::make_icon(size, &rgba) else { return };
+            let windows: Vec<isize> = with_app(|a| {
+                a.icons.insert(app.clone(), icon.0 as isize);
+                a.remotes.iter().filter(|(_, r)| r.app == app).map(|(k, _)| *k).collect()
+            })
+            .unwrap_or_default();
+            for w in windows {
+                native::set_window_icon(hwnd_of(w), icon);
+            }
+        }
+        UiEvent::Clipboard(text) => {
+            let owner = with_app(|a| a.clipboard.then(|| {
+                a.clip_applied = Some(text.clone());
+                a.controller
+            }))
+            .flatten();
+            if let Some(owner) = owner {
+                if !native::set_clipboard_text(hwnd_of(owner), &text) {
+                    eprintln!("warning: could not set the Windows clipboard");
+                }
+            }
+        }
         UiEvent::Title { id, title } => {
             if let Some(h) = with_app(|a| a.by_id.get(&id).copied()).flatten() {
                 unsafe { let _ = SetWindowTextW(hwnd_of(h), &HSTRING::from(title)); }
@@ -153,11 +211,13 @@ fn handle_event(ev: UiEvent) {
                 let r = a.remotes.get_mut(&key)?;
                 r.rw = w;
                 r.rh = h;
-                Some(key)
+                Some((key, r.scale, r.maximized))
             })
             .flatten();
-            if let Some(key) = target {
-                resize_client(hwnd_of(key), w as i32, h as i32);
+            if let Some((key, scale, maximized)) = target {
+                if !maximized {
+                    resize_client(hwnd_of(key), (w as f64 * scale).round() as i32, (h as f64 * scale).round() as i32);
+                }
             }
         }
         UiEvent::Frame { id, picture } => {
@@ -189,25 +249,53 @@ fn handle_event(ev: UiEvent) {
     }
 }
 
-fn create_remote_window(id: u64, title: &str, w: u32, h: u32) {
+fn create_remote_window(id: u64, app: &str, title: &str, w: u32, h: u32) {
     unsafe {
         let hinst = with_app(|a| a.hinst).unwrap_or(0);
         let style = WS_OVERLAPPEDWINDOW;
-        let mut r = RECT { left: 0, top: 0, right: w as i32, bottom: h as i32 };
-        let _ = AdjustWindowRectEx(&mut r, style, false, WINDOW_EX_STYLE(0));
         let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), w!("RmRemoteWindow"), &HSTRING::from(title), style, CW_USEDEFAULT, CW_USEDEFAULT,
-            r.right - r.left, r.bottom - r.top, None, None, Some(HINSTANCE(hinst as *mut c_void)), None);
+            w as i32, h as i32, None, None, Some(HINSTANCE(hinst as *mut c_void)), None);
         let Ok(hwnd) = hwnd else {
             eprintln!("CreateWindowExW failed for remote window {id}");
             return;
         };
-        with_app(|a| {
-            a.remotes.insert(hwnd.0 as isize, Remote { id, rw: w, rh: h, picture: None, frames: 0, high_surrogate: None });
+        // Taskbar identity before the window is shown: own group + icon per remote application.
+        let aumid = format!("RemoteMac.{}", app.replace(|c: char| !c.is_ascii_alphanumeric(), "_"));
+        if !native::set_app_user_model_id(hwnd, &aumid) {
+            eprintln!("warning: could not set AppUserModelID {aumid}");
+        }
+        let scale = native::dpi_scale(hwnd);
+        let (cached, request) = with_app(|a| {
+            a.remotes.insert(hwnd.0 as isize, Remote { id, app: app.into(), rw: w, rh: h, scale, maximized: false, picture: None, frames: 0, high_surrogate: None });
             a.by_id.insert(id, hwnd.0 as isize);
-        });
+            let cached = a.icons.get(app).copied();
+            let request = cached.is_none() && a.icons_requested.insert(app.to_string());
+            if request {
+                a.link.send(&Message::GetAppIcon { application_id: app.into() });
+            }
+            (cached, request)
+        })
+        .unwrap_or((None, false));
+        let _ = request;
+        if let Some(icon) = cached {
+            native::set_window_icon(hwnd, HICON(icon as *mut c_void));
+        }
+        resize_client(hwnd, (w as f64 * scale).round() as i32, (h as f64 * scale).round() as i32);
         let _ = ShowWindow(hwnd, SW_SHOW);
-        eprintln!("window created id={id} {w}x{h} title={title:?}");
+        eprintln!("window created id={id} app={app} {w}x{h}pt scale={scale} aumid={aumid} title={title:?}");
     }
+}
+
+/// Current client size of the window expressed in Mac points.
+fn client_points(hwnd: HWND) -> (u32, u32, f64) {
+    let (cw, ch) = client_size(hwnd);
+    let scale = with_app(|a| a.remotes.get(&(hwnd.0 as isize)).map(|r| r.scale)).flatten().unwrap_or(1.0);
+    ((cw as f64 / scale).round().max(1.0) as u32, (ch as f64 / scale).round().max(1.0) as u32, scale)
+}
+
+fn request_remote_resize(hwnd: HWND) {
+    let (pw, ph, _) = client_points(hwnd);
+    send_for(hwnd, |r, _| (pw.abs_diff(r.rw) > 2 || ph.abs_diff(r.rh) > 2).then_some(Message::WindowResizeRequest { window_id: r.id, width: pw, height: ph }));
 }
 
 fn resize_client(hwnd: HWND, w: i32, h: i32) {
@@ -355,10 +443,31 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             LRESULT(0)
         }
         WM_EXITSIZEMOVE => {
-            let (cw, ch) = client_size(hwnd);
-            send_for(hwnd, |r, _| {
-                ((cw as u32).abs_diff(r.rw) > 2 || (ch as u32).abs_diff(r.rh) > 2).then_some(Message::WindowResizeRequest { window_id: r.id, width: cw as u32, height: ch as u32 })
-            });
+            request_remote_resize(hwnd);
+            LRESULT(0)
+        }
+        WM_SIZE => {
+            // Maximize / restore do not go through a size-move loop.
+            let kind = wp.0 as u32;
+            let was = with_app(|a| a.remotes.get_mut(&(hwnd.0 as isize)).map(|r| std::mem::replace(&mut r.maximized, kind == SIZE_MAXIMIZED))).flatten();
+            if let Some(was_max) = was {
+                if kind == SIZE_MAXIMIZED || (kind == SIZE_RESTORED && was_max) {
+                    request_remote_resize(hwnd);
+                }
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+        WM_ACTIVATE => {
+            if (wp.0 & 0xffff) as u32 != WA_INACTIVE {
+                send_for(hwnd, |r, _| Some(Message::WindowFocus { window_id: r.id }));
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+        WM_DPICHANGED => {
+            let scale = ((wp.0 & 0xffff) as f64 / 96.0).max(0.5);
+            with_app(|a| a.remotes.get_mut(&(hwnd.0 as isize)).map(|r| r.scale = scale));
+            let r = &*(lp.0 as *const RECT);
+            let _ = SetWindowPos(hwnd, None, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
             LRESULT(0)
         }
         WM_CLOSE => {
@@ -518,7 +627,8 @@ fn smoke_tick() {
         (7, Some((hwnd, _))) => unsafe {
             // user drags the border to 640x400: client resized, then WM_EXITSIZEMOVE
             let style = WINDOW_STYLE(GetWindowLongW(hwnd, GWL_STYLE) as u32);
-            let mut r = RECT { left: 0, top: 0, right: 640, bottom: 400 };
+            let sc = native::dpi_scale(hwnd);
+            let mut r = RECT { left: 0, top: 0, right: (640.0 * sc).round() as i32, bottom: (400.0 * sc).round() as i32 };
             let _ = AdjustWindowRectEx(&mut r, style, false, WINDOW_EX_STYLE(0));
             let _ = SetWindowPos(hwnd, None, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
             sendmsg(hwnd, WM_EXITSIZEMOVE, 0, 0);
@@ -526,7 +636,49 @@ fn smoke_tick() {
         },
         (8, Some((_, (rw, rh)))) if resized => {
             if (rw, rh) == (640, 400) {
-                finish("resize request accepted by the remote side", true, format!("remote now {rw}x{rh}"), 9);
+                finish("resize request accepted by the remote side (in Mac points)", true, format!("remote now {rw}x{rh}pt"), 20);
+            }
+        }
+        (20, Some((hwnd, _))) => {
+            let aumid = native::get_app_user_model_id(hwnd);
+            let icon = native::window_has_icon(hwnd);
+            if icon {
+                let ok = aumid.as_deref() == Some("RemoteMac.testapp");
+                finish("own taskbar identity: AppUserModelID + app icon", ok, format!("aumid={aumid:?} icon={icon}"), 21);
+            }
+        }
+        (21, Some((_, _))) => {
+            // user copies on Windows; the remote app pastes it
+            let owner = with_app(|a| a.controller).unwrap_or(0);
+            native::set_clipboard_text(hwnd_of(owner), "from-windows");
+            std::thread::sleep(Duration::from_millis(300));
+            // (WM_CLIPBOARDUPDATE is posted to the controller; it forwards ClipboardSet)
+            with_app(|a| a.smoke.as_mut().map(|s| s.stage = 22));
+        }
+        (22, Some((hwnd, _))) if since_stage > Duration::from_millis(700) => {
+            send_for(hwnd, |r, cc| Some(Message::Key { window_id: r.id, physical_key: "KeyV".into(), modifiers: map_modifiers(Mods { ctrl: true, ..Default::default() }, cc), down: true }));
+            send_for(hwnd, |r, cc| Some(Message::Key { window_id: r.id, physical_key: "KeyV".into(), modifiers: map_modifiers(Mods { ctrl: true, ..Default::default() }, cc), down: false }));
+            with_app(|a| a.smoke.as_mut().map(|s| { s.stage = 23; s.stage_started = Instant::now() }));
+        }
+        (23, Some((hwnd, _))) => {
+            let t = title_of(hwnd);
+            if t.contains("[17 chars]") {
+                finish("clipboard Windows->Mac (Ctrl+V pastes 'from-windows')", true, t, 24);
+            }
+        }
+        (24, Some((hwnd, _))) => {
+            for k in ["KeyA", "KeyC"] {
+                for down in [true, false] {
+                    send_for(hwnd, |r, cc| Some(Message::Key { window_id: r.id, physical_key: k.into(), modifiers: map_modifiers(Mods { ctrl: true, ..Default::default() }, cc), down }));
+                }
+            }
+            with_app(|a| a.smoke.as_mut().map(|s| { s.stage = 25; s.stage_started = Instant::now() }));
+        }
+        (25, Some((_, _))) => {
+            let owner = with_app(|a| a.controller).unwrap_or(0);
+            let clip = native::clipboard_text(hwnd_of(owner));
+            if clip.as_deref() == Some("hellofrom-windows") {
+                finish("clipboard Mac->Windows (Ctrl+A, Ctrl+C lands on the Windows clipboard)", true, format!("{clip:?}"), 9);
             }
         }
         (9, Some((hwnd, _))) => {

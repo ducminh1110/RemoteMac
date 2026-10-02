@@ -11,7 +11,11 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
 pub enum UiEvent {
-    WindowCreated { id: u64, title: String, w: u32, h: u32 },
+    WindowCreated { id: u64, app: String, title: String, w: u32, h: u32 },
+    /// Square RGBA icon (straight alpha) for an application id.
+    Icon { app: String, size: u32, rgba: Vec<u8> },
+    /// The remote clipboard now holds this text.
+    Clipboard(String),
     Resized { id: u64, w: u32, h: u32 },
     Title { id: u64, title: String },
     Destroyed { id: u64 },
@@ -68,7 +72,15 @@ fn recv_loop(mut sess: Session<TcpStream>, tx: Sender<UiEvent>, wake: impl Fn())
                 }
             }
             Ok(Some(Frame::Msg(m))) => match m {
-                Message::WindowCreated { window_id, title, bounds, .. } => emit(UiEvent::WindowCreated { id: window_id, title, w: bounds.w, h: bounds.h }),
+                Message::WindowCreated { window_id, application_id, title, bounds, .. } => emit(UiEvent::WindowCreated { id: window_id, app: application_id, title, w: bounds.w, h: bounds.h }),
+                Message::AppIcon { application_id, size, rgba_base64 } => {
+                    if let Ok(rgba) = rm_protocol::base64_decode(&rgba_base64) {
+                        if rgba.len() == (size * size * 4) as usize {
+                            emit(UiEvent::Icon { app: application_id, size, rgba });
+                        }
+                    }
+                }
+                Message::ClipboardSet { text, .. } => emit(UiEvent::Clipboard(text)),
                 Message::WindowMoved { window_id, bounds } => emit(UiEvent::Resized { id: window_id, w: bounds.w, h: bounds.h }),
                 Message::WindowTitleChanged { window_id, title } => emit(UiEvent::Title { id: window_id, title }),
                 Message::WindowDestroyed { window_id } => {
