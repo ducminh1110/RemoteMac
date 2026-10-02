@@ -124,7 +124,10 @@ func num(_ v: Any?) -> Double { (v as? NSNumber)?.doubleValue ?? 0 }
 func int(_ v: Any?) -> Int { (v as? NSNumber)?.intValue ?? 0 }
 
 func joinRelay(_ conn: Conn, session: String, token: String) throws {
-    let line = try JSONSerialization.data(withJSONObject: ["session_id": session, "role": "agent", "token": token])
+    var join: [String: Any] = ["session_id": session, "role": "agent", "token": token]
+    // admission key of a relay on a public address
+    if let key = ProcessInfo.processInfo.environment["RM_RELAY_KEY"], !key.isEmpty { join["key"] = key }
+    let line = try JSONSerialization.data(withJSONObject: join)
     try conn.writeAll(line + Data([10]))
     let reply = try conn.readLine()
     if reply != "READY" { throw WireError(description: "relay refused: \(reply)") }

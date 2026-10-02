@@ -13,6 +13,10 @@ enum Role: String { case window, dialog, open_panel, save_panel }
 struct WinInfo: Equatable {
     var id: CGWindowID, pid: pid_t, title: String, rect: CGRect
     var appID: String = "unknown", role: Role = .window, parent: CGWindowID? = nil
+    /// Height of the Mac title bar cut off the stream (the viewer draws its own title bar).
+    var inset: CGFloat = 0
+    /// What is streamed: the window without its title bar.
+    var content: CGRect { CGRect(x: rect.minX, y: rect.minY + inset, width: rect.width, height: max(2, rect.height - inset)) }
 }
 
 func rectJSON(_ r: CGRect) -> [String: Any] { ["x": Int(r.minX), "y": Int(r.minY), "w": Int(r.width), "h": Int(r.height)] }
@@ -71,6 +75,21 @@ func classify(pid: pid_t, rect: CGRect, fromPanelService: Bool, isFirstWindow: B
         }
     }
     return standard && !fromPanelService ? .window : .dialog
+}
+
+/// Height of a plain title bar (traffic lights + title, nothing else in it), else 0. Windows whose
+/// toolbar shares the title bar (Xcode, Finder) or whose content runs under it keep it.
+func titleBarInset(pid: pid_t, rect: CGRect) -> CGFloat {
+    guard let w = axWindowMatching(pid: pid, rect: rect),
+          wAXString(w, kAXSubroleAttribute as String) == (kAXStandardWindowSubrole as String) else { return 0 }
+    let kids = wAX(w, kAXChildrenAttribute as String) as? [AXUIElement] ?? []
+    if kids.contains(where: { wAXString($0, kAXRoleAttribute as String) == (kAXToolbarRole as String) }) { return 0 }
+    guard let cb = wAX(w, kAXCloseButtonAttribute as String) else { return 0 }
+    var p = CGPoint.zero, s = CGSize.zero
+    guard let pv = wAX(cb as! AXUIElement, kAXPositionAttribute as String), let sv = wAX(cb as! AXUIElement, kAXSizeAttribute as String),
+          AXValueGetValue(pv as! AXValue, .cgPoint, &p), AXValueGetValue(sv as! AXValue, .cgSize, &s) else { return 0 }
+    let bar = ((p.y - rect.minY) * 2 + s.height).rounded()
+    return (20...40).contains(bar) && bar < rect.height / 2 ? bar : 0
 }
 
 final class WindowTracker {
@@ -164,6 +183,7 @@ final class WindowTracker {
             let role = companions[pid] != nil ? Role.window : classify(pid: pid, rect: rect, fromPanelService: fromService, isFirstWindow: first)
             var w = WinInfo(id: id, pid: pid, title: title, rect: rect, appID: appID, role: role)
             if role != .window { w.parent = parentFor(appID: appID, rect: rect) }
+            if role == .window { w.inset = titleBarInset(pid: pid, rect: rect) }
             known[id] = w
             onCreated?(w)
         }

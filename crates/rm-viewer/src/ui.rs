@@ -54,6 +54,8 @@ pub struct ShowcaseOptions {
     pub settle: Duration,
     /// Give up on an app that shows no window by then.
     pub app_timeout: Duration,
+    /// Typed into each app's window once it is drawn (keyboard path: WM_CHAR -> Mac).
+    pub type_text: Option<String>,
 }
 
 const WM_UI_EVENT: u32 = WM_APP + 1;
@@ -94,6 +96,8 @@ struct Remote {
     hover: bool,
     pressed: Option<chrome::Light>,
     active: bool,
+    /// Owned by its parent window (a dialog or panel with a parent): no menu, only the red light.
+    owned: bool,
 }
 
 struct App {
@@ -408,7 +412,7 @@ fn handle_event(ev: UiEvent) {
                     return vec![]; // unchanged (it is re-sent on every focus): no rebuild, no flicker
                 }
                 a.menus.insert(app.clone(), menus.clone());
-                a.remotes.iter().filter(|(_, r)| r.app == app && r.role == WindowRole::Window).map(|(k, _)| *k).collect()
+                a.remotes.iter().filter(|(_, r)| r.app == app && !r.owned).map(|(k, _)| *k).collect()
             })
             .unwrap_or_default();
             for w in windows {
@@ -566,7 +570,7 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         let scale = native::dpi_scale(hwnd);
         let (cached, parent_origin) = with_app(|a| {
             a.remotes.insert(hwnd.0 as isize, Remote { id, app: app.into(), role, parent, rx: x, ry: y, rw: w, rh: h, scale, maximized: false, presenter: None, picture: None, frames: 0,
-                high_surrogate: None, cmds: HashMap::new(), content: content.0 as isize, menu: 0, menu_x: vec![], open_menu: None, hover: false, pressed: None, active: false });
+                high_surrogate: None, cmds: HashMap::new(), content: content.0 as isize, menu: 0, menu_x: vec![], open_menu: None, hover: false, pressed: None, active: false, owned });
             a.by_id.insert(id, hwnd.0 as isize);
             let cached = a.icons.get(app).copied();
             if cached.is_none() && a.icons_requested.insert(app.to_string()) {
@@ -851,7 +855,7 @@ fn ui_font(px: i32, weight: i32) -> HFONT {
 /// Paint the Mac chrome (title bar with traffic lights and title; menu strip) into `hdc`.
 fn paint_chrome(frame: HWND, hdc: HDC) {
     struct View { scale: f64, active: bool, hover: bool, dialog: bool, menu: isize, open: Option<usize> }
-    let Some(v) = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| View { scale: r.scale, active: r.active, hover: r.hover, dialog: r.role != WindowRole::Window, menu: r.menu, open: r.open_menu })).flatten() else { return };
+    let Some(v) = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| View { scale: r.scale, active: r.active, hover: r.hover, dialog: r.owned, menu: r.menu, open: r.open_menu })).flatten() else { return };
     let (cw, _) = client_size(frame);
     let th = chrome::title_height(v.scale);
     let bar = chrome::bar_height(v.scale, v.menu != 0);
@@ -954,7 +958,7 @@ fn frame_border(hwnd: HWND) -> i32 {
 }
 
 fn light_action(frame: HWND, l: chrome::Light) {
-    let dialog = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.role != WindowRole::Window)).flatten().unwrap_or(false);
+    let dialog = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.owned)).flatten().unwrap_or(false);
     unsafe {
         match l {
             chrome::Light::Close => { let _ = PostMessageW(Some(frame), WM_CLOSE, WPARAM(0), LPARAM(0)); }
@@ -1846,6 +1850,20 @@ fn showcase_tick() {
             let drawn = with_app(|a| a.remotes.values().any(|r| r.app == app && r.frames >= 1)).unwrap_or(false);
             if drawn && seen.is_none() {
                 showcase_note(format!("{app}: first window drawn after {:.1}s", launched.elapsed().as_secs_f64()));
+                let typing = with_app(|a| a.showcase.as_ref().and_then(|s| s.cfg.type_text.clone())).flatten();
+                let target = with_app(|a| a.remotes.iter().find(|(_, r)| r.app == app && !r.owned).map(|(k, _)| *k)).flatten();
+                if let (Some(text), Some(h)) = (typing, target) {
+                    unsafe { let _ = SetForegroundWindow(hwnd_of(h)); }
+                    // a click into the picture first, so the Mac app has a focused text view
+                    if let Some(c) = content_of(hwnd_of(h)) {
+                        let (cw, ch) = client_size(c);
+                        let pt = ((ch / 2) as isize) << 16 | (cw / 2) as isize;
+                        sendmsg(c, WM_LBUTTONDOWN, 1, pt);
+                        sendmsg(c, WM_LBUTTONUP, 0, pt);
+                    }
+                    text.chars().for_each(|ch| type_char(hwnd_of(h), ch));
+                    showcase_note(format!("{app}: typed {text:?} on Windows"));
+                }
                 with_app(|a| a.showcase.as_mut().map(|s| s.current = Some((app.clone(), launched, Some(Instant::now())))));
                 return;
             }

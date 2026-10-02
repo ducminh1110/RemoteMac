@@ -57,11 +57,11 @@ final class InputInjector {
             e.postToPid(w.pid)
             usleep(15_000)
         case "mouse_move":
-            let p = CGPoint(x: w.rect.minX + num(msg["x"]), y: w.rect.minY + num(msg["y"]))
+            let p = CGPoint(x: w.content.minX + num(msg["x"]), y: w.content.minY + num(msg["y"]))
             lastPoint = p
             post(.mouseMoved, p, button: .left, pid: w.pid)
         case "mouse_button":
-            let p = CGPoint(x: w.rect.minX + num(msg["x"]), y: w.rect.minY + num(msg["y"]))
+            let p = CGPoint(x: w.content.minX + num(msg["x"]), y: w.content.minY + num(msg["y"]))
             lastPoint = p
             let down = (msg["down"] as? Bool) ?? true
             let (type, button): (CGEventType, CGMouseButton)

@@ -7,7 +7,8 @@ param(
   [string] $Apps = "xcode",
   [string] $Out = "out\showcase",
   [int] $Settle = 12,
-  [int] $TimeoutSec = 900
+  [int] $TimeoutSec = 900,
+  [string] $Type = ""
 )
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing, System.Windows.Forms
@@ -15,7 +16,7 @@ New-Item -ItemType Directory -Force -Path $Out | Out-Null
 Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $Out "ready"), (Join-Path $Out "desktop.done")
 $log = Join-Path $Out "viewer.log"
 $viewer = Start-Process -PassThru -NoNewWindow -FilePath target\release\remote-mac-viewer.exe `
-  -ArgumentList "--relay $Relay --session $Session --showcase `"$Out`" --apps $Apps --settle $Settle --no-shortcuts" -RedirectStandardError $log
+  -ArgumentList ("--relay $Relay --session $Session --showcase `"$Out`" --apps $Apps --settle $Settle --no-shortcuts" + $(if ($Type) { " --type `"$Type`"" } else { "" })) -RedirectStandardError $log
 
 function Save-Desktop([string] $path) {
   try {

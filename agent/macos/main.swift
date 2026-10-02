@@ -99,8 +99,8 @@ func sendMenuBar(_ id: String) {
     }
 }
 
-func startStream(_ id: CGWindowID) {
-    let ws = WindowStream(windowID: id) { pkt in do { try conn.sendVideo(pkt) } catch { log("video send failed: \(error)") } }
+func startStream(_ id: CGWindowID, inset: CGFloat) {
+    let ws = WindowStream(windowID: id, inset: inset) { pkt in do { try conn.sendVideo(pkt) } catch { log("video send failed: \(error)") } }
     streamsLock.lock(); streams[id] = ws; streamsLock.unlock()
     Task { do { try await ws.start(); log("stream started window=\(id)") } catch { log("stream start failed window=\(id): \(error)")
         send(["type": "capability_unavailable", "capability": "capture", "reason": "\(error)"]) } }
@@ -111,11 +111,11 @@ func stopStream(_ id: CGWindowID) {
 }
 
 tracker.onCreated = { w in
-    log("window created id=\(w.id) app=\(w.appID) role=\(w.role.rawValue) parent=\(w.parent.map { String($0) } ?? "-") \(Int(w.rect.width))x\(Int(w.rect.height))")
+    log("window created id=\(w.id) app=\(w.appID) role=\(w.role.rawValue) parent=\(w.parent.map { String($0) } ?? "-") \(Int(w.rect.width))x\(Int(w.rect.height)) titleBarCut=\(Int(w.inset))")
     lastSize[w.id] = w.rect.size
-    send(["type": "window_created", "window_id": Int(w.id), "application_id": w.appID, "title": w.title, "bounds": rectJSON(w.rect),
+    send(["type": "window_created", "window_id": Int(w.id), "application_id": w.appID, "title": w.title, "bounds": rectJSON(w.content),
           "parent_id": w.parent.map { Int($0) as Any } ?? NSNull(), "role": w.role.rawValue])
-    startStream(w.id)
+    startStream(w.id, inset: w.inset)
     if w.role == .window { DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { sendMenuBar(w.appID) } }
 }
 tracker.onDestroyed = { id in
@@ -125,10 +125,10 @@ tracker.onDestroyed = { id in
     send(["type": "window_destroyed", "window_id": Int(id)])
 }
 tracker.onMoved = { w in
-    send(["type": "window_moved", "window_id": Int(w.id), "bounds": rectJSON(w.rect)])
+    send(["type": "window_moved", "window_id": Int(w.id), "bounds": rectJSON(w.content)])
     if lastSize[w.id] != w.rect.size {            // size changed: the encoder is bound to a size, so restart the stream
         lastSize[w.id] = w.rect.size
-        stopStream(w.id); startStream(w.id)
+        stopStream(w.id); startStream(w.id, inset: w.inset)
     }
 }
 tracker.onTitle = { w in send(["type": "window_title_changed", "window_id": Int(w.id), "title": w.title]) }
@@ -178,7 +178,7 @@ func handle(_ m: [String: Any]) {
         if type == "window_close" {
             if let cb = axAttr(aw, kAXCloseButtonAttribute as String) { AXUIElementPerformAction(cb as! AXUIElement, kAXPressAction as CFString) }
         } else {
-            var size = CGSize(width: num(m["width"]), height: num(m["height"]))
+            var size = CGSize(width: num(m["width"]), height: num(m["height"]) + w.inset) // the viewer asks for the picture size
             if let v = AXValueCreate(.cgSize, &size) { AXUIElementSetAttributeValue(aw, kAXSizeAttribute as CFString, v) }
         }
     case "window_focus":

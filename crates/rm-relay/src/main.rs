@@ -6,6 +6,7 @@ fn main() {
         eprintln!("bind {addr}: {e}");
         std::process::exit(1)
     });
-    eprintln!("rm-relay listening on {addr} (plaintext development transport)");
-    rm_relay::serve(l, rm_relay::Config::default());
+    let key = rm_relay::env_key();
+    eprintln!("rm-relay listening on {addr} (plaintext transport; admission key {})", if key.is_some() { "required" } else { "off" });
+    rm_relay::serve(l, rm_relay::Config { key, ..Default::default() });
 }

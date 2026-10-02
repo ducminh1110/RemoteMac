@@ -29,6 +29,14 @@ pub struct Join {
     pub session_id: String,
     pub role: Role,
     pub token: String,
+    /// Admission key of a relay that is reachable from the internet (`RM_RELAY_KEY`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+/// Admission key for joins, from the environment (`RM_RELAY_KEY`), if set.
+pub fn env_key() -> Option<String> {
+    std::env::var("RM_RELAY_KEY").ok().filter(|k| !k.is_empty())
 }
 
 struct Pending {
@@ -41,11 +49,14 @@ struct Pending {
 pub struct Config {
     pub pair_timeout: Duration,
     pub hello_timeout: Duration,
+    /// When set, only joins presenting this key are paired (anyone else is refused before
+    /// taking a slot): a relay on a public address is not an open pipe.
+    pub key: Option<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { pair_timeout: Duration::from_secs(300), hello_timeout: Duration::from_secs(10) }
+        Self { pair_timeout: Duration::from_secs(300), hello_timeout: Duration::from_secs(10), key: None }
     }
 }
 
@@ -94,6 +105,11 @@ fn handle(conn: TcpStream, table: Table, cfg: Config) -> std::io::Result<()> {
         Ok(j) => j,
         Err(_) => return reject(conn, "bad hello"),
     };
+    if let Some(k) = &cfg.key {
+        if !constant_time_eq(k, join.key.as_deref().unwrap_or("")) {
+            return reject(conn, "not admitted");
+        }
+    }
     if !valid_session_id(&join.session_id) || join.token.len() < 16 || join.token.len() > 128 {
         return reject(conn, "bad session or token");
     }
@@ -166,7 +182,7 @@ fn pipe(a: TcpStream, b: TcpStream) {
 /// Client/agent helper: connect, send join line, wait for READY.
 pub fn join(addr: &str, session_id: &str, role: Role, token: &str) -> std::io::Result<TcpStream> {
     let mut s = TcpStream::connect(addr)?;
-    let j = serde_json::to_string(&Join { session_id: session_id.into(), role, token: token.into() }).unwrap();
+    let j = serde_json::to_string(&Join { session_id: session_id.into(), role, token: token.into(), key: env_key() }).unwrap();
     s.write_all(j.as_bytes())?;
     s.write_all(b"\n")?;
     let mut line = Vec::new();
@@ -255,7 +271,7 @@ mod tests {
 
     #[test]
     fn pair_timeout_evicts() {
-        let addr = start(Config { pair_timeout: Duration::from_millis(200), hello_timeout: Duration::from_secs(2) });
+        let addr = start(Config { pair_timeout: Duration::from_millis(200), hello_timeout: Duration::from_secs(2), key: None });
         let r = join(&addr, "sess-4", Role::Agent, TOK);
         // the waiter is told READY never comes; it receives ERR pair timeout
         assert!(r.is_err());
@@ -266,5 +282,23 @@ mod tests {
         assert!(constant_time_eq("abc", "abc"));
         assert!(!constant_time_eq("abc", "abd"));
         assert!(!constant_time_eq("abc", "abcd"));
+    }
+
+    #[test]
+    fn admission_key_keeps_strangers_out() {
+        let addr = start(Config { key: Some("relay-admission-key".into()), ..Default::default() });
+        let line = |key: Option<&str>| {
+            let mut s = TcpStream::connect(&addr).unwrap();
+            let j = serde_json::to_string(&Join { session_id: "k1".into(), role: Role::Agent, token: TOK.into(), key: key.map(Into::into) }).unwrap();
+            s.write_all(format!("{j}\n").as_bytes()).unwrap();
+            s.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+            let mut buf = [0u8; 64];
+            let n = s.read(&mut buf).unwrap_or(0);
+            (s, String::from_utf8_lossy(&buf[..n]).to_string())
+        };
+        assert_eq!(line(None).1, "ERR not admitted\n");
+        assert_eq!(line(Some("wrong")).1, "ERR not admitted\n");
+        let (_waiter, reply) = line(Some("relay-admission-key"));
+        assert_eq!(reply, "", "an admitted agent waits for its client");
     }
 }

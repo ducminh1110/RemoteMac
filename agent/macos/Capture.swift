@@ -40,6 +40,8 @@ func annexB(_ sb: CMSampleBuffer, keyframe: Bool) -> Data? {
 
 final class WindowStream: NSObject, SCStreamOutput {
     let windowID: CGWindowID
+    /// Points cut off the top (the Mac title bar).
+    let inset: CGFloat
     private let onPacket: (VideoPacket) -> Void
     private var scStream: SCStream?
     private var session: VTCompressionSession?
@@ -48,13 +50,15 @@ final class WindowStream: NSObject, SCStreamOutput {
     private var t0: CFAbsoluteTime = 0
     private(set) var sent = 0
 
-    init(windowID: CGWindowID, onPacket: @escaping (VideoPacket) -> Void) { self.windowID = windowID; self.onPacket = onPacket }
+    init(windowID: CGWindowID, inset: CGFloat = 0, onPacket: @escaping (VideoPacket) -> Void) { self.windowID = windowID; self.inset = inset; self.onPacket = onPacket }
 
     func start() async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard let w = content.windows.first(where: { $0.windowID == windowID }) else { throw WireError(description: "window \(windowID) not shareable") }
         let cfg = SCStreamConfiguration()
-        cfg.width = max(2, Int(w.frame.width)); cfg.height = max(2, Int(w.frame.height))
+        let cut = min(inset, max(0, w.frame.height - 2))
+        if cut > 0 { cfg.sourceRect = CGRect(x: 0, y: cut, width: w.frame.width, height: w.frame.height - cut) }
+        cfg.width = max(2, Int(w.frame.width)); cfg.height = max(2, Int(w.frame.height - cut))
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         cfg.pixelFormat = kCVPixelFormatType_32BGRA
         cfg.queueDepth = 6; cfg.showsCursor = false
