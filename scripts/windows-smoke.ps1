@@ -38,7 +38,13 @@ $relay = Start-Process -PassThru -NoNewWindow -FilePath target\release\rm-relay.
 Start-Sleep -Seconds 1
 $agent = Start-Process -PassThru -NoNewWindow -FilePath target\release\rm-fakeagent.exe -ArgumentList "--relay 127.0.0.1:$port --session showcase" -RedirectStandardError "out\fakeagent-showcase.log"
 Start-Sleep -Seconds 1
+$env:RM_STATS = "1"   # the stats overlay in these screenshots
 & ./scripts/windows-showcase.ps1 -Relay "127.0.0.1:$port" -Session showcase -Apps "testapp,notes" -Out "out\showcase-fake" -Settle 2 -TimeoutSec 120
 if ($LASTEXITCODE -ne 0) { $failed++ }
+Remove-Item Env:RM_STATS
+# the video went over UDP (FEC) and the stats line names the decoder and pacing
+$vlog = Get-Content "out\showcase-fake\viewer.log" -ErrorAction SilentlyContinue
+$vlog | Select-String -Pattern "video decoder|frame pacing|stream:" | Select-Object -First 6 | ForEach-Object { Write-Host $_.Line }
+if (-not ($vlog | Select-String -Pattern "Network UDP\+FEC")) { Write-Host "video did not use UDP in the showcase"; $failed++ }
 foreach ($p in @($agent, $relay)) { if (-not $p.HasExited) { $p.Kill() } }
 exit $failed

@@ -29,6 +29,9 @@ pub struct Comp {
     video_scale: IDCompositionScaleTransform,
     chrome: IDCompositionVisual,
     chrome_surface: Option<(IDCompositionSurface, i32, i32)>,
+    /// stats overlay (Ctrl+Alt+Shift+S), above everything
+    overlay: IDCompositionVisual,
+    overlay_surface: Option<(IDCompositionSurface, i32, i32)>,
     d3d: ID3D11Device,
     ctx: ID3D11DeviceContext,
     swap: Option<IDXGISwapChain1>,
@@ -109,9 +112,11 @@ impl Comp {
             root.AddVisual(&bg, false, None).ok()?;
             root.AddVisual(&video, true, &bg).ok()?;
             root.AddVisual(&chrome, true, &video).ok()?;
+            let overlay = device.CreateVisual().ok()?;
+            root.AddVisual(&overlay, true, &chrome).ok()?;
             target.SetRoot(&root).ok()?;
             device.Commit().ok()?;
-            Some(Self { device, _target: target, root, clip, bg_scale, video, video_scale, chrome, chrome_surface: None, d3d, ctx, swap: None, swap_size: (0, 0), vp: None, area: (0, 0, 1, 1), kind })
+            Some(Self { device, _target: target, root, clip, bg_scale, video, video_scale, chrome, chrome_surface: None, overlay, overlay_surface: None, d3d, ctx, swap: None, swap_size: (0, 0), vp: None, area: (0, 0, 1, 1), kind })
         }
     }
 
@@ -166,6 +171,30 @@ impl Comp {
                 self.chrome_surface = Some((s, w, h));
             }
             let Some((s, _, _)) = self.chrome_surface.as_ref() else { return false };
+            let mut off = POINT::default();
+            let Ok(tex) = s.BeginDraw::<ID3D11Texture2D>(None, &mut off) else { return false };
+            upload(&self.ctx, &tex, off, w, h, bgra);
+            let ok = s.EndDraw().is_ok();
+            ok && self.device.Commit().is_ok()
+        }
+    }
+
+    /// The stats overlay (premultiplied BGRA, `w`x`h`) at (`x`, `y`); `w` 0 hides it.
+    pub fn set_overlay(&mut self, x: i32, y: i32, w: i32, h: i32, bgra: &[u8]) -> bool {
+        unsafe {
+            if w <= 0 || h <= 0 {
+                let _ = self.overlay.SetContent(None::<&windows::core::IUnknown>);
+                self.overlay_surface = None;
+                return self.device.Commit().is_ok();
+            }
+            if self.overlay_surface.as_ref().map(|s| (s.1, s.2)) != Some((w, h)) {
+                let Ok(s) = self.device.CreateSurface(w as u32, h as u32, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED) else { return false };
+                let _ = self.overlay.SetContent(&s);
+                self.overlay_surface = Some((s, w, h));
+            }
+            let _ = self.overlay.SetOffsetX2(x as f32);
+            let _ = self.overlay.SetOffsetY2(y as f32);
+            let Some((s, _, _)) = self.overlay_surface.as_ref() else { return false };
             let mut off = POINT::default();
             let Ok(tex) = s.BeginDraw::<ID3D11Texture2D>(None, &mut off) else { return false };
             upload(&self.ctx, &tex, off, w, h, bgra);

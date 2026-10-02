@@ -64,6 +64,8 @@ pub struct ShowcaseOptions {
 const WM_UI_EVENT: u32 = WM_APP + 1;
 /// wParam = remote id of an open panel to replace with the Windows file picker.
 const WM_PICK_FILE: u32 = WM_APP + 2;
+/// The monitor's vertical blank: show the pictures that arrived since the last one.
+const WM_VSYNC: u32 = WM_APP + 3;
 const TIMER_ID: usize = 1;
 const WM_MOUSE_LEAVE: u32 = 0x02A3;
 
@@ -148,42 +150,86 @@ struct App {
     display_req: Option<(u32, u32, u32)>,
     display: Option<(u32, u32)>,
     stats: Stats,
+    /// frame pacing: pictures wait here for the next vblank (newest per window)
+    pending: HashMap<u64, (net::Pic, net::FrameMeta)>,
+    /// set when pictures are pending: the pacer thread posts WM_VSYNC at the next vblank
+    vsync: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// stats overlay on (Ctrl+Alt+Shift+S), and its last text
+    overlay: bool,
+    overlay_lines: Vec<String>,
+    stats_logged: Instant,
 }
 
-/// Stream health, logged every few seconds (pictures shown, skipped as stale, bytes).
+/// Stream health over the last second: the stats overlay and the log.
 struct Stats {
     shown: u64,
+    /// pictures replaced before they were shown (a newer one came first)
     skipped: u64,
     udp: u64,
     bytes: u64,
     decode_us: u64,
-    /// capture -> received, agent clock (ms), summed over `lat_n` pictures
-    lat_ms: f64,
-    lat_n: u64,
+    /// capture -> fully received (agent clock), summed over `recv_n` pictures
+    recv_ms: f64,
+    recv_n: u64,
+    /// capture -> presented
+    shown_ms: f64,
+    shown_n: u64,
+    size: (usize, usize),
     since: Instant,
 }
 
 impl Default for Stats {
     fn default() -> Self {
-        Self { shown: 0, skipped: 0, udp: 0, bytes: 0, decode_us: 0, lat_ms: 0.0, lat_n: 0, since: Instant::now() }
+        Self { shown: 0, skipped: 0, udp: 0, bytes: 0, decode_us: 0, recv_ms: 0.0, recv_n: 0, shown_ms: 0.0, shown_n: 0, size: (0, 0), since: Instant::now() }
     }
 }
 
 impl Stats {
-    fn note(&mut self, m: &net::FrameMeta) {
+    fn note(&mut self, m: &net::FrameMeta, shown_agent_us: Option<i64>, size: (usize, usize)) {
         self.shown += 1;
         self.udp += m.via_udp as u64;
         self.bytes += m.bytes as u64;
         self.decode_us += m.decode_us as u64;
+        self.size = size;
+        let ok = |ms: f64| (0.0..5000.0).contains(&ms);
         if let Some(r) = m.received_agent_us {
             let ms = (r - m.pts_us as i64) as f64 / 1000.0;
-            if (0.0..5000.0).contains(&ms) {
-                self.lat_ms += ms;
-                self.lat_n += 1;
+            if ok(ms) {
+                self.recv_ms += ms;
+                self.recv_n += 1;
+            }
+        }
+        if let Some(n) = shown_agent_us {
+            let ms = (n - m.pts_us as i64) as f64 / 1000.0;
+            if ok(ms) {
+                self.shown_ms += ms;
+                self.shown_n += 1;
             }
         }
     }
+
+    /// The overlay's lines (as Moonlight's: video, network, latency, decoder).
+    fn lines(&self, link: Option<rm_client::udp::LinkStats>, pacing: bool) -> Vec<String> {
+        let secs = self.since.elapsed().as_secs_f64().max(0.001);
+        let avg = |sum: f64, n: u64| if n > 0 { format!("{:.1} ms", sum / n as f64) } else { "-".into() };
+        let mut v = vec![format!("Video   {}x{}  {:.0} fps  {:.1} Mbit/s", self.size.0, self.size.1, self.shown as f64 / secs, self.bytes as f64 * 8.0 / secs / 1e6)];
+        match link {
+            Some(l) if l.active => v.push(format!(
+                "Network UDP+FEC  RTT {}  loss {:.1}%  fixed {}  lost {}",
+                l.rtt_ms.map_or("-".into(), |r| format!("{r:.0} ms")),
+                l.loss * 100.0,
+                l.recovered,
+                l.lost
+            )),
+            Some(l) => v.push(format!("Network TCP (UDP {})  RTT {}", if l.ready { "idle" } else { "blocked" }, l.rtt_ms.map_or("-".into(), |r| format!("{r:.0} ms")))),
+            None => v.push("Network TCP".into()),
+        }
+        v.push(format!("Latency capture->shown {}  (->received {}, decode {:.1} ms)", avg(self.shown_ms, self.shown_n), avg(self.recv_ms, self.recv_n), self.decode_us as f64 / self.shown.max(1) as f64 / 1000.0));
+        v.push(format!("Decoder {:?}  pacing {}  frames skipped {}", net::decoder_kind(), if pacing { "vsync" } else { "off" }, self.skipped));
+        v
+    }
 }
+
 
 thread_local! { static APP: RefCell<Option<App>> = const { RefCell::new(None) }; }
 
@@ -281,8 +327,12 @@ pub fn run(opts: Options) -> i32 {
             *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, smoke, showcase, exit: None, hinst: hinst.0 as isize, controller: ctl,
                 icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_seq: 0, d3d: opts.d3d, comp: use_comp,
                 launcher, panels: HashMap::new(), uploads: HashMap::new(), next_transfer: 1, redirect_panels: opts.windows_file_picker,
-                shortcut_dir, app_names: vec![], icon_rgba: HashMap::new(), menus: HashMap::new(), display_req: None, display: None, stats: Stats::default() })
+                shortcut_dir, app_names: vec![], icon_rgba: HashMap::new(), menus: HashMap::new(), display_req: None, display: None, stats: Stats::default(),
+                pending: HashMap::new(), vsync: None, overlay: std::env::var_os("RM_STATS").is_some(), overlay_lines: vec![], stats_logged: Instant::now() - Duration::from_secs(4) })
         });
+        let pacer = if use_comp { start_pacer(ctl) } else { None };
+        eprintln!("frame pacing: {}", if pacer.is_some() { "vsync" } else { "off" });
+        with_app(|a| a.vsync = pacer);
         SetTimer(Some(controller), TIMER_ID, 100, None);
         if opts.clipboard && !native::listen_clipboard(controller) {
             eprintln!("warning: clipboard listener unavailable; clipboard sync off");
@@ -360,6 +410,10 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
     match msg {
         WM_UI_EVENT => {
             drain_events();
+            LRESULT(0)
+        }
+        WM_VSYNC => {
+            on_vsync();
             LRESULT(0)
         }
         WM_TIMER => {
@@ -486,18 +540,174 @@ fn on_local_clipboard(owner: HWND) {
 }
 
 fn stats_tick() {
+    let Some((lines, overlay)) = with_app(|a| {
+        if a.stats.since.elapsed() < Duration::from_secs(1) {
+            return None;
+        }
+        let link = a.link.udp.as_ref().and_then(|u| u.stats.lock().ok().map(|s| s.clone()));
+        let lines = a.stats.lines(link, a.vsync.is_some());
+        if a.stats.shown > 0 && a.stats_logged.elapsed() >= Duration::from_secs(5) {
+            eprintln!("stream: {}", lines.join(" | "));
+            a.stats_logged = Instant::now();
+        }
+        a.stats = Stats::default();
+        a.overlay_lines = lines.clone();
+        Some((lines, a.overlay))
+    })
+    .flatten() else { return };
+    if overlay {
+        draw_overlays(&lines);
+    }
+}
+
+/// Draw the stats panel on every composition window (top left of the picture).
+fn draw_overlays(lines: &[String]) {
+    let keys: Vec<(isize, f64)> = with_app(|a| a.remotes.iter().filter(|(_, r)| r.comp.is_some()).map(|(k, r)| (*k, r.scale)).collect()).unwrap_or_default();
+    for (k, scale) in keys {
+        let (w, h, px) = overlay_bitmap(lines, scale);
+        let bar = bar_px(hwnd_of(k));
+        let m = (10.0 * scale) as i32;
+        with_app(|a| a.remotes.get_mut(&k).and_then(|r| r.comp.as_mut()).map(|c| c.set_overlay(m, bar + m, w, h, &px)));
+    }
+}
+
+fn hide_overlays() {
     with_app(|a| {
-        let secs = a.stats.since.elapsed().as_secs_f64();
-        if secs >= 5.0 {
-            if a.stats.shown > 0 {
-                let st = &a.stats;
-                let lat = if st.lat_n > 0 { format!("{:.1} ms", st.lat_ms / st.lat_n as f64) } else { "-".into() };
-                eprintln!("stream: {:.0} fps shown ({} over UDP), {:.1} Mbit/s, capture->received {lat}, decode {:.1} ms, {} stale pictures skipped",
-                    st.shown as f64 / secs, st.udp, st.bytes as f64 * 8.0 / secs / 1e6, st.decode_us as f64 / st.shown.max(1) as f64 / 1000.0, st.skipped);
+        for r in a.remotes.values_mut() {
+            if let Some(c) = r.comp.as_mut() {
+                c.set_overlay(0, 0, 0, 0, &[]);
             }
-            a.stats = Stats::default();
         }
     });
+}
+
+/// The panel: white JetBrains Mono on translucent black, premultiplied BGRA.
+fn overlay_bitmap(lines: &[String], scale: f64) -> (i32, i32, Vec<u8>) {
+    unsafe {
+        let px = (12.0 * scale).round() as i32;
+        let pad = (8.0 * scale).round() as i32;
+        let line_h = (px as f64 * 1.45).round() as i32;
+        let screen = GetDC(None);
+        let mem = CreateCompatibleDC(Some(screen));
+        let font = CreateFontW(-px, 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, 0, &HSTRING::from(native::mono_face()));
+        let oldf = SelectObject(mem, font.into());
+        let mut wmax = 0;
+        let texts: Vec<Vec<u16>> = lines.iter().map(|l| l.encode_utf16().collect()).collect();
+        for t in &texts {
+            let mut sz = SIZE::default();
+            let _ = GetTextExtentPoint32W(mem, t, &mut sz);
+            wmax = wmax.max(sz.cx);
+        }
+        let (w, h) = (wmax + 2 * pad, line_h * lines.len() as i32 + 2 * pad - (line_h - px) / 2);
+        let dib = BITMAPINFO { bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() }, ..Default::default() };
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let Ok(bmp) = CreateDIBSection(Some(mem), &dib, DIB_RGB_COLORS, &mut bits, None, 0) else {
+            SelectObject(mem, oldf);
+            let _ = DeleteObject(font.into());
+            let _ = DeleteDC(mem);
+            ReleaseDC(None, screen);
+            return (0, 0, vec![]);
+        };
+        let old = SelectObject(mem, bmp.into());
+        fill(mem, RECT { left: 0, top: 0, right: w, bottom: h }, (0, 0, 0));
+        SetBkMode(mem, TRANSPARENT);
+        SetTextColor(mem, rgb((255, 255, 255)));
+        for (i, t) in texts.iter().enumerate() {
+            let _ = TextOutW(mem, pad, pad + i as i32 * line_h, t);
+        }
+        let _ = GdiFlush();
+        let src = std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize);
+        // white text over black at 70%: premultiplied, alpha from the text's coverage
+        let out: Vec<u8> = src.chunks_exact(4).flat_map(|p| {
+            let l = p[0].max(p[1]).max(p[2]);
+            let a = l.max(178);
+            [l, l, l, a]
+        }).collect();
+        SelectObject(mem, old);
+        SelectObject(mem, oldf);
+        let _ = DeleteObject(bmp.into());
+        let _ = DeleteObject(font.into());
+        let _ = DeleteDC(mem);
+        ReleaseDC(None, screen);
+        (w, h, out)
+    }
+}
+
+/// Frame pacing (as Moonlight's): a thread waits for the monitor's vertical blank and, when
+/// pictures are waiting, has the UI show them then. Every picture lands on a refresh, at most
+/// one per window per refresh. RM_PACING=0 shows pictures as soon as they are decoded.
+fn start_pacer(ctl: isize) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    if std::env::var("RM_PACING").ok().as_deref() == Some("0") {
+        return None;
+    }
+    let g = crate::gpu::shared().filter(|g| g.hardware)?;
+    let output = unsafe {
+        use windows::core::Interface;
+        let dxgi = g.device.cast::<windows::Win32::Graphics::Dxgi::IDXGIDevice>().ok()?;
+        dxgi.GetAdapter().ok()?.EnumOutputs(0).ok()?
+    };
+    struct Out(windows::Win32::Graphics::Dxgi::IDXGIOutput);
+    unsafe impl Send for Out {}
+    let out = Out(output);
+    let flag = std::sync::Arc::new(AtomicBool::new(false));
+    let f = flag.clone();
+    std::thread::Builder::new()
+        .name("rm-vsync".into())
+        .spawn(move || {
+            let out = out;
+            loop {
+                if unsafe { out.0.WaitForVBlank() }.is_err() {
+                    std::thread::sleep(Duration::from_millis(16));
+                }
+                if f.swap(false, Ordering::AcqRel) {
+                    unsafe {
+                        let _ = PostMessageW(Some(hwnd_of(ctl)), WM_VSYNC, WPARAM(0), LPARAM(0));
+                    }
+                }
+            }
+        })
+        .ok()?;
+    Some(flag)
+}
+
+/// Put a decoded picture on its window (GPU texture, uploaded BGRA, or GDI repaint).
+fn present_frame(id: u64, picture: net::Pic, meta: net::FrameMeta) {
+    let key = with_app(|a| {
+        let key = *a.by_id.get(&id)?;
+        let shown_agent_us = a.link.udp.as_ref().and_then(|u| u.agent_now_us());
+        let r = a.remotes.get_mut(&key)?;
+        r.frames += 1;
+        let size = picture.size();
+        let gpu_ok = match (&picture, r.comp.as_mut(), r.presenter.as_mut()) {
+            (net::Pic::Gpu(g), Some(c), _) => c.present_gpu(g),
+            (net::Pic::Cpu(p), Some(c), _) => c.present(p),
+            (net::Pic::Cpu(p), None, Some(d)) => d.present(p),
+            _ => false,
+        };
+        if !gpu_ok && r.presenter.take().is_some() {
+            eprintln!("Direct3D presenter failed; falling back to GDI for window {id}");
+        }
+        if let net::Pic::Cpu(p) = picture {
+            r.picture = Some(p);
+        }
+        a.stats.note(&meta, shown_agent_us, size);
+        Some((key, gpu_ok))
+    })
+    .flatten();
+    if let Some((k, false)) = key {
+        if let Some(c) = content_of(hwnd_of(k)) {
+            unsafe { let _ = InvalidateRect(Some(c), None, false); }
+        }
+    }
+}
+
+/// Show what waited for this vblank.
+fn on_vsync() {
+    let pending: Vec<(u64, (net::Pic, net::FrameMeta))> = with_app(|a| a.pending.drain().collect()).unwrap_or_default();
+    for (id, (picture, meta)) in pending {
+        present_frame(id, picture, meta);
+    }
 }
 
 fn drain_events() {
@@ -645,33 +855,18 @@ fn handle_event(ev: UiEvent) {
                 }
             }
         }
-        UiEvent::Frame { id, picture, meta } => {
-            let key = with_app(|a| {
-                let key = *a.by_id.get(&id)?;
-                let r = a.remotes.get_mut(&key)?;
-                r.frames += 1;
-                a.stats.note(&meta);
-                let gpu_ok = match (&picture, r.comp.as_mut(), r.presenter.as_mut()) {
-                    (net::Pic::Gpu(g), Some(c), _) => c.present_gpu(g),
-                    (net::Pic::Cpu(p), Some(c), _) => c.present(p),
-                    (net::Pic::Cpu(p), None, Some(d)) => d.present(p),
-                    _ => false,
-                };
-                if !gpu_ok && r.presenter.take().is_some() {
-                    eprintln!("Direct3D presenter failed; falling back to GDI for window {id}");
-                }
-                if let net::Pic::Cpu(p) = picture {
-                    r.picture = Some(p);
-                }
-                Some((key, gpu_ok))
-            })
-            .flatten();
-            if let Some((k, false)) = key {
-                if let Some(c) = content_of(hwnd_of(k)) {
-                    unsafe { let _ = InvalidateRect(Some(c), None, false); }
-                }
+        UiEvent::Frame { id, picture, meta } => match with_app(|a| a.vsync.clone()).flatten() {
+            // paced: wait for the next vblank (a newer picture replaces a waiting one)
+            Some(flag) => {
+                with_app(|a| {
+                    if a.pending.insert(id, (picture, meta)).is_some() {
+                        a.stats.skipped += 1;
+                    }
+                });
+                flag.store(true, std::sync::atomic::Ordering::Release);
             }
-        }
+            None => present_frame(id, picture, meta),
+        },
         UiEvent::Destroyed { id } => {
             if let Some(h) = with_app(|a| a.by_id.remove(&id)).flatten() {
                 with_app(|a| a.remotes.remove(&h));
@@ -1565,6 +1760,18 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 return LRESULT(0);
             }
             let mods = current_mods();
+            // Ctrl+Alt+Shift+S: the stats overlay, as in Moonlight
+            if vk == 'S' as u32 && mods.ctrl && mods.alt && mods.shift {
+                if down {
+                    let (on, lines) = with_app(|a| {
+                        a.overlay = !a.overlay;
+                        (a.overlay, a.overlay_lines.clone())
+                    })
+                    .unwrap_or((false, vec![]));
+                    if on { draw_overlays(&lines) } else { hide_overlays() }
+                }
+                return LRESULT(0);
+            }
             if sends_as_text(vk, mods) {
                 return LRESULT(0); // WM_CHAR delivers the character, layout-correct
             }

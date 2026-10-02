@@ -38,12 +38,16 @@ fn main() {
     };
     let stream = rm_relay::join_with(&relay, &session, Role::Client, &token, wait).unwrap_or_else(|e| fail("relay", e));
     let udp = std::env::var_os("RM_NO_UDP").is_none();
-    if e2e.is_some() || record.is_some() {
-        // short when UDP video comes in beside the TCP stream
-        stream.set_read_timeout(Some(std::time::Duration::from_millis(if udp { 20 } else { 1000 }))).ok();
-    }
+    let timed = e2e.is_some() || record.is_some();
+    // the handshake gets a patient timeout (the Mac probes its encoder first) ...
+    stream.set_read_timeout(timed.then(|| std::time::Duration::from_secs(10))).ok();
+    let sock = stream.try_clone().unwrap_or_else(|e| fail("socket", e));
     let mut s = Session::handshake(stream).unwrap_or_else(|e| fail("handshake", e));
-    if udp && (e2e.is_some() || record.is_some()) {
+    if timed {
+        // ... then a short one when UDP video comes in beside the TCP stream
+        sock.set_read_timeout(Some(std::time::Duration::from_millis(if udp { 20 } else { 1000 }))).ok();
+    }
+    if udp && timed {
         if let Err(e) = s.attach_udp(&relay, &session, &token) {
             eprintln!("UDP video unavailable: {e}");
         }

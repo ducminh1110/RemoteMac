@@ -108,8 +108,16 @@ impl<S: Read + Write> Session<S> {
     }
 }
 
+/// The next control message, riding out short read timeouts (the stream may have one so that
+/// UDP video is not held up) for up to 15 s.
 fn next<S: Read>(s: &mut S) -> Result<Message, ClientError> {
-    read_message(s)?.ok_or(ClientError::Closed)
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        match read_message(s) {
+            Err(ProtocolError::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) && std::time::Instant::now() < deadline => continue,
+            r => return r?.ok_or(ClientError::Closed),
+        }
+    }
 }
 
 fn unexpected(m: Message) -> ClientError {
