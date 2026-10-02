@@ -55,6 +55,8 @@ struct Ctx<'a, S: Read + Write> {
     errors: Vec<String>,
     non_annexb: usize,
     decoder: Option<rm_decode::H264Decoder>,
+    clipboard: Option<String>,
+    icon: Option<(u32, Vec<u8>)>,
 }
 
 fn is_timeout(e: &ProtocolError) -> bool {
@@ -102,6 +104,10 @@ impl<S: Read + Write> Ctx<'_, S> {
             Frame::Msg(Message::WindowDestroyed { .. }) => self.destroyed = true,
             Frame::Msg(Message::AppExited { .. }) => self.exited = true,
             Frame::Msg(Message::AppLaunched { pid, .. }) => self.launched_pid = Some(pid),
+            Frame::Msg(Message::ClipboardSet { text, .. }) => self.clipboard = Some(text),
+            Frame::Msg(Message::AppIcon { size, rgba_base64, .. }) => {
+                self.icon = Some((size, rm_protocol::base64_decode(&rgba_base64).unwrap_or_default()))
+            }
             Frame::Msg(Message::Error { code, message }) => self.errors.push(format!("{code}: {message}")),
             Frame::Msg(_) => {}
         }
@@ -140,7 +146,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let caps_dump = serde_json::to_string(&sess.capabilities).unwrap_or_default();
     let mut c = Ctx { sess, r: Report::default(), started: Instant::now(), first_video: None, last_title: String::new(),
         destroyed: false, exited: false, launched_pid: None, errors: vec![], non_annexb: 0,
-        decoder: rm_decode::H264Decoder::new().ok() };
+        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None };
 
     c.r.check("agent reports capture+input+GUI", caps_ok, caps_dump);
 
@@ -218,6 +224,37 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     c.send(Message::Key { window_id: wid, physical_key: "Backspace".into(), modifiers: vec![], down: false });
     let ok = c.pump(8, |c| c.last_title.contains("[0 chars]"));
     c.r.check("Cmd+A, Backspace clears the text (modifiers work)", ok, c.last_title.clone());
+
+    // ---- clipboard, Windows -> Mac: set it, then Cmd+V in the app
+    let key = |c: &mut Ctx<S>, k: &str, mods: Vec<Modifier>| {
+        c.send(Message::Key { window_id: wid, physical_key: k.into(), modifiers: mods.clone(), down: true });
+        c.send(Message::Key { window_id: wid, physical_key: k.into(), modifiers: mods, down: false });
+    };
+    c.send(Message::ClipboardSet { seq: 1, text: "pasted".into() });
+    std::thread::sleep(Duration::from_millis(600));
+    key(&mut c, "KeyV", vec![Modifier::Command]);
+    let ok = c.pump(8, |c| c.last_title.contains("[6 chars]"));
+    c.r.check("clipboard client->Mac (ClipboardSet then Cmd+V pastes 'pasted')", ok, c.last_title.clone());
+
+    // ---- clipboard, Mac -> Windows: Cmd+A, Cmd+C in the app comes back as ClipboardSet
+    c.send(Message::TextInput { window_id: wid, text: "!".into() });
+    c.pump(5, |c| c.last_title.contains("[7 chars]"));
+    c.clipboard = None;
+    key(&mut c, "KeyA", vec![Modifier::Command]);
+    key(&mut c, "KeyC", vec![Modifier::Command]);
+    let ok = c.pump(8, |c| c.clipboard.as_deref() == Some("pasted!"));
+    c.r.check("clipboard Mac->client (Cmd+C arrives as ClipboardSet 'pasted!')", ok, format!("{:?}", c.clipboard));
+
+    // ---- app icon for the taskbar
+    c.send(Message::GetAppIcon { application_id: app.into() });
+    let ok = c.pump(8, |c| c.icon.is_some());
+    let detail = c.icon.as_ref().map(|(s, px)| {
+        let opaque = px.as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count();
+        (ok && *s >= 16 && px.len() == (*s * *s * 4) as usize && opaque > 0, format!("size={s} bytes={} opaquePixels={opaque}", px.len()))
+    });
+    let (icon_ok, icon_detail) = detail.unwrap_or((false, "no AppIcon".into()));
+    c.r.check("app icon delivered (square RGBA, not empty)", icon_ok, icon_detail);
+    c.send(Message::WindowFocus { window_id: wid });
 
     // ---- lifecycle
     c.send(Message::AppTerminate { application_id: app.into() });

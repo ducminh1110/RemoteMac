@@ -127,6 +127,10 @@ tracker.onAppExited = { id, code in
 }
 tracker.start()
 
+let clipboard = ClipboardSync()
+clipboard.onLocalChange = { seq, text in send(["type": "clipboard_set", "seq": Int(seq), "text": text]) }
+clipboard.start()
+
 let inputTypes: Set<String> = ["mouse_move", "mouse_button", "scroll", "key", "text_input"]
 
 func handle(_ m: [String: Any]) {
@@ -154,6 +158,22 @@ func handle(_ m: [String: Any]) {
             var size = CGSize(width: num(m["width"]), height: num(m["height"]))
             if let v = AXValueCreate(.cgSize, &size) { AXUIElementSetAttributeValue(aw, kAXSizeAttribute as CFString, v) }
         }
+    case "window_focus":
+        let wid = CGWindowID(int(m["window_id"]))
+        if let w = tracker.current(wid) {
+            NSRunningApplication(processIdentifier: w.pid)?.activate(options: [.activateIgnoringOtherApps])
+            if let aw = axWindowFor(pid: w.pid, id: wid, rect: w.rect) { AXUIElementPerformAction(aw, kAXRaiseAction as CFString) }
+        }
+    case "get_app_icon":
+        let id = m["application_id"] as? String ?? ""
+        guard let d = apps.descriptor(id) else { send(["type": "error", "code": "unknown_app", "message": id]); break }
+        // the bundle (…/Foo.app) carries the real icon; a bare executable gets the generic one
+        let bundle = d.executable.components(separatedBy: "/Contents/MacOS/").first ?? d.executable
+        if let rgba = appIconRGBA(path: bundle, size: 64) {
+            send(["type": "app_icon", "application_id": id, "size": 64, "rgba_base64": rgba.base64EncodedString()])
+        } else { send(["type": "error", "code": "icon_unavailable", "message": id]) }
+    case "clipboard_set":
+        clipboard.apply(m["text"] as? String ?? "")
     case "ping":
         send(["type": "pong", "nonce": m["nonce"] ?? 0])
     case _ where inputTypes.contains(type):

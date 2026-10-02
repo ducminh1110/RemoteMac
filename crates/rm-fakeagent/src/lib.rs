@@ -34,9 +34,11 @@ fn animated_frame(t: usize) -> Vec<u8> {
 }
 
 struct State {
-    chars: usize,
+    text: String,
     all_selected: bool,
     window_open: bool,
+    clipboard: String,
+    clip_seq: u64,
 }
 
 type Writer<W> = Arc<Mutex<W>>;
@@ -55,7 +57,7 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
     send(&writer, &Message::ServerHello(Hello::ours("rm-fakeagent", &["h264"], &["control", "video"])))?;
     send(&writer, &Message::CapabilityReport(caps()))?;
 
-    let state = Arc::new(Mutex::new(State { chars: 0, all_selected: false, window_open: false }));
+    let state = Arc::new(Mutex::new(State { text: String::new(), all_selected: false, window_open: false, clipboard: String::new(), clip_seq: 0 }));
     let stop = Arc::new(AtomicBool::new(false));
     let mut video: Option<std::thread::JoinHandle<()>> = None;
 
@@ -73,21 +75,43 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
             }
             Message::AppLaunch { application_id, .. } => send(&writer, &Message::Error { code: "launch_rejected".into(), message: format!("unknown application '{application_id}'") })?,
             Message::TextInput { text, .. } => {
-                let n = { let mut s = state.lock().unwrap(); s.chars += text.chars().count(); s.all_selected = false; s.chars };
+                let n = { let mut s = state.lock().unwrap(); type_text(&mut s, &text); s.text.chars().count() };
                 send(&writer, &Message::WindowTitleChanged { window_id: WINDOW_ID, title: title(n) })?;
+            }
+            Message::ClipboardSet { text, .. } => state.lock().unwrap().clipboard = text,
+            Message::GetAppIcon { application_id } => {
+                let size = 64u32;
+                let px: Vec<u8> = (0..size * size).flat_map(|i| [(i % size * 4) as u8, (i / size * 4) as u8, 200, 255]).collect();
+                send(&writer, &Message::AppIcon { application_id, size, rgba_base64: base64_encode(&px) })?;
             }
             Message::Key { physical_key, modifiers, down: true, .. } => {
                 let cmd = modifiers.contains(&Modifier::Command);
+                let mut copied = None;
                 let n = {
                     let mut s = state.lock().unwrap();
                     match (physical_key.as_str(), cmd) {
                         ("KeyA", true) => s.all_selected = true,
-                        ("KeyA", false) => { s.chars += 1; s.all_selected = false }
-                        ("Backspace", _) => { if s.all_selected { s.chars = 0 } else { s.chars = s.chars.saturating_sub(1) } s.all_selected = false }
+                        ("KeyC", true) => {
+                            s.clip_seq += 1;
+                            s.clipboard = s.text.clone();
+                            copied = Some((s.clip_seq, s.text.clone()));
+                        }
+                        ("KeyV", true) => { let c = s.clipboard.clone(); type_text(&mut s, &c) }
+                        ("Backspace", _) => {
+                            if s.all_selected { s.text.clear() } else { s.text.pop(); }
+                            s.all_selected = false
+                        }
+                        (k, false) if k.starts_with("Key") && k.len() == 4 => {
+                            let c = k[3..].to_ascii_lowercase();
+                            type_text(&mut s, &c)
+                        }
                         _ => {}
                     }
-                    s.chars
+                    s.text.chars().count()
                 };
+                if let Some((seq, text)) = copied {
+                    send(&writer, &Message::ClipboardSet { seq, text })?;
+                }
                 send(&writer, &Message::WindowTitleChanged { window_id: WINDOW_ID, title: title(n) })?;
             }
             Message::WindowResizeRequest { window_id, width, height } => {
@@ -101,6 +125,15 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
     stop.store(true, Ordering::SeqCst);
     if let Some(v) = video { let _ = v.join(); }
     Ok(())
+}
+
+/// Typing replaces a select-all selection, like a text view.
+fn type_text(s: &mut State, t: &str) {
+    if s.all_selected {
+        s.text.clear();
+        s.all_selected = false;
+    }
+    s.text.push_str(t);
 }
 
 fn close_window<W: Write>(w: &Writer<W>, st: &Arc<Mutex<State>>, stop: &Arc<AtomicBool>, video: &mut Option<std::thread::JoinHandle<()>>) -> Result<(), ProtocolError> {

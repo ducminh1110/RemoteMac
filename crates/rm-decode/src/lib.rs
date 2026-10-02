@@ -18,7 +18,7 @@ impl Picture {
     /// Number of distinct pixel values among a sample of the image (0 for empty).
     pub fn distinct_colors(&self) -> usize {
         let mut seen = std::collections::HashSet::new();
-        for px in self.bgra.chunks_exact(4).step_by(7) {
+        for px in self.bgra.as_chunks::<4>().0.iter().step_by(7) {
             seen.insert([px[0], px[1], px[2]]);
             if seen.len() > 4096 {
                 break;
@@ -46,7 +46,7 @@ impl H264Decoder {
         let (w, h) = yuv.dimensions();
         let mut rgba = vec![0u8; w * h * 4];
         yuv.write_rgba8(&mut rgba);
-        for px in rgba.chunks_exact_mut(4) {
+        for px in rgba.as_chunks_mut::<4>().0 {
             px.swap(0, 2); // RGBA -> BGRA
         }
         Ok(Some(Picture { width: w, height: h, bgra: rgba }))

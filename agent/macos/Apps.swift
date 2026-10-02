@@ -23,6 +23,8 @@ final class AppManager {
         apps.map { ["id": $0.id, "name": $0.name, "available": FileManager.default.isExecutableFile(atPath: $0.executable)] }
     }
 
+    func descriptor(_ id: String) -> AppDescriptor? { apps.first { $0.id == id } }
+
     func appID(forPid pid: pid_t) -> String? {
         lock.lock(); defer { lock.unlock() }
         return running.first(where: { $0.value.processIdentifier == pid })?.key

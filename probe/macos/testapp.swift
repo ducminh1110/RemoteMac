@@ -12,6 +12,8 @@ let appItem = NSMenuItem(); mainMenu.addItem(appItem); appItem.submenu = NSMenu(
 let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: ""); mainMenu.addItem(editItem)
 let editMenu = NSMenu(title: "Edit"); editItem.submenu = editMenu
 editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
 app.mainMenu = mainMenu
 
 let win = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 480, height: 320),

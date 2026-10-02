@@ -227,6 +227,17 @@ pub enum Message {
     WindowClose { window_id: u64 },
     /// Client -> agent: the user resized the local window; resize the remote window (points).
     WindowResizeRequest { window_id: u64, width: u32, height: u32 },
+    /// Client -> agent: the local window was activated; raise/focus the remote window.
+    WindowFocus { window_id: u64 },
+
+    /// Client -> agent: send the icon of a registered application.
+    GetAppIcon { application_id: String },
+    /// Agent -> client: square RGBA icon (straight alpha), base64 encoded.
+    AppIcon { application_id: String, size: u32, rgba_base64: String },
+
+    /// Either direction: the clipboard now holds this text. `seq` lets each side ignore
+    /// the echo of a change it applied itself.
+    ClipboardSet { seq: u64, text: String },
 
     MouseMove { window_id: u64, x: f64, y: f64 },
     MouseButton { window_id: u64, button: MouseButton, down: bool, x: f64, y: f64 },
@@ -249,6 +260,7 @@ impl Message {
                 Channel::WindowMetadata
             }
             Ping { .. } | Pong { .. } => Channel::Telemetry,
+            ClipboardSet { .. } => Channel::Clipboard,
             _ => Channel::Control,
         }
     }
@@ -331,6 +343,50 @@ pub fn read_message<R: Read>(r: &mut R) -> Result<Option<Message>, ProtocolError
     serde_json::from_slice(&payload).map(Some).map_err(|e| ProtocolError::Malformed(e.to_string()))
 }
 
+
+// ---------------------------------------------------------------- base64 (icons)
+
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+pub fn base64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            if i <= c.len() {
+                out.push(B64[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+pub fn base64_decode(s: &str) -> Result<Vec<u8>, ProtocolError> {
+    let val = |b: u8| -> Result<u32, ProtocolError> {
+        B64.iter().position(|&x| x == b).map(|p| p as u32).ok_or_else(|| ProtocolError::Malformed("bad base64".into()))
+    };
+    let bytes = s.as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return Err(ProtocolError::Malformed("bad base64 length".into()));
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for q in bytes.chunks(4) {
+        let pad = q.iter().rev().take_while(|&&b| b == b'=').count();
+        if pad > 2 || q[..4 - pad].contains(&b'=') {
+            return Err(ProtocolError::Malformed("bad base64 padding".into()));
+        }
+        let mut n = 0u32;
+        for &b in &q[..4 - pad] {
+            n = n << 6 | val(b)?;
+        }
+        n <<= 6 * pad as u32;
+        let take = 3 - pad;
+        out.extend_from_slice(&n.to_be_bytes()[1..1 + take]);
+    }
+    Ok(out)
+}
 
 // ---------------------------------------------------------------- video frames
 
@@ -597,5 +653,26 @@ mod tests {
         // a video frame over the bulk limit is refused on encode
         let big = VideoFrame { window_id: 1, pts_us: 0, keyframe: false, codec: 1, width: 1, height: 1, data: vec![0; MAX_BULK_FRAME] };
         assert!(matches!(encode_video(&big), Err(ProtocolError::FrameTooLarge(..))));
+    }
+
+    #[test]
+    fn base64_roundtrip_and_rejects_garbage() {
+        for len in 0..20 {
+            let data: Vec<u8> = (0..len).map(|i| (i * 37 + 11) as u8).collect();
+            assert_eq!(base64_decode(&base64_encode(&data)).unwrap(), data, "len={len}");
+        }
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+        assert_eq!(base64_encode(b"Ma"), "TWE=");
+        assert!(base64_decode("TWF").is_err());
+        assert!(base64_decode("T=Fu").is_err());
+        assert!(base64_decode("TW?u").is_err());
+    }
+
+    #[test]
+    fn clipboard_rides_its_own_channel() {
+        let c = Message::ClipboardSet { seq: 1, text: "x".into() };
+        assert_eq!(c.channel(), Channel::Clipboard);
+        let bytes = encode(&c).unwrap();
+        assert_eq!(decode(&bytes).unwrap().unwrap().0, c);
     }
 }
