@@ -6,6 +6,7 @@
 
 use crate::keymap::*;
 use crate::native;
+use crate::comp;
 use crate::d3d;
 use crate::launcher::{self, Launcher};
 use crate::chrome;
@@ -80,6 +81,8 @@ struct Remote {
     maximized: bool,
     /// GPU presenter; `None` means GDI.
     presenter: Option<d3d::Presenter>,
+    /// DirectComposition surface (rounded window, chrome + picture); replaces `presenter`.
+    comp: Option<comp::Comp>,
     picture: Option<Picture>,
     frames: u32,
     high_surrogate: Option<u16>,
@@ -124,6 +127,8 @@ struct App {
     clip_applied: Option<String>,
     clip_seq: u64,
     d3d: bool,
+    /// Windows are composition windows (rounded, anti-aliased): decided once at start.
+    comp: bool,
     launcher: Option<Launcher>,
     /// Remote open panels we replaced with the Windows picker: panel id -> parent window id.
     panels: HashMap<u64, Option<u64>>,
@@ -197,15 +202,21 @@ pub fn run(opts: Options) -> i32 {
             shortcuts::remove_all(d);
         }
         link.send(&Message::ListApps);
-        let launcher = Launcher::create(hinst, opts.app.is_none() && !opts.smoke);
+        let mut launcher = Launcher::create(hinst, opts.app.is_none() && !opts.smoke);
+        if let Some(l) = launcher.as_mut() {
+            l.status(&format!("relay {} · session {}", opts.relay, opts.session));
+        }
         if launcher.is_none() {
             eprintln!("warning: launcher window could not be created");
         }
         let smoke = opts.smoke.then(Smoke::new);
+        native::load_fonts();
+        let use_comp = opts.d3d && comp::available();
+        eprintln!("window surfaces: {}", if use_comp { "DirectComposition (rounded corners)" } else if opts.d3d { "Direct3D 11" } else { "GDI" });
         let showcase = opts.showcase.map(Showcase::new);
         APP.with(|a| {
             *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, smoke, showcase, exit: None, hinst: hinst.0 as isize, controller: ctl,
-                icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_seq: 0, d3d: opts.d3d,
+                icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_seq: 0, d3d: opts.d3d, comp: use_comp,
                 launcher, panels: HashMap::new(), uploads: HashMap::new(), next_transfer: 1, redirect_panels: opts.windows_file_picker,
                 shortcut_dir, app_names: vec![], icon_rgba: HashMap::new(), menus: HashMap::new(), display_req: None, display: None })
         });
@@ -280,6 +291,14 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
 
 unsafe extern "system" fn launcher_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            with_app(|a| a.launcher.as_ref().map(|l| l.paint(hdc)));
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1),
         WM_SIZE => {
             with_app(|a| a.launcher.as_ref().map(|l| l.fit()));
             LRESULT(0)
@@ -507,9 +526,10 @@ fn handle_event(ev: UiEvent) {
                 let key = *a.by_id.get(&id)?;
                 let r = a.remotes.get_mut(&key)?;
                 r.frames += 1;
-                let gpu_ok = match r.presenter.as_mut() {
-                    Some(p) => p.present(&picture),
-                    None => false,
+                let gpu_ok = match (r.comp.as_mut(), r.presenter.as_mut()) {
+                    (Some(c), _) => c.present(&picture),
+                    (None, Some(p)) => p.present(&picture),
+                    _ => false,
                 };
                 if !gpu_ok && r.presenter.take().is_some() {
                     eprintln!("Direct3D presenter failed; falling back to GDI for window {id}");
@@ -560,7 +580,9 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
             style |= WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0;
         }
         let hinst = HINSTANCE(hinst as *mut c_void);
-        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), w!("RmRemoteWindow"), &HSTRING::from(title), WINDOW_STYLE(style), 40 + x.max(0), 40 + y.max(0),
+        let use_comp = with_app(|a| a.comp).unwrap_or(false);
+        let ex = if use_comp { WS_EX_NOREDIRECTIONBITMAP } else { WINDOW_EX_STYLE(0) };
+        let hwnd = CreateWindowExW(ex, w!("RmRemoteWindow"), &HSTRING::from(title), WINDOW_STYLE(style), 40 + x.max(0), 40 + y.max(0),
             w as i32, h as i32, if owned { owner.map(hwnd_of) } else { None }, None, Some(hinst), None);
         let Ok(hwnd) = hwnd else {
             eprintln!("CreateWindowExW failed for remote window {id}");
@@ -574,6 +596,9 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
             return;
         };
         native::round_corners(hwnd);
+        if use_comp {
+            native::no_border(hwnd); // our own rounded edge; DWM's 1px border would show square-ish
+        }
         let aumid = format!("RemoteMac.{}", app.replace(|c: char| !c.is_ascii_alphanumeric(), "_"));
         if !owned && !native::set_app_user_model_id(hwnd, &aumid) {
             // Taskbar identity before the window is shown: own group + icon per remote application.
@@ -581,7 +606,7 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         }
         let scale = native::dpi_scale(hwnd);
         let (cached, parent_origin) = with_app(|a| {
-            a.remotes.insert(hwnd.0 as isize, Remote { id, app: app.into(), role, parent, rx: x, ry: y, rw: w, rh: h, scale, maximized: false, presenter: None, picture: None, frames: 0,
+            a.remotes.insert(hwnd.0 as isize, Remote { id, app: app.into(), role, parent, rx: x, ry: y, rw: w, rh: h, scale, maximized: false, presenter: None, comp: None, picture: None, frames: 0,
                 high_surrogate: None, cmds: HashMap::new(), content: content.0 as isize, menu: 0, menu_x: vec![], open_menu: None, hover: false, pressed: None, active: false, owned, fullscreen: false, saved: RECT::default(), reveal: false });
             a.by_id.insert(id, hwnd.0 as isize);
             let cached = a.icons.get(app).copied();
@@ -621,9 +646,12 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         layout(hwnd);
         keep_on_screen(hwnd);
         let _ = ShowWindow(hwnd, SW_SHOW);
-        let presenter = if with_app(|a| a.d3d).unwrap_or(false) { d3d::Presenter::new(content, w, h) } else { None };
-        let renderer = presenter.as_ref().map(|p| p.kind).unwrap_or("gdi");
-        with_app(|a| a.remotes.get_mut(&(hwnd.0 as isize)).map(|r| r.presenter = presenter));
+        let compositor = if use_comp { comp::Comp::new(hwnd) } else { None };
+        let presenter = if compositor.is_none() && with_app(|a| a.d3d).unwrap_or(false) { d3d::Presenter::new(content, w, h) } else { None };
+        let renderer = compositor.as_ref().map(|c| c.kind).or(presenter.as_ref().map(|p| p.kind)).unwrap_or("gdi");
+        with_app(|a| a.remotes.get_mut(&(hwnd.0 as isize)).map(|r| { r.presenter = presenter; r.comp = compositor }));
+        layout(hwnd);
+        let _ = InvalidateRect(Some(hwnd), None, false);
         eprintln!("window created id={id} app={app} role={role:?} parent={parent:?} renderer={renderer} {w}x{h}pt scale={scale} title={title:?}");
     }
 }
@@ -741,6 +769,16 @@ fn layout(frame: HWND) {
     let (cw, ch) = client_size(frame);
     let bar = bar_px(frame);
     unsafe { let _ = MoveWindow(content, 0, bar, cw, (ch - bar).max(1), true); }
+    let square = unsafe { IsZoomed(frame).as_bool() } || is_fullscreen(frame);
+    with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).map(|r| {
+        let radius = if square { 0.0 } else { (chrome::CORNER_RADIUS * r.scale) as f32 };
+        if let Some(c) = r.comp.as_mut() {
+            c.layout(cw, ch, bar, radius);
+        }
+    }));
+    if bar == 0 {
+        with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).and_then(|r| r.comp.as_mut()).map(|c| c.set_chrome(0, 0, &[])));
+    }
 }
 
 /// Current picture size of the window expressed in Mac points.
@@ -941,8 +979,10 @@ fn fill(hdc: HDC, rc: RECT, c: chrome::Rgb) {
     }
 }
 
+/// Inter at `weight` (bundled; Segoe UI if it could not be loaded).
 fn ui_font(px: i32, weight: i32) -> HFONT {
-    unsafe { CreateFontW(-px, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, w!("Segoe UI")) }
+    let face = native::ui_face(weight);
+    unsafe { CreateFontW(-px, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, &HSTRING::from(face)) }
 }
 
 /// Paint the Mac chrome (title bar with traffic lights and title; menu strip) into `hdc`.
@@ -957,7 +997,15 @@ fn paint_chrome(frame: HWND, hdc: HDC) {
     unsafe {
         // double-buffered: draw into a bitmap, then one blit
         let mem = CreateCompatibleDC(Some(hdc));
-        let bmp = CreateCompatibleBitmap(hdc, cw, bar);
+        let dib = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: cw, biHeight: -bar, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
+            ..Default::default()
+        };
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let Ok(bmp) = CreateDIBSection(Some(mem), &dib, DIB_RGB_COLORS, &mut bits, None, 0) else {
+            let _ = DeleteDC(mem);
+            return;
+        };
         let old = SelectObject(mem, bmp.into());
         let tbg = chrome::title_bg(v.active);
         fill(mem, RECT { left: 0, top: 0, right: cw, bottom: bar }, tbg);
@@ -1039,7 +1087,17 @@ fn paint_chrome(frame: HWND, hdc: HDC) {
         SelectObject(mem, oldf);
         let _ = DeleteObject(bold.into());
         let _ = DeleteObject(regular.into());
-        let _ = BitBlt(hdc, 0, 0, cw, bar, Some(mem), 0, 0, SRCCOPY);
+        let _ = GdiFlush();
+        let composed = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.comp.is_some())).flatten().unwrap_or(false);
+        if composed {
+            // GDI leaves alpha at 0: the bar is opaque
+            let px = std::slice::from_raw_parts_mut(bits as *mut u8, (cw * bar * 4) as usize);
+            px.chunks_exact_mut(4).for_each(|p| p[3] = 255);
+            let px = px.to_vec();
+            with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).and_then(|r| r.comp.as_mut()).map(|c| c.set_chrome(cw, bar, &px)));
+        } else {
+            let _ = BitBlt(hdc, 0, 0, cw, bar, Some(mem), 0, 0, SRCCOPY);
+        }
         SelectObject(mem, old);
         let _ = DeleteObject(bmp.into());
         let _ = DeleteDC(mem);
@@ -1279,7 +1337,8 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
-            if !repaint_gpu(frame) {
+            let composed = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.comp.is_some())).flatten().unwrap_or(false);
+            if !composed && !repaint_gpu(frame) {
                 paint_into(frame, hdc, client_size(hwnd));
             }
             let _ = EndPaint(hwnd, &ps);
@@ -1437,29 +1496,13 @@ fn title_of(hwnd: HWND) -> String {
 }
 
 fn painted_colors(frame: HWND) -> usize {
-    let hwnd = content_of(frame).unwrap_or(frame);
-    unsafe {
-        let (w, h) = client_size(hwnd);
-        if w <= 0 || h <= 0 {
-            return 0;
-        }
-        let hdc = GetDC(Some(hwnd));
-        let mem = CreateCompatibleDC(Some(hdc));
-        let bmp = CreateCompatibleBitmap(hdc, w, h);
-        let old = SelectObject(mem, bmp.into());
-        let _ = PrintWindow(hwnd, mem, PRINT_WINDOW_FLAGS(0x2)); // PW_RENDERFULLCONTENT
-        let mut bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
-            ..Default::default()
-        };
-        let mut buf = vec![0u8; (w * h * 4) as usize];
-        GetDIBits(mem, bmp, 0, h as u32, Some(buf.as_mut_ptr() as *mut c_void), &mut bmi, DIB_RGB_COLORS);
-        SelectObject(mem, old);
-        let _ = DeleteObject(bmp.into());
-        let _ = DeleteDC(mem);
-        ReleaseDC(Some(hwnd), hdc);
-        Picture { width: w as usize, height: h as usize, bgra: buf }.distinct_colors()
-    }
+    // the picture area (under the bar)
+    let bar = bar_px(frame);
+    capture(frame, false).map(|s| {
+        let rows = (s.h - bar).max(0);
+        let start = (bar * s.w * 4) as usize;
+        distinct(&Shot { w: s.w, h: rows, px: s.px[start..].to_vec() })
+    }).unwrap_or(0)
 }
 
 fn light_center(l: chrome::Light, scale: f64) -> (i32, i32) {
@@ -1497,7 +1540,57 @@ impl Shot {
 
 /// The window as it is composed on screen (PrintWindow full content: chrome, picture, Direct3D).
 /// `whole`: the outer window (borders included) instead of the client area.
+/// What is on screen in the window's client (or whole) rect, brought to the top first. Used when
+/// PrintWindow cannot see composition content.
+fn capture_screen(hwnd: HWND, whole: bool) -> Option<Shot> {
+    unsafe {
+        let (x, y, w, h) = if whole {
+            let mut r = RECT::default();
+            let _ = GetWindowRect(hwnd, &mut r);
+            (r.left, r.top, r.right - r.left, r.bottom - r.top)
+        } else {
+            let mut o = POINT::default();
+            let _ = ClientToScreen(hwnd, &mut o);
+            let (w, h) = client_size(hwnd);
+            (o.x, o.y, w, h)
+        };
+        if w <= 0 || h <= 0 {
+            return None;
+        }
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        let _ = windows::Win32::Graphics::Dwm::DwmFlush();
+        std::thread::sleep(Duration::from_millis(250));
+        let screen = GetDC(None);
+        let mem = CreateCompatibleDC(Some(screen));
+        let bmp = CreateCompatibleBitmap(screen, w, h);
+        let old = SelectObject(mem, bmp.into());
+        let _ = BitBlt(mem, 0, 0, w, h, Some(screen), x, y, SRCCOPY);
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
+            ..Default::default()
+        };
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        GetDIBits(mem, bmp, 0, h as u32, Some(px.as_mut_ptr() as *mut c_void), &mut bmi, DIB_RGB_COLORS);
+        SelectObject(mem, old);
+        let _ = DeleteObject(bmp.into());
+        let _ = DeleteDC(mem);
+        ReleaseDC(None, screen);
+        let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        Some(Shot { w, h, px })
+    }
+}
+
+/// The window's picture: PrintWindow (full content), or the screen when that comes back blank
+/// (composition windows).
 fn capture(hwnd: HWND, whole: bool) -> Option<Shot> {
+    let shot = capture_print(hwnd, whole);
+    match shot {
+        Some(s) if distinct(&s) > 8 => Some(s),
+        _ => capture_screen(hwnd, whole),
+    }
+}
+
+fn capture_print(hwnd: HWND, whole: bool) -> Option<Shot> {
     unsafe {
         let (w, h) = if whole {
             let mut r = RECT::default();
@@ -1756,9 +1849,25 @@ fn smoke_tick() {
             let content_top = content_of(main).map(|c| { let mut r = RECT::default(); let _ = GetWindowRect(c, &mut r); r.top - org.y }).unwrap_or(-1);
             let ok = style & WS_CAPTION.0 != WS_CAPTION.0 && caption == HTCAPTION && on_light == HTCLIENT && lights_ok && content_top == bar_px(main);
             finish("Mac window chrome: traffic lights, own title bar, menu strip above the picture", ok,
-                format!("caption={caption} light={on_light} lights={colors:?} want={want:?} active={active} pictureTop={content_top} bar={}", bar_px(main)), 44);
-            click_light(main, chrome::Light::Minimize);
+                format!("caption={caption} light={on_light} lights={colors:?} want={want:?} active={active} pictureTop={content_top} bar={}", bar_px(main)), 47);
         },
+        (47, Some((main, _))) => {
+            // rounded, anti-aliased corners: the very corner shows what is behind the window,
+            // the bar a few pixels along is the bar
+            let composed = with_app(|a| a.remotes.get(&(main.0 as isize)).map(|r| r.comp.is_some())).flatten().unwrap_or(false);
+            if composed {
+                let shot = capture_screen(main, false);
+                let active = with_app(|a| a.remotes.get(&(main.0 as isize)).map(|r| r.active)).flatten().unwrap_or(false);
+                let bg = chrome::title_bg(active);
+                let far = |a: (u8, u8, u8), b: (u8, u8, u8)| a.0.abs_diff(b.0) as u32 + a.1.abs_diff(b.1) as u32 + a.2.abs_diff(b.2) as u32;
+                let (corner, edge) = shot.as_ref().map(|s| (s.pixel(0, 0), s.pixel(s.w / 2, 2))).unwrap_or_default();
+                let ok = far(corner, bg) > 24 && far(edge, bg) < 12;
+                finish("rounded window corners (DirectComposition clip)", ok, format!("corner={corner:?} barEdge={edge:?} bar={bg:?}"), 44);
+            } else {
+                finish("square corners with the GDI renderer", true, "gdi".into(), 44);
+            }
+            click_light(main, chrome::Light::Minimize);
+        }
         (44, Some((main, _))) => unsafe {
             if IsIconic(main).as_bool() {
                 let _ = ShowWindow(main, SW_RESTORE);

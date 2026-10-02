@@ -3,6 +3,9 @@
 //! Mac app's menus beside them and the title centred in the space left. Geometry, hit testing and
 //! the anti-aliased light sprites are pure functions (tested on any OS); `ui` paints them with GDI.
 
+/// Window corner radius in DIPs (current macOS windows).
+pub const CORNER_RADIUS: f64 = 12.0;
+
 /// Bar height in DIPs (1 DIP = 1 Mac point).
 pub const TITLE_H: f64 = 40.0;
 /// Light diameter, centre spacing and the first centre, as on macOS.

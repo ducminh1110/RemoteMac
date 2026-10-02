@@ -188,3 +188,51 @@ pub fn round_corners_off(hwnd: HWND) {
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref as *const _ as *const std::ffi::c_void, std::mem::size_of_val(&pref) as u32);
     }
 }
+
+/// Windows 11: no 1px DWM border (the composition window draws its own rounded edge).
+pub fn no_border(hwnd: HWND) {
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
+    let none: u32 = 0xFFFF_FFFE; // DWMWA_COLOR_NONE
+    unsafe {
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &none as *const _ as *const std::ffi::c_void, 4);
+    }
+}
+
+static FONTS_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Bundled Inter (UI) and JetBrains Mono (technical details), private to this process.
+pub fn load_fonts() {
+    const FONTS: [&[u8]; 5] = [
+        include_bytes!("../fonts/Inter-Regular.ttf"),
+        include_bytes!("../fonts/Inter-Medium.ttf"),
+        include_bytes!("../fonts/Inter-SemiBold.ttf"),
+        include_bytes!("../fonts/JetBrainsMono-Regular.ttf"),
+        include_bytes!("../fonts/JetBrainsMono-Medium.ttf"),
+    ];
+    let mut all = true;
+    for f in FONTS {
+        let mut n = 0u32;
+        let h = unsafe { AddFontMemResourceEx(f.as_ptr() as *const std::ffi::c_void, f.len() as u32, None, std::ptr::addr_of_mut!(n)) };
+        all &= !h.is_invalid() && n > 0;
+    }
+    FONTS_LOADED.store(all, std::sync::atomic::Ordering::SeqCst);
+    if !all {
+        eprintln!("warning: bundled fonts not loaded; using Segoe UI");
+    }
+}
+
+/// GDI face name of Inter at a weight (each static weight is its own family for GDI).
+pub fn ui_face(weight: i32) -> &'static str {
+    if !FONTS_LOADED.load(std::sync::atomic::Ordering::SeqCst) {
+        return "Segoe UI";
+    }
+    match weight {
+        w if w >= 600 => "Inter SemiBold",
+        w if w >= 500 => "Inter Medium",
+        _ => "Inter",
+    }
+}
+
+pub fn mono_face() -> &'static str {
+    if FONTS_LOADED.load(std::sync::atomic::Ordering::SeqCst) { "JetBrains Mono" } else { "Consolas" }
+}
