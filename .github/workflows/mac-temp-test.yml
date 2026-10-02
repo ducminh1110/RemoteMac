@@ -1,22 +1,15 @@
-name: Temporary Mac Test Server
+name: Temporary RemoteMac macOS Environment
 
 on:
   workflow_dispatch:
-    inputs:
-      macos_runner:
-        description: "macOS runner"
-        required: true
-        default: "macos-15"
-        type: string
 
 permissions:
   contents: read
 
 jobs:
-  temporary-mac:
-    name: Temporary RemoteMac
-    runs-on: ${{ inputs.macos_runner }}
-
+  mac-environment:
+    name: RemoteMac macOS Runner
+    runs-on: macos-15
     timeout-minutes: 360
 
     env:
@@ -25,159 +18,191 @@ jobs:
       RM_RELAY_KEY: ${{ secrets.RM_RELAY_KEY }}
 
     steps:
-      - name: Checkout RemoteMac
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: claude/inspiring-einstein-er2d37
 
-      - name: Show Mac environment
-        shell: bash
+      - name: Install dependencies
         run: |
-          set -euo pipefail
+          brew install openssl || true
 
-          echo "=========================================="
-          echo " RemoteMac Temporary macOS Environment"
-          echo "=========================================="
-          echo "Machine name : $(scutil --get ComputerName 2>/dev/null || hostname)"
-          echo "Hostname     : $(hostname)"
-          echo "macOS        : $(sw_vers -productVersion)"
-          echo "Architecture : $(uname -m)"
-          echo "Runner       : $RUNNER_NAME"
-          echo "Session      : $RM_SESSION_ID"
-          echo "Relay        : $RM_RELAY_HOST"
-          echo "=========================================="
+      - name: Show Mac information
+        run: |
+          echo "=============================="
+          echo " RemoteMac Temporary Mac"
+          echo "=============================="
+          echo "Machine:"
+          scutil --get ComputerName || hostname
+
+          echo "macOS:"
+          sw_vers
+
+          echo "Architecture:"
+          uname -m
+
+          echo "Runner:"
+          echo "$RUNNER_NAME"
+
+          echo "Session:"
+          echo "$RM_SESSION_ID"
+
+          echo "Relay:"
+          echo "$RM_RELAY_HOST"
+
+          echo "=============================="
 
       - name: Generate session token
         shell: bash
         run: |
           set -euo pipefail
 
-          SESSION_TOKEN="$(openssl rand -hex 16)"
+          TOKEN=$(openssl rand -hex 16)
 
-          echo "RM_SESSION_TOKEN=$SESSION_TOKEN" >> "$GITHUB_ENV"
+          echo "RM_SESSION_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
           echo ""
-          echo "=========================================="
-          echo " RemoteMac connection information"
-          echo "=========================================="
-          echo "Machine name : $(scutil --get ComputerName 2>/dev/null || hostname)"
-          echo "Session ID   : $RM_SESSION_ID"
-          echo "Session token: $SESSION_TOKEN"
-          echo "Relay        : $RM_RELAY_HOST"
-          echo "=========================================="
-          echo ""
-          echo "Use these values with the RemoteMac Windows viewer."
-          echo "The relay admission key is intentionally NOT printed."
+          echo "=============================="
+          echo " RemoteMac Connection Info"
+          echo "=============================="
+          echo "Session ID:"
+          echo "$RM_SESSION_ID"
 
-      - name: Verify relay configuration
-        shell: bash
+          echo "Session Token:"
+          echo "$TOKEN"
+
+          echo "Relay:"
+          echo "$RM_RELAY_HOST"
+
+          echo "=============================="
+
+      - name: Check relay connectivity
         run: |
-          set -euo pipefail
+          set -eux
 
-          if [[ -z "${RM_RELAY_KEY:-}" ]]; then
-            echo "::error::RM_RELAY_KEY is not configured."
-            exit 1
-          fi
+          echo "DNS:"
+          dig +short remotemac.mooo.com
 
-          echo "Relay admission key is configured."
+          echo "TCP:"
+          nc -vz -w 10 remotemac.mooo.com 7470
 
       - name: Build macOS agent
         shell: bash
         run: |
           set -euo pipefail
 
-          xcode-select -p
-          swift --version
-          clang --version
-
           chmod +x ./scripts/build-agent-macos.sh
+
           ./scripts/build-agent-macos.sh
 
-          test -x ./out/remote-agent-mac
-
-          echo "RemoteMac agent built successfully."
+          ls -lah out/
 
       - name: Start RemoteMac agent
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Starting RemoteMac macOS agent..."
-          echo "Machine: $(scutil --get ComputerName 2>/dev/null || hostname)"
-          echo "Session: $RM_SESSION_ID"
-          echo "Relay: $RM_RELAY_HOST"
+          if [ -z "${RM_RELAY_KEY:-}" ]; then
+            echo "Missing RM_RELAY_KEY"
+            exit 1
+          fi
+
+          export RM_SESSION_TOKEN="$RM_SESSION_TOKEN"
+          export RM_RELAY_KEY="$RM_RELAY_KEY"
+
+          echo "Starting RemoteMac agent"
 
           ./out/remote-agent-mac \
             --relay "$RM_RELAY_HOST" \
             --session "$RM_SESSION_ID" \
             > "$RUNNER_TEMP/remote-agent.log" 2>&1 &
 
-          AGENT_PID=$!
-          echo "$AGENT_PID" > "$RUNNER_TEMP/remote-agent.pid"
+          PID=$!
 
-          sleep 3
+          echo "$PID" > "$RUNNER_TEMP/agent.pid"
 
-          if ! kill -0 "$AGENT_PID" 2>/dev/null; then
-            echo "RemoteMac agent exited during startup."
-            cat "$RUNNER_TEMP/remote-agent.log" || true
+          sleep 5
+
+          if ! kill -0 "$PID" 2>/dev/null; then
+            echo "Agent exited"
+            cat "$RUNNER_TEMP/remote-agent.log"
             exit 1
           fi
 
-          echo "RemoteMac agent started."
-          echo "PID: $AGENT_PID"
+          echo "Agent running"
+          echo "PID=$PID"
 
-      - name: Keep temporary test environment alive
+      - name: Show agent startup log
+        if: always()
+        run: |
+          sleep 3
+          echo "========== Agent log =========="
+          cat "$RUNNER_TEMP/remote-agent.log" || true
+
+
+      - name: Keep Mac session alive
         shell: bash
         run: |
           set -euo pipefail
 
           echo ""
-          echo "=========================================="
-          echo " RemoteMac Mac environment is READY"
-          echo "=========================================="
-          echo "Machine      : $(scutil --get ComputerName 2>/dev/null || hostname)"
-          echo "macOS        : $(sw_vers -productVersion)"
-          echo "Architecture : $(uname -m)"
-          echo "Session      : $RM_SESSION_ID"
-          echo "Relay        : $RM_RELAY_HOST"
-          echo "=========================================="
+          echo "================================"
+          echo " RemoteMac READY"
+          echo "================================"
+
+          echo "Machine:"
+          scutil --get ComputerName || hostname
+
+          echo "Session:"
+          echo "$RM_SESSION_ID"
+
+          echo "Relay:"
+          echo "$RM_RELAY_HOST"
+
+          echo ""
+          echo "Use:"
+          echo ""
+          echo "RM_SESSION_TOKEN=$RM_SESSION_TOKEN"
           echo ""
 
           while true; do
-            if [[ -f "$RUNNER_TEMP/remote-agent.pid" ]]; then
-              AGENT_PID="$(cat "$RUNNER_TEMP/remote-agent.pid")"
 
-              if ! kill -0 "$AGENT_PID" 2>/dev/null; then
-                echo "[$(date '+%Y-%m-%d %H:%M:%S')] RemoteMac agent stopped."
-                echo "----- agent log -----"
-                cat "$RUNNER_TEMP/remote-agent.log" || true
+            if [ -f "$RUNNER_TEMP/agent.pid" ]; then
+
+              PID=$(cat "$RUNNER_TEMP/agent.pid")
+
+              if ! kill -0 "$PID" 2>/dev/null; then
+                echo "Agent stopped"
+                cat "$RUNNER_TEMP/remote-agent.log"
                 exit 1
               fi
+
             fi
 
-            # Random interval between 5 and 10 seconds.
-            DELAY=$((5 + RANDOM % 6))
-            sleep "$DELAY"
 
-            # Periodic non-sensitive status output.
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] RemoteMac test environment alive — session=$RM_SESSION_ID"
+            WAIT=$((5 + RANDOM % 6))
+
+            sleep "$WAIT"
+
+            echo "[$(date)] RemoteMac alive"
+            echo "Session=$RM_SESSION_ID"
+
           done
 
-      - name: Stop RemoteMac agent
+
+      - name: Cleanup
         if: always()
         shell: bash
         run: |
-          set +e
 
-          if [[ -f "$RUNNER_TEMP/remote-agent.pid" ]]; then
-            AGENT_PID="$(cat "$RUNNER_TEMP/remote-agent.pid")"
+          echo "Stopping agent"
 
-            if kill -0 "$AGENT_PID" 2>/dev/null; then
-              echo "Stopping RemoteMac agent..."
-              kill "$AGENT_PID"
-              sleep 2
-            fi
+          if [ -f "$RUNNER_TEMP/agent.pid" ]; then
+
+            PID=$(cat "$RUNNER_TEMP/agent.pid")
+
+            kill "$PID" || true
+
           fi
 
-          echo "----- RemoteMac agent log -----"
-          cat "$RUNNER_TEMP/remote-agent.log" 2>/dev/null || true
+
+          echo "========== Final agent log =========="
+          cat "$RUNNER_TEMP/remote-agent.log" || true
