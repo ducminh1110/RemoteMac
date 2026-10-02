@@ -1,5 +1,7 @@
-// remote-agent-mac: terminal-launched macOS agent. Speaks the rm-protocol over a relay connection.
-//   RM_SESSION_TOKEN=... remote-agent-mac --relay HOST:PORT --session ID
+// remotemac (remote-agent-mac): terminal-launched macOS agent. Speaks the rm-protocol over a relay.
+//   ./remotemac --password SECRET            -> shows "ID session to connect" + password
+//   ./remotemac                              -> same, with a random password
+//   RM_SESSION_TOKEN=... ./remotemac --relay HOST:PORT --session NAME   (scripts, CI)
 import Foundation
 import AppKit
 import ApplicationServices
@@ -8,17 +10,43 @@ import VideoToolbox
 func log(_ s: String) { FileHandle.standardError.write(Data("[agent] \(s)\n".utf8)) }
 func fail(_ s: String) -> Never { log(s); exit(1) }
 
-var relayAddr: String?, sessionID: String?
+let usage = "usage: remotemac [--password SECRET] [--id 123456789] [--relay HOST:PORT]\n       RM_SESSION_TOKEN=.. remotemac --relay HOST:PORT --session NAME"
+var relayArg: String?, sessionArg: String?, passwordArg: String?, idArg: String?
 var argv = CommandLine.arguments.dropFirst().makeIterator()
 while let a = argv.next() {
     switch a {
-    case "--relay": relayAddr = argv.next()
-    case "--session": sessionID = argv.next()
-    default: fail("usage: RM_SESSION_TOKEN=.. remote-agent-mac --relay HOST:PORT --session ID")
+    case "--relay": relayArg = argv.next()
+    case "--session": sessionArg = argv.next()
+    case "--password": passwordArg = argv.next()
+    case "--id": idArg = argv.next()?.filter(\.isNumber)
+    case "-h", "--help": print(usage); exit(0)
+    default: fail(usage)
     }
 }
-guard let relayAddr = relayAddr, let sessionID = sessionID, let token = ProcessInfo.processInfo.environment["RM_SESSION_TOKEN"] else {
-    fail("usage: RM_SESSION_TOKEN=.. remote-agent-mac --relay HOST:PORT --session ID")
+let env = ProcessInfo.processInfo.environment
+let relayAddr = relayArg ?? env["RM_RELAY"] ?? defaultRelay
+let sessionID: String, token: String
+if let s = sessionArg {
+    guard let t = env["RM_SESSION_TOKEN"] else { fail(usage) }
+    sessionID = s; token = t
+} else {
+    // ID + password mode; a restart for the next client keeps both (RM_PASSWORD, RM_ID)
+    let id = idArg ?? env["RM_ID"] ?? persistentID()
+    guard id.count == 9 else { fail("the ID must be 9 digits") }
+    let password = passwordArg ?? env["RM_PASSWORD"] ?? randomPassword()
+    guard password.count >= 4 else { fail("the password must have at least 4 characters") }
+    setenv("RM_ID", id, 1); setenv("RM_PASSWORD", password, 1)
+    sessionID = relaySession(id: id); token = sessionToken(id: id, password: password)
+    if env["RM_QUIET_BANNER"] == nil {
+        print("")
+        print("  RemoteMac is ready — connect from Windows with:")
+        print("    ID session to connect: \(displayID(id))")
+        print("    Password: \(password)")
+        print("  (relay \(relayAddr); Ctrl+C to stop)")
+        print("")
+        fflush(stdout)
+        setenv("RM_QUIET_BANNER", "1", 1) // printed once, not again after each session
+    }
 }
 
 // ---- capability probe (runtime, never assumed) ------------------------------------------------
@@ -44,8 +72,15 @@ func probeCapabilities() -> [String: Any] {
 
 // ---- connect + handshake ------------------------------------------------------------------------
 let conn: Conn
-do { conn = try Conn.connect(hostPort: relayAddr); try joinRelay(conn, session: sessionID, token: token) } catch { fail("\(error)") }
-log("relay joined, session=\(sessionID) (token not logged)")
+do { conn = try Conn.connect(hostPort: relayAddr) } catch {
+    log("relay \(relayAddr) not reachable (\(error)); retrying in 5 s"); restartForNextClient(after: 5)
+}
+log("relay joined, session=\(sessionID) (token not logged); waiting for a client")
+do { try joinRelay(conn, session: sessionID, token: token) } catch {
+    // nobody came within the relay's wait (or the relay refused): wait again
+    log("\(error); waiting again"); restartForNextClient(after: 2)
+}
+log("client connected")
 
 func readJSON() throws -> [String: Any]? {
     guard let (_, payload) = try conn.readFrame() else { return nil }
@@ -63,6 +98,7 @@ do {
     try conn.send(probeCapabilities())
 } catch { fail("handshake: \(error)") }
 log("handshake complete")
+let sender = Sender(conn: conn)
 
 // ---- runtime -------------------------------------------------------------------------------------
 let apps = AppManager()
@@ -97,7 +133,13 @@ func axWindowFor(pid: pid_t, id: CGWindowID, rect: CGRect) -> AXUIElement? {
     return nil // never guess: acting on another window is worse than reporting an error
 }
 
-func send(_ m: [String: Any]) { do { try conn.send(m) } catch { log("send failed: \(error)") } }
+func send(_ m: [String: Any]) { do { try sender.send(m) } catch { log("send failed: \(error)") } }
+sender.requestKeyframe = { wid in streamsLock.lock(); let ws = streams[CGWindowID(wid)]; streamsLock.unlock(); ws?.requestKeyframe() }
+sender.onBitrate = { b in
+    log("bitrate -> \(b / 1000) kbit/s (dropped frames so far: \(sender.dropped))")
+    streamsLock.lock(); let all = Array(streams.values); streamsLock.unlock()
+    for ws in all { ws.setBitrate(b) }
+}
 
 let menuQueue = DispatchQueue(label: "rm.menus")
 /// Read (off the main path: big apps take a moment) and send an app's menu bar.
@@ -109,7 +151,8 @@ func sendMenuBar(_ id: String) {
 }
 
 func startStream(_ id: CGWindowID, inset: CGFloat) {
-    let ws = WindowStream(windowID: id, inset: inset) { pkt in do { try conn.sendVideo(pkt) } catch { log("video send failed: \(error)") } }
+    let ws = WindowStream(windowID: id, inset: inset) { pkt in sender.sendVideo(pkt) }
+    ws.setBitrate(sender.bitrate)
     streamsLock.lock(); streams[id] = ws; streamsLock.unlock()
     Task { do { try await ws.start(); log("stream started window=\(id)") } catch { log("stream start failed window=\(id): \(error)")
         send(["type": "capability_unavailable", "capability": "capture", "reason": "\(error)"]) } }
@@ -176,7 +219,8 @@ func handle(_ m: [String: Any]) {
         guard !desktop.isActive else { break }
         send(["type": "app_launched", "application_id": desktopAppID, "pid": 0])
         send(desktop.start())
-        let ws = WindowStream(windowID: desktopWindowID, display: desktop.displayID) { pkt in do { try conn.sendVideo(pkt) } catch { log("video send failed: \(error)") } }
+        let ws = WindowStream(windowID: desktopWindowID, display: desktop.displayID) { pkt in sender.sendVideo(pkt) }
+        ws.setBitrate(sender.bitrate)
         streamsLock.lock(); streams[desktopWindowID] = ws; streamsLock.unlock()
         Task { do { try await ws.start(); log("desktop stream started") } catch { log("desktop stream failed: \(error)")
             send(["type": "capability_unavailable", "capability": "capture", "reason": "\(error)"]) } }
@@ -265,6 +309,10 @@ func handle(_ m: [String: Any]) {
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.8) { sendMenuBar(id) }
     case "clipboard_set":
         clipboard.apply(m["text"] as? String ?? "")
+    case "request_keyframe":
+        let wid = CGWindowID(int(m["window_id"]))
+        streamsLock.lock(); let ws = streams[wid]; streamsLock.unlock()
+        ws?.requestKeyframe()
     case "ping":
         send(["type": "pong", "nonce": m["nonce"] ?? 0])
     case _ where inputTypes.contains(type):
@@ -283,6 +331,8 @@ let reader = Thread {
         log("client disconnected")
     } catch { log("read loop ended: \(error)") }
     apps.terminateAll()
+    // ready for the next connection (same ID and password)
+    if sessionArg == nil { restartForNextClient() }
     exit(0)
 }
 reader.stackSize = 4 << 20

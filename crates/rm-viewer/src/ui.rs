@@ -34,6 +34,8 @@ pub struct Options {
     pub relay: String,
     pub session: String,
     pub token: String,
+    /// Ask for the Mac's ID and password in a window (session/token are derived from them).
+    pub prompt: bool,
     pub app: Option<String>,
     pub ctrl_as_command: bool,
     pub smoke: bool,
@@ -145,6 +147,20 @@ struct App {
     /// Virtual display last asked of the Mac (DisplayConfigure), and what it answered.
     display_req: Option<(u32, u32, u32)>,
     display: Option<(u32, u32)>,
+    stats: Stats,
+}
+
+/// Stream health, logged every few seconds (pictures shown, skipped as stale, bytes).
+struct Stats {
+    shown: u64,
+    skipped: u64,
+    since: Instant,
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self { shown: 0, skipped: 0, since: Instant::now() }
+    }
 }
 
 thread_local! { static APP: RefCell<Option<App>> = const { RefCell::new(None) }; }
@@ -188,11 +204,34 @@ pub fn run(opts: Options) -> i32 {
         let wake = move || {
             let _ = PostMessageW(Some(hwnd_of(ctl)), WM_UI_EVENT, WPARAM(0), LPARAM(0));
         };
-        let (link, rx) = match net::connect(&opts.relay, &opts.session, &opts.token, opts.app.as_deref(), wake) {
-            Ok(x) => x,
-            Err(e) => {
-                eprintln!("connect failed: {e}");
-                return 1;
+        native::load_fonts();
+        let mut opts = opts;
+        let (link, rx) = if opts.prompt {
+            // ID + password window; a failed attempt shows why and asks again
+            let (mut id, mut error) = (crate::connect::last_id(), None::<String>);
+            loop {
+                let Some((typed, password)) = crate::connect::ask(id.as_deref(), error.as_deref()) else { return 0 };
+                let (session, token) = (rm_protocol::session::relay_session(&typed), rm_protocol::session::token(&typed, &password));
+                match net::connect_with(&opts.relay, &session, &token, opts.app.as_deref(), false, wake) {
+                    Ok(x) => {
+                        crate::connect::remember_id(&typed);
+                        opts.session = rm_protocol::session::display_id(&typed);
+                        break x;
+                    }
+                    Err(e) => {
+                        eprintln!("connect failed: {e}");
+                        error = Some(net::friendly_error(&e));
+                        id = Some(rm_protocol::session::display_id(&typed));
+                    }
+                }
+            }
+        } else {
+            match net::connect(&opts.relay, &opts.session, &opts.token, opts.app.as_deref(), wake) {
+                Ok(x) => x,
+                Err(e) => {
+                    eprintln!("connect failed: {e}");
+                    return 1;
+                }
             }
         };
         eprintln!("connected; waiting for windows");
@@ -204,13 +243,12 @@ pub fn run(opts: Options) -> i32 {
         link.send(&Message::ListApps);
         let mut launcher = Launcher::create(hinst, opts.app.is_none() && !opts.smoke);
         if let Some(l) = launcher.as_mut() {
-            l.status(&format!("relay {} · session {}", opts.relay, opts.session));
+            l.status(&format!("Mac {} · relay {}", opts.session, opts.relay));
         }
         if launcher.is_none() {
             eprintln!("warning: launcher window could not be created");
         }
         let smoke = opts.smoke.then(Smoke::new);
-        native::load_fonts();
         let use_comp = opts.d3d && comp::available();
         eprintln!("window surfaces: {}", if use_comp { "DirectComposition (rounded corners)" } else if opts.d3d { "Direct3D 11" } else { "GDI" });
         let showcase = opts.showcase.map(Showcase::new);
@@ -218,7 +256,7 @@ pub fn run(opts: Options) -> i32 {
             *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, smoke, showcase, exit: None, hinst: hinst.0 as isize, controller: ctl,
                 icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_seq: 0, d3d: opts.d3d, comp: use_comp,
                 launcher, panels: HashMap::new(), uploads: HashMap::new(), next_transfer: 1, redirect_panels: opts.windows_file_picker,
-                shortcut_dir, app_names: vec![], icon_rgba: HashMap::new(), menus: HashMap::new(), display_req: None, display: None })
+                shortcut_dir, app_names: vec![], icon_rgba: HashMap::new(), menus: HashMap::new(), display_req: None, display: None, stats: Stats::default() })
         });
         SetTimer(Some(controller), TIMER_ID, 100, None);
         if opts.clipboard && !native::listen_clipboard(controller) {
@@ -271,6 +309,7 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             LRESULT(0)
         }
         WM_TIMER => {
+            stats_tick();
             smoke_tick();
             showcase_tick();
             LRESULT(0)
@@ -392,11 +431,39 @@ fn on_local_clipboard(owner: HWND) {
     });
 }
 
+fn stats_tick() {
+    with_app(|a| {
+        let secs = a.stats.since.elapsed().as_secs_f64();
+        if secs >= 5.0 {
+            if a.stats.shown > 0 {
+                eprintln!("stream: {:.0} fps shown, {} stale pictures skipped", a.stats.shown as f64 / secs, a.stats.skipped);
+            }
+            a.stats = Stats::default();
+        }
+    });
+}
+
 fn drain_events() {
     let events: Vec<UiEvent> = with_app(|a| a.rx.try_iter().collect()).unwrap_or_default();
-    for ev in events {
+    for ev in latest_frames_only(events) {
         handle_event(ev);
     }
+}
+
+/// Of several pictures queued for one window only the newest is shown (the others would only
+/// add latency); everything else keeps its order.
+fn latest_frames_only(events: Vec<UiEvent>) -> Vec<UiEvent> {
+    let mut last: HashMap<u64, usize> = HashMap::new();
+    for (i, e) in events.iter().enumerate() {
+        if let UiEvent::Frame { id, .. } = e {
+            last.insert(*id, i);
+        }
+    }
+    let skipped = events.iter().enumerate().filter(|(i, e)| matches!(e, UiEvent::Frame { id, .. } if last.get(id) != Some(i))).count();
+    if skipped > 0 {
+        with_app(|a| a.stats.skipped += skipped as u64);
+    }
+    events.into_iter().enumerate().filter(|(i, e)| !matches!(e, UiEvent::Frame { id, .. } if last.get(id) != Some(i))).map(|(_, e)| e).collect()
 }
 
 fn handle_event(ev: UiEvent) {
@@ -526,6 +593,7 @@ fn handle_event(ev: UiEvent) {
                 let key = *a.by_id.get(&id)?;
                 let r = a.remotes.get_mut(&key)?;
                 r.frames += 1;
+                a.stats.shown += 1;
                 let gpu_ok = match (r.comp.as_mut(), r.presenter.as_mut()) {
                     (Some(c), _) => c.present(&picture),
                     (None, Some(p)) => p.present(&picture),

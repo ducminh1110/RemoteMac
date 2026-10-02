@@ -22,6 +22,21 @@ Ba lớp khoá:
 
 ---
 
+## 0. Cách nhanh nhất (bản phát hành)
+
+Workflow **Release builds** (tab Actions) tạo sẵn 3 gói, đã cài sẵn `remotemac.mooo.com` và key:
+
+| Gói | Chạy ở đâu | Dùng thế nào |
+|---|---|---|
+| `remotemac-relay.tar.gz` | server | `tar -xzf remotemac-relay.tar.gz && cd remotemac-relay && sudo ./remotemac-relay-setup.sh` — tự cài từ A–Z, rồi in các cổng cần mở (**TCP 7470**, TCP 22) |
+| `remotemac-macos.tar.gz` | Mac | `tar -xzf remotemac-macos.tar.gz && cd remotemac && xattr -d com.apple.quarantine remotemac; ./remotemac --password MatKhau` → in ra `ID session to connect` + `Password` |
+| `RemoteMac-windows.zip` | Windows | mở `RemoteMac.exe`, gõ ID + mật khẩu, bấm **Connect** |
+
+Chạy lại script trên server là cập nhật relay (key giữ nguyên). Các mục dưới đây là cách làm tay
+từng bước (để hiểu hoặc khi gỡ lỗi).
+
+---
+
 ## 1. DNS (FreeDNS)
 
 Bản ghi `A`: `remotemac.mooo.com` → IP server (hiện `140.211.166.242`).
@@ -202,6 +217,8 @@ GitHub và biến môi trường trên các máy.
 | `ERR not admitted` | `RM_RELAY_KEY` trên máy không khớp với server |
 | `ERR session mismatch` | token hai bên khác nhau, hoặc hai máy cùng vai trò (2 agent) vào cùng session |
 | `ERR pair timeout` | bên kia không vào trong 5 phút; chạy lại |
+| Viewer báo *This Mac is not online* | trên Mac chưa chạy `./remotemac`, hoặc gõ sai ID |
+| Viewer báo *Wrong password* | sai mật khẩu; sai 5 lần thì session bị khoá 1 phút (*Too many wrong passwords*) |
 | `ERR bad session or token` | session chỉ được chữ/số/`-` (≤64 ký tự); token 16–128 ký tự |
 | Mac vào được nhưng không có hình | chưa cấp quyền Screen Recording / Accessibility cho Terminal |
 | Xem log relay | `journalctl -u rm-relay -f` |

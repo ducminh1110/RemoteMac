@@ -12,7 +12,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MAX_HELLO_LINE: u64 = 512;
 const MAX_PENDING: usize = 1024;
@@ -32,12 +32,28 @@ pub struct Join {
     /// Admission key of a relay that is reachable from the internet (`RM_RELAY_KEY`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// False: do not wait for the peer; if nobody is waiting under this session the relay answers
+    /// `ERR no such session` at once (a viewer asking for a Mac that is not online).
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub wait: bool,
 }
 
-/// Admission key for joins, from the environment (`RM_RELAY_KEY`), if set.
-pub fn env_key() -> Option<String> {
-    std::env::var("RM_RELAY_KEY").ok().filter(|k| !k.is_empty())
+fn yes() -> bool {
+    true
 }
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+/// Admission key for joins: the environment (`RM_RELAY_KEY`), else the key built into this
+/// binary (release builds set `RM_RELAY_KEY` at compile time, so users need not configure it).
+pub fn env_key() -> Option<String> {
+    std::env::var("RM_RELAY_KEY").ok().filter(|k| !k.is_empty()).or_else(|| option_env!("RM_RELAY_KEY").filter(|k| !k.is_empty()).map(String::from))
+}
+
+/// Wrong tokens allowed per session before it is locked (stops password guessing).
+pub const MAX_FAILURES: u32 = 5;
+pub const LOCKOUT: Duration = Duration::from_secs(60);
 
 struct Pending {
     token: String,
@@ -52,15 +68,19 @@ pub struct Config {
     /// When set, only joins presenting this key are paired (anyone else is refused before
     /// taking a slot): a relay on a public address is not an open pipe.
     pub key: Option<String>,
+    /// Test aid: limit each direction to this many kilobits per second (a slow, far link).
+    pub throttle_kbps: Option<u32>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { pair_timeout: Duration::from_secs(300), hello_timeout: Duration::from_secs(10), key: None }
+        Self { pair_timeout: Duration::from_secs(300), hello_timeout: Duration::from_secs(10), key: None, throttle_kbps: None }
     }
 }
 
 type Table = Arc<Mutex<HashMap<String, Pending>>>;
+/// session -> (wrong tokens, since)
+type Failures = Arc<Mutex<HashMap<String, (u32, Instant)>>>;
 
 pub fn constant_time_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
@@ -77,10 +97,11 @@ fn valid_session_id(s: &str) -> bool {
 
 pub fn serve(listener: TcpListener, cfg: Config) {
     let table: Table = Arc::new(Mutex::new(HashMap::new()));
+    let failures: Failures = Arc::new(Mutex::new(HashMap::new()));
     for conn in listener.incoming().flatten() {
-        let (table, cfg) = (table.clone(), cfg.clone());
+        let (table, failures, cfg) = (table.clone(), failures.clone(), cfg.clone());
         thread::spawn(move || {
-            let _ = handle(conn, table, cfg);
+            let _ = handle(conn, table, failures, cfg);
         });
     }
 }
@@ -89,7 +110,9 @@ fn reject(mut s: TcpStream, why: &str) -> std::io::Result<()> {
     s.write_all(format!("ERR {why}\n").as_bytes())
 }
 
-fn handle(conn: TcpStream, table: Table, cfg: Config) -> std::io::Result<()> {
+fn handle(conn: TcpStream, table: Table, failures: Failures, cfg: Config) -> std::io::Result<()> {
+    // small control/input messages must not wait for Nagle
+    let _ = conn.set_nodelay(true);
     conn.set_read_timeout(Some(cfg.hello_timeout))?;
     // Read the join line byte-by-byte-ish via a limited BufReader, taking care
     // not to swallow payload bytes that follow it.
@@ -114,19 +137,35 @@ fn handle(conn: TcpStream, table: Table, cfg: Config) -> std::io::Result<()> {
         return reject(conn, "bad session or token");
     }
 
+    {
+        let mut f = failures.lock().unwrap();
+        f.retain(|_, (_, since)| since.elapsed() < LOCKOUT);
+        if f.get(&join.session_id).is_some_and(|(n, _)| *n >= MAX_FAILURES) {
+            drop(f);
+            return reject(conn, "locked");
+        }
+    }
     let peer = {
         let mut t = table.lock().unwrap();
         match t.remove(&join.session_id) {
             Some(p) => {
                 if !constant_time_eq(&p.token, &join.token) || p.role == join.role {
-                    // Put the legitimate waiter back; refuse the intruder.
+                    // Put the legitimate waiter back; refuse the intruder, and count the attempt.
                     t.insert(join.session_id.clone(), p);
                     drop(t);
+                    let mut f = failures.lock().unwrap();
+                    let e = f.entry(join.session_id.clone()).or_insert((0, Instant::now()));
+                    e.0 += 1;
                     return reject(conn, "session mismatch");
                 }
+                failures.lock().unwrap().remove(&join.session_id);
                 Some(p)
             }
             None => {
+                if !join.wait {
+                    drop(t);
+                    return reject(conn, "no such session");
+                }
                 if t.len() >= MAX_PENDING {
                     drop(t);
                     return reject(conn, "relay busy");
@@ -158,21 +197,47 @@ fn handle(conn: TcpStream, table: Table, cfg: Config) -> std::io::Result<()> {
             let mut b = conn;
             a.write_all(b"READY\n")?;
             b.write_all(b"READY\n")?;
-            pipe(a, b);
+            pipe(a, b, cfg.throttle_kbps);
             Ok(())
         }
     }
 }
 
-fn pipe(a: TcpStream, b: TcpStream) {
+/// Copy bytes, at most `kbps` kilobits per second when set (token bucket, 20 ms quanta).
+fn copy_limited(r: &mut TcpStream, w: &mut TcpStream, kbps: Option<u32>) {
+    let Some(kbps) = kbps else {
+        let _ = std::io::copy(r, w);
+        return;
+    };
+    let rate = kbps as f64 * 1000.0 / 8.0; // bytes per second
+    let mut buf = vec![0u8; 16 * 1024];
+    let start = Instant::now();
+    let mut sent = 0f64;
+    loop {
+        let n = match r.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        sent += n as f64;
+        let due = Duration::from_secs_f64(sent / rate);
+        if let Some(wait) = due.checked_sub(start.elapsed()) {
+            thread::sleep(wait);
+        }
+        if w.write_all(&buf[..n]).is_err() {
+            return;
+        }
+    }
+}
+
+fn pipe(a: TcpStream, b: TcpStream, kbps: Option<u32>) {
     let (mut a_r, mut b_w) = (a.try_clone().unwrap(), b.try_clone().unwrap());
     let (mut b_r, mut a_w) = (b, a);
     let t1 = thread::spawn(move || {
-        let _ = std::io::copy(&mut a_r, &mut b_w);
+        copy_limited(&mut a_r, &mut b_w, kbps);
         let _ = b_w.shutdown(std::net::Shutdown::Both);
     });
     let t2 = thread::spawn(move || {
-        let _ = std::io::copy(&mut b_r, &mut a_w);
+        copy_limited(&mut b_r, &mut a_w, kbps);
         let _ = a_w.shutdown(std::net::Shutdown::Both);
     });
     let _ = t1.join();
@@ -181,8 +246,16 @@ fn pipe(a: TcpStream, b: TcpStream) {
 
 /// Client/agent helper: connect, send join line, wait for READY.
 pub fn join(addr: &str, session_id: &str, role: Role, token: &str) -> std::io::Result<TcpStream> {
-    let mut s = TcpStream::connect(addr)?;
-    let j = serde_json::to_string(&Join { session_id: session_id.into(), role, token: token.into(), key: env_key() }).unwrap();
+    join_with(addr, session_id, role, token, true)
+}
+
+/// [`join`], optionally failing at once (`ERR no such session`) when the peer is not waiting.
+pub fn join_with(addr: &str, session_id: &str, role: Role, token: &str, wait: bool) -> std::io::Result<TcpStream> {
+    use std::net::ToSocketAddrs;
+    let target = addr.to_socket_addrs()?.next().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "relay address not found"))?;
+    let mut s = TcpStream::connect_timeout(&target, Duration::from_secs(10))?;
+    let _ = s.set_nodelay(true);
+    let j = serde_json::to_string(&Join { session_id: session_id.into(), role, token: token.into(), key: env_key(), wait }).unwrap();
     s.write_all(j.as_bytes())?;
     s.write_all(b"\n")?;
     let mut line = Vec::new();
@@ -271,7 +344,7 @@ mod tests {
 
     #[test]
     fn pair_timeout_evicts() {
-        let addr = start(Config { pair_timeout: Duration::from_millis(200), hello_timeout: Duration::from_secs(2), key: None });
+        let addr = start(Config { pair_timeout: Duration::from_millis(200), hello_timeout: Duration::from_secs(2), key: None, throttle_kbps: None });
         let r = join(&addr, "sess-4", Role::Agent, TOK);
         // the waiter is told READY never comes; it receives ERR pair timeout
         assert!(r.is_err());
@@ -289,7 +362,7 @@ mod tests {
         let addr = start(Config { key: Some("relay-admission-key".into()), ..Default::default() });
         let line = |key: Option<&str>| {
             let mut s = TcpStream::connect(&addr).unwrap();
-            let j = serde_json::to_string(&Join { session_id: "k1".into(), role: Role::Agent, token: TOK.into(), key: key.map(Into::into) }).unwrap();
+            let j = serde_json::to_string(&Join { session_id: "k1".into(), role: Role::Agent, token: TOK.into(), key: key.map(Into::into), wait: true }).unwrap();
             s.write_all(format!("{j}\n").as_bytes()).unwrap();
             s.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
             let mut buf = [0u8; 64];
@@ -300,5 +373,53 @@ mod tests {
         assert_eq!(line(Some("wrong")).1, "ERR not admitted\n");
         let (_waiter, reply) = line(Some("relay-admission-key"));
         assert_eq!(reply, "", "an admitted agent waits for its client");
+    }
+
+    #[test]
+    fn password_guessing_locks_the_session() {
+        let addr = start(Config::default());
+        let _agent = std::thread::spawn({
+            let a = addr.clone();
+            move || join(&a, "lock-1", Role::Agent, TOK)
+        });
+        thread::sleep(Duration::from_millis(100));
+        let attempt = |tok: &str| join(&addr, "lock-1", Role::Client, tok).err().map(|e| e.to_string());
+        for _ in 0..MAX_FAILURES {
+            assert_eq!(attempt("wrong-token-0123456789").as_deref(), Some("ERR session mismatch"));
+        }
+        // now even the right token is refused for a while
+        assert_eq!(attempt(TOK).as_deref(), Some("ERR locked"));
+    }
+
+    #[test]
+    fn client_need_not_wait_for_an_offline_mac() {
+        let addr = start(Config::default());
+        let t = Instant::now();
+        let e = join_with(&addr, "offline-1", Role::Client, TOK, false).unwrap_err();
+        assert_eq!(e.to_string(), "ERR no such session");
+        assert!(t.elapsed() < Duration::from_secs(2));
+        // with the Mac waiting, the same join pairs
+        let a = addr.clone();
+        let agent = thread::spawn(move || join(&a, "offline-1", Role::Agent, TOK).map(|_| ()));
+        thread::sleep(Duration::from_millis(100));
+        assert!(join_with(&addr, "offline-1", Role::Client, TOK, false).is_ok());
+        assert!(agent.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn throttled_link_is_slow() {
+        let addr = start(Config { throttle_kbps: Some(800), ..Default::default() }); // 100 KB/s
+        let a = addr.clone();
+        let agent = thread::spawn(move || {
+            let mut s = join(&a, "slow-1", Role::Agent, TOK).unwrap();
+            s.write_all(&vec![7u8; 50_000]).unwrap();
+        });
+        thread::sleep(Duration::from_millis(100));
+        let mut c = join(&addr, "slow-1", Role::Client, TOK).unwrap();
+        let t = Instant::now();
+        let mut got = vec![0u8; 50_000];
+        c.read_exact(&mut got).unwrap();
+        assert!(t.elapsed() >= Duration::from_millis(400), "50 KB at 100 KB/s took {:?}", t.elapsed());
+        agent.join().unwrap();
     }
 }

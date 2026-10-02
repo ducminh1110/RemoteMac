@@ -1,0 +1,166 @@
+name: Release builds
+
+# The three things a user downloads, all set up for remotemac.mooo.com:
+#   remotemac-macos.tar.gz   the Mac agent (universal: Apple silicon + Intel):  ./remotemac --password PASS
+#   RemoteMac-windows.zip    RemoteMac.exe: type the Mac's ID and password, done
+#   remotemac-relay.tar.gz   the relay server + remotemac-relay-setup.sh (installs it from A to Z)
+# The relay admission key comes from the RM_RELAY_KEY secret and is built into all three.
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/inspiring-einstein-er2d37]
+    paths: [agent/**, crates/**, deploy/**, scripts/build-agent-macos.sh, .github/workflows/release.yml, Cargo.*]
+
+permissions:
+  contents: read
+
+jobs:
+  mac:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build universal remotemac
+        env:
+          RM_BUILD_RELAY_KEY: ${{ secrets.RM_RELAY_KEY }}
+        run: |
+          set -euo pipefail
+          for arch in arm64 x86_64; do
+            RM_SWIFT_TARGET=$arch-apple-macos14.0 ./scripts/build-agent-macos.sh
+            mv out/remote-agent-mac out/remotemac-$arch
+          done
+          rm -f out/BuildConfig.swift
+          mkdir -p dist/remotemac
+          lipo -create out/remotemac-arm64 out/remotemac-x86_64 -output dist/remotemac/remotemac
+          codesign --force -s - dist/remotemac/remotemac
+          lipo -info dist/remotemac/remotemac
+          dist/remotemac/remotemac --help
+          cat > dist/remotemac/README.txt <<'TXT'
+          RemoteMac for macOS (14 or later, Apple silicon and Intel)
+
+            xattr -d com.apple.quarantine remotemac 2>/dev/null; chmod +x remotemac
+            ./remotemac --password YOUR-PASSWORD
+
+          It prints:
+            ID session to connect: 123 456 789
+            Password: YOUR-PASSWORD
+          Type both into RemoteMac.exe on Windows. The ID stays the same on this Mac.
+          First run: allow Terminal in System Settings > Privacy & Security >
+          Screen Recording and Accessibility, then run the command again.
+          Without --password a random password is shown. Ctrl+C stops it.
+          TXT
+          sed -i '' 's/^          //' dist/remotemac/README.txt
+          tar -C dist -czf dist/remotemac-macos.tar.gz remotemac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remotemac-macos
+          path: dist/remotemac-macos.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build RemoteMac.exe
+        env:
+          RM_RELAY_KEY: ${{ secrets.RM_RELAY_KEY }}
+        run: cargo build --release -p rm-viewer
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist\RemoteMac | Out-Null
+          Copy-Item target\release\remote-mac-viewer.exe dist\RemoteMac\RemoteMac.exe
+          @"
+          RemoteMac for Windows
+
+          1. On the Mac run:  ./remotemac --password YOUR-PASSWORD
+          2. Open RemoteMac.exe, type the ID and the password the Mac shows, press Connect.
+
+          The Mac's apps open as windows here (and in the Start menu while connected);
+          "Mac Desktop" shows the whole Mac screen. The last ID is remembered.
+          "@ -replace '(?m)^          ', '' | Set-Content dist\RemoteMac\README.txt
+          Compress-Archive -Path dist\RemoteMac\* -DestinationPath dist\RemoteMac-windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RemoteMac-windows
+          path: dist/RemoteMac-windows.zip
+
+  relay-bin:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static rm-relay (musl)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+          rustup target add ${{ matrix.arch }}-unknown-linux-musl
+          cargo build --release -p rm-relay --target ${{ matrix.arch }}-unknown-linux-musl
+          mkdir -p dist && cp target/${{ matrix.arch }}-unknown-linux-musl/release/rm-relay dist/rm-relay-${{ matrix.arch }}
+          file dist/rm-relay-${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rm-relay-${{ matrix.arch }}
+          path: dist/rm-relay-${{ matrix.arch }}
+
+  relay:
+    needs: relay-bin
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rm-relay-*
+          path: bins
+          merge-multiple: true
+      - name: Package the relay
+        env:
+          RM_RELAY_KEY: ${{ secrets.RM_RELAY_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/remotemac-relay
+          ls bins
+          cp bins/rm-relay-* dist/remotemac-relay/
+          chmod +x dist/remotemac-relay/rm-relay-*
+          # source fallback for other CPUs
+          git archive --format=tar.gz -o dist/remotemac-relay/remotemac-src.tar.gz HEAD Cargo.toml Cargo.lock rust-toolchain.toml crates
+          python3 - <<'PY'
+          import os
+          p = "deploy/remotemac-relay-setup.sh"
+          s = open(p).read().replace('BUILTIN_KEY="__RM_BUILTIN_KEY__"', 'BUILTIN_KEY="%s"' % os.environ.get("RM_RELAY_KEY", ""), 1)
+          open("dist/remotemac-relay/remotemac-relay-setup.sh", "w").write(s)
+          PY
+          chmod +x dist/remotemac-relay/remotemac-relay-setup.sh
+          bash -n dist/remotemac-relay/remotemac-relay-setup.sh
+          cat > dist/remotemac-relay/README.txt <<'TXT'
+          RemoteMac relay server (remotemac.mooo.com), Ubuntu / Debian, x86_64 or ARM
+
+            tar -xzf remotemac-relay.tar.gz && cd remotemac-relay
+            sudo ./remotemac-relay-setup.sh
+
+          Installs the relay as a systemd service, opens the port in ufw/iptables,
+          checks it and prints the ports to open in your provider's firewall:
+            TCP 7470 (relay) and TCP 22 (SSH). Running it again updates the relay.
+          TXT
+          sed -i 's/^          //' dist/remotemac-relay/README.txt
+          tar -C dist -czf dist/remotemac-relay.tar.gz remotemac-relay
+      - name: Try the setup script's relay locally
+        run: |
+          set -euo pipefail
+          B=dist/remotemac-relay/rm-relay-x86_64
+          RM_RELAY_KEY=test-key-0123456789 $B 127.0.0.1:47970 2>relay.log &
+          sleep 1
+          printf '{"session_id":"probe","role":"agent","token":"0123456789abcdef0"}\n' | timeout 3 nc -q 1 127.0.0.1 47970 | tee reply.txt
+          grep -q "ERR not admitted" reply.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remotemac-relay
+          path: dist/remotemac-relay.tar.gz

@@ -49,6 +49,22 @@ final class WindowStream: NSObject, SCStreamOutput {
     private let lock = NSLock()
     private var t0: CFAbsoluteTime = 0
     private(set) var sent = 0
+    /// next encoded frame is an IDR (client asked, or frames were dropped)
+    private var forceKey = true
+    private var bitrate = 10_000_000
+
+    func requestKeyframe() { lock.lock(); forceKey = true; lock.unlock() }
+
+    func setBitrate(_ b: Int) {
+        lock.lock(); bitrate = b; let s = session; lock.unlock()
+        if let s = s { applyBitrate(s, b) }
+    }
+
+    private func applyBitrate(_ s: VTCompressionSession, _ b: Int) {
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: b as CFNumber)
+        // hard cap per second: rate spikes are what fill the link
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [b / 8 * 3 / 2, 1] as CFArray)
+    }
 
     /// Set for a whole-display stream (Mac Desktop); `windowID` is then the reserved desktop id.
     let display: CGDirectDisplayID?
@@ -97,14 +113,25 @@ final class WindowStream: NSObject, SCStreamOutput {
 
     private func makeSession(_ w: Int, _ h: Int) -> VTCompressionSession? {
         var s: VTCompressionSession?
-        guard VTCompressionSessionCreate(allocator: nil, width: Int32(w), height: Int32(h), codecType: kCMVideoCodecType_H264,
-                                         encoderSpecification: nil, imageBufferAttributes: nil, compressedDataAllocator: nil,
-                                         outputCallback: nil, refcon: nil, compressionSessionOut: &s) == noErr, let s = s else { return nil }
+        // Apple's low-latency rate control (what FaceTime uses) when available, else the regular one
+        let lowLatency = [kVTVideoEncoderSpecification_EnableLowLatencyRateControl as String: true] as CFDictionary
+        if VTCompressionSessionCreate(allocator: nil, width: Int32(w), height: Int32(h), codecType: kCMVideoCodecType_H264,
+                                      encoderSpecification: lowLatency, imageBufferAttributes: nil, compressedDataAllocator: nil,
+                                      outputCallback: nil, refcon: nil, compressionSessionOut: &s) != noErr {
+            s = nil
+            guard VTCompressionSessionCreate(allocator: nil, width: Int32(w), height: Int32(h), codecType: kCMVideoCodecType_H264,
+                                             encoderSpecification: nil, imageBufferAttributes: nil, compressedDataAllocator: nil,
+                                             outputCallback: nil, refcon: nil, compressionSessionOut: &s) == noErr else { return nil }
+        }
+        guard let s = s else { return nil }
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Main_AutoLevel)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: 8_000_000 as CFNumber)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 1 as CFNumber)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 60 as CFNumber)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
+        applyBitrate(s, bitrate)
+        // keyframes on request (start, client resync, after drops); a long safety interval only
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 10 as CFNumber)
         VTCompressionSessionPrepareToEncodeFrames(s)
         encW = w; encH = h
         return s
@@ -119,12 +146,15 @@ final class WindowStream: NSObject, SCStreamOutput {
         lock.lock()
         if session == nil { session = makeSession(w, h) }
         let s = session; let ok = (w == encW && h == encH)
+        let key = forceKey; forceKey = false
         lock.unlock()
         guard let sess = s, ok else { return }   // size changed: the owner restarts the stream
         let ptsUs = UInt64(max(0, (CFAbsoluteTimeGetCurrent() - t0) * 1_000_000))
         let wid = UInt64(windowID), ew = UInt16(w), eh = UInt16(h)
         VTCompressionSessionEncodeFrame(sess, imageBuffer: pb, presentationTimeStamp: CMSampleBufferGetPresentationTimeStamp(sb),
-                                        duration: .invalid, frameProperties: nil, infoFlagsOut: nil) { [weak self] status, _, out in
+                                        duration: .invalid,
+                                        frameProperties: key ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary : nil,
+                                        infoFlagsOut: nil) { [weak self] status, _, out in
             guard let self = self, status == noErr, let out = out, CMSampleBufferDataIsReady(out) else { return }
             let a = CMSampleBufferGetSampleAttachmentsArray(out, createIfNecessary: false) as? [[CFString: Any]]
             let key = (a?.first?[kCMSampleAttachmentKey_NotSync] as? Bool) != true

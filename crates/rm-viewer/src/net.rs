@@ -6,8 +6,12 @@ use rm_decode::{H264Decoder, Picture};
 use rm_protocol::{write_message, Frame, Message};
 use std::collections::HashMap;
 use std::net::TcpStream;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
+
+/// Encoded frames buffered per window before the viewer gives up on catching up, drops them
+/// and asks the Mac for a fresh keyframe (Moonlight's "frame queue overflow -> IDR").
+const DECODE_QUEUE: usize = 4;
 
 #[derive(Debug)]
 pub enum UiEvent {
@@ -44,10 +48,37 @@ impl Link {
     }
 }
 
+/// Why connecting failed, in words for the user (the relay's `ERR ...` replies mapped).
+pub fn friendly_error(e: &str) -> String {
+    let m = if e.contains("no such session") {
+        "This Mac is not online. Start remotemac on the Mac and check the ID."
+    } else if e.contains("session mismatch") {
+        "Wrong password (or the Mac is already in use)."
+    } else if e.contains("locked") {
+        "Too many wrong passwords. Wait a minute and try again."
+    } else if e.contains("not admitted") {
+        "The relay refused this viewer (relay key mismatch). Use the current RemoteMac build."
+    } else if e.contains("pair timeout") {
+        "The Mac did not answer in time. Try again."
+    } else if e.contains("relay busy") {
+        "The relay is busy. Try again shortly."
+    } else if e.contains("handshake") {
+        "Connected, but the Mac did not complete the handshake. Update remotemac on the Mac."
+    } else {
+        return format!("Cannot reach the RemoteMac server: {e}");
+    };
+    m.to_string()
+}
+
 /// Connect, handshake, optionally launch `app`, and start the receive thread.
 /// `wake` is called (from the receive thread) after events are queued.
-pub fn connect(relay: &str, session: &str, token: &str, app: Option<&str>, wake: impl Fn() + Send + 'static) -> Result<(Link, Receiver<UiEvent>), String> {
-    let stream = rm_relay::join(relay, session, rm_relay::Role::Client, token).map_err(|e| format!("relay: {e}"))?;
+pub fn connect(relay: &str, session: &str, token: &str, app: Option<&str>, wake: impl Fn() + Send + Sync + 'static) -> Result<(Link, Receiver<UiEvent>), String> {
+    connect_with(relay, session, token, app, true, wake)
+}
+
+/// [`connect`]; `wait: false` fails at once when the Mac is not waiting at the relay.
+pub fn connect_with(relay: &str, session: &str, token: &str, app: Option<&str>, wait: bool, wake: impl Fn() + Send + Sync + 'static) -> Result<(Link, Receiver<UiEvent>), String> {
+    let stream = rm_relay::join_with(relay, session, rm_relay::Role::Client, token, wait).map_err(|e| format!("relay: {e}"))?;
     let writer = Arc::new(Mutex::new(stream.try_clone().map_err(|e| e.to_string())?));
     let sess = Session::handshake(stream).map_err(|e| format!("handshake: {e}"))?;
     let link = Link { writer };
@@ -58,12 +89,52 @@ pub fn connect(relay: &str, session: &str, token: &str, app: Option<&str>, wake:
     if let Some(app) = app {
         link.send(&Message::AppLaunch { application_id: app.into(), arguments: vec![], working_directory: None, environment: Default::default() });
     }
-    std::thread::spawn(move || recv_loop(sess, tx, wake));
+    let l2 = link.clone();
+    std::thread::spawn(move || recv_loop(sess, l2, tx, wake));
     Ok((link, rx))
 }
 
-fn recv_loop(mut sess: Session<TcpStream>, tx: Sender<UiEvent>, wake: impl Fn()) {
-    let mut decoders: HashMap<u64, H264Decoder> = HashMap::new();
+/// One window's decoder on its own thread: the socket keeps being read (input echoes, menus,
+/// other windows) while a big frame decodes, and the UI only ever gets finished pictures.
+struct DecodeWorker {
+    tx: SyncSender<rm_protocol::VideoFrame>,
+    /// frames are being dropped until the next keyframe
+    resync: bool,
+}
+
+fn spawn_decoder(id: u64, link: Link, tx: Sender<UiEvent>, wake: Arc<dyn Fn() + Send + Sync>) -> DecodeWorker {
+    let (ftx, frx) = sync_channel::<rm_protocol::VideoFrame>(DECODE_QUEUE);
+    std::thread::Builder::new()
+        .name(format!("rm-decode-{id}"))
+        .spawn(move || {
+            let Ok(mut d) = H264Decoder::new() else { return };
+            let mut last_ask = std::time::Instant::now() - std::time::Duration::from_secs(1);
+            for v in frx {
+                match d.decode(&v.data) {
+                    Ok(Some(picture)) => {
+                        if tx.send(UiEvent::Frame { id, picture }).is_err() {
+                            return;
+                        }
+                        wake();
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        // a broken reference chain: ask for a keyframe (at most a few per second)
+                        if last_ask.elapsed().as_millis() > 300 {
+                            link.send(&Message::RequestKeyframe { window_id: id });
+                            last_ask = std::time::Instant::now();
+                        }
+                    }
+                }
+            }
+        })
+        .expect("decode thread");
+    DecodeWorker { tx: ftx, resync: false }
+}
+
+fn recv_loop(mut sess: Session<TcpStream>, link: Link, tx: Sender<UiEvent>, wake: impl Fn() + Send + Sync + 'static) {
+    let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+    let mut decoders: HashMap<u64, DecodeWorker> = HashMap::new();
     let emit = |e: UiEvent| {
         if tx.send(e).is_ok() {
             wake();
@@ -72,9 +143,23 @@ fn recv_loop(mut sess: Session<TcpStream>, tx: Sender<UiEvent>, wake: impl Fn())
     loop {
         match sess.recv() {
             Ok(Some(Frame::Video(v))) => {
-                let d = decoders.entry(v.window_id).or_insert_with(|| H264Decoder::new().expect("decoder"));
-                if let Ok(Some(picture)) = d.decode(&v.data) {
-                    emit(UiEvent::Frame { id: v.window_id, picture });
+                let id = v.window_id;
+                let w = decoders.entry(id).or_insert_with(|| spawn_decoder(id, link.clone(), tx.clone(), wake.clone()));
+                if w.resync && !v.keyframe {
+                    continue;
+                }
+                w.resync = false;
+                match w.tx.try_send(v) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => {
+                        // decoding cannot keep up: skip ahead to a fresh keyframe instead of
+                        // showing an ever older picture
+                        w.resync = true;
+                        link.send(&Message::RequestKeyframe { window_id: id });
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
+                        decoders.remove(&id);
+                    }
                 }
             }
             Ok(Some(Frame::Msg(m))) => match m {

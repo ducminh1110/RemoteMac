@@ -2,18 +2,21 @@ use rm_client::Session;
 use rm_relay::Role;
 
 fn usage() -> ! {
-    eprintln!("usage: remote-mac --relay HOST:PORT --session ID [--launch APP_ID | --e2e APP_ID | --record FILE --apps a,b [--settle SECS] [--shots DIR]]\n       token from $RM_SESSION_TOKEN");
+    eprintln!("usage: remote-mac [--relay HOST:PORT] (--id ID --password PASS | --session NAME) [--launch APP_ID | --e2e APP_ID | --record FILE --apps a,b [--settle SECS] [--shots DIR]]\n       --session takes its token from $RM_SESSION_TOKEN; the relay defaults to $RM_RELAY or remotemac.mooo.com:7470");
     std::process::exit(2)
 }
 
 fn main() {
     let (mut relay, mut session, mut launch, mut e2e) = (None, None, None, None);
     let (mut record, mut apps, mut settle, mut shots) = (None, None, None, None);
+    let (mut id, mut password) = (None, std::env::var("RM_PASSWORD").ok());
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--relay" => relay = args.next(),
             "--session" => session = args.next(),
+            "--id" => id = args.next(),
+            "--password" => password = args.next(),
             "--launch" => launch = args.next(),
             "--e2e" => e2e = args.next(),
             "--record" => record = args.next(),
@@ -23,9 +26,17 @@ fn main() {
             _ => usage(),
         }
     }
-    let (Some(relay), Some(session)) = (relay, session) else { usage() };
-    let token = std::env::var("RM_SESSION_TOKEN").unwrap_or_else(|_| usage());
-    let stream = rm_relay::join(&relay, &session, Role::Client, &token).unwrap_or_else(|e| fail("relay", e));
+    let relay = relay.or_else(|| std::env::var("RM_RELAY").ok().filter(|r| !r.is_empty())).unwrap_or_else(|| rm_protocol::session::DEFAULT_RELAY.into());
+    // ID + password (what the Mac prints) or the legacy session name + RM_SESSION_TOKEN
+    let (session, token, wait) = match (session, id, password) {
+        (Some(s), _, _) => (s, std::env::var("RM_SESSION_TOKEN").unwrap_or_else(|_| usage()), true),
+        (None, Some(id), Some(pw)) => {
+            let id = rm_protocol::session::normalize_id(&id).unwrap_or_else(|| fail("--id", "expected the 9-digit ID the Mac prints"));
+            (rm_protocol::session::relay_session(&id), rm_protocol::session::token(&id, &pw), false)
+        }
+        _ => usage(),
+    };
+    let stream = rm_relay::join_with(&relay, &session, Role::Client, &token, wait).unwrap_or_else(|e| fail("relay", e));
     if e2e.is_some() || record.is_some() {
         stream.set_read_timeout(Some(std::time::Duration::from_secs(1))).ok();
     }

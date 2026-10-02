@@ -8,5 +8,9 @@ fn main() {
     });
     let key = rm_relay::env_key();
     eprintln!("rm-relay listening on {addr} (plaintext transport; admission key {})", if key.is_some() { "required" } else { "off" });
-    rm_relay::serve(l, rm_relay::Config { key, ..Default::default() });
+    let throttle_kbps = std::env::var("RM_RELAY_THROTTLE_KBPS").ok().and_then(|v| v.parse().ok());
+    if let Some(k) = throttle_kbps {
+        eprintln!("test mode: each direction limited to {k} kbit/s");
+    }
+    rm_relay::serve(l, rm_relay::Config { key, throttle_kbps, ..Default::default() });
 }

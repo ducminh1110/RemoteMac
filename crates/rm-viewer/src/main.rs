@@ -1,15 +1,30 @@
+// Release builds are a GUI app (no console window); errors go to the connect window.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let has = |k: &str| args.iter().any(|a| a == k);
-    let (Some(relay), Some(session)) = (get("--relay"), get("--session")) else {
-        eprintln!("usage: RM_SESSION_TOKEN=.. remote-mac-viewer --relay HOST:PORT --session ID [--app testapp] [--raw-ctrl] [--no-clipboard] [--renderer d3d11|gdi] [--mac-file-panel] [--no-shortcuts] [--smoke] [--showcase DIR --apps xcode,textedit --settle SECS --type TEXT]");
-        std::process::exit(2)
+    if has("-h") || has("--help") {
+        eprintln!("usage: RemoteMac.exe                      (asks for the Mac's ID and password)\n       RemoteMac.exe --id 123456789 --password PASS\n       RM_SESSION_TOKEN=.. RemoteMac.exe --session NAME   (legacy)\n  [--relay HOST:PORT] [--app testapp] [--raw-ctrl] [--no-clipboard] [--renderer d3d11|gdi] [--mac-file-panel] [--no-shortcuts] [--smoke] [--showcase DIR --apps xcode,textedit --settle SECS --type TEXT]");
+        std::process::exit(0)
+    }
+    let relay = get("--relay").or_else(|| std::env::var("RM_RELAY").ok().filter(|r| !r.is_empty())).unwrap_or_else(|| rm_protocol::session::DEFAULT_RELAY.into());
+    // --session (legacy, token from RM_SESSION_TOKEN) | --id + --password | the connect window
+    let (session, token, prompt) = match (get("--session"), get("--id"), get("--password").or_else(|| std::env::var("RM_PASSWORD").ok())) {
+        (Some(s), _, _) => (s, std::env::var("RM_SESSION_TOKEN").unwrap_or_default(), false),
+        (None, Some(id), Some(pw)) => match rm_protocol::session::normalize_id(&id) {
+            Some(id) => (rm_protocol::session::relay_session(&id), rm_protocol::session::token(&id, &pw), false),
+            None => {
+                eprintln!("--id must be the 9-digit ID the Mac prints");
+                std::process::exit(2)
+            }
+        },
+        _ => (String::new(), String::new(), true),
     };
-    let token = std::env::var("RM_SESSION_TOKEN").unwrap_or_default();
     #[cfg(windows)]
     {
-        let opts = rm_viewer::ui::Options { relay, session, token, app: get("--app"), ctrl_as_command: !has("--raw-ctrl"), smoke: has("--smoke"), clipboard: !has("--no-clipboard"), d3d: get("--renderer").as_deref() != Some("gdi"), windows_file_picker: !has("--mac-file-panel") && !has("--showcase"), shortcuts: !has("--no-shortcuts"),
+        let opts = rm_viewer::ui::Options { relay, session, token, prompt: prompt && !has("--smoke") && !has("--showcase"), app: get("--app"), ctrl_as_command: !has("--raw-ctrl"), smoke: has("--smoke"), clipboard: !has("--no-clipboard"), d3d: get("--renderer").as_deref() != Some("gdi"), windows_file_picker: !has("--mac-file-panel") && !has("--showcase"), shortcuts: !has("--no-shortcuts"),
             showcase: get("--showcase").map(|dir| rm_viewer::ui::ShowcaseOptions {
                 apps: get("--apps").unwrap_or_else(|| "xcode".into()).split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
                 dir: dir.into(),
@@ -21,8 +36,8 @@ fn main() {
     }
     #[cfg(not(windows))]
     {
-        let _ = (relay, session, token, has("--smoke"));
-        eprintln!("remote-mac-viewer needs Windows (the portable parts are covered by `cargo test -p rm-viewer`)");
+        let _ = (relay, session, token, prompt);
+        eprintln!("the RemoteMac viewer needs Windows (the portable parts are covered by `cargo test -p rm-viewer`)");
         std::process::exit(2);
     }
 }

@@ -37,6 +37,10 @@ final class Conn {
                 if Darwin.connect(fd, ai.pointee.ai_addr, ai.pointee.ai_addrlen) == 0 {
                     var one: Int32 = 1
                     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, socklen_t(MemoryLayout<Int32>.size))
+                    // keep at most ~128 KB unsent in the kernel: writes then block early, so the
+                    // sender sees a slow link at once instead of filling seconds of buffers
+                    var lowat: Int32 = 128 * 1024
+                    setsockopt(fd, IPPROTO_TCP, 0x201 /* TCP_NOTSENT_LOWAT */, &lowat, socklen_t(MemoryLayout<Int32>.size))
                     return Conn(fd: fd)
                 }
                 close(fd)
@@ -126,9 +130,102 @@ func int(_ v: Any?) -> Int { (v as? NSNumber)?.intValue ?? 0 }
 func joinRelay(_ conn: Conn, session: String, token: String) throws {
     var join: [String: Any] = ["session_id": session, "role": "agent", "token": token]
     // admission key of a relay on a public address
-    if let key = ProcessInfo.processInfo.environment["RM_RELAY_KEY"], !key.isEmpty { join["key"] = key }
+    if let key = ProcessInfo.processInfo.environment["RM_RELAY_KEY"].flatMap({ $0.isEmpty ? nil : $0 }) ?? (builtinRelayKey.isEmpty ? nil : builtinRelayKey) {
+        join["key"] = key
+    }
     let line = try JSONSerialization.data(withJSONObject: join)
     try conn.writeAll(line + Data([10]))
     let reply = try conn.readLine()
     if reply != "READY" { throw WireError(description: "relay refused: \(reply)") }
+}
+
+/// Everything the agent sends goes through here, on one writer thread (the approach of
+/// Sunshine/Moonlight, done for one TCP stream):
+///  - control and input replies first, video after them;
+///  - video never queues up: when a window has frames waiting, its pending frames are dropped
+///    and it waits for a fresh IDR (requested from its encoder), so what is shown stays current;
+///  - the bitrate follows the link: queueing delay or drops lower it, a clear link raises it.
+final class Sender {
+    private let conn: Conn
+    private let cond = NSCondition()
+    private var control: [Data] = []
+    private var video: [(data: Data, window: UInt64, key: Bool, queued: CFAbsoluteTime)] = []
+    private var waitingForKey: Set<UInt64> = []
+    private var maxDelay: Double = 0
+    private var congested = false
+    private var lastAdjust = CFAbsoluteTimeGetCurrent(), lastDecrease = CFAbsoluteTimeGetCurrent()
+    private(set) var dropped = 0
+    private(set) var bitrate: Int
+    let minBitrate = 1_000_000, maxBitrate = 40_000_000
+    /// Ask a window's encoder for an IDR frame.
+    var requestKeyframe: ((UInt64) -> Void)?
+    var onBitrate: ((Int) -> Void)?
+
+    init(conn: Conn, bitrate: Int = 10_000_000) {
+        self.conn = conn; self.bitrate = bitrate
+        let t = Thread { [weak self] in self?.run() }
+        t.name = "rm.sender"; t.qualityOfService = .userInteractive
+        t.start()
+    }
+
+    func send(_ msg: [String: Any]) throws {
+        let json = try JSONSerialization.data(withJSONObject: msg)
+        let d = conn.frame(channel(forType: msg["type"] as? String ?? ""), json)
+        cond.lock(); control.append(d); cond.signal(); cond.unlock()
+    }
+
+    func sendVideo(_ p: VideoPacket) {
+        var ask: UInt64?
+        cond.lock()
+        if waitingForKey.contains(p.windowID) && !p.keyframe {
+            dropped += 1                       // decoder state is gone until the IDR: skip
+        } else {
+            if p.keyframe { waitingForKey.remove(p.windowID) }
+            let pending = video.filter { $0.window == p.windowID }.count
+            if pending >= 2 && !p.keyframe {
+                // backlog: drop what is waiting for this window, start again from an IDR
+                let before = video.count
+                video.removeAll { $0.window == p.windowID }
+                dropped += before - video.count + 1
+                waitingForKey.insert(p.windowID)
+                congested = true
+                ask = p.windowID
+            } else {
+                video.append((conn.frame(.video, p.payload()), p.windowID, p.keyframe, CFAbsoluteTimeGetCurrent()))
+                cond.signal()
+            }
+        }
+        cond.unlock()
+        if let w = ask { requestKeyframe?(w) }
+    }
+
+    private func run() {
+        while true {
+            cond.lock()
+            while control.isEmpty && video.isEmpty { cond.wait() }
+            let item: (Data, CFAbsoluteTime?)
+            if !control.isEmpty { item = (control.removeFirst(), nil) } else { let v = video.removeFirst(); item = (v.data, v.queued) }
+            cond.unlock()
+            do { try conn.writeAll(item.0) } catch { log("send failed: \(error)"); return }
+            if let q = item.1 { note(delay: CFAbsoluteTimeGetCurrent() - q) }
+        }
+    }
+
+    /// Additive-increase / multiplicative-decrease on the measured queueing delay.
+    private func note(delay: Double) {
+        var change: Int?
+        cond.lock()
+        maxDelay = max(maxDelay, delay)
+        let now = CFAbsoluteTimeGetCurrent()
+        if now - lastAdjust >= 0.5 {
+            if congested || maxDelay > 0.12 {
+                bitrate = max(minBitrate, Int(Double(bitrate) * 0.7)); lastDecrease = now; change = bitrate
+            } else if maxDelay < 0.03 && now - lastDecrease > 3 && bitrate < maxBitrate {
+                bitrate = min(maxBitrate, Int(Double(bitrate) * 1.12)); change = bitrate
+            }
+            maxDelay = 0; congested = false; lastAdjust = now
+        }
+        cond.unlock()
+        if let b = change { onBitrate?(b) }
+    }
 }

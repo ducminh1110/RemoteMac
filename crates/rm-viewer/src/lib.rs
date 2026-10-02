@@ -10,6 +10,8 @@ pub mod d3d;
 #[cfg(windows)]
 pub mod comp;
 #[cfg(windows)]
+pub mod connect;
+#[cfg(windows)]
 pub mod launcher;
 #[cfg(windows)]
 pub mod native;

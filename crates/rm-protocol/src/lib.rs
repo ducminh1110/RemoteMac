@@ -301,6 +301,9 @@ pub enum Message {
     /// Client -> agent: enter / leave fullscreen for this window (on the virtual display when
     /// there is one); the new size arrives as `WindowMoved`.
     WindowFullscreen { window_id: u64, on: bool },
+    /// Client -> agent: the decoder lost sync (or just started): send an IDR frame now. Like
+    /// Moonlight, keyframes come on request instead of on a fixed timer.
+    RequestKeyframe { window_id: u64 },
 
     /// Either direction: the clipboard now holds this text. `seq` lets each side ignore
     /// the echo of a change it applied itself.
@@ -918,5 +921,55 @@ mod display_tests {
         }
         let j = serde_json::to_string(&Message::WindowFullscreen { window_id: 3, on: true }).unwrap();
         assert_eq!(j, r#"{"type":"window_fullscreen","window_id":3,"on":true}"#);
+    }
+}
+
+/// Connecting with an ID and a password (`remotemac --password ...` on the Mac, the connect
+/// dialog on Windows). The relay pairs by the ID; both sides derive the same session token from
+/// ID + password, so only someone who knows the password gets in. Kept identical in Swift
+/// (`agent/macos/Session.swift`): see the shared test vector below.
+pub mod session {
+    use sha2::{Digest, Sha256};
+
+    /// Default public relay.
+    pub const DEFAULT_RELAY: &str = "remotemac.mooo.com:7470";
+
+    /// "123 456 789", "123-456-789" -> "123456789"; None unless it is 9 digits.
+    pub fn normalize_id(id: &str) -> Option<String> {
+        let d: String = id.chars().filter(|c| !c.is_whitespace() && *c != '-').collect();
+        (d.len() == 9 && d.bytes().all(|b| b.is_ascii_digit())).then_some(d)
+    }
+
+    /// "123456789" -> "123 456 789" (how it is shown and typed).
+    pub fn display_id(id: &str) -> String {
+        let d: Vec<char> = id.chars().collect();
+        d.chunks(3).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>().join(" ")
+    }
+
+    /// Relay session name for an ID.
+    pub fn relay_session(id: &str) -> String {
+        format!("rm-{id}")
+    }
+
+    /// Session token (48 hex chars) from ID and password.
+    pub fn token(id: &str, password: &str) -> String {
+        let h = Sha256::digest(format!("remotemac/v1:{id}:{password}").as_bytes());
+        h.iter().map(|b| format!("{b:02x}")).collect::<String>()[..48].to_string()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn ids_and_tokens() {
+            assert_eq!(normalize_id(" 123 456-789 ").as_deref(), Some("123456789"));
+            assert_eq!(normalize_id("12345678"), None);
+            assert_eq!(normalize_id("12345678a"), None);
+            assert_eq!(display_id("123456789"), "123 456 789");
+            assert_eq!(relay_session("123456789"), "rm-123456789");
+            // shared vector with the Swift agent (scripts/e2e-macos.sh connects both with it)
+            assert_eq!(token("123456789", "s3cret"), "3a6365467c85f122da38bf3b7192b081049bbf94ace2a9e0");
+        }
     }
 }
