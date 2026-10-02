@@ -38,6 +38,9 @@ func annexB(_ sb: CMSampleBuffer, keyframe: Bool) -> Data? {
     return out
 }
 
+/// 4:2:0 pictures (capture and encoder) must have even sizes.
+func even(_ v: Int) -> Int { max(2, v + (v & 1)) }
+
 /// The client said its decoder takes H.264 High (set before windows start streaming).
 var useHighProfile = false
 
@@ -52,6 +55,7 @@ final class WindowStream: NSObject, SCStreamOutput {
     private let lock = NSLock()
     private var t0: CFAbsoluteTime = 0
     private(set) var sent = 0
+    private var loggedEncodeError = false
     /// next encoded frame is an IDR (client asked, or frames were dropped)
     private var forceKey = true
     private var bitrate = 10_000_000
@@ -81,7 +85,7 @@ final class WindowStream: NSObject, SCStreamOutput {
         if let did = display {
             guard let d = content.displays.first(where: { $0.displayID == did }) else { throw WireError(description: "display \(did) not shareable") }
             let cfg = SCStreamConfiguration()
-            cfg.width = max(2, d.width); cfg.height = max(2, d.height)
+            cfg.width = even(d.width); cfg.height = even(d.height)
             cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
             cfg.queueDepth = 6; cfg.showsCursor = false // the client draws its own pointer, as remote desktops do
@@ -96,7 +100,8 @@ final class WindowStream: NSObject, SCStreamOutput {
         let cfg = SCStreamConfiguration()
         let cut = min(inset, max(0, w.frame.height - 2))
         if cut > 0 { cfg.sourceRect = CGRect(x: 0, y: cut, width: w.frame.width, height: w.frame.height - cut) }
-        cfg.width = max(2, Int(w.frame.width)); cfg.height = max(2, Int(w.frame.height - cut))
+        // 4:2:0 needs even sizes (an odd one gets no frames at all): round up a pixel
+        cfg.width = even(Int(w.frame.width)); cfg.height = even(Int(w.frame.height - cut))
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
         cfg.queueDepth = 6; cfg.showsCursor = false
@@ -167,7 +172,11 @@ final class WindowStream: NSObject, SCStreamOutput {
                                         duration: .invalid,
                                         frameProperties: key ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary : nil,
                                         infoFlagsOut: nil) { [weak self] status, _, out in
-            guard let self = self, status == noErr, let out = out, CMSampleBufferDataIsReady(out) else { return }
+            guard let self = self else { return }
+            guard status == noErr, let out = out, CMSampleBufferDataIsReady(out) else {
+                if status != noErr && !self.loggedEncodeError { self.loggedEncodeError = true; log("encoder error \(status) window=\(wid) \(ew)x\(eh)") }
+                return
+            }
             let a = CMSampleBufferGetSampleAttachmentsArray(out, createIfNecessary: false) as? [[CFString: Any]]
             let key = (a?.first?[kCMSampleAttachmentKey_NotSync] as? Bool) != true
             guard let data = annexB(out, keyframe: key) else { return }
