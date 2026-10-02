@@ -50,10 +50,29 @@ final class WindowStream: NSObject, SCStreamOutput {
     private var t0: CFAbsoluteTime = 0
     private(set) var sent = 0
 
-    init(windowID: CGWindowID, inset: CGFloat = 0, onPacket: @escaping (VideoPacket) -> Void) { self.windowID = windowID; self.inset = inset; self.onPacket = onPacket }
+    /// Set for a whole-display stream (Mac Desktop); `windowID` is then the reserved desktop id.
+    let display: CGDirectDisplayID?
+
+    init(windowID: CGWindowID, inset: CGFloat = 0, display: CGDirectDisplayID? = nil, onPacket: @escaping (VideoPacket) -> Void) {
+        self.windowID = windowID; self.inset = inset; self.display = display; self.onPacket = onPacket
+    }
 
     func start() async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        if let did = display {
+            guard let d = content.displays.first(where: { $0.displayID == did }) else { throw WireError(description: "display \(did) not shareable") }
+            let cfg = SCStreamConfiguration()
+            cfg.width = max(2, d.width); cfg.height = max(2, d.height)
+            cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+            cfg.pixelFormat = kCVPixelFormatType_32BGRA
+            cfg.queueDepth = 6; cfg.showsCursor = false // the client draws its own pointer, as remote desktops do
+            let s = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: cfg, delegate: nil)
+            try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "rm.capture.display.\(did)"))
+            t0 = CFAbsoluteTimeGetCurrent()
+            try await s.startCapture()
+            scStream = s
+            return
+        }
         guard let w = content.windows.first(where: { $0.windowID == windowID }) else { throw WireError(description: "window \(windowID) not shareable") }
         let cfg = SCStreamConfiguration()
         let cut = min(inset, max(0, w.frame.height - 2))

@@ -18,9 +18,13 @@ use std::time::{Duration, Instant};
 pub const WIDTH: usize = 480;
 pub const HEIGHT: usize = 352;
 const PANEL: (usize, usize) = (320, 240);
+/// the fake Mac's screen
+const DESKTOP: (usize, usize) = (960, 600);
 pub const UPLOAD_DIR: &str = "/Users/runner/Downloads/RemoteMac Uploads";
 
-const APPS: [(&str, &str); 2] = [("testapp", "RM Test App"), ("notes", "Notes Test")];
+/// "desktop" is the whole Mac (one window showing the screen); input on it goes to the window
+/// under the pointer, like on the real agent.
+const APPS: [(&str, &str); 3] = [("desktop", "Mac Desktop"), ("testapp", "RM Test App"), ("notes", "Notes Test")];
 
 fn caps() -> CapabilityReport {
     let ok = || Capability::Available { detail: "fake agent".into() };
@@ -71,6 +75,11 @@ struct State {
     /// window sizes (last requested), and sizes before fullscreen
     sizes: HashMap<u64, (u32, u32)>,
     before_fullscreen: HashMap<u64, (u32, u32)>,
+    /// where each window is (screen points), for the desktop's pointer
+    rects: HashMap<u64, Rect>,
+    desktop: Option<u64>,
+    /// the window that last got a click on the desktop (keyboard focus there)
+    front: Option<u64>,
 }
 
 type Writer<W> = Arc<Mutex<W>>;
@@ -100,7 +109,7 @@ fn open_window<W: Write + Send + 'static>(
     role: WindowRole,
     parent: Option<u64>,
 ) -> Result<u64, ProtocolError> {
-    let (w, h) = if role == WindowRole::Window { (WIDTH, HEIGHT) } else { PANEL };
+    let (w, h) = if app == "desktop" { DESKTOP } else if role == WindowRole::Window { (WIDTH, HEIGHT) } else { PANEL };
     let stop = Arc::new(AtomicBool::new(false));
     let id = {
         let mut s = st.lock().unwrap();
@@ -110,8 +119,13 @@ fn open_window<W: Write + Send + 'static>(
         id
     };
     let t = if role == WindowRole::Window { title(title_base, 0) } else { title_base.to_string() };
-    let x = 200 + 40 * id as i32;
-    send(writer, &Message::WindowCreated { window_id: id, application_id: app.into(), title: t, bounds: Rect { x, y: 216, w: w as u32, h: h as u32 }, parent_id: parent, role })?;
+    let x = if app == "desktop" { 0 } else { 200 + 40 * id as i32 };
+    let bounds = Rect { x, y: if app == "desktop" { 0 } else { 216 }, w: w as u32, h: h as u32 };
+    st.lock().unwrap().rects.insert(id, bounds);
+    if app == "desktop" {
+        st.lock().unwrap().desktop = Some(id);
+    }
+    send(writer, &Message::WindowCreated { window_id: id, application_id: app.into(), title: t, bounds, parent_id: parent, role })?;
     let wr = writer.clone();
     let hue = (60 * id % 256) as u8;
     let handle = std::thread::spawn(move || video_loop(wr, id, w, h, hue, stop));
@@ -124,6 +138,16 @@ fn close_window<W: Write>(writer: &Writer<W>, st: &Arc<Mutex<State>>, id: u64) -
     let children: Vec<u64> = st.lock().unwrap().windows.iter().filter(|(_, w)| w.parent == Some(id)).map(|(k, _)| *k).collect();
     for c in children {
         close_window(writer, st, c)?;
+    }
+    {
+        let mut s = st.lock().unwrap();
+        s.rects.remove(&id);
+        if s.desktop == Some(id) {
+            s.desktop = None;
+        }
+        if s.front == Some(id) {
+            s.front = None;
+        }
     }
     let Some(mut w) = st.lock().unwrap().windows.remove(&id) else { return Ok(()) };
     w.stop.store(true, Ordering::SeqCst);
@@ -194,6 +218,21 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
                     _ => Message::Error { code: "menu_invoke_failed".into(), message: format!("{application_id} {path:?}") },
                 }
             }
+            // Mac Desktop: a click picks the window under the pointer; keys go to it
+            Message::MouseButton { window_id, down: true, x, y, .. } if st.lock().unwrap().desktop == Some(window_id) => {
+                let mut s = st.lock().unwrap();
+                let hit = s.rects.iter().filter(|(id, _)| Some(**id) != s.desktop).find(|(_, r)| x >= r.x as f64 && y >= r.y as f64 && x < (r.x + r.w as i32) as f64 && y < (r.y + r.h as i32) as f64).map(|(id, _)| *id);
+                s.front = hit;
+                continue;
+            }
+            Message::TextInput { window_id, text } if st.lock().unwrap().desktop == Some(window_id) => match st.lock().unwrap().front {
+                Some(front) => Message::TextInput { window_id: front, text },
+                None => continue,
+            },
+            Message::Key { window_id, physical_key, modifiers, down } if st.lock().unwrap().desktop == Some(window_id) => match st.lock().unwrap().front {
+                Some(front) => Message::Key { window_id: front, physical_key, modifiers, down },
+                None => continue,
+            },
             m => m,
         };
         match msg {
@@ -322,6 +361,7 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
             Message::PanelCancel { window_id } => close_window(&writer, &st, window_id)?,
             Message::WindowResizeRequest { window_id, width, height } => {
                 st.lock().unwrap().sizes.insert(window_id, (width, height));
+                st.lock().unwrap().rects.insert(window_id, Rect { x: 200, y: 216, w: width, h: height });
                 send(&writer, &Message::WindowMoved { window_id, bounds: Rect { x: 200, y: 216, w: width, h: height } })?;
             }
             Message::WindowClose { window_id } => close_window(&writer, &st, window_id)?,
@@ -353,7 +393,9 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
                     if let Some(hd) = handle {
                         let _ = hd.join();
                     }
-                    send(&writer, &Message::WindowMoved { window_id, bounds: Rect { x: if on { 1920 } else { 200 }, y: if on { 25 } else { 216 }, w, h } })?;
+                    let bounds = Rect { x: if on { 1920 } else { 200 }, y: if on { 25 } else { 216 }, w, h };
+                    st.lock().unwrap().rects.insert(window_id, bounds);
+                    send(&writer, &Message::WindowMoved { window_id, bounds })?;
                     let wr = writer.clone();
                     let hue = (60 * window_id % 256) as u8;
                     let handle = std::thread::spawn(move || video_loop(wr, window_id, w as usize, h as usize, hue, stop));

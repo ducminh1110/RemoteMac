@@ -24,7 +24,9 @@ final class AppManager {
     }
 
     func list() -> [[String: Any]] {
-        apps.map { ["id": $0.id, "name": $0.name, "available": FileManager.default.isExecutableFile(atPath: $0.executable)] }
+        // the whole Mac first, then its apps
+        [["id": desktopAppID, "name": "Mac Desktop", "available": true]]
+            + apps.map { ["id": $0.id, "name": $0.name, "available": FileManager.default.isExecutableFile(atPath: $0.executable)] }
     }
 
     func descriptor(_ id: String) -> AppDescriptor? { apps.first { $0.id == id } }

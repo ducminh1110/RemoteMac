@@ -40,12 +40,21 @@ final class InputInjector {
     private let tracker: WindowTracker
     private var lastPoint = CGPoint.zero
     private var activatedPid: pid_t = 0
-    init(tracker: WindowTracker) { self.tracker = tracker }
+    private var leftDown = false, rightDown = false
+    private let desktop: DesktopSession
+    init(tracker: WindowTracker, desktop: DesktopSession) { self.tracker = tracker; self.desktop = desktop }
 
     /// Returns an error string if the message could not be delivered.
     func handle(_ msg: [String: Any]) -> String? {
         let wid = CGWindowID(int(msg["window_id"]))
-        guard let w = tracker.current(wid) else { return "unknown window \(wid)" }
+        // Mac Desktop: coordinates are on the display, keys go to whatever app is in front (pid 0)
+        let w: WinInfo
+        if wid == desktopWindowID && desktop.isActive {
+            w = WinInfo(id: wid, pid: 0, title: "Mac Desktop", rect: desktop.bounds)
+        } else {
+            guard let found = tracker.current(wid) else { return "unknown window \(wid)" }
+            w = found
+        }
         switch msg["type"] as? String ?? "" {
         case "text_input":
             typeUnicode(msg["text"] as? String ?? "", pid: w.pid)
@@ -54,12 +63,14 @@ final class InputInjector {
             let src = CGEventSource(stateID: .hidSystemState)
             guard let e = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: (msg["down"] as? Bool) ?? true) else { return "event failed" }
             e.flags = flags(msg["modifiers"] as? [String] ?? [])
-            e.postToPid(w.pid)
+            if w.pid == 0 { e.post(tap: .cghidEventTap) } else { e.postToPid(w.pid) }
             usleep(15_000)
         case "mouse_move":
             let p = CGPoint(x: w.content.minX + num(msg["x"]), y: w.content.minY + num(msg["y"]))
             lastPoint = p
-            post(.mouseMoved, p, button: .left, pid: w.pid)
+            // with a button held this is a drag (selecting text, moving windows, resizing)
+            let type: CGEventType = leftDown ? .leftMouseDragged : rightDown ? .rightMouseDragged : .mouseMoved
+            post(type, p, button: rightDown && !leftDown ? .right : .left, pid: w.pid)
         case "mouse_button":
             let p = CGPoint(x: w.content.minX + num(msg["x"]), y: w.content.minY + num(msg["y"]))
             lastPoint = p
@@ -70,6 +81,7 @@ final class InputInjector {
             case "middle": (type, button) = (down ? .otherMouseDown : .otherMouseUp, .center)
             default: (type, button) = (down ? .leftMouseDown : .leftMouseUp, .left)
             }
+            if button == .left { leftDown = down } else if button == .right { rightDown = down }
             post(type, p, button: button, pid: w.pid)
         case "scroll":
             // Unverified on runners (docs/SPEC.md): pixel units, y positive = content moves down.
@@ -82,7 +94,7 @@ final class InputInjector {
     }
 
     private func post(_ type: CGEventType, _ p: CGPoint, button: CGMouseButton, pid: pid_t) {
-        if activatedPid != pid || type == .leftMouseDown {
+        if pid != 0 && (activatedPid != pid || type == .leftMouseDown) {
             NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
             activatedPid = pid; usleep(150_000)
         }
@@ -99,7 +111,7 @@ final class InputInjector {
             for down in [true, false] {
                 guard let e = CGEvent(keyboardEventSource: CGEventSource(stateID: .hidSystemState), virtualKey: 0, keyDown: down) else { continue }
                 e.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
-                e.postToPid(pid)
+                if pid == 0 { e.post(tap: .cghidEventTap) } else { e.postToPid(pid) }
                 usleep(15_000)
             }
         }

@@ -67,7 +67,8 @@ log("handshake complete")
 // ---- runtime -------------------------------------------------------------------------------------
 let apps = AppManager()
 let tracker = WindowTracker(apps: apps)
-let injector = InputInjector(tracker: tracker)
+let desktop = DesktopSession()
+let injector = InputInjector(tracker: tracker, desktop: desktop)
 let streamsLock = NSLock()
 var streams: [CGWindowID: WindowStream] = [:]
 var lastSize: [CGWindowID: CGSize] = [:]
@@ -170,6 +171,32 @@ func handle(_ m: [String: Any]) {
     switch type {
     case "list_apps":
         send(["type": "apps", "apps": apps.list()])
+    case "app_launch" where (m["application_id"] as? String) == desktopAppID:
+        // Mac Desktop: the main display as one window
+        guard !desktop.isActive else { break }
+        send(["type": "app_launched", "application_id": desktopAppID, "pid": 0])
+        send(desktop.start())
+        let ws = WindowStream(windowID: desktopWindowID, display: desktop.displayID) { pkt in do { try conn.sendVideo(pkt) } catch { log("video send failed: \(error)") } }
+        streamsLock.lock(); streams[desktopWindowID] = ws; streamsLock.unlock()
+        Task { do { try await ws.start(); log("desktop stream started") } catch { log("desktop stream failed: \(error)")
+            send(["type": "capability_unavailable", "capability": "capture", "reason": "\(error)"]) } }
+    case "app_terminate" where (m["application_id"] as? String) == desktopAppID,
+         "window_close" where CGWindowID(int(m["window_id"])) == desktopWindowID:
+        guard desktop.isActive else { break }
+        desktop.stop()
+        stopStream(desktopWindowID)
+        send(["type": "window_destroyed", "window_id": Int(desktopWindowID)])
+        send(["type": "app_exited", "application_id": desktopAppID, "code": NSNull()])
+    case "window_focus" where CGWindowID(int(m["window_id"])) == desktopWindowID,
+         "window_fullscreen" where CGWindowID(int(m["window_id"])) == desktopWindowID,
+         "window_resize_request" where CGWindowID(int(m["window_id"])) == desktopWindowID:
+        break // the desktop is the display itself: nothing to raise or resize
+    case "get_menu_bar" where (m["application_id"] as? String) == desktopAppID:
+        send(["type": "menu_bar", "application_id": desktopAppID, "menus": [Any]()]) // the Mac's own menu bar is in the picture
+    case "get_app_icon" where (m["application_id"] as? String) == desktopAppID:
+        if let rgba = appIconRGBA(path: "/System/Library/CoreServices/Finder.app", size: 64) {
+            send(["type": "app_icon", "application_id": desktopAppID, "size": 64, "rgba_base64": rgba.base64EncodedString()])
+        }
     case "app_launch":
         let id = m["application_id"] as? String ?? ""
         let r = apps.launch(id: id, args: m["arguments"] as? [String] ?? [])

@@ -69,6 +69,12 @@ struct Ctx<'a, S: Read + Write> {
     /// last WindowMoved size of the main window, and the last video size seen
     moved: Option<(u32, u32)>,
     video_size: Option<(u16, u16)>,
+    /// main window's current content rect (screen points)
+    main_rect: Option<rm_protocol::Rect>,
+    /// the Mac Desktop window: id, bounds, frames seen, last video size
+    desktop: Option<(u64, rm_protocol::Rect)>,
+    desktop_frames: usize,
+    desktop_video: Option<(u16, u16)>,
 }
 
 fn is_timeout(e: &ProtocolError) -> bool {
@@ -78,6 +84,10 @@ fn is_timeout(e: &ProtocolError) -> bool {
 impl<S: Read + Write> Ctx<'_, S> {
     fn absorb(&mut self, f: Frame) {
         match f {
+            Frame::Video(v) if self.desktop.map(|d| d.0) == Some(v.window_id) => {
+                self.desktop_frames += 1;
+                self.desktop_video = Some((v.width, v.height));
+            }
             Frame::Video(v) => {
                 if self.r.first_frame_ms.is_none() {
                     self.r.first_frame_ms = Some(self.started.elapsed().as_millis());
@@ -99,7 +109,7 @@ impl<S: Read + Write> Ctx<'_, S> {
                 if !v.has_start_code() {
                     self.non_annexb += 1;
                 }
-                if let Some(d) = self.decoder.as_mut() {
+                if let (Some(d), true) = (self.decoder.as_mut(), self.r.window.is_none_or(|w| w.0 == v.window_id)) {
                     match d.decode(&v.data) {
                         Ok(Some(p)) => {
                             self.r.decoded += 1;
@@ -110,8 +120,14 @@ impl<S: Read + Write> Ctx<'_, S> {
                     }
                 }
             }
+            Frame::Msg(Message::WindowCreated { window_id, bounds, application_id, .. }) if application_id == "desktop" => {
+                self.desktop = Some((window_id, bounds));
+            }
             Frame::Msg(Message::WindowCreated { window_id, bounds, title, role, parent_id, .. }) => {
                 self.created.push((window_id, role, parent_id));
+                if role == rm_protocol::WindowRole::Window && self.r.window.is_none() {
+                    self.main_rect = Some(bounds);
+                }
                 if role != rm_protocol::WindowRole::Window {
                     return;
                 }
@@ -135,7 +151,10 @@ impl<S: Read + Write> Ctx<'_, S> {
             Frame::Msg(Message::FileUploadFailed { reason, .. }) => self.errors.push(format!("upload: {reason}")),
             Frame::Msg(Message::MenuBar { menus, .. }) => self.menus = Some(menus),
             Frame::Msg(Message::DisplayStatus { available, width, height, reason, .. }) => self.display = Some((available, width, height, reason)),
-            Frame::Msg(Message::WindowMoved { window_id, bounds }) if self.r.window.map(|w| w.0) == Some(window_id) => self.moved = Some((bounds.w, bounds.h)),
+            Frame::Msg(Message::WindowMoved { window_id, bounds }) if self.r.window.map(|w| w.0) == Some(window_id) => {
+                self.moved = Some((bounds.w, bounds.h));
+                self.main_rect = Some(bounds);
+            }
             Frame::Msg(Message::AppExited { .. }) => self.exited = true,
             Frame::Msg(Message::AppLaunched { pid, .. }) => self.launched_pid = Some(pid),
             Frame::Msg(Message::ClipboardSet { text, .. }) => self.clipboard = Some(text),
@@ -180,7 +199,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let caps_dump = serde_json::to_string(&sess.capabilities).unwrap_or_default();
     let mut c = Ctx { sess, r: Report::default(), started: Instant::now(), first_video: None, last_title: String::new(),
         destroyed: false, exited: false, launched_pid: None, errors: vec![], non_annexb: 0,
-        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None };
+        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None, main_rect: None, desktop: None, desktop_frames: 0, desktop_video: None };
 
     c.r.check("agent reports capture+input+GUI", caps_ok, caps_dump);
 
@@ -359,6 +378,30 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     c.send(Message::WindowFullscreen { window_id: wid, on: false });
     let back = c.pump(12, |c| c.moved.is_some_and(|m| m.0 < 1000));
     c.r.check("leaving fullscreen restores the window", back, format!("moved={:?}", c.moved));
+
+    // ---- Mac Desktop: the whole screen as one window; input on it reaches the app under the pointer
+    c.send(Message::AppLaunch { application_id: "desktop".into(), arguments: vec![], working_directory: None, environment: Default::default() });
+    let up = c.pump(12, |c| c.desktop.is_some() && c.desktop_frames >= 3);
+    let d = c.desktop;
+    let size_ok = d.is_some_and(|(_, b)| c.desktop_video == Some((b.w as u16, b.h as u16)) && b.w >= 640);
+    c.r.check("Mac Desktop streams the whole screen", up && size_ok, format!("desktop={d:?} frames={} video={:?}", c.desktop_frames, c.desktop_video));
+    if let (Some((did, db)), Some(r)) = (d, c.main_rect) {
+        // click into the test app through the desktop (desktop coordinates = screen points)
+        let (x, y) = ((r.x - db.x) as f64 + 40.0, (r.y - db.y) as f64 + 40.0);
+        let before = c.last_title.clone();
+        for down in [true, false] {
+            c.send(Message::MouseButton { window_id: did, button: rm_protocol::MouseButton::Left, down, x, y });
+        }
+        c.pump(1, |_| false);
+        c.send(Message::TextInput { window_id: did, text: "d".into() });
+        let ok = c.pump(10, |c| c.last_title != before && c.last_title.contains("chars]"));
+        c.r.check("input on the desktop reaches the app under the pointer", ok, format!("before={before:?} after={:?} click=({x},{y})", c.last_title));
+        c.send(Message::AppTerminate { application_id: "desktop".into() });
+        let gone = c.pump(8, |c| c.destroyed_ids.contains(&did));
+        c.r.check("closing the Mac Desktop stops its stream", gone, format!("destroyed={:?}", c.destroyed_ids));
+    } else {
+        c.r.check("input on the desktop reaches the app under the pointer", false, "no desktop or main window");
+    }
 
     // ---- lifecycle
     c.send(Message::AppTerminate { application_id: app.into() });

@@ -660,6 +660,10 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         layout(hwnd);
         let _ = InvalidateRect(Some(hwnd), None, false);
         eprintln!("window created id={id} app={app} role={role:?} parent={parent:?} renderer={renderer} {w}x{h}pt scale={scale} title={title:?}");
+        if app == DESKTOP_APP {
+            // the whole Mac: straight to fullscreen, as a remote desktop is used
+            toggle_fullscreen(hwnd);
+        }
     }
 }
 
@@ -719,8 +723,11 @@ fn animate(frame: HWND, a: RECT, b: RECT) {
 
 /// Green light / F11: fullscreen on this monitor, with the Mac app sized to it exactly (on the
 /// Mac's virtual display of this monitor's size), and back.
+/// The remote "application" that is the whole Mac screen.
+const DESKTOP_APP: &str = "desktop";
+
 fn toggle_fullscreen(frame: HWND) {
-    let Some((on, saved, id, scale)) = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| (r.fullscreen, r.saved, r.id, r.scale))).flatten() else { return };
+    let Some((on, saved, id, scale, desktop)) = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| (r.fullscreen, r.saved, r.id, r.scale, r.app == DESKTOP_APP))).flatten() else { return };
     unsafe {
         if !on {
             let mut from = RECT::default();
@@ -729,7 +736,8 @@ fn toggle_fullscreen(frame: HWND) {
             // the Mac gets a display like this monitor (once; again if the monitor changed)
             let req = chrome::display_request(mon.right - mon.left, mon.bottom - mon.top, scale);
             with_app(|a| {
-                if a.display_req != Some(req) {
+                // the Mac Desktop is the Mac's own screen: it is only scaled, nothing to resize there
+                if !desktop && a.display_req != Some(req) {
                     a.display_req = Some(req);
                     a.link.send(&Message::DisplayConfigure { width: req.0, height: req.1, scale: req.2 });
                 }
@@ -743,7 +751,9 @@ fn toggle_fullscreen(frame: HWND) {
             let _ = SetWindowPos(frame, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             animate(frame, from, mon);
             layout(frame);
-            with_app(|a| a.link.send(&Message::WindowFullscreen { window_id: id, on: true }));
+            if !desktop {
+                with_app(|a| a.link.send(&Message::WindowFullscreen { window_id: id, on: true }));
+            }
         } else {
             let mut from = RECT::default();
             let _ = GetWindowRect(frame, &mut from);
@@ -757,7 +767,9 @@ fn toggle_fullscreen(frame: HWND) {
                 native::round_corners(frame);
             }
             layout(frame);
-            with_app(|a| a.link.send(&Message::WindowFullscreen { window_id: id, on: false }));
+            if !desktop {
+                with_app(|a| a.link.send(&Message::WindowFullscreen { window_id: id, on: false }));
+            }
         }
         let _ = InvalidateRect(Some(frame), None, false);
     }
@@ -1832,7 +1844,7 @@ fn smoke_tick() {
         }
         (30, Some(_)) => {
             let ids = with_app(|a| a.launcher.as_ref().map(|l| (l.count(), l.ids.clone()))).flatten();
-            if let Some((2, ids)) = ids {
+            if let Some((3, ids)) = ids {
                 finish("launcher lists the Mac's applications", true, format!("{ids:?}"), 31);
                 launch_app("notes"); // same path as a double-click on the "Notes Test" icon
             }
@@ -2026,7 +2038,49 @@ fn smoke_tick() {
         }
         (10, _) if !destroyed.is_empty() && find_window("testapp", WindowRole::Window).is_none() => {
             let notes_alive = find_window("notes", WindowRole::Window).is_some();
-            finish("closing one app's window leaves the other app running", notes_alive, format!("destroyed={destroyed:?}"), 37);
+            finish("closing one app's window leaves the other app running", notes_alive, format!("destroyed={destroyed:?}"), 50);
+        }
+        (50, _) => {
+            launch_app(DESKTOP_APP); // the "Mac Desktop" icon in the launcher
+            with_app(|a| a.smoke.as_mut().map(|s| { s.stage = 51; s.stage_started = Instant::now() }));
+        }
+        (51, _) => unsafe {
+            if let Some((d, did)) = find_window(DESKTOP_APP, WindowRole::Window) {
+                let frames = with_app(|a| a.remotes.get(&(d.0 as isize)).map(|r| r.frames)).flatten().unwrap_or(0);
+                if frames >= 5 {
+                    let mon = monitor_rect(d);
+                    let mut wr = RECT::default();
+                    let _ = GetWindowRect(d, &mut wr);
+                    let covers = (wr.left, wr.top, wr.right, wr.bottom) == (mon.left, mon.top, mon.right, mon.bottom);
+                    let colors = painted_colors(d);
+                    finish("Mac Desktop opens fullscreen and shows the whole Mac screen", covers && bar_px(d) == 0 && colors > 100,
+                        format!("window={:?} monitor={:?} frames={frames} colors={colors}", (wr.left, wr.top, wr.right, wr.bottom), (mon.left, mon.top, mon.right, mon.bottom)), 52);
+                    // a click and a key on the desktop reach the window under the pointer (the notes app)
+                    let notes = with_app(|a| a.remotes.values().find(|r| r.app == "notes").map(|r| (r.rx, r.ry))).flatten();
+                    if let Some((nx, ny)) = notes {
+                        with_app(|a| {
+                            for down in [true, false] {
+                                a.link.send(&Message::MouseButton { window_id: did, button: MouseButton::Left, down, x: nx as f64 + 30.0, y: ny as f64 + 30.0 });
+                            }
+                            a.link.send(&Message::TextInput { window_id: did, text: "q".into() });
+                        });
+                    }
+                }
+            }
+        },
+        (52, _) => {
+            if let Some((notes, _)) = find_window("notes", WindowRole::Window) {
+                let t = title_of(notes);
+                if t.contains("[3 chars]") {
+                    finish("input on the Mac Desktop reaches the app under the pointer", true, t, 53);
+                    with_app(|a| a.link.send(&Message::AppTerminate { application_id: DESKTOP_APP.into() }));
+                }
+            }
+        }
+        (53, _) => {
+            if find_window(DESKTOP_APP, WindowRole::Window).is_none() {
+                finish("closing the Mac Desktop", true, "window gone".into(), 37);
+            }
         }
         (37, _) => {
             let Some(dir) = with_app(|a| a.shortcut_dir.clone()).flatten() else {
@@ -2034,10 +2088,10 @@ fn smoke_tick() {
                 return;
             };
             let found: Vec<(String, Option<String>)> = shortcuts::list(&dir).iter().filter_map(|p| shortcuts::read(p)).collect();
-            let want = [("--app testapp".to_string(), Some("RemoteMac.testapp".to_string())), ("--app notes".to_string(), Some("RemoteMac.notes".to_string()))];
+            let want = [("--app desktop".to_string(), Some("RemoteMac.desktop".to_string())), ("--app testapp".to_string(), Some("RemoteMac.testapp".to_string())), ("--app notes".to_string(), Some("RemoteMac.notes".to_string()))];
             let icons = dir.join("icons").read_dir().map(|d| d.count()).unwrap_or(0);
-            if want.iter().all(|w| found.contains(w)) && icons >= 2 {
-                finish("each Mac app is in the Start menu / Windows Search (shortcut + icon + AUMID)", found.len() == 2, format!("{found:?} icons={icons}"), 38);
+            if want.iter().all(|w| found.contains(w)) && icons >= 3 {
+                finish("each Mac app is in the Start menu / Windows Search (shortcut + icon + AUMID)", found.len() == 3, format!("{found:?} icons={icons}"), 38);
             }
         }
         (38, _) => {
