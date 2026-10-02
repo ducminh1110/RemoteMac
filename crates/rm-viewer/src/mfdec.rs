@@ -144,7 +144,7 @@ impl MfDecoder {
 
     fn output(&mut self, visible: (u32, u32)) -> Result<Option<Decoded>, String> {
         unsafe {
-            loop {
+            for _ in 0..4 {
                 let own = if self.provides_samples {
                     None
                 } else {
@@ -171,6 +171,7 @@ impl MfDecoder {
                     Err(e) => return Err(format!("decode: {e}")),
                 }
             }
+            Err("decoder keeps changing its output format".into())
         }
     }
 
