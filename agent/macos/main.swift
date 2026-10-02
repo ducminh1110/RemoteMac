@@ -77,15 +77,23 @@ func axAttr(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
     return AXUIElementCopyAttributeValue(el, name as CFString, &v) == .success ? v : nil
 }
 /// The AX window of `pid` whose frame matches the window-server rect (apps may own several windows).
+@_silgen_name("_AXUIElementGetWindow")
+func _AXUIElementGetWindow(_ element: AXUIElement, _ id: UnsafeMutablePointer<CGWindowID>) -> AXError
+
+/// The AX window that *is* window `id` (by its window-server id), else the one with its frame.
 func axWindowFor(pid: pid_t, id: CGWindowID, rect: CGRect) -> AXUIElement? {
     let wins = axAttr(AXUIElementCreateApplication(pid), kAXWindowsAttribute as String) as? [AXUIElement] ?? []
+    for w in wins {
+        var wid: CGWindowID = 0
+        if _AXUIElementGetWindow(w, &wid) == .success && wid == id { return w }
+    }
     for w in wins {
         var p = CGPoint.zero, s = CGSize.zero
         if let pv = axAttr(w, kAXPositionAttribute as String), let sv = axAttr(w, kAXSizeAttribute as String),
            AXValueGetValue(pv as! AXValue, .cgPoint, &p), AXValueGetValue(sv as! AXValue, .cgSize, &s),
            abs(p.x - rect.minX) < 3, abs(p.y - rect.minY) < 3, abs(s.width - rect.width) < 3, abs(s.height - rect.height) < 3 { return w }
     }
-    return wins.first
+    return nil // never guess: acting on another window is worse than reporting an error
 }
 
 func send(_ m: [String: Any]) { do { try conn.send(m) } catch { log("send failed: \(error)") } }

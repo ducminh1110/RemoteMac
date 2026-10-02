@@ -236,3 +236,33 @@ pub fn ui_face(weight: i32) -> &'static str {
 pub fn mono_face() -> &'static str {
     if FONTS_LOADED.load(std::sync::atomic::Ordering::SeqCst) { "JetBrains Mono" } else { "Consolas" }
 }
+
+/// Ways around DWM's frame line in a composition window's transparent corners (smoke tries them).
+pub fn corner_remedy(hwnd: HWND, remedy: &str, radius: i32) {
+    use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMWA_NCRENDERING_POLICY};
+    use windows::Win32::UI::Controls::MARGINS;
+    unsafe {
+        match remedy {
+            "extend-frame" => {
+                let m = MARGINS { cxLeftWidth: 0, cxRightWidth: 0, cyTopHeight: 1, cyBottomHeight: 0 };
+                let _ = DwmExtendFrameIntoClientArea(hwnd, &m);
+            }
+            "nc-rendering-off" => {
+                let p = DWMNCRP_DISABLED;
+                let _ = DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &p as *const _ as *const std::ffi::c_void, std::mem::size_of_val(&p) as u32);
+            }
+            "window-region" => {
+                let mut r = RECT::default();
+                let _ = GetClientRect(hwnd, &mut r);
+                let mut o = POINT::default();
+                let _ = ClientToScreen(hwnd, &mut o);
+                let mut wr = RECT::default();
+                let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut wr);
+                let (dx, dy) = (o.x - wr.left, o.y - wr.top);
+                let rgn = CreateRoundRectRgn(dx, dy, dx + r.right + 1, dy + r.bottom + 1, 2 * radius, 2 * radius);
+                let _ = SetWindowRgn(hwnd, Some(rgn), true);
+            }
+            _ => {}
+        }
+    }
+}

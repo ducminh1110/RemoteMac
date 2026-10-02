@@ -1586,6 +1586,16 @@ fn capture_screen(hwnd: HWND, whole: bool) -> Option<Shot> {
     }
 }
 
+/// Is there a drop shadow under the window (the pixel just below it darker than further away)?
+fn shadow_below(hwnd: HWND) -> bool {
+    let mut o = POINT::default();
+    unsafe { let _ = ClientToScreen(hwnd, &mut o); }
+    let (w, h) = client_size(hwnd);
+    let Some(s) = screen_pixels(o.x + w / 2, o.y + h + 1, 1, 40) else { return false };
+    let lum = |p: (u8, u8, u8)| p.0 as i32 + p.1 as i32 + p.2 as i32;
+    lum(s.pixel(0, 0)) + 9 < lum(s.pixel(0, 39))
+}
+
 /// Screen pixels of a rectangle, as composed now.
 fn screen_pixels(x: i32, y: i32, w: i32, h: i32) -> Option<Shot> {
     if w <= 0 || h <= 0 {
@@ -1901,9 +1911,26 @@ fn smoke_tick() {
                 let bg = chrome::title_bg(active);
                 let far = |a: (u8, u8, u8), b: (u8, u8, u8)| a.0.abs_diff(b.0) as u32 + a.1.abs_diff(b.1) as u32 + a.2.abs_diff(b.2) as u32;
                 let (corner, edge) = shot.as_ref().map(|s| (s.pixel(0, 0), s.pixel(s.w / 2, 2))).unwrap_or_default();
-                let (behind_corner, behind_edge) = behind.as_ref().map(|s| (s.pixel(0, 0), s.pixel(s.w / 2, 2))).unwrap_or_default();
-                let ok = far(corner, behind_corner) < 12 && far(edge, bg) < 12 && (far(behind_edge, bg) > 12 || far(behind_corner, bg) > 12 || corner == behind_corner);
-                finish("rounded window corners (DirectComposition clip)", ok, format!("corner={corner:?} behindCorner={behind_corner:?} barEdge={edge:?} bar={bg:?}"), 44);
+                let behind_corner = behind.as_ref().map(|s| s.pixel(0, 0)).unwrap_or_default();
+                let clean = |c: (u8, u8, u8)| far(c, behind_corner) < 12;
+                let mut ok = clean(corner) && far(edge, bg) < 12;
+                let mut notes = vec![format!("plain: corner={corner:?} behind={behind_corner:?} shadow={}", shadow_below(main))];
+                // DWM can draw a 1px frame line along the top, visible only in the transparent
+                // corners: try the remedies one after another and report which one works
+                if !ok {
+                    for remedy in ["extend-frame", "nc-rendering-off", "window-region"] {
+                        native::corner_remedy(main, remedy, (chrome::CORNER_RADIUS * native::dpi_scale(main)) as i32);
+                        std::thread::sleep(Duration::from_millis(400));
+                        let c = capture_screen(main, false).map(|s| s.pixel(0, 0)).unwrap_or_default();
+                        let fixed = clean(c);
+                        notes.push(format!("{remedy}: corner={c:?} fixed={fixed} shadow={}", shadow_below(main)));
+                        if fixed {
+                            ok = true;
+                            break;
+                        }
+                    }
+                }
+                finish("rounded window corners (DirectComposition clip)", ok, format!("barEdge={edge:?} bar={bg:?} | {}", notes.join(" | ")), 44);
             } else {
                 finish("square corners with the GDI renderer", true, "gdi".into(), 44);
             }
