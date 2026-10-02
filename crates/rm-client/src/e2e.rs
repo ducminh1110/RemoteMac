@@ -57,6 +57,10 @@ struct Ctx<'a, S: Read + Write> {
     decoder: Option<rm_decode::H264Decoder>,
     clipboard: Option<String>,
     icon: Option<(u32, Vec<u8>)>,
+    /// every WindowCreated: (id, role, parent)
+    created: Vec<(u64, rm_protocol::WindowRole, Option<u64>)>,
+    destroyed_ids: Vec<u64>,
+    uploaded: Option<String>,
 }
 
 fn is_timeout(e: &ProtocolError) -> bool {
@@ -90,7 +94,11 @@ impl<S: Read + Write> Ctx<'_, S> {
                     }
                 }
             }
-            Frame::Msg(Message::WindowCreated { window_id, bounds, title, .. }) => {
+            Frame::Msg(Message::WindowCreated { window_id, bounds, title, role, parent_id, .. }) => {
+                self.created.push((window_id, role, parent_id));
+                if role != rm_protocol::WindowRole::Window {
+                    return;
+                }
                 if self.r.window.is_none() {
                     self.r.window = Some((window_id, bounds));
                 }
@@ -101,7 +109,14 @@ impl<S: Read + Write> Ctx<'_, S> {
                 self.last_title = title.clone();
                 self.r.titles.push(title);
             }
-            Frame::Msg(Message::WindowDestroyed { .. }) => self.destroyed = true,
+            Frame::Msg(Message::WindowDestroyed { window_id }) => {
+                self.destroyed_ids.push(window_id);
+                if self.r.window.map(|w| w.0) == Some(window_id) {
+                    self.destroyed = true;
+                }
+            }
+            Frame::Msg(Message::FileUploaded { remote_path, .. }) => self.uploaded = Some(remote_path),
+            Frame::Msg(Message::FileUploadFailed { reason, .. }) => self.errors.push(format!("upload: {reason}")),
             Frame::Msg(Message::AppExited { .. }) => self.exited = true,
             Frame::Msg(Message::AppLaunched { pid, .. }) => self.launched_pid = Some(pid),
             Frame::Msg(Message::ClipboardSet { text, .. }) => self.clipboard = Some(text),
@@ -146,7 +161,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let caps_dump = serde_json::to_string(&sess.capabilities).unwrap_or_default();
     let mut c = Ctx { sess, r: Report::default(), started: Instant::now(), first_video: None, last_title: String::new(),
         destroyed: false, exited: false, launched_pid: None, errors: vec![], non_annexb: 0,
-        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None };
+        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None };
 
     c.r.check("agent reports capture+input+GUI", caps_ok, caps_dump);
 
@@ -255,6 +270,38 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let (icon_ok, icon_detail) = detail.unwrap_or((false, "no AppIcon".into()));
     c.r.check("app icon delivered (square RGBA, not empty)", icon_ok, icon_detail);
     c.send(Message::WindowFocus { window_id: wid });
+
+    // ---- an app dialog appears as a child window of its parent, and can be closed from the client
+    key(&mut c, "KeyI", vec![Modifier::Command]);
+    let found = c.pump(10, |c| c.created.iter().any(|(_, r, _)| *r == rm_protocol::WindowRole::Dialog));
+    let dlg = c.created.iter().find(|(_, r, _)| *r == rm_protocol::WindowRole::Dialog).copied();
+    c.r.check("app dialog reported as a child window (role=dialog, parent=main)", found && dlg.map(|d| d.2) == Some(Some(wid)), format!("created={:?}", c.created));
+    if let Some((did, _, _)) = dlg {
+        c.send(Message::WindowClose { window_id: did });
+        let ok = c.pump(8, |c| c.destroyed_ids.contains(&did));
+        c.r.check("closing the dialog from the client closes it on the Mac", ok, format!("destroyed={:?}", c.destroyed_ids));
+    }
+
+    // ---- the app's file Open panel: upload a file, have the panel open it
+    key(&mut c, "KeyO", vec![Modifier::Command]);
+    let found = c.pump(12, |c| c.created.iter().any(|(_, r, _)| *r == rm_protocol::WindowRole::OpenPanel));
+    let panel = c.created.iter().find(|(_, r, _)| *r == rm_protocol::WindowRole::OpenPanel).copied();
+    c.r.check("file Open panel reported (role=open_panel, parent=main)", found && panel.map(|p| p.2) == Some(Some(wid)), format!("created={:?}", c.created));
+    let payload: Vec<u8> = (0..716_800u32).map(|i| (i % 251) as u8).collect();
+    let tid = 9u64;
+    c.send(Message::FileUploadBegin { transfer_id: tid, name: "../rm e2e upload.bin".into(), size: payload.len() as u64 });
+    for (i, chunk) in payload.chunks(rm_protocol::UPLOAD_CHUNK).enumerate() {
+        c.send(Message::FileUploadChunk { transfer_id: tid, offset: (i * rm_protocol::UPLOAD_CHUNK) as u64, data_base64: rm_protocol::base64_encode(chunk) });
+    }
+    c.send(Message::FileUploadEnd { transfer_id: tid });
+    let ok = c.pump(15, |c| c.uploaded.is_some());
+    let path = c.uploaded.clone().unwrap_or_default();
+    c.r.check("upload lands in the uploads folder with a sanitised name", ok && path.ends_with("/RemoteMac Uploads/rm e2e upload.bin") && !path.contains(".."), format!("path={path:?} errors={:?}", c.errors));
+    if let (Some((pid, _, _)), true) = (panel, ok) {
+        c.send(Message::PanelChooseFile { window_id: pid, remote_path: path });
+        let ok = c.pump(15, |c| c.last_title.contains("[opened rm e2e upload.bin 716800 bytes]"));
+        c.r.check("panel opens the uploaded file in the app", ok, c.last_title.clone());
+    }
 
     // ---- lifecycle
     c.send(Message::AppTerminate { application_id: app.into() });

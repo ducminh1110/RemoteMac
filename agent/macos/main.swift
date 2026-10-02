@@ -101,10 +101,11 @@ func stopStream(_ id: CGWindowID) {
     if let ws = ws { Task { await ws.stop(); log("stream stopped window=\(id) packets=\(ws.sent)") } }
 }
 
-tracker.onCreated = { w, appID in
-    log("window created id=\(w.id) app=\(appID) \(Int(w.rect.width))x\(Int(w.rect.height))")
+tracker.onCreated = { w in
+    log("window created id=\(w.id) app=\(w.appID) role=\(w.role.rawValue) parent=\(w.parent.map { String($0) } ?? "-") \(Int(w.rect.width))x\(Int(w.rect.height))")
     lastSize[w.id] = w.rect.size
-    send(["type": "window_created", "window_id": Int(w.id), "application_id": appID, "title": w.title, "bounds": rectJSON(w.rect), "parent_id": NSNull()])
+    send(["type": "window_created", "window_id": Int(w.id), "application_id": w.appID, "title": w.title, "bounds": rectJSON(w.rect),
+          "parent_id": w.parent.map { Int($0) as Any } ?? NSNull(), "role": w.role.rawValue])
     startStream(w.id)
 }
 tracker.onDestroyed = { id in
@@ -130,6 +131,40 @@ tracker.start()
 let clipboard = ClipboardSync()
 clipboard.onLocalChange = { seq, text in send(["type": "clipboard_set", "seq": Int(seq), "text": text]) }
 clipboard.start()
+
+let uploads = UploadStore(send: send)
+
+func keyTo(_ pid: pid_t, _ code: CGKeyCode, _ flags: CGEventFlags = []) {
+    for down in [true, false] {
+        guard let e = CGEvent(keyboardEventSource: CGEventSource(stateID: .hidSystemState), virtualKey: code, keyDown: down) else { continue }
+        e.flags = flags
+        e.postToPid(pid)
+        usleep(20_000)
+    }
+}
+
+/// Make a file panel open `path`: "Go to folder" (Cmd+Shift+G), type the full path, confirm twice.
+func chooseInPanel(pid: pid_t, path: String) {
+    NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
+    usleep(300_000)
+    keyTo(pid, 5, [.maskCommand, .maskShift])          // G
+    usleep(700_000)
+    for ch in path {
+        let units = Array(String(ch).utf16)
+        for down in [true, false] {
+            guard let e = CGEvent(keyboardEventSource: CGEventSource(stateID: .hidSystemState), virtualKey: 0, keyDown: down) else { continue }
+            e.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+            e.postToPid(pid)
+            usleep(8_000)
+        }
+    }
+    usleep(400_000)
+    keyTo(pid, 36)                                      // Return: go to the file
+    usleep(900_000)
+    keyTo(pid, 36)                                      // Return: Open
+    log("panel pid=\(pid) asked to open \(path.split(separator: "/").last ?? "")")
+}
+
 
 let inputTypes: Set<String> = ["mouse_move", "mouse_button", "scroll", "key", "text_input"]
 
@@ -172,6 +207,17 @@ func handle(_ m: [String: Any]) {
         if let rgba = appIconRGBA(path: bundle, size: 64) {
             send(["type": "app_icon", "application_id": id, "size": 64, "rgba_base64": rgba.base64EncodedString()])
         } else { send(["type": "error", "code": "icon_unavailable", "message": id]) }
+    case "file_upload_begin", "file_upload_chunk", "file_upload_end":
+        uploads.handle(m)
+    case "panel_choose_file":
+        let wid = CGWindowID(int(m["window_id"]))
+        guard let w = tracker.current(wid), w.role == .open_panel, let path = m["remote_path"] as? String,
+              path.hasPrefix(uploads.dir.path + "/"), FileManager.default.fileExists(atPath: path) else {
+            send(["type": "error", "code": "panel_choose_failed", "message": "\(wid)"]); break
+        }
+        chooseInPanel(pid: w.pid, path: path)
+    case "panel_cancel":
+        if let w = tracker.current(CGWindowID(int(m["window_id"]))), w.role == .open_panel || w.role == .save_panel { keyTo(w.pid, 53) }
     case "clipboard_set":
         clipboard.apply(m["text"] as? String ?? "")
     case "ping":

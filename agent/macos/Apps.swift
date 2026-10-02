@@ -7,6 +7,8 @@ struct AppDescriptor { let id: String, name: String, executable: String, maxArgs
 final class AppManager {
     let apps: [AppDescriptor]
     private var running: [String: Process] = [:]
+    /// Apps that were already running and that we present rather than spawn (Finder): id -> pid.
+    private var adopted: [String: pid_t] = [:]
     private let lock = NSLock()
 
     init() {
@@ -16,6 +18,8 @@ final class AppManager {
             AppDescriptor(id: "testapp", name: "RM Test App", executable: testapp, maxArgs: 0),
             AppDescriptor(id: "textedit", name: "TextEdit", executable: "/System/Applications/TextEdit.app/Contents/MacOS/TextEdit", maxArgs: 0),
             AppDescriptor(id: "xcode", name: "Xcode", executable: "/Applications/Xcode.app/Contents/MacOS/Xcode", maxArgs: 4),
+            AppDescriptor(id: "simulator", name: "Simulator", executable: "/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator", maxArgs: 0),
+            AppDescriptor(id: "finder", name: "Finder", executable: "/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder", maxArgs: 0),
         ]
     }
 
@@ -27,9 +31,9 @@ final class AppManager {
 
     func appID(forPid pid: pid_t) -> String? {
         lock.lock(); defer { lock.unlock() }
-        return running.first(where: { $0.value.processIdentifier == pid })?.key
+        return running.first(where: { $0.value.processIdentifier == pid })?.key ?? adopted.first(where: { $0.value == pid })?.key
     }
-    var pids: [pid_t] { lock.lock(); defer { lock.unlock() }; return running.values.map { $0.processIdentifier } }
+    var pids: [pid_t] { lock.lock(); defer { lock.unlock() }; return running.values.map { $0.processIdentifier } + Array(adopted.values) }
 
     /// Returns pid or an (code, message) error.
     func launch(id: String, args: [String]) -> (pid: pid_t?, err: (String, String)?) {
@@ -39,6 +43,13 @@ final class AppManager {
             return (nil, ("launch_rejected", "argument contains control characters"))
         }
         guard FileManager.default.isExecutableFile(atPath: d.executable) else { return (nil, ("app_not_installed", id)) }
+        if id == "finder" {
+            // Finder is always running; "launching" it means opening a new Finder window.
+            guard let f = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first else { return (nil, ("launch_failed", "Finder not running")) }
+            NSWorkspace.shared.open(URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true))
+            lock.lock(); adopted[id] = f.processIdentifier; lock.unlock()
+            return (f.processIdentifier, nil)
+        }
         lock.lock(); defer { lock.unlock() }
         if let p = running[id], p.isRunning { return (nil, ("already_running", id)) }
         let p = Process(); p.executableURL = URL(fileURLWithPath: d.executable); p.arguments = args
@@ -48,7 +59,8 @@ final class AppManager {
     }
 
     func terminate(id: String) -> Bool {
-        lock.lock(); let p = running.removeValue(forKey: id); lock.unlock()
+        lock.lock(); let p = running.removeValue(forKey: id); let a = adopted.removeValue(forKey: id); lock.unlock()
+        if a != nil { return true }   // never kill an app we did not start
         guard let proc = p else { return false }
         proc.terminate(); proc.waitUntilExit()
         return true
