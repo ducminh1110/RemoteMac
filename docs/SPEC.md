@@ -115,6 +115,12 @@ Chạy `scripts/e2e-macos.sh` trên cùng một máy: `rm-relay` + `remote-agent
 - Lần chạy đầu của e2e trên cùng mã này đã in FPS, nhưng công thức sai nên bị loại; công thức mới (theo timestamp khung) có trong code, **chưa có số FPS đã xác minh cho đường agent→relay→client**.
 - Chỉ là app test 480×348, relay loopback, truyền tải **chưa mã hoá**; chưa thử Xcode/TextEdit qua agent, chưa thử nhiều cửa sổ, resize qua agent, cuộn, kéo-chọn.
 
+### Kết quả viewer Windows + clipboard/icon trên Mac thật
+
+- `macos-15` (run [36982319348](https://github.com/ducminh1110/RemoteMac/actions/runs/36982319348)): 16/16 bước, gồm giải mã khung VideoToolbox bằng openh264 (decoded=60, decodeErrors=0, 480×348), clipboard client→Mac (Cmd+V dán "pasted"), Mac→client (Cmd+C trả "pasted!"), icon app 64×64 (3316 điểm ảnh không trong suốt).
+- `windows-latest` (run [36982614961](https://github.com/ducminh1110/RemoteMac/actions/runs/36982614961)), viewer thật + agent giả qua relay, `SMOKE PASS: 9 checks`: khung được vẽ vào cửa sổ (đọc lại bằng PrintWindow, 4097 màu), gõ chữ → app, click rồi gõ, Backspace dạng phím vật lý, resize theo point (640×400pt), AUMID `RemoteMac.testapp` + icon, clipboard Windows→Mac và Mac→Windows, đóng cửa sổ → cửa sổ Mac đóng.
+- Giới hạn: smoke tự gửi message vào cửa sổ (không phải người thật bấm); chưa nối viewer Windows với agent Mac thật (hai runner khác nhau, cần relay công khai); giải mã phần mềm + GDI chưa đo hiệu năng ở 1440p.
+
 Bài học khi làm gate (đã sửa trong probe, giữ lại để không lặp lại):
 1. Lượt đầu `macos-15` báo GO **oan**: chọn nhầm cửa sổ 106×108 và so hash ảnh nên con trỏ nhấp nháy cũng làm "pass". Nay đo thêm nhiễu không-input và đọc giá trị ô nhập bằng Accessibility.
 2. Lỗi "TextEdit không nhận phím" lúc đầu **không phải** do runner: do tôi truyền file tạm qua argv nên TextEdit hiện hộp thoại "document could not be opened". Bỏ tham số thì TextEdit mở tài liệu bình thường.
@@ -141,7 +147,7 @@ Thứ tự phụ thuộc: **Gate (GO) → M1 (GO) → M2 (agent thật + client 
 | `rm-client` (`remote-mac`): handshake → `Ready`, list/launch; test end-to-end client↔relay↔agent | Xong, có test (1). Bản CLI, **chưa có cửa sổ** |
 | Probe macOS (Swift) + workflow Gate | **Gate G và M1 đều GO trên 3 runner thật** (số liệu ở §2). Sau nhiều vòng sửa lỗi của chính probe |
 | `agent/macos` (`remote-agent-mac`, Swift): relay join, handshake, capability thật, allowlist launch, theo dõi cửa sổ, `SCStream`→H.264 Annex-B, input (phím/Unicode/chuột/modifier) | **Xong và đã chạy end-to-end trên `macos-15` và `macos-26`** (12/12 bước, xem §2 "Kết quả M2-agent") |
-| Compositor/decoder trên Windows (Media Foundation + Direct3D 11 + Win32), bắt input Windows | **Chưa làm** — M2b, cần CI `windows-latest` |
+| Viewer Windows (`crates/rm-viewer`, `remote-mac-viewer.exe`): cửa sổ Win32 cho mỗi cửa sổ Mac, giải mã H.264 (openh264, phần mềm) + vẽ GDI, chuột/phím/Unicode (Ctrl→Command), resize/maximize theo point↔DIP, đóng cửa sổ, AppUserModelID + icon app riêng trên taskbar, clipboard hai chiều, đồng bộ focus | **Xong, smoke 9/9 trên `windows-latest`** với agent giả (run [36982614961](https://github.com/ducminh1110/RemoteMac/actions/runs/36982614961)). **Chưa chạy với Mac thật qua mạng**; chưa có Direct3D 11 / giải mã phần cứng |
 | Mã hoá đầu-cuối (Noise/QUIC) + TLS cho relay | **Chưa làm — bắt buộc trước khi dùng thật** |
 | GitHub provider (device-flow OAuth, `workflow_dispatch`, theo dõi run, huỷ run) | **Chưa làm** — M3 (Gate hiện chạy bằng push lên nhánh) |
 | Clipboard, file transfer, audio, DPI, đa màn hình, Simulator, Xcode | Sau M2 |
