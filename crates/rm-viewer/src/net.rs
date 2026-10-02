@@ -13,6 +13,86 @@ use std::sync::{Arc, Mutex};
 /// and asks the Mac for a fresh keyframe (Moonlight's "frame queue overflow -> IDR").
 const DECODE_QUEUE: usize = 4;
 
+/// A decoded picture: BGRA in memory (openh264 or Media Foundation's software decoder) or an
+/// NV12 texture on the shared GPU device (hardware decoding).
+#[derive(Debug)]
+pub enum Pic {
+    Cpu(Picture),
+    #[cfg(windows)]
+    Gpu(crate::gpu::GpuPic),
+}
+
+impl Pic {
+    pub fn size(&self) -> (usize, usize) {
+        match self {
+            Pic::Cpu(p) => (p.width, p.height),
+            #[cfg(windows)]
+            Pic::Gpu(g) => (g.width as usize, g.height as usize),
+        }
+    }
+}
+
+/// Which decoder new windows get.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecoderKind {
+    /// openh264 (portable; Main profile at most)
+    Software,
+    /// Media Foundation, system memory (multithreaded; High profile)
+    Platform,
+    /// Media Foundation on the GPU (DXVA), pictures stay in video memory
+    Hardware,
+}
+
+static DECODER: std::sync::OnceLock<DecoderKind> = std::sync::OnceLock::new();
+
+/// Choose the decoder once, before connecting (the UI knows whether it can show GPU pictures).
+pub fn set_decoder(k: DecoderKind) {
+    let _ = DECODER.set(k);
+}
+
+pub fn decoder_kind() -> DecoderKind {
+    *DECODER.get().unwrap_or(&DecoderKind::Software)
+}
+
+enum Dec {
+    Open(H264Decoder),
+    #[cfg(windows)]
+    Mf(crate::mfdec::MfDecoder),
+}
+
+impl Dec {
+    fn new() -> Option<Self> {
+        #[cfg(windows)]
+        {
+            let gpu = match decoder_kind() {
+                DecoderKind::Hardware => Some(crate::gpu::shared()),
+                DecoderKind::Platform => Some(None),
+                DecoderKind::Software => None,
+            };
+            if let Some(g) = gpu {
+                match crate::mfdec::MfDecoder::new(g) {
+                    Ok(d) => return Some(Dec::Mf(d)),
+                    Err(e) => eprintln!("Media Foundation decoder unavailable ({e}); using openh264"),
+                }
+            }
+        }
+        H264Decoder::new().ok().map(Dec::Open)
+    }
+
+    fn decode(&mut self, v: &rm_protocol::VideoFrame) -> Result<Option<Pic>, String> {
+        match self {
+            Dec::Open(d) => d.decode(&v.data).map(|p| p.map(Pic::Cpu)),
+            #[cfg(windows)]
+            Dec::Mf(d) => d.decode(&v.data, (v.width as u32, v.height as u32)).map(|p| {
+                p.map(|p| match p {
+                    crate::mfdec::Decoded::Gpu(g) => Pic::Gpu(g),
+                    crate::mfdec::Decoded::Cpu(c) => Pic::Cpu(c),
+                })
+            }),
+        }
+    }
+}
+
 /// Timing of one picture, for the stats overlay.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FrameMeta {
@@ -41,7 +121,7 @@ pub enum UiEvent {
     Resized { id: u64, w: u32, h: u32 },
     Title { id: u64, title: String },
     Destroyed { id: u64 },
-    Frame { id: u64, picture: Picture, meta: FrameMeta },
+    Frame { id: u64, picture: Pic, meta: FrameMeta },
     AppExited(String),
     Notice(String),
     Disconnected(String),
@@ -115,6 +195,8 @@ pub fn connect_with(relay: &str, session: &str, token: &str, app: Option<&str>, 
     if !sess.capabilities.can_stream_apps() {
         eprintln!("warning: host reports it cannot stream apps: {:?}", sess.capabilities);
     }
+    let kind = decoder_kind();
+    link.send(&Message::VideoDecoder { high_profile: kind != DecoderKind::Software, hardware: kind == DecoderKind::Hardware });
     if let Some(app) = app {
         link.send(&Message::AppLaunch { application_id: app.into(), arguments: vec![], working_directory: None, environment: Default::default() });
     }
@@ -187,11 +269,11 @@ fn spawn_decoder(id: u64, link: Link, tx: Sender<UiEvent>, wake: Arc<dyn Fn() + 
     std::thread::Builder::new()
         .name(format!("rm-decode-{id}"))
         .spawn(move || {
-            let Ok(mut d) = H264Decoder::new() else { return };
+            let Some(mut d) = Dec::new() else { return };
             let mut last_ask = std::time::Instant::now() - std::time::Duration::from_secs(1);
             for (v, mut meta) in frx {
                 let t = std::time::Instant::now();
-                match d.decode(&v.data) {
+                match d.decode(&v) {
                     Ok(Some(picture)) => {
                         meta.decode_us = t.elapsed().as_micros() as u32;
                         if tx.send(UiEvent::Frame { id, picture, meta }).is_err() {
@@ -308,8 +390,7 @@ mod tests {
                 }
                 Ok(UiEvent::Frame { picture, .. }) => {
                     frames += 1;
-                    assert_eq!((picture.width, picture.height), (480, 352));
-                    assert_eq!(picture.bgra.len(), 480 * 352 * 4);
+                    assert_eq!(picture.size(), (480, 352));
                 }
                 Ok(UiEvent::Title { title, .. }) => titled |= title.contains("[5 chars]"),
                 Ok(_) | Err(_) => {}
@@ -340,7 +421,7 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(12);
         while std::time::Instant::now() < deadline && udp < 60 {
             if let Ok(UiEvent::Frame { picture, meta, .. }) = rx.recv_timeout(Duration::from_millis(300)) {
-                assert_eq!(picture.bgra.len(), 480 * 352 * 4);
+                assert_eq!(picture.size(), (480, 352));
                 if meta.via_udp { udp += 1 } else { tcp += 1 }
             }
         }

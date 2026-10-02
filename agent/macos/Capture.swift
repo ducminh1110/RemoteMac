@@ -38,6 +38,9 @@ func annexB(_ sb: CMSampleBuffer, keyframe: Bool) -> Data? {
     return out
 }
 
+/// The client said its decoder takes H.264 High (set before windows start streaming).
+var useHighProfile = false
+
 final class WindowStream: NSObject, SCStreamOutput {
     let windowID: CGWindowID
     /// Points cut off the top (the Mac title bar).
@@ -80,7 +83,7 @@ final class WindowStream: NSObject, SCStreamOutput {
             let cfg = SCStreamConfiguration()
             cfg.width = max(2, d.width); cfg.height = max(2, d.height)
             cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
-            cfg.pixelFormat = kCVPixelFormatType_32BGRA
+            cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
             cfg.queueDepth = 6; cfg.showsCursor = false // the client draws its own pointer, as remote desktops do
             let s = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: cfg, delegate: nil)
             try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "rm.capture.display.\(did)"))
@@ -95,7 +98,7 @@ final class WindowStream: NSObject, SCStreamOutput {
         if cut > 0 { cfg.sourceRect = CGRect(x: 0, y: cut, width: w.frame.width, height: w.frame.height - cut) }
         cfg.width = max(2, Int(w.frame.width)); cfg.height = max(2, Int(w.frame.height - cut))
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
-        cfg.pixelFormat = kCVPixelFormatType_32BGRA
+        cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
         cfg.queueDepth = 6; cfg.showsCursor = false
         let s = SCStream(filter: SCContentFilter(desktopIndependentWindow: w), configuration: cfg, delegate: nil)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "rm.capture.\(windowID)"))
@@ -126,8 +129,12 @@ final class WindowStream: NSObject, SCStreamOutput {
         guard let s = s else { return nil }
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Main_AutoLevel)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ProfileLevel, value: useHighProfile ? kVTProfileLevel_H264_High_AutoLevel : kVTProfileLevel_H264_Main_AutoLevel)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 60 as CFNumber)
+        // signal BT.709 in the stream (the viewer's GPU colour conversion uses it)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ColorPrimaries, value: kCVImageBufferColorPrimaries_ITU_R_709_2)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_TransferFunction, value: kCVImageBufferTransferFunction_ITU_R_709_2)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_YCbCrMatrix, value: kCVImageBufferYCbCrMatrix_ITU_R_709_2)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
         applyBitrate(s, bitrate)
         // keyframes on request (start, client resync, after drops); a long safety interval only

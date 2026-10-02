@@ -12,6 +12,10 @@ pub mod comp;
 #[cfg(windows)]
 pub mod connect;
 #[cfg(windows)]
+pub mod gpu;
+#[cfg(windows)]
+pub mod mfdec;
+#[cfg(windows)]
 pub mod launcher;
 #[cfg(windows)]
 pub mod native;

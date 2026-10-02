@@ -255,6 +255,7 @@ dependencies = [
 name = "rm-viewer"
 version = "0.1.0"
 dependencies = [
+ "openh264",
  "rm-client",
  "rm-decode",
  "rm-fakeagent",

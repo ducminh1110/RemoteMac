@@ -333,6 +333,10 @@ func handle(_ m: [String: Any]) {
         let wid = CGWindowID(int(m["window_id"]))
         streamsLock.lock(); let ws = streams[wid]; streamsLock.unlock()
         ws?.requestKeyframe()
+    case "video_decoder":
+        // the client decodes with Windows' own decoder: High profile (better quality per bit)
+        useHighProfile = m["high_profile"] as? Bool ?? false
+        log("client decoder: high_profile=\(useHighProfile) hardware=\(m["hardware"] as? Bool ?? false)")
     case "ping":
         send(["type": "pong", "nonce": m["nonce"] ?? 0])
     case _ where inputTypes.contains(type):

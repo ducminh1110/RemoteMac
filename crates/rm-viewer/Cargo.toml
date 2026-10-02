@@ -41,7 +41,10 @@ features = [
   "Win32_UI_Controls",
   "Win32_Graphics_Dwm",
   "Win32_Graphics_DirectComposition",
+  "Win32_Media",
+  "Win32_Media_MediaFoundation",
 ]
 
 [dev-dependencies]
 rm-fakeagent = { path = "../rm-fakeagent" }
+openh264 = "0.9"

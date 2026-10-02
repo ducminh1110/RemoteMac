@@ -69,8 +69,8 @@ final class UdpLink {
             if alive != wasAlive { wasAlive = alive; onAlive?(alive) }
             let n = Darwin.recv(fd, &buf, buf.count, 0)
             guard n >= 3, buf[0] == 0x52, buf[1] == 0x4D else { continue }
-            func be32(_ o: Int) -> UInt32 { buf[o..<o + 4].reduce(0) { $0 << 8 | UInt32($1) } }
-            func be64(_ o: Int) -> UInt64 { buf[o..<o + 8].reduce(0) { $0 << 8 | UInt64($1) } }
+            func be32(_ o: Int) -> UInt32 { var v: UInt32 = 0; for i in o..<(o + 4) { v = (v << 8) | UInt32(buf[i]) }; return v }
+            func be64(_ o: Int) -> UInt64 { var v: UInt64 = 0; for i in o..<(o + 8) { v = (v << 8) | UInt64(buf[i]) }; return v }
             switch buf[2] {
             case 2 where n >= 4:                       // relay status
                 registered = buf[3] != 0xFF
@@ -153,7 +153,8 @@ final class UdpLink {
         be(p.windowID); be(s); be(p.ptsMicros); be(p.width); be(p.height); be(UInt32(len))
         for b in 0..<blocks {
             let first = b * Self.maxBlock, k = min(Self.maxBlock, n - first)
-            let m = fecPct == 0 ? 0 : max(1, min(255 - k, (k * fecPct + 99) / 100))
+            let pct: Int = fecPct
+            let m: Int = pct == 0 ? 0 : max(1, min(255 - k, (k * pct + 99) / 100))
             let shards: [[UInt8]] = (0..<k).map { j in
                 let start = min(len, (first + j) * size), end = min(len, start + size)
                 var sh = Array(bytes[start..<end]); if sh.count < size { sh += [UInt8](repeating: 0, count: size - sh.count) }

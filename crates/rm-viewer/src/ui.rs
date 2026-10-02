@@ -227,6 +227,10 @@ pub fn run(opts: Options) -> i32 {
             let _ = PostMessageW(Some(hwnd_of(ctl)), WM_UI_EVENT, WPARAM(0), LPARAM(0));
         };
         native::load_fonts();
+        // decided before any window exists: composition windows, and with them GPU pictures
+        let use_comp = opts.d3d && comp::available();
+        net::set_decoder(choose_decoder(use_comp));
+        eprintln!("video decoder: {:?}", net::decoder_kind());
         let mut opts = opts;
         let (link, rx) = if opts.prompt {
             // ID + password window; a failed attempt shows why and asks again
@@ -271,7 +275,6 @@ pub fn run(opts: Options) -> i32 {
             eprintln!("warning: launcher window could not be created");
         }
         let smoke = opts.smoke.then(Smoke::new);
-        let use_comp = opts.d3d && comp::available();
         eprintln!("window surfaces: {}", if use_comp { "DirectComposition (rounded corners)" } else if opts.d3d { "Direct3D 11" } else { "GDI" });
         let showcase = opts.showcase.map(Showcase::new);
         APP.with(|a| {
@@ -292,6 +295,35 @@ pub fn run(opts: Options) -> i32 {
         }
         with_app(|a| a.exit.unwrap_or(0)).unwrap_or(0)
     }
+}
+
+/// Best decoder this PC has: the GPU (DXVA through Media Foundation, pictures stay in video
+/// memory; needs composition windows), else Media Foundation in software, else openh264.
+/// RM_DECODER=hardware|platform|software forces one.
+fn choose_decoder(use_comp: bool) -> net::DecoderKind {
+    use net::DecoderKind::*;
+    let forced = match std::env::var("RM_DECODER").ok().as_deref() {
+        Some("hardware") => Some(Hardware),
+        Some("platform") => Some(Platform),
+        Some("software") => Some(Software),
+        _ => None,
+    };
+    if let Some(k) = forced {
+        return k;
+    }
+    // probe on a thread of its own (Media Foundation wants a multithreaded COM apartment)
+    std::thread::spawn(move || {
+        let gpu = crate::gpu::shared().filter(|g| g.hardware);
+        if use_comp && gpu.is_some() && crate::mfdec::MfDecoder::new(gpu).is_ok() {
+            Hardware
+        } else if crate::mfdec::MfDecoder::new(None).is_ok() {
+            Platform
+        } else {
+            Software
+        }
+    })
+    .join()
+    .unwrap_or(Software)
 }
 
 /// The Mac is no longer reachable from this viewer: its apps leave the Start menu and Search.
@@ -619,15 +651,18 @@ fn handle_event(ev: UiEvent) {
                 let r = a.remotes.get_mut(&key)?;
                 r.frames += 1;
                 a.stats.note(&meta);
-                let gpu_ok = match (r.comp.as_mut(), r.presenter.as_mut()) {
-                    (Some(c), _) => c.present(&picture),
-                    (None, Some(p)) => p.present(&picture),
+                let gpu_ok = match (&picture, r.comp.as_mut(), r.presenter.as_mut()) {
+                    (net::Pic::Gpu(g), Some(c), _) => c.present_gpu(g),
+                    (net::Pic::Cpu(p), Some(c), _) => c.present(p),
+                    (net::Pic::Cpu(p), None, Some(d)) => d.present(p),
                     _ => false,
                 };
                 if !gpu_ok && r.presenter.take().is_some() {
                     eprintln!("Direct3D presenter failed; falling back to GDI for window {id}");
                 }
-                r.picture = Some(picture);
+                if let net::Pic::Cpu(p) = picture {
+                    r.picture = Some(p);
+                }
                 Some((key, gpu_ok))
             })
             .flatten();

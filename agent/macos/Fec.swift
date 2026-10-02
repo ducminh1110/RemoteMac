@@ -51,6 +51,12 @@ func fecEncode(_ data: [[UInt8]], m: Int) -> [[UInt8]] {
 
 /// The vector rm-protocol's `fec::tests::known_vector` checks: the two sides must agree.
 func fecSelfTest() -> Bool {
-    let data = (0..<3).map { j in (0..<4).map { b in UInt8((j * 7 + b * 13 + 1) & 0xFF) } }
-    return fecEncode(data, m: 2) == [[0xff, 0x69, 0x31, 0xb7], [0x9a, 0xdf, 0xb3, 0x59]]
+    var data: [[UInt8]] = []
+    for j in 0..<3 {
+        var row: [UInt8] = []
+        for b in 0..<4 { let v: Int = j * 7 + b * 13 + 1; row.append(UInt8(v & 0xFF)) }
+        data.append(row)
+    }
+    let expected: [[UInt8]] = [[0xff, 0x69, 0x31, 0xb7], [0x9a, 0xdf, 0xb3, 0x59]]
+    return fecEncode(data, m: 2) == expected
 }

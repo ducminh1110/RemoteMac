@@ -304,6 +304,9 @@ pub enum Message {
     /// Client -> agent: the decoder lost sync (or just started): send an IDR frame now. Like
     /// Moonlight, keyframes come on request instead of on a fixed timer.
     RequestKeyframe { window_id: u64 },
+    /// Client -> agent, after the handshake: what the client's decoder takes. `high_profile`:
+    /// H.264 High (Windows' own decoder) instead of Main (the portable fallback).
+    VideoDecoder { high_profile: bool, hardware: bool },
 
     /// Either direction: the clipboard now holds this text. `seq` lets each side ignore
     /// the echo of a change it applied itself.

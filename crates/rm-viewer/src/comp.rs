@@ -33,12 +33,27 @@ pub struct Comp {
     ctx: ID3D11DeviceContext,
     swap: Option<IDXGISwapChain1>,
     swap_size: (u32, u32),
+    /// GPU colour conversion (NV12 -> the swap chain), for hardware-decoded pictures
+    vp: Option<VideoProc>,
     /// picture area (x, y, w, h) inside the window, pixels
     area: (i32, i32, i32, i32),
     pub kind: &'static str,
 }
 
+struct VideoProc {
+    dev: ID3D11VideoDevice,
+    ctx: ID3D11VideoContext,
+    en: ID3D11VideoProcessorEnumerator,
+    vp: ID3D11VideoProcessor,
+    /// (input texture size, output size)
+    sizes: ((u32, u32), (u32, u32)),
+}
+
 fn create_device() -> Option<(ID3D11Device, ID3D11DeviceContext, &'static str)> {
+    // the viewer's shared device: hardware-decoded pictures live on it
+    if let Some(g) = crate::gpu::shared() {
+        return Some((g.device.clone(), g.ctx.clone(), if g.hardware { "dcomp-d3d11-hardware" } else { "dcomp-d3d11-warp" }));
+    }
     let drivers: [(D3D_DRIVER_TYPE, &'static str); 2] = [(D3D_DRIVER_TYPE_HARDWARE, "dcomp-d3d11-hardware"), (D3D_DRIVER_TYPE_WARP, "dcomp-d3d11-warp")];
     for (driver, kind) in drivers {
         let (mut device, mut ctx) = (None, None);
@@ -96,7 +111,7 @@ impl Comp {
             root.AddVisual(&chrome, true, &video).ok()?;
             target.SetRoot(&root).ok()?;
             device.Commit().ok()?;
-            Some(Self { device, _target: target, root, clip, bg_scale, video, video_scale, chrome, chrome_surface: None, d3d, ctx, swap: None, swap_size: (0, 0), area: (0, 0, 1, 1), kind })
+            Some(Self { device, _target: target, root, clip, bg_scale, video, video_scale, chrome, chrome_surface: None, d3d, ctx, swap: None, swap_size: (0, 0), vp: None, area: (0, 0, 1, 1), kind })
         }
     }
 
@@ -159,48 +174,121 @@ impl Comp {
         }
     }
 
+    /// The swap chain at `w`x`h` (made or resized). False if the device was lost.
+    fn ensure_swap(&mut self, w: u32, h: u32) -> bool {
+        unsafe {
+            if self.swap.is_some() && self.swap_size == (w, h) {
+                return true;
+            }
+            match self.swap.as_ref() {
+                Some(sc) => {
+                    if sc.ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0)).is_err() {
+                        return false;
+                    }
+                }
+                None => {
+                    let Ok(dxgi) = self.d3d.cast::<IDXGIDevice>() else { return false };
+                    let Ok(adapter) = dxgi.GetAdapter() else { return false };
+                    let Ok(factory) = adapter.GetParent::<IDXGIFactory2>() else { return false };
+                    let desc = DXGI_SWAP_CHAIN_DESC1 {
+                        Width: w,
+                        Height: h,
+                        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                        BufferCount: 2,
+                        Scaling: DXGI_SCALING_STRETCH,
+                        SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+                        AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+                        ..Default::default()
+                    };
+                    let Ok(sc) = factory.CreateSwapChainForComposition(&self.d3d, &desc, None) else { return false };
+                    if self.video.SetContent(&sc).is_err() {
+                        return false;
+                    }
+                    self.swap = Some(sc);
+                }
+            }
+            self.swap_size = (w, h);
+            self.scale_video();
+            let _ = self.device.Commit();
+            true
+        }
+    }
+
     /// Upload and show a decoded picture. False if the device was lost.
     pub fn present(&mut self, p: &Picture) -> bool {
         let (w, h) = (p.width as u32, p.height as u32);
+        if !self.ensure_swap(w, h) {
+            return false;
+        }
         unsafe {
-            if self.swap.is_none() || self.swap_size != (w, h) {
-                match self.swap.as_ref() {
-                    Some(sc) => {
-                        if sc.ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0)).is_err() {
-                            return false;
-                        }
-                    }
-                    None => {
-                        let Ok(dxgi) = self.d3d.cast::<IDXGIDevice>() else { return false };
-                        let Ok(adapter) = dxgi.GetAdapter() else { return false };
-                        let Ok(factory) = adapter.GetParent::<IDXGIFactory2>() else { return false };
-                        let desc = DXGI_SWAP_CHAIN_DESC1 {
-                            Width: w,
-                            Height: h,
-                            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-                            BufferCount: 2,
-                            Scaling: DXGI_SCALING_STRETCH,
-                            SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-                            AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-                            ..Default::default()
-                        };
-                        let Ok(sc) = factory.CreateSwapChainForComposition(&self.d3d, &desc, None) else { return false };
-                        if self.video.SetContent(&sc).is_err() {
-                            return false;
-                        }
-                        self.swap = Some(sc);
-                    }
-                }
-                self.swap_size = (w, h);
-                self.scale_video();
-                let _ = self.device.Commit();
-            }
             let Some(sc) = self.swap.as_ref() else { return false };
             let Ok(back) = sc.GetBuffer::<ID3D11Texture2D>(0) else { return false };
             self.ctx.UpdateSubresource(&back, 0, None, p.bgra.as_ptr() as *const _, w * 4, 0);
             sc.Present(0, DXGI_PRESENT(0)).is_ok()
+        }
+    }
+
+    /// Show a hardware-decoded picture: the GPU video processor converts NV12 into the swap
+    /// chain directly (the picture never comes back to system memory).
+    pub fn present_gpu(&mut self, p: &crate::gpu::GpuPic) -> bool {
+        let (w, h) = (p.width, p.height);
+        if !self.ensure_swap(w, h) {
+            return false;
+        }
+        unsafe {
+            let mut td = D3D11_TEXTURE2D_DESC::default();
+            p.tex.GetDesc(&mut td);
+            let sizes = ((td.Width, td.Height), (w, h));
+            if self.vp.as_ref().map(|v| v.sizes) != Some(sizes) {
+                self.vp = None;
+                let Ok(dev) = self.d3d.cast::<ID3D11VideoDevice>() else { return false };
+                let Ok(vctx) = self.ctx.cast::<ID3D11VideoContext>() else { return false };
+                let rate = DXGI_RATIONAL { Numerator: 60, Denominator: 1 };
+                let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+                    InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+                    InputFrameRate: rate,
+                    InputWidth: td.Width,
+                    InputHeight: td.Height,
+                    OutputFrameRate: rate,
+                    OutputWidth: w,
+                    OutputHeight: h,
+                    Usage: D3D11_VIDEO_USAGE_OPTIMAL_SPEED,
+                };
+                let Ok(en) = dev.CreateVideoProcessorEnumerator(&desc) else { return false };
+                let Ok(vp) = dev.CreateVideoProcessor(&en, 0) else { return false };
+                // BT.709 limited-range YCbCr in, full-range RGB out
+                let cs_in = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0x14 };
+                let cs_out = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 };
+                vctx.VideoProcessorSetStreamColorSpace(&vp, 0, &cs_in);
+                vctx.VideoProcessorSetOutputColorSpace(&vp, &cs_out);
+                vctx.VideoProcessorSetStreamFrameFormat(&vp, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+                vctx.VideoProcessorSetStreamAutoProcessingMode(&vp, 0, false);
+                let r = windows::Win32::Foundation::RECT { left: 0, top: 0, right: w as i32, bottom: h as i32 };
+                vctx.VideoProcessorSetStreamSourceRect(&vp, 0, true, Some(&r));
+                vctx.VideoProcessorSetStreamDestRect(&vp, 0, true, Some(&r));
+                vctx.VideoProcessorSetOutputTargetRect(&vp, true, Some(&r));
+                self.vp = Some(VideoProc { dev, ctx: vctx, en, vp, sizes });
+            }
+            let Some(v) = self.vp.as_ref() else { return false };
+            let Some(sc) = self.swap.as_ref() else { return false };
+            let Ok(back) = sc.GetBuffer::<ID3D11Texture2D>(0) else { return false };
+            let od = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC { ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D, Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 } } };
+            let mut ov = None;
+            if v.dev.CreateVideoProcessorOutputView(&back, &v.en, &od, Some(&mut ov)).is_err() {
+                return false;
+            }
+            let id = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC { FourCC: 0, ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D, Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 } } };
+            let mut iv = None;
+            if v.dev.CreateVideoProcessorInputView(&p.tex, &v.en, &id, Some(&mut iv)).is_err() {
+                return false;
+            }
+            let (Some(ov), Some(iv)) = (ov, iv) else { return false };
+            let mut stream = D3D11_VIDEO_PROCESSOR_STREAM { Enable: true.into(), pInputSurface: std::mem::ManuallyDrop::new(Some(iv)), ..Default::default() };
+            let ok = v.ctx.VideoProcessorBlt(&v.vp, &ov, 0, std::slice::from_ref(&stream)).is_ok();
+            std::mem::ManuallyDrop::drop(&mut stream.pInputSurface);
+            ok && sc.Present(0, DXGI_PRESENT(0)).is_ok()
         }
     }
 }
