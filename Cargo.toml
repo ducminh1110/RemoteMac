@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["crates/rm-decode", "crates/rm-fakeagent", "crates/rm-viewer", "crates/rm-protocol", "crates/rm-core", "crates/rm-relay", "crates/rm-agent", "crates/rm-client"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+# openh264 is C++: keep it optimised even in debug test builds so encode/decode tests stay fast.
+[profile.dev.package.openh264-sys2]
+opt-level = 3
+[profile.dev.package.openh264]
+opt-level = 3
+[profile.dev.package.rm-decode]
+opt-level = 2

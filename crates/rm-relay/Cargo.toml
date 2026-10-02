@@ -1,0 +1,13 @@
+[package]
+name = "rm-relay"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "rm-relay"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

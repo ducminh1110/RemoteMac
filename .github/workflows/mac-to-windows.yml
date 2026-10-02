@@ -1,0 +1,80 @@
+name: Mac -> Windows (recorded session replayed in the viewer)
+
+# Two machines, no network path between them: the macOS runner runs the real agent and records
+# a session (Xcode, TextEdit, the test app: real windows, menus, icons, H.264 video); the Windows
+# runner replays that recording into the native viewer, which opens each app in a Mac-style
+# window and takes screenshots of every window and of the whole Windows desktop.
+on:
+  workflow_dispatch:
+    inputs:
+      apps:
+        description: Mac apps to record and open on Windows (comma separated ids)
+        default: xcode,textedit,testapp,desktop
+  push:
+    branches: [claude/inspiring-einstein-er2d37]
+    paths: [crates/**, agent/**, probe/macos/testapp.swift, scripts/mac-record.sh, scripts/windows-showcase.ps1, .github/workflows/mac-to-windows.yml]
+
+permissions:
+  contents: read
+
+env:
+  APPS: ${{ github.event.inputs.apps || 'xcode,textedit,testapp,desktop' }}
+
+jobs:
+  mac:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record a real Mac session
+        run: ./scripts/mac-record.sh "$APPS"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mac-recording-${{ matrix.os }}
+          path: |
+            out/recording/*
+            out/*.log
+          retention-days: 3
+
+  windows:
+    needs: mac
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build viewer, relay and replay agent
+        run: cargo build --release -p rm-viewer -p rm-relay -p rm-fakeagent
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-recording-${{ matrix.os }}
+          path: mac-recording
+      - name: Replay the Mac session into the viewer and take screenshots
+        shell: pwsh
+        run: |
+          $env:RM_SESSION_TOKEN = "replay-" + [guid]::NewGuid().ToString("N")
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          $relay = Start-Process -PassThru -NoNewWindow -FilePath target\release\rm-relay.exe -ArgumentList "127.0.0.1:47961" -RedirectStandardError out\relay.log
+          Start-Sleep -Seconds 1
+          $agent = Start-Process -PassThru -NoNewWindow -FilePath target\release\rm-fakeagent.exe -ArgumentList "--relay 127.0.0.1:47961 --session replay --replay mac-recording\recording\session.rmrec" -RedirectStandardError out\replay.log
+          Start-Sleep -Seconds 1
+          & ./scripts/windows-showcase.ps1 -Relay 127.0.0.1:47961 -Session replay -Apps $env:APPS -Out out\showcase -Settle 8 -TimeoutSec 600
+          $code = $LASTEXITCODE
+          foreach ($p in @($agent, $relay)) { if (-not $p.HasExited) { $p.Kill() } }
+          Write-Host "=== replay agent log"; Get-Content out\replay.log -ErrorAction SilentlyContinue
+          exit $code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-screenshots-${{ matrix.os }}
+          path: |
+            out/showcase/*
+            mac-recording/recording/*.png

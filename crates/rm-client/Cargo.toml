@@ -1,0 +1,26 @@
+[package]
+name = "rm-client"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "remote-mac"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rm-protocol = { path = "../rm-protocol" }
+rm-core = { path = "../rm-core" }
+rm-decode = { path = "../rm-decode" }
+rm-relay = { path = "../rm-relay" }
+
+[lib]
+name = "rm_client"
+path = "src/lib.rs"
+
+[dev-dependencies]
+rm-agent = { path = "../rm-agent" }
+rm-fakeagent = { path = "../rm-fakeagent" }
+rm-relay = { path = "../rm-relay" }

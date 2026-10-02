@@ -1,0 +1,4 @@
+[toolchain]
+# Pinned so local builds and every CI runner (Linux, macOS, Windows) lint and compile identically.
+channel = "1.97.0"
+components = ["clippy", "rustfmt"]

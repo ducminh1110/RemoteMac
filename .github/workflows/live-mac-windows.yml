@@ -1,0 +1,83 @@
+name: Live Mac <-> Windows (through the relay server)
+
+# Both runners connect *out* to the relay on our own server (set up by hand, see
+# deploy/RELAY-SETUP.md): the Mac agent and the Windows viewer pair there and talk live. The
+# viewer opens the apps, types into them and takes screenshots of the Mac-style windows and of
+# the Windows desktop; the Mac side takes its own. A scripted test with a per-run token derived
+# from the RM_RELAY_KEY secret; both jobs end when the showcase is done.
+on:
+  workflow_dispatch:
+    inputs:
+      apps:
+        description: Mac apps to open on Windows
+        default: xcode,textedit,testapp
+  push:
+    branches: [claude/inspiring-einstein-er2d37]
+    paths: [live/trigger]   # created / bumped to start a run once the relay is set up
+
+permissions:
+  contents: read
+
+env:
+  RM_RELAY: remotemac.mooo.com:7470
+  APPS: ${{ github.event.inputs.apps || 'xcode,textedit,testapp' }}
+
+jobs:
+  mac:
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      RM_RELAY_KEY: ${{ secrets.RM_RELAY_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Serve this Mac's apps through the relay
+        run: |
+          [[ -n "$RM_RELAY_KEY" ]] || { echo "::error::repository secret RM_RELAY_KEY is missing (deploy/RELAY-SETUP.md)"; exit 1; }
+          export RM_SESSION="live-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          export RM_SESSION_TOKEN=$(printf '%s' "$RM_RELAY_KEY:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" | shasum -a 256 | cut -c1-48)
+          echo "::add-mask::$RM_SESSION_TOKEN"
+          ./scripts/mac-live.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-mac
+          path: |
+            out/*.log
+            out/mac-screens/*.png
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      RM_RELAY_KEY: ${{ secrets.RM_RELAY_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Relay reachable and closed to strangers
+        shell: pwsh
+        run: |
+          if (-not $env:RM_RELAY_KEY) { throw "repository secret RM_RELAY_KEY is missing (deploy/RELAY-SETUP.md)" }
+          $h, $p = $env:RM_RELAY -split ":"
+          $c = New-Object System.Net.Sockets.TcpClient
+          try { $c.Connect($h, [int]$p) } catch { throw "relay $env:RM_RELAY not reachable: $_ (server firewall / security group?)" }
+          $s = $c.GetStream(); $s.ReadTimeout = 5000
+          $hello = [Text.Encoding]::UTF8.GetBytes('{"session_id":"probe","role":"agent","token":"0123456789abcdef0"}' + "`n")
+          $s.Write($hello, 0, $hello.Length)
+          $buf = New-Object byte[] 64; $n = $s.Read($buf, 0, 64); $c.Close()
+          $reply = [Text.Encoding]::UTF8.GetString($buf, 0, $n).Trim()
+          Write-Host "join without the key -> $reply"
+          if ($reply -ne "ERR not admitted") { throw "relay does not require the admission key" }
+      - name: Build the viewer
+        run: cargo build --release -p rm-viewer
+      - name: Connect to the Mac, open apps, type, take screenshots
+        shell: pwsh
+        run: |
+          $session = "live-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $bytes = [System.Text.Encoding]::UTF8.GetBytes("$($env:RM_RELAY_KEY):$($env:GITHUB_RUN_ID):$($env:GITHUB_RUN_ATTEMPT)")
+          $env:RM_SESSION_TOKEN = (-join ([System.Security.Cryptography.SHA256]::HashData($bytes) | ForEach-Object { $_.ToString("x2") })).Substring(0, 48)
+          Write-Host "::add-mask::$($env:RM_SESSION_TOKEN)"
+          ./scripts/windows-showcase.ps1 -Relay $env:RM_RELAY -Session $session -Apps $env:APPS -Out out\live -Settle 12 -Type "Hello from Windows" -TimeoutSec 1200
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-windows-screenshots
+          path: out/live/*
