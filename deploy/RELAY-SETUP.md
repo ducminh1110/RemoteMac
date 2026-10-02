@@ -1,31 +1,81 @@
-# Relay server setup (by hand, on the server)
+# Hướng dẫn đầy đủ: relay server `remotemac.mooo.com`
 
-Public name: `remotemac.mooo.com` (FreeDNS) -> the server; the relay listens on TCP 7470.
+Relay là "điểm hẹn" giữa máy Mac (agent) và máy Windows (viewer). Cả hai đều **kết nối ra**
+relay, không máy nào phải mở cổng vào, nên Mac sau NAT, sau wifi nhà hay trên runner CI đều nối
+được. Relay chỉ ghép cặp và chuyển tiếp byte, không đọc nội dung.
 
-The relay pairs one Mac agent with one Windows viewer per session and forwards their bytes. On a
-public address it only admits joins that present the admission key (`RM_RELAY_KEY`).
+```
+  Windows (remote-mac-viewer) ──TCP──►  remotemac.mooo.com:7470  ◄──TCP── Mac (remote-agent-mac)
+                                        (rm-relay, systemd)
+```
 
-Run on the server (Ubuntu), as the `ubuntu` user:
+Ba lớp khoá:
+
+| Gì | Ai giữ | Dùng để |
+|---|---|---|
+| `RM_RELAY_KEY` (admission key) | server + mọi máy được phép dùng relay | relay từ chối mọi kết nối không có key (người lạ không dùng ké được) |
+| session id (vd. `my-mac`) | Mac + Windows của bạn | relay ghép đúng Mac với đúng Windows |
+| `RM_SESSION_TOKEN` (≥16 ký tự) | Mac + Windows của bạn | chỉ người biết token mới vào được session đó |
+
+> Lưu ý bảo mật: đường truyền tới relay hiện là TCP **chưa mã hoá** (TLS là bước tiếp theo của
+> dự án). Key và token không bao giờ được commit vào repo; trên GitHub chỉ để trong Secrets.
+
+---
+
+## 1. DNS (FreeDNS)
+
+Bản ghi `A`: `remotemac.mooo.com` → IP server (hiện `140.211.166.242`).
+
+Kiểm tra từ bất kỳ máy nào:
 
 ```bash
-# 1. tools + Rust (the repo pins its toolchain; rustup fetches it on the first build)
+nslookup remotemac.mooo.com      # phải ra 140.211.166.242
+```
+
+Nếu IP server thay đổi: vào FreeDNS → *Dynamic DNS* sửa lại bản ghi (hoặc dùng URL cập nhật
+động FreeDNS cấp, chạy bằng `curl` trong cron trên server).
+
+---
+
+## 2. Chuẩn bị server (Ubuntu, user `ubuntu`)
+
+```bash
+ssh ubuntu@remotemac.mooo.com
+
+# đổi mật khẩu tạm và (khuyên dùng) chuyển sang đăng nhập bằng SSH key
+passwd
+# trên máy bạn:  ssh-copy-id ubuntu@remotemac.mooo.com
+# rồi trên server tắt đăng nhập bằng mật khẩu:
+#   sudo sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config && sudo systemctl restart ssh
+```
+
+## 3. Cài Rust và build relay
+
+```bash
 sudo apt-get update && sudo apt-get install -y build-essential curl git openssl
 curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 . "$HOME/.cargo/env"
 
-# 2. build the relay
 git clone -b claude/inspiring-einstein-er2d37 https://github.com/ducminh1110/RemoteMac.git
 cd RemoteMac && cargo build --release -p rm-relay
 sudo install -m 0755 target/release/rm-relay /usr/local/bin/rm-relay
+```
 
-# 3. admission key (only root can read it); the last line prints it once, for the GitHub secret
+(Build lần đầu tải toolchain Rust repo ghim sẵn, mất vài phút. Chạy được trên x86_64 lẫn ARM.)
+
+## 4. Admission key
+
+```bash
 sudo mkdir -p /etc/remote-mac
 KEY=$(openssl rand -hex 24)
 echo "RM_RELAY_KEY=$KEY" | sudo tee /etc/remote-mac/relay.env >/dev/null
 sudo chmod 600 /etc/remote-mac/relay.env
-echo "RM_RELAY_KEY = $KEY"
+echo "RM_RELAY_KEY = $KEY"     # chép lại key này (dùng ở bước 7 và 8), không gửi lên chat/repo
+```
 
-# 4. service
+## 5. Chạy relay như một service (tự chạy lại khi lỗi / khi server khởi động lại)
+
+```bash
 sudo tee /etc/systemd/system/rm-relay.service >/dev/null <<'UNIT'
 [Unit]
 Description=Remote Mac relay
@@ -48,20 +98,110 @@ WantedBy=multi-user.target
 UNIT
 sudo systemctl daemon-reload
 sudo systemctl enable --now rm-relay
-
-# 5. firewall: open TCP 7470 (if ufw is on); a cloud firewall / security group may also need it
-sudo ufw status | grep -q "Status: active" && sudo ufw allow 7470/tcp
-
-# 6. check: "admission key required", and listening on 7470
-sudo systemctl status rm-relay --no-pager | head -n 8
-ss -ltn | grep 7470
 ```
 
-Then in GitHub: repository **Settings → Secrets and variables → Actions → New repository
-secret**, name `RM_RELAY_KEY`, value: the key printed in step 3.
+## 6. Mở cổng 7470/TCP
 
-Updating the relay later: `cd ~/RemoteMac && git pull && cargo build --release -p rm-relay &&
-sudo install -m 0755 target/release/rm-relay /usr/local/bin/rm-relay && sudo systemctl restart rm-relay`.
+```bash
+sudo ufw status | grep -q "Status: active" && sudo ufw allow 7470/tcp
+```
 
-Security notes: the relay leg is still plaintext TCP (key and per-run tokens included); TLS is
-the next step. Prefer SSH keys over password login on the server.
+Nếu nhà cung cấp server có **firewall riêng** (Security Group / Cloud Firewall trên trang quản
+lý): thêm luật cho phép **TCP 7470 inbound**. Chỉ cần cổng này (và 22 cho SSH).
+
+### Kiểm tra
+
+Trên server:
+
+```bash
+sudo systemctl status rm-relay --no-pager | head -n 8   # active (running)
+journalctl -u rm-relay -n 5 --no-pager                   # "... admission key required"
+ss -ltn | grep 7470                                      # LISTEN 0.0.0.0:7470
+```
+
+Từ máy Windows (PowerShell):
+
+```powershell
+Test-NetConnection remotemac.mooo.com -Port 7470          # TcpTestSucceeded : True
+```
+
+Từ một máy Linux/Mac bất kỳ (relay phải **từ chối** khi không có key):
+
+```bash
+printf '{"session_id":"probe","role":"agent","token":"0123456789abcdef0"}\n' | nc remotemac.mooo.com 7470
+# -> ERR not admitted
+```
+
+---
+
+## 7. Nối máy Mac (agent)
+
+Trên Mac (macOS 14 trở lên; cần Xcode Command Line Tools: `xcode-select --install`):
+
+```bash
+git clone -b claude/inspiring-einstein-er2d37 https://github.com/ducminh1110/RemoteMac.git
+cd RemoteMac && ./scripts/build-agent-macos.sh          # -> out/remote-agent-mac
+
+export RM_RELAY_KEY="<key ở bước 4>"
+export RM_SESSION_TOKEN="$(openssl rand -hex 16)"       # token của bạn; chép lại cho máy Windows
+echo "token: $RM_SESSION_TOKEN"
+./out/remote-agent-mac --relay remotemac.mooo.com:7470 --session my-mac
+```
+
+Lần đầu macOS sẽ hỏi quyền cho app chạy agent (Terminal / iTerm):
+**System Settings → Privacy & Security → Screen Recording** và **Accessibility** → bật, rồi chạy
+lại lệnh trên. Agent in `relay joined, session=my-mac` là đang chờ máy Windows (relay giữ chỗ
+5 phút; agent tự thoát nếu không ai vào, chạy lại là được).
+
+## 8. Nối máy Windows (viewer)
+
+Tải `remote-mac-viewer.exe` từ artifact **remote-mac-viewer-windows-x64** của workflow
+*Windows viewer* (tab Actions của repo), rồi trong PowerShell:
+
+```powershell
+$env:RM_RELAY_KEY = "<key ở bước 4>"
+$env:RM_SESSION_TOKEN = "<token in ra ở bước 7>"
+.\remote-mac-viewer.exe --relay remotemac.mooo.com:7470 --session my-mac
+```
+
+Launcher hiện ra với các app của Mac (**Mac Desktop** đứng đầu: điều khiển cả máy ở fullscreen).
+Double-click để mở; các app cũng có trong Start menu / Windows Search khi đang kết nối.
+
+Mẹo: đặt sẵn biến môi trường cho user (`setx RM_RELAY_KEY "..."`, `setx RM_SESSION_TOKEN "..."`)
+rồi tạo shortcut tới
+`remote-mac-viewer.exe --relay remotemac.mooo.com:7470 --session my-mac`.
+
+---
+
+## 9. Chạy thử Mac ↔ Windows trên GitHub Actions (CI)
+
+1. Repo → **Settings → Secrets and variables → Actions → New repository secret**:
+   tên `RM_RELAY_KEY`, giá trị: key ở bước 4.
+2. Kích hoạt workflow *Live Mac <-> Windows*: tạo hoặc sửa file `live/trigger` rồi push lên
+   nhánh (hoặc nhờ Claude làm). Hai runner cùng nối ra relay, viewer mở Xcode/TextEdit/testapp,
+   gõ thử chữ, chụp màn hình rồi cả hai job tự kết thúc. Token mỗi lần chạy được sinh riêng từ
+   `RM_RELAY_KEY` + số hiệu lần chạy.
+
+---
+
+## 10. Cập nhật relay
+
+```bash
+cd ~/RemoteMac && git pull && . "$HOME/.cargo/env" && cargo build --release -p rm-relay \
+  && sudo install -m 0755 target/release/rm-relay /usr/local/bin/rm-relay && sudo systemctl restart rm-relay
+```
+
+Đổi key: sửa `/etc/remote-mac/relay.env`, `sudo systemctl restart rm-relay`, cập nhật secret
+GitHub và biến môi trường trên các máy.
+
+## 11. Gỡ lỗi nhanh
+
+| Triệu chứng | Nguyên nhân thường gặp |
+|---|---|
+| `connect failed` / `TcpTestSucceeded: False` | firewall (ufw hoặc firewall của nhà cung cấp) chưa mở 7470; service chưa chạy |
+| `ERR not admitted` | `RM_RELAY_KEY` trên máy không khớp với server |
+| `ERR session mismatch` | token hai bên khác nhau, hoặc hai máy cùng vai trò (2 agent) vào cùng session |
+| `ERR pair timeout` | bên kia không vào trong 5 phút; chạy lại |
+| `ERR bad session or token` | session chỉ được chữ/số/`-` (≤64 ký tự); token 16–128 ký tự |
+| Mac vào được nhưng không có hình | chưa cấp quyền Screen Recording / Accessibility cho Terminal |
+| Xem log relay | `journalctl -u rm-relay -f` |
