@@ -11,7 +11,10 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
 pub enum UiEvent {
-    WindowCreated { id: u64, app: String, title: String, w: u32, h: u32 },
+    WindowCreated { id: u64, app: String, title: String, x: i32, y: i32, w: u32, h: u32, parent: Option<u64>, role: rm_protocol::WindowRole },
+    Apps(Vec<rm_protocol::AppInfo>),
+    Uploaded { transfer_id: u64, remote_path: String },
+    UploadFailed { transfer_id: u64, reason: String },
     /// Square RGBA icon (straight alpha) for an application id.
     Icon { app: String, size: u32, rgba: Vec<u8> },
     /// The remote clipboard now holds this text.
@@ -72,7 +75,10 @@ fn recv_loop(mut sess: Session<TcpStream>, tx: Sender<UiEvent>, wake: impl Fn())
                 }
             }
             Ok(Some(Frame::Msg(m))) => match m {
-                Message::WindowCreated { window_id, application_id, title, bounds, .. } => emit(UiEvent::WindowCreated { id: window_id, app: application_id, title, w: bounds.w, h: bounds.h }),
+                Message::WindowCreated { window_id, application_id, title, bounds, parent_id, role } => emit(UiEvent::WindowCreated { id: window_id, app: application_id, title, x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, parent: parent_id, role }),
+                Message::Apps { apps } => emit(UiEvent::Apps(apps)),
+                Message::FileUploaded { transfer_id, remote_path } => emit(UiEvent::Uploaded { transfer_id, remote_path }),
+                Message::FileUploadFailed { transfer_id, reason } => emit(UiEvent::UploadFailed { transfer_id, reason }),
                 Message::AppIcon { application_id, size, rgba_base64 } => {
                     if let Ok(rgba) = rm_protocol::base64_decode(&rgba_base64) {
                         if rgba.len() == (size * size * 4) as usize {
@@ -96,6 +102,31 @@ fn recv_loop(mut sess: Session<TcpStream>, tx: Sender<UiEvent>, wake: impl Fn())
             Err(e) => return emit(UiEvent::Disconnected(e.to_string())),
         }
     }
+}
+
+/// Send a local file to the agent in protocol-sized chunks. Runs on the caller's thread
+/// (the UI spawns one); the agent answers with `FileUploaded` / `FileUploadFailed`.
+pub fn upload_file(link: &Link, transfer_id: u64, path: &std::path::Path) -> Result<u64, String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let size = f.metadata().map_err(|e| e.to_string())?.len();
+    if size > rm_protocol::MAX_UPLOAD {
+        return Err(format!("{} is larger than the {} byte limit", path.display(), rm_protocol::MAX_UPLOAD));
+    }
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "upload".into());
+    link.send(&Message::FileUploadBegin { transfer_id, name, size });
+    let mut buf = vec![0u8; rm_protocol::UPLOAD_CHUNK];
+    let mut offset = 0u64;
+    loop {
+        let n = f.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        link.send(&Message::FileUploadChunk { transfer_id, offset, data_base64: rm_protocol::base64_encode(&buf[..n]) });
+        offset += n as u64;
+    }
+    link.send(&Message::FileUploadEnd { transfer_id });
+    Ok(offset)
 }
 
 #[cfg(test)]
@@ -141,5 +172,53 @@ mod tests {
             if let Ok(UiEvent::Destroyed { .. }) = rx.recv_timeout(Duration::from_millis(300)) { destroyed = true }
         }
         assert!(destroyed);
+    }
+
+    #[test]
+    fn several_apps_open_panel_and_upload() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        std::thread::spawn(move || rm_relay::serve(l, Default::default()));
+        let (a, tok) = (addr.clone(), "viewer-test-token-multi-0123456789");
+        std::thread::spawn(move || { let _ = rm_fakeagent::serve_via_relay(&a, "v-2", tok); });
+        std::thread::sleep(Duration::from_millis(150));
+        let (link, rx) = connect(&addr, "v-2", tok, Some("testapp"), || {}).unwrap();
+        link.send(&Message::AppLaunch { application_id: "notes".into(), arguments: vec![], working_directory: None, environment: Default::default() });
+
+        let file = std::env::temp_dir().join(format!("rm-upload-{}.bin", std::process::id()));
+        std::fs::write(&file, vec![42u8; 700 * 1024]).unwrap(); // three chunks
+        let (mut mains, mut panel, mut uploaded, mut opened) = (HashMap::new(), None, None, false);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < deadline && !opened {
+            match rx.recv_timeout(Duration::from_millis(300)) {
+                Ok(UiEvent::WindowCreated { id, app, role, parent, .. }) => match role {
+                    rm_protocol::WindowRole::Window => {
+                        mains.insert(app.clone(), id);
+                        if app == "testapp" {
+                            link.send(&Message::Key { window_id: id, physical_key: "KeyO".into(), modifiers: vec![rm_protocol::Modifier::Command], down: true });
+                        }
+                    }
+                    rm_protocol::WindowRole::OpenPanel => {
+                        assert_eq!(parent, mains.get("testapp").copied());
+                        panel = Some(id);
+                        upload_file(&link, 7, &file).unwrap();
+                    }
+                    _ => {}
+                },
+                Ok(UiEvent::Uploaded { transfer_id: 7, remote_path }) => {
+                    assert!(remote_path.ends_with(&*file.file_name().unwrap().to_string_lossy()));
+                    link.send(&Message::PanelChooseFile { window_id: panel.unwrap(), remote_path: remote_path.clone() });
+                    uploaded = Some(remote_path);
+                }
+                Ok(UiEvent::Title { title, .. }) if title.contains("[opened ") => {
+                    assert!(title.contains("716800 bytes"), "{title}");
+                    opened = true;
+                }
+                _ => {}
+            }
+        }
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(mains.len(), 2, "two apps running side by side: {mains:?}");
+        assert!(uploaded.is_some() && opened, "upload + panel choose: {uploaded:?}");
     }
 }

@@ -7,6 +7,8 @@
 use crate::keymap::*;
 use crate::native;
 use crate::d3d;
+use crate::launcher::{self, Launcher};
+use rm_protocol::WindowRole;
 use crate::net::{self, Link, UiEvent};
 use rm_decode::Picture;
 use rm_protocol::{Message, MouseButton};
@@ -34,14 +36,23 @@ pub struct Options {
     pub clipboard: bool,
     /// Prefer Direct3D 11 (falls back to GDI when no device can be created).
     pub d3d: bool,
+    /// Replace the Mac's file Open panel with the Windows one (uploading the chosen file).
+    pub windows_file_picker: bool,
 }
 
 const WM_UI_EVENT: u32 = WM_APP + 1;
+/// wParam = remote id of an open panel to replace with the Windows file picker.
+const WM_PICK_FILE: u32 = WM_APP + 2;
 const TIMER_ID: usize = 1;
 
 struct Remote {
     id: u64,
     app: String,
+    role: WindowRole,
+    parent: Option<u64>,
+    /// Remote window origin (Mac screen points), used to place owned dialogs relative to their parent.
+    rx: i32,
+    ry: i32,
     /// Remote window size in Mac points.
     rw: u32,
     rh: u32,
@@ -73,6 +84,13 @@ struct App {
     clip_applied: Option<String>,
     clip_seq: u64,
     d3d: bool,
+    launcher: Option<Launcher>,
+    /// Remote open panels we replaced with the Windows picker: panel id -> parent window id.
+    panels: HashMap<u64, Option<u64>>,
+    /// Upload transfer id -> panel id waiting for the uploaded file.
+    uploads: HashMap<u64, u64>,
+    next_transfer: u64,
+    redirect_panels: bool,
 }
 
 thread_local! { static APP: RefCell<Option<App>> = const { RefCell::new(None) }; }
@@ -89,9 +107,15 @@ fn hwnd_of(v: isize) -> HWND {
 pub fn run(opts: Options) -> i32 {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        // One viewer per user session: a second launch (Start menu, Search, taskbar) hands its app over.
+        if !opts.smoke && launcher::forward_to_running_instance(opts.app.as_deref()) {
+            return 0;
+        }
         let hinst: HINSTANCE = GetModuleHandleW(None).expect("module handle").into();
         let cursor = LoadCursorW(None, IDC_ARROW).ok().unwrap_or_default();
-        for (name, proc) in [(w!("RmController"), Some(controller_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT)), (w!("RmRemoteWindow"), Some(remote_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT))] {
+        for (name, proc) in [(w!("RmController"), Some(controller_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT)), (w!("RmRemoteWindow"), Some(remote_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT)),
+            (launcher::CLASS, Some(launcher_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT))] {
             let wc = WNDCLASSW { lpfnWndProc: proc, hInstance: hinst, lpszClassName: name, hCursor: cursor, ..Default::default() };
             if RegisterClassW(&wc) == 0 {
                 eprintln!("RegisterClassW failed");
@@ -117,10 +141,16 @@ pub fn run(opts: Options) -> i32 {
             }
         };
         eprintln!("connected; waiting for windows");
+        link.send(&Message::ListApps);
+        let launcher = Launcher::create(hinst, opts.app.is_none() && !opts.smoke);
+        if launcher.is_none() {
+            eprintln!("warning: launcher window could not be created");
+        }
         let smoke = opts.smoke.then(Smoke::new);
         APP.with(|a| {
             *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, smoke, exit: None, hinst: hinst.0 as isize, controller: ctl,
-                icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_seq: 0, d3d: opts.d3d })
+                icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_seq: 0, d3d: opts.d3d,
+                launcher, panels: HashMap::new(), uploads: HashMap::new(), next_transfer: 1, redirect_panels: opts.windows_file_picker })
         });
         SetTimer(Some(controller), TIMER_ID, 100, None);
         if opts.clipboard && !native::listen_clipboard(controller) {
@@ -157,8 +187,97 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             on_local_clipboard(hwnd);
             LRESULT(0)
         }
+        WM_PICK_FILE => {
+            pick_file_for_panel(wp.0 as u64);
+            LRESULT(0)
+        }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }
+}
+
+// ------------------------------------------------------------------ launcher
+
+unsafe extern "system" fn launcher_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_SIZE => {
+            with_app(|a| a.launcher.as_ref().map(|l| l.fit()));
+            LRESULT(0)
+        }
+        WM_NOTIFY => {
+            if let Some(app) = with_app(|a| a.launcher.as_ref().and_then(|l| l.activated(lp))).flatten() {
+                launch_app(&app);
+            }
+            LRESULT(0)
+        }
+        WM_COPYDATA => {
+            if let Some(app) = launcher::copydata_app(lp) {
+                launch_app(&app);
+            }
+            LRESULT(1)
+        }
+        WM_CLOSE => {
+            // Closing the launcher keeps running apps open; the viewer exits with the last window.
+            if with_app(|a| a.remotes.is_empty()).unwrap_or(true) {
+                quit(0);
+            } else {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+/// Launch an app, or bring its existing main window to the front (like clicking a running app).
+fn launch_app(app: &str) {
+    let existing = with_app(|a| a.remotes.iter().find(|(_, r)| r.app == app && r.parent.is_none()).map(|(k, _)| *k)).flatten();
+    match existing {
+        Some(h) => unsafe {
+            let _ = ShowWindow(hwnd_of(h), SW_RESTORE);
+            let _ = SetForegroundWindow(hwnd_of(h));
+        },
+        None => {
+            with_app(|a| a.link.send(&Message::AppLaunch { application_id: app.into(), arguments: vec![], working_directory: None, environment: Default::default() }));
+        }
+    }
+}
+
+// ------------------------------------------------------------------ file panels
+
+/// The Mac app opened a file panel: show the Windows picker instead, upload the chosen file and
+/// make the Mac panel open it. Cancelling the Windows picker cancels the Mac panel.
+fn pick_file_for_panel(panel: u64) {
+    let Some((owner, smoke)) = with_app(|a| {
+        let parent = a.panels.get(&panel).copied()?;
+        let owner = parent.and_then(|p| a.by_id.get(&p).copied()).or_else(|| a.launcher.as_ref().map(|l| l.hwnd.0 as isize)).unwrap_or(0);
+        Some((owner, a.smoke.is_some()))
+    })
+    .flatten() else { return };
+    let picked = if smoke {
+        std::env::var_os("RM_SMOKE_PICK_FILE").map(std::path::PathBuf::from)
+    } else {
+        native::pick_open_file(hwnd_of(owner), "Open on Mac")
+    };
+    let Some(path) = picked else {
+        with_app(|a| {
+            a.panels.remove(&panel);
+            a.link.send(&Message::PanelCancel { window_id: panel })
+        });
+        return;
+    };
+    let Some((link, tid)) = with_app(|a| {
+        let tid = a.next_transfer;
+        a.next_transfer += 1;
+        a.uploads.insert(tid, panel);
+        (a.link.clone(), tid)
+    }) else { return };
+    eprintln!("uploading {} for Mac open panel {panel}", path.display());
+    std::thread::spawn(move || {
+        if let Err(e) = net::upload_file(&link, tid, &path) {
+            eprintln!("upload failed: {e}");
+            link.send(&Message::PanelCancel { window_id: panel });
+        }
+    });
 }
 
 /// Windows clipboard changed: forward it unless we caused the change ourselves.
@@ -182,11 +301,60 @@ fn drain_events() {
 
 fn handle_event(ev: UiEvent) {
     match ev {
-        UiEvent::WindowCreated { id, app, title, w, h } => create_remote_window(id, &app, &title, w, h),
+        UiEvent::WindowCreated { id, app, title, x, y, w, h, parent, role } => {
+            let redirect = role == WindowRole::OpenPanel && with_app(|a| a.redirect_panels).unwrap_or(false);
+            if redirect {
+                let ctl = with_app(|a| {
+                    a.panels.insert(id, parent);
+                    a.controller
+                })
+                .unwrap_or(0);
+                unsafe { let _ = PostMessageW(Some(hwnd_of(ctl)), WM_PICK_FILE, WPARAM(id as usize), LPARAM(0)); }
+            } else {
+                create_remote_window(id, &app, &title, (x, y, w, h), parent, role);
+            }
+        }
+        UiEvent::Apps(apps) => {
+            with_app(|a| {
+                let rows: Vec<(String, String, bool)> = apps.iter().map(|x| (x.id.clone(), x.name.clone(), x.available)).collect();
+                if let Some(l) = a.launcher.as_mut() {
+                    l.set_apps(&rows);
+                }
+                for x in &apps {
+                    if let Some(icon) = a.icons.get(&x.id) {
+                        if let Some(l) = a.launcher.as_ref() {
+                            l.set_icon(&x.id, HICON(*icon as *mut c_void));
+                        }
+                    } else if a.icons_requested.insert(x.id.clone()) {
+                        a.link.send(&Message::GetAppIcon { application_id: x.id.clone() });
+                    }
+                }
+            });
+        }
+        UiEvent::Uploaded { transfer_id, remote_path } => {
+            with_app(|a| {
+                if let Some(panel) = a.uploads.remove(&transfer_id) {
+                    a.panels.remove(&panel);
+                    a.link.send(&Message::PanelChooseFile { window_id: panel, remote_path });
+                }
+            });
+        }
+        UiEvent::UploadFailed { transfer_id, reason } => {
+            eprintln!("upload {transfer_id} failed on the Mac: {reason}");
+            with_app(|a| {
+                if let Some(panel) = a.uploads.remove(&transfer_id) {
+                    a.panels.remove(&panel);
+                    a.link.send(&Message::PanelCancel { window_id: panel });
+                }
+            });
+        }
         UiEvent::Icon { app, size, rgba } => {
             let Some(icon) = native::make_icon(size, &rgba) else { return };
             let windows: Vec<isize> = with_app(|a| {
                 a.icons.insert(app.clone(), icon.0 as isize);
+                if let Some(l) = a.launcher.as_ref() {
+                    l.set_icon(&app, icon);
+                }
                 a.remotes.iter().filter(|(_, r)| r.app == app).map(|(k, _)| *k).collect()
             })
             .unwrap_or_default();
@@ -251,7 +419,13 @@ fn handle_event(ev: UiEvent) {
                 with_app(|a| a.remotes.remove(&h));
                 unsafe { let _ = DestroyWindow(hwnd_of(h)); }
             }
+            with_app(|a| a.panels.remove(&id));
             smoke_note_destroyed(id);
+            // Last remote window gone and the launcher is not on screen: the viewer is done.
+            let idle = with_app(|a| a.smoke.is_none() && a.remotes.is_empty() && !a.launcher.as_ref().is_some_and(|l| unsafe { IsWindowVisible(l.hwnd).as_bool() })).unwrap_or(false);
+            if idle {
+                quit(0);
+            }
         }
         UiEvent::AppExited(app) => eprintln!("remote app exited: {app}"),
         UiEvent::Notice(n) => eprintln!("notice: {n}"),
@@ -262,43 +436,53 @@ fn handle_event(ev: UiEvent) {
     }
 }
 
-fn create_remote_window(id: u64, app: &str, title: &str, w: u32, h: u32) {
+fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32, u32, u32), parent: Option<u64>, role: WindowRole) {
     unsafe {
-        let hinst = with_app(|a| a.hinst).unwrap_or(0);
-        let style = WS_OVERLAPPEDWINDOW;
+        let (hinst, owner) = with_app(|a| (a.hinst, parent.and_then(|p| a.by_id.get(&p).copied()))).unwrap_or((0, None));
+        // Dialogs, sheets and panels become *owned* windows: they stay above their parent,
+        // minimise with it and do not get their own taskbar button, as on the Mac.
+        let owned = owner.is_some() && role != WindowRole::Window;
+        let style = if owned { WINDOW_STYLE(WS_POPUP.0 | WS_CAPTION.0 | WS_SYSMENU.0 | WS_THICKFRAME.0) } else { WS_OVERLAPPEDWINDOW };
         let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), w!("RmRemoteWindow"), &HSTRING::from(title), style, CW_USEDEFAULT, CW_USEDEFAULT,
-            w as i32, h as i32, None, None, Some(HINSTANCE(hinst as *mut c_void)), None);
+            w as i32, h as i32, if owned { owner.map(hwnd_of) } else { None }, None, Some(HINSTANCE(hinst as *mut c_void)), None);
         let Ok(hwnd) = hwnd else {
             eprintln!("CreateWindowExW failed for remote window {id}");
             return;
         };
-        // Taskbar identity before the window is shown: own group + icon per remote application.
         let aumid = format!("RemoteMac.{}", app.replace(|c: char| !c.is_ascii_alphanumeric(), "_"));
-        if !native::set_app_user_model_id(hwnd, &aumid) {
+        if !owned && !native::set_app_user_model_id(hwnd, &aumid) {
+            // Taskbar identity before the window is shown: own group + icon per remote application.
             eprintln!("warning: could not set AppUserModelID {aumid}");
         }
         let scale = native::dpi_scale(hwnd);
-        let (cached, request) = with_app(|a| {
-            a.remotes.insert(hwnd.0 as isize, Remote { id, app: app.into(), rw: w, rh: h, scale, maximized: false, presenter: None, picture: None, frames: 0, high_surrogate: None });
+        let (cached, parent_origin) = with_app(|a| {
+            a.remotes.insert(hwnd.0 as isize, Remote { id, app: app.into(), role, parent, rx: x, ry: y, rw: w, rh: h, scale, maximized: false, presenter: None, picture: None, frames: 0, high_surrogate: None });
             a.by_id.insert(id, hwnd.0 as isize);
             let cached = a.icons.get(app).copied();
-            let request = cached.is_none() && a.icons_requested.insert(app.to_string());
-            if request {
+            if cached.is_none() && a.icons_requested.insert(app.to_string()) {
                 a.link.send(&Message::GetAppIcon { application_id: app.into() });
             }
-            (cached, request)
+            let parent_origin = owner.and_then(|o| a.remotes.get(&o)).map(|p| (p.rx, p.ry));
+            (cached, parent_origin)
         })
-        .unwrap_or((None, false));
-        let _ = request;
+        .unwrap_or((None, None));
         if let Some(icon) = cached {
             native::set_window_icon(hwnd, HICON(icon as *mut c_void));
         }
         resize_client(hwnd, (w as f64 * scale).round() as i32, (h as f64 * scale).round() as i32);
+        if let (true, Some(o), Some((px, py))) = (owned, owner, parent_origin) {
+            // keep the dialog where the Mac put it relative to its parent
+            let mut orc = RECT::default();
+            let _ = GetWindowRect(hwnd_of(o), &mut orc);
+            let nx = orc.left + ((x - px) as f64 * scale).round() as i32;
+            let ny = orc.top + ((y - py) as f64 * scale).round() as i32;
+            let _ = SetWindowPos(hwnd, None, nx, ny, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+        }
         let _ = ShowWindow(hwnd, SW_SHOW);
         let presenter = if with_app(|a| a.d3d).unwrap_or(false) { d3d::Presenter::new(hwnd, w, h) } else { None };
         let renderer = presenter.as_ref().map(|p| p.kind).unwrap_or("gdi");
         with_app(|a| a.remotes.get_mut(&(hwnd.0 as isize)).map(|r| r.presenter = presenter));
-        eprintln!("window created id={id} app={app} renderer={renderer} {w}x{h}pt scale={scale} aumid={aumid} title={title:?}");
+        eprintln!("window created id={id} app={app} role={role:?} parent={parent:?} renderer={renderer} {w}x{h}pt scale={scale} title={title:?}");
     }
 }
 
@@ -527,21 +711,35 @@ struct Smoke {
     stage: u32,
     started: Instant,
     stage_started: Instant,
-    destroyed: bool,
+    destroyed: Vec<u64>,
     results: Vec<(String, bool, String)>,
     resized: bool,
 }
 
 impl Smoke {
     fn new() -> Self {
-        Self { stage: 0, started: Instant::now(), stage_started: Instant::now(), destroyed: false, results: vec![], resized: false }
+        Self { stage: 0, started: Instant::now(), stage_started: Instant::now(), destroyed: vec![], results: vec![], resized: false }
     }
 }
 
-fn smoke_note_destroyed(_id: u64) {
+fn smoke_note_destroyed(id: u64) {
     with_app(|a| {
         if let Some(s) = a.smoke.as_mut() {
-            s.destroyed = true;
+            s.destroyed.push(id);
+        }
+    });
+}
+
+/// (hwnd, remote id) of the first window matching app/role/top-level.
+fn find_window(app: &str, role: WindowRole) -> Option<(HWND, u64)> {
+    with_app(|a| a.remotes.iter().find(|(_, r)| r.app == app && r.role == role).map(|(k, r)| (hwnd_of(*k), r.id))).flatten()
+}
+
+fn send_key(window_id: u64, key: &str, ctrl: bool) {
+    with_app(|a| {
+        let mods = map_modifiers(Mods { ctrl, ..Default::default() }, a.ctrl_as_command);
+        for down in [true, false] {
+            a.link.send(&Message::Key { window_id, physical_key: key.into(), modifiers: mods.clone(), down });
         }
     });
 }
@@ -592,9 +790,10 @@ fn smoke_tick() {
     // Snapshot under a short borrow; all Win32 calls happen outside it (they re-enter our window procs).
     let Some((stage, since_stage, since_start, window, frames, destroyed, resized)) = with_app(|a| {
         let s = a.smoke.as_ref()?;
-        let (key, frames) = a.remotes.iter().next().map(|(k, r)| (Some(*k), r.frames)).unwrap_or((None, 0));
+        let main = a.remotes.iter().find(|(_, r)| r.app == "testapp" && r.role == WindowRole::Window);
+        let (key, frames) = main.map(|(k, r)| (Some(*k), r.frames)).unwrap_or((None, 0));
         let dims = key.and_then(|k| a.remotes.get(&k)).map(|r| (r.rw, r.rh));
-        Some((s.stage, s.stage_started.elapsed(), s.started.elapsed(), key.map(|k| (hwnd_of(k), dims.unwrap_or((0, 0)))), frames, s.destroyed, s.resized))
+        Some((s.stage, s.stage_started.elapsed(), s.started.elapsed(), key.map(|k| (hwnd_of(k), dims.unwrap_or((0, 0)))), frames, s.destroyed.clone(), s.resized))
     })
     .flatten() else { return };
 
@@ -608,7 +807,7 @@ fn smoke_tick() {
             }
         });
     };
-    if since_start > Duration::from_secs(60) || since_stage > Duration::from_secs(20) {
+    if since_start > Duration::from_secs(90) || since_stage > Duration::from_secs(20) {
         finish(&format!("stage {stage} timed out"), false, format!("frames={frames}"), 99);
     }
 
@@ -708,15 +907,68 @@ fn smoke_tick() {
             let owner = with_app(|a| a.controller).unwrap_or(0);
             let clip = native::clipboard_text(hwnd_of(owner));
             if clip.as_deref() == Some("hellofrom-windows") {
-                finish("clipboard Mac->Windows (Ctrl+A, Ctrl+C lands on the Windows clipboard)", true, format!("{clip:?}"), 9);
+                finish("clipboard Mac->Windows (Ctrl+A, Ctrl+C lands on the Windows clipboard)", true, format!("{clip:?}"), 30);
+            }
+        }
+        (30, Some(_)) => {
+            let ids = with_app(|a| a.launcher.as_ref().map(|l| (l.count(), l.ids.clone()))).flatten();
+            if let Some((2, ids)) = ids {
+                finish("launcher lists the Mac's applications", true, format!("{ids:?}"), 31);
+                launch_app("notes"); // same path as a double-click on the "Notes Test" icon
+            }
+        }
+        (31, Some((main, _))) => {
+            if let Some((notes, nid)) = find_window("notes", WindowRole::Window) {
+                let aumid = native::get_app_user_model_id(notes);
+                let both = unsafe { IsWindow(Some(main)).as_bool() };
+                finish("second app opens alongside the first, in its own taskbar group", both && aumid.as_deref() == Some("RemoteMac.notes"), format!("aumid={aumid:?} firstStillOpen={both}"), 32);
+                with_app(|a| a.link.send(&Message::TextInput { window_id: nid, text: "zz".into() }));
+            }
+        }
+        (32, Some((main, _))) => {
+            if let Some((notes, _)) = find_window("notes", WindowRole::Window) {
+                let (tn, tm) = (title_of(notes), title_of(main));
+                if tn.contains("[2 chars]") {
+                    finish("input goes to the right app when several run", tm.contains("[17 chars]"), format!("notes={tn:?} testapp={tm:?}"), 33);
+                }
+            }
+        }
+        (33, Some((_, _))) => {
+            if let Some((_, mid)) = find_window("testapp", WindowRole::Window) {
+                send_key(mid, "KeyI", true); // opens the app's "About" dialog
+                with_app(|a| a.smoke.as_mut().map(|s| s.stage = 34));
+            }
+        }
+        (34, Some((main, _))) => {
+            if let Some((dlg, _)) = find_window("testapp", WindowRole::Dialog) {
+                let owner = unsafe { GetWindow(dlg, GW_OWNER) }.ok();
+                finish("app dialogs become owned windows of their parent", owner == Some(main), format!("owner={:?} parent={:?}", owner.map(|o| o.0), main.0), 35);
+                sendmsg(dlg, WM_CLOSE, 0, 0);
+            }
+        }
+        (35, Some((_, _))) => {
+            if find_window("testapp", WindowRole::Dialog).is_none() {
+                if let Some((_, mid)) = find_window("testapp", WindowRole::Window) {
+                    send_key(mid, "KeyO", true); // the app shows its file Open panel
+                    with_app(|a| a.smoke.as_mut().map(|s| s.stage = 36));
+                }
+            }
+        }
+        (36, Some((main, _))) => {
+            let t = title_of(main);
+            if t.contains("[opened ") {
+                let mac_panel_shown = find_window("testapp", WindowRole::OpenPanel).is_some();
+                let ok = t.contains("716800 bytes") && !mac_panel_shown;
+                finish("Mac file panel replaced by the Windows picker; chosen file uploaded and opened", ok, format!("{t:?} macPanelShown={mac_panel_shown}"), 9);
             }
         }
         (9, Some((hwnd, _))) => {
             sendmsg(hwnd, WM_CLOSE, 0, 0);
             with_app(|a| a.smoke.as_mut().map(|s| s.stage = 10));
         }
-        (10, _) if destroyed => {
-            finish("closing the window closes the remote window", true, "WindowDestroyed received".into(), 100);
+        (10, _) if !destroyed.is_empty() && find_window("testapp", WindowRole::Window).is_none() => {
+            let notes_alive = find_window("notes", WindowRole::Window).is_some();
+            finish("closing one app's window leaves the other app running", notes_alive, format!("destroyed={destroyed:?}"), 100);
         }
         (99, _) | (100, _) => {
             let (ok, n) = with_app(|a| {

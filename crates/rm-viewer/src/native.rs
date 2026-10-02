@@ -151,3 +151,22 @@ pub fn dpi_scale(hwnd: HWND) -> f64 {
     let dpi = unsafe { GetDpiForWindow(hwnd) };
     if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 }
 }
+
+/// The standard Windows "Open" dialog (File Explorer picker), owned by `owner`.
+/// Returns the chosen file's path, or `None` if the user cancelled.
+pub fn pick_open_file(owner: HWND, title: &str) -> Option<std::path::PathBuf> {
+    use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
+    use windows::Win32::UI::Shell::{FileOpenDialog, IFileOpenDialog, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, SIGDN_FILESYSPATH};
+    unsafe {
+        let dlg: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let opts = dlg.GetOptions().ok()?;
+        let _ = dlg.SetOptions(opts | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST);
+        let _ = dlg.SetTitle(&HSTRING::from(title));
+        dlg.Show(Some(owner)).ok()?; // Err on cancel
+        let item = dlg.GetResult().ok()?;
+        let p = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = p.to_string().ok().map(std::path::PathBuf::from);
+        CoTaskMemFree(Some(p.0 as *const c_void));
+        path
+    }
+}

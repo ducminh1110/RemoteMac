@@ -8,6 +8,10 @@ cargo build --release -p rm-relay -p rm-fakeagent -p rm-viewer
 if ($LASTEXITCODE -ne 0) { exit 3 }
 New-Item -ItemType Directory -Force -Path out | Out-Null
 $failed = 0
+# the file the smoke "picks" in the Windows Open dialog (700 KiB: several upload chunks)
+$pick = Join-Path $PWD "out\smoke-pick.bin"
+[IO.File]::WriteAllBytes($pick, (New-Object byte[] 716800))
+$env:RM_SMOKE_PICK_FILE = $pick
 $port = 47901
 foreach ($renderer in @("d3d11", "gdi")) {
   $port++

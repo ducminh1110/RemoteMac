@@ -15,6 +15,10 @@ pub const MIN_PROTOCOL_VERSION: u16 = 1;
 /// Hard cap per frame so a hostile peer cannot make us allocate arbitrarily.
 pub const MAX_CONTROL_FRAME: usize = 1 << 20; // 1 MiB
 pub const MAX_BULK_FRAME: usize = 16 << 20; // 16 MiB
+/// Raw bytes per upload chunk (base64 grows it by 4/3, well under the bulk frame limit).
+pub const UPLOAD_CHUNK: usize = 256 << 10;
+/// Largest file a client may upload in one transfer.
+pub const MAX_UPLOAD: u64 = 2 << 30;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
@@ -194,6 +198,19 @@ pub enum MouseButton {
     Middle,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowRole {
+    #[default]
+    Window,
+    /// Dialog, alert, sheet or panel that belongs to `parent_id`.
+    Dialog,
+    /// A file *open* panel (possibly drawn by an out-of-process helper on the Mac).
+    OpenPanel,
+    /// A file *save* panel.
+    SavePanel,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Message {
@@ -219,7 +236,17 @@ pub enum Message {
     AppTerminate { application_id: String },
     AppExited { application_id: String, code: Option<i32> },
 
-    WindowCreated { window_id: u64, application_id: String, title: String, bounds: Rect, parent_id: Option<u64> },
+    WindowCreated {
+        window_id: u64,
+        application_id: String,
+        title: String,
+        bounds: Rect,
+        parent_id: Option<u64>,
+        /// What kind of window this is, so the client can present it natively
+        /// (an owned dialog, or a file panel it may replace with its own picker).
+        #[serde(default)]
+        role: WindowRole,
+    },
     WindowDestroyed { window_id: u64 },
     WindowMoved { window_id: u64, bounds: Rect },
     WindowTitleChanged { window_id: u64, title: String },
@@ -238,6 +265,20 @@ pub enum Message {
     /// Either direction: the clipboard now holds this text. `seq` lets each side ignore
     /// the echo of a change it applied itself.
     ClipboardSet { seq: u64, text: String },
+
+    /// Client -> agent: start uploading a local file the user picked (Files channel).
+    FileUploadBegin { transfer_id: u64, name: String, size: u64 },
+    /// Client -> agent: next piece of the file; `offset` must equal the bytes received so far.
+    FileUploadChunk { transfer_id: u64, offset: u64, data_base64: String },
+    FileUploadEnd { transfer_id: u64 },
+    /// Agent -> client: the file is complete on the Mac at `remote_path`.
+    FileUploaded { transfer_id: u64, remote_path: String },
+    /// Agent -> client: the upload was refused or failed; nothing is kept.
+    FileUploadFailed { transfer_id: u64, reason: String },
+    /// Client -> agent: choose `remote_path` in this open panel and confirm it.
+    PanelChooseFile { window_id: u64, remote_path: String },
+    /// Client -> agent: dismiss this panel (the user cancelled the local picker).
+    PanelCancel { window_id: u64 },
 
     MouseMove { window_id: u64, x: f64, y: f64 },
     MouseButton { window_id: u64, button: MouseButton, down: bool, x: f64, y: f64 },
@@ -261,6 +302,7 @@ impl Message {
             }
             Ping { .. } | Pong { .. } => Channel::Telemetry,
             ClipboardSet { .. } => Channel::Clipboard,
+            FileUploadBegin { .. } | FileUploadChunk { .. } | FileUploadEnd { .. } => Channel::Files,
             _ => Channel::Control,
         }
     }
@@ -386,6 +428,21 @@ pub fn base64_decode(s: &str) -> Result<Vec<u8>, ProtocolError> {
         out.extend_from_slice(&n.to_be_bytes()[1..1 + take]);
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------- uploads
+
+/// Make a client-supplied file name safe to create inside the upload folder: no directories,
+/// no traversal, no control characters, no hidden/empty names, bounded length.
+pub fn sanitize_upload_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("");
+    let cleaned: String = base.chars().filter(|c| !c.is_control() && *c != ':').collect();
+    let trimmed = cleaned.trim().trim_start_matches('.').trim();
+    let mut out: String = trimmed.chars().take(200).collect();
+    if out.is_empty() || out == "." || out == ".." {
+        out = "upload".into();
+    }
+    out
 }
 
 // ---------------------------------------------------------------- video frames
@@ -674,5 +731,35 @@ mod tests {
         assert_eq!(c.channel(), Channel::Clipboard);
         let bytes = encode(&c).unwrap();
         assert_eq!(decode(&bytes).unwrap().unwrap().0, c);
+    }
+
+    #[test]
+    fn window_role_defaults_for_older_agents() {
+        let j = r#"{"type":"window_created","window_id":1,"application_id":"a","title":"t","bounds":{"x":0,"y":0,"w":1,"h":1},"parent_id":null}"#;
+        match serde_json::from_str::<Message>(j).unwrap() {
+            Message::WindowCreated { role, .. } => assert_eq!(role, WindowRole::Window),
+            m => panic!("{m:?}"),
+        }
+        let j = r#"{"type":"window_created","window_id":2,"application_id":"a","title":"","bounds":{"x":0,"y":0,"w":1,"h":1},"parent_id":1,"role":"open_panel"}"#;
+        assert!(matches!(serde_json::from_str::<Message>(j).unwrap(), Message::WindowCreated { role: WindowRole::OpenPanel, parent_id: Some(1), .. }));
+    }
+
+    #[test]
+    fn uploads_ride_the_files_channel_and_fit() {
+        let c = Message::FileUploadChunk { transfer_id: 1, offset: 0, data_base64: base64_encode(&vec![7u8; UPLOAD_CHUNK]) };
+        assert_eq!(c.channel(), Channel::Files);
+        assert!(encode(&c).is_ok());
+    }
+
+    #[test]
+    fn upload_names_cannot_escape_the_folder() {
+        assert_eq!(sanitize_upload_name("report.pdf"), "report.pdf");
+        assert_eq!(sanitize_upload_name("../../etc/passwd"), "passwd");
+        assert_eq!(sanitize_upload_name("C:\\Users\\me\\photo.png"), "photo.png");
+        assert_eq!(sanitize_upload_name(".bashrc"), "bashrc");
+        assert_eq!(sanitize_upload_name(".."), "upload");
+        assert_eq!(sanitize_upload_name("a\u{0}b\nc:d"), "abcd");
+        assert_eq!(sanitize_upload_name(""), "upload");
+        assert_eq!(sanitize_upload_name(&"x".repeat(500)).len(), 200);
     }
 }

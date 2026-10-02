@@ -5,6 +5,8 @@ pub mod net;
 #[cfg(windows)]
 pub mod d3d;
 #[cfg(windows)]
+pub mod launcher;
+#[cfg(windows)]
 pub mod native;
 #[cfg(windows)]
 pub mod ui;
