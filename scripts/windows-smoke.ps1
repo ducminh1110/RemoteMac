@@ -30,4 +30,15 @@ foreach ($renderer in @("d3d11", "gdi")) {
   $left = @(Get-ChildItem -Path $env:RM_SHORTCUT_DIR -Filter *.lnk -ErrorAction SilentlyContinue)
   if ($left.Count -ne 0) { Write-Host "shortcuts left after the viewer exited: $($left.Name)"; $failed++ }
 }
+
+# Showcase against the fake agent: screenshots of its apps in Mac-style windows (artifact).
+$port++
+$env:RM_SESSION_TOKEN = "showcase-" + [guid]::NewGuid().ToString("N")
+$relay = Start-Process -PassThru -NoNewWindow -FilePath target\release\rm-relay.exe -ArgumentList "127.0.0.1:$port" -RedirectStandardError "out\relay-showcase.log"
+Start-Sleep -Seconds 1
+$agent = Start-Process -PassThru -NoNewWindow -FilePath target\release\rm-fakeagent.exe -ArgumentList "--relay 127.0.0.1:$port --session showcase" -RedirectStandardError "out\fakeagent-showcase.log"
+Start-Sleep -Seconds 1
+& ./scripts/windows-showcase.ps1 -Relay "127.0.0.1:$port" -Session showcase -Apps "testapp,notes" -Out "out\showcase-fake" -Settle 2 -TimeoutSec 120
+if ($LASTEXITCODE -ne 0) { $failed++ }
+foreach ($p in @($agent, $relay)) { if (-not $p.HasExited) { $p.Kill() } }
 exit $failed

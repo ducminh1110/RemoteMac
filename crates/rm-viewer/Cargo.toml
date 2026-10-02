@@ -39,6 +39,7 @@ features = [
   "Win32_Graphics_Dxgi",
   "Win32_Graphics_Dxgi_Common",
   "Win32_UI_Controls",
+  "Win32_Graphics_Dwm",
 ]
 
 [dev-dependencies]

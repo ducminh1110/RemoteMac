@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
   push:
     branches: [claude/inspiring-einstein-er2d37]
-    paths: [crates/**, scripts/windows-smoke.ps1, .github/workflows/windows-viewer.yml, Cargo.*]
+    paths: [crates/**, scripts/windows-smoke.ps1, scripts/windows-showcase.ps1, .github/workflows/windows-viewer.yml, Cargo.*]
 
 permissions:
   contents: read
@@ -27,7 +27,9 @@ jobs:
         if: always()
         with:
           name: windows-viewer-logs
-          path: out/*.log
+          path: |
+            out/*.log
+            out/showcase-fake/*
       - uses: actions/upload-artifact@v4
         if: success()
         with:
