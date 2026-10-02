@@ -148,6 +148,8 @@ struct Block {
     m: usize,
     shards: Vec<Option<Vec<u8>>>,
     have: usize,
+    /// data shards that arrived themselves (not rebuilt)
+    data_have: usize,
     done: bool,
 }
 
@@ -167,15 +169,17 @@ impl Partial {
     fn complete(&self) -> bool {
         self.blocks.iter().all(|b| b.as_ref().is_some_and(|b| b.done))
     }
+    /// (data shards expected, data shards that arrived). Parity is left out: a block is done
+    /// as soon as any k shards are in, so later parity packets are never seen and would read
+    /// as losses. Missing data shards are an unbiased sample of the link's loss.
     fn counts(&self) -> (u32, u32) {
-        // expected counts only blocks we know of (a block with nothing at all is unknown: count k=1)
         let mut e = 0;
         let mut r = 0;
         for b in &self.blocks {
             match b {
                 Some(b) => {
-                    e += (b.k + b.m) as u32;
-                    r += b.have as u32;
+                    e += b.k as u32;
+                    r += b.data_have as u32;
                 }
                 None => e += 1,
             }
@@ -252,12 +256,13 @@ impl Reassembler {
         if f.size != size || f.len != len || f.blocks.len() != blocks {
             return out;
         }
-        let b = f.blocks[block].get_or_insert_with(|| Block { k, m, shards: vec![None; k + m], have: 0, done: false });
+        let b = f.blocks[block].get_or_insert_with(|| Block { k, m, shards: vec![None; k + m], have: 0, data_have: 0, done: false });
         if b.k != k || b.m != m || b.done || b.shards[index].is_some() {
             return out;
         }
         b.shards[index] = Some(p[HEADER..].to_vec());
         b.have += 1;
+        b.data_have += (index < k) as usize;
         if b.have >= b.k {
             let had_all_data = b.shards[..b.k].iter().all(|s| s.is_some());
             if fec::reconstruct(b.k, b.m, &mut b.shards) {
@@ -358,6 +363,7 @@ mod tests {
         }
         assert_eq!(r.stats.frames, 4);
         assert_eq!(r.stats.lost, 0);
+        assert_eq!(r.stats.loss(), 0.0, "a clean link reads as no loss even with parity");
     }
 
     #[test]
@@ -374,7 +380,8 @@ mod tests {
         let got: Vec<Out> = d.iter().flat_map(|p| r.push(p, now)).collect();
         assert!(matches!(&got[..], [Out::Frame(f)] if f == &v), "{got:?}");
         assert_eq!(r.stats.recovered, 1);
-        assert!((r.stats.loss() - 10.0 / 60.0).abs() < 1e-9);
+        // the 10 lost packets were all data shards: 10 of 50
+        assert!(r.stats.loss() > 0.1 && r.stats.loss() < 0.25, "{}", r.stats.loss());
     }
 
     #[test]

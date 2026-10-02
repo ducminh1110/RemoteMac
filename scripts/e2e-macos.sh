@@ -34,6 +34,10 @@ grep -q "fec self-test ok" out/agent.log || { echo "Swift FEC self-test failed (
 UDP_FRAMES=$(sed -n 's/^UDP frames=\([0-9]*\).*/\1/p' out/e2e.txt)
 echo "video frames received over UDP: ${UDP_FRAMES:-0}"
 [[ "${UDP_FRAMES:-0}" -gt 30 ]] || { echo "video did not move to UDP"; [[ $RC == 0 ]] && RC=1; }
+# loopback loses nothing: the measured loss must say so (it drives the bitrate)
+LOSS=$(sed -n 's/^UDP .* loss=\([0-9.]*\)%.*/\1/p' out/e2e.txt)
+echo "measured loss on loopback: ${LOSS:-?}%"
+awk -v l="${LOSS:-100}" 'BEGIN { exit !(l < 3) }' || { echo "loss misreported on a clean link"; [[ $RC == 0 ]] && RC=1; }
 
 # far, lossy link: a relay limited to 6 Mbit/s that drops 5% of UDP packets; FEC rebuilds them
 # and the agent adapts its bitrate instead of queueing video (informational, not gating)

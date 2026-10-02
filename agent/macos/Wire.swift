@@ -223,11 +223,11 @@ final class Sender {
         var change: Int?
         cond.lock()
         let now = CFAbsoluteTimeGetCurrent()
-        if r.lost > 0 || r.loss > 0.10 || wait > 0.08 {
+        // random loss is FEC's job (its share rises with the loss); only real congestion -
+        // frames lost despite FEC, a growing send queue, or a very lossy link - costs bitrate
+        if r.lost > 0 || r.loss > 0.15 || wait > 0.08 {
             if now - lastDecrease > 0.4 { bitrate = max(minBitrate, Int(Double(bitrate) * 0.7)); lastDecrease = now; change = bitrate }
-        } else if r.loss > 0.03 {
-            if now - lastDecrease > 1 { bitrate = max(minBitrate, Int(Double(bitrate) * 0.9)); lastDecrease = now; change = bitrate }
-        } else if r.loss < 0.01 && wait < 0.02 && now - lastDecrease > 3 && now - lastAdjust > 0.5 && bitrate < maxBitrate {
+        } else if r.loss < 0.05 && wait < 0.02 && now - lastDecrease > 3 && now - lastAdjust > 0.5 && bitrate < maxBitrate {
             bitrate = min(maxBitrate, Int(Double(bitrate) * 1.08)); lastAdjust = now; change = bitrate
         }
         cond.unlock()

@@ -434,6 +434,8 @@ mod tests {
         let (tcp, udp, stats) = udp_run(None, "v-udp-1");
         assert!(udp >= 60, "frames over udp={udp} tcp={tcp} {stats:?}");
         assert!(stats.rtt_ms.is_some() && stats.offset_us.is_some(), "{stats:?}");
+        // a clean link must not read as lossy (that would push the bitrate down for nothing)
+        assert!(stats.loss < 0.02 && stats.lost == 0, "{stats:?}");
     }
 
     #[test]
