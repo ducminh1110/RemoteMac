@@ -74,6 +74,8 @@ impl Comp {
             let root = device.CreateVisual().ok()?;
             let clip = device.CreateRectangleClip().ok()?;
             root.SetClip(&clip).ok()?;
+            // soft borders: the rounded clip is anti-aliased (hard is the default)
+            root.SetBorderMode(DCOMPOSITION_BORDER_MODE_SOFT).ok()?;
             // background: one opaque pixel, stretched
             let bg = device.CreateVisual().ok()?;
             let bg_surface = device.CreateSurface(1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED).ok()?;

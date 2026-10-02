@@ -69,7 +69,7 @@ final class DisplayManager {
         NSRunningApplication(processIdentifier: w.pid)?.activate(options: [.activateIgnoringOtherApps])
         // the app may not know the new display yet (screens are re-read on its run loop):
         // set, check where the window really is, retry for a few seconds
-        for attempt in 0..12 {
+        for attempt in 0..<12 {
             setFrame(aw, frame)
             usleep(250_000)
             var p = CGPoint.zero, sz = CGSize.zero

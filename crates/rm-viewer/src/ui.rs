@@ -595,9 +595,13 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
             let _ = DestroyWindow(hwnd);
             return;
         };
-        native::round_corners(hwnd);
         if use_comp {
-            native::no_border(hwnd); // our own rounded edge; DWM's 1px border would show square-ish
+            // the composition clip makes the (larger, anti-aliased) rounded corners; DWM's own
+            // rounding would add its 1px highlight in the transparent corner
+            native::round_corners_off(hwnd);
+            native::no_border(hwnd);
+        } else {
+            native::round_corners(hwnd);
         }
         let aumid = format!("RemoteMac.{}", app.replace(|c: char| !c.is_ascii_alphanumeric(), "_"));
         if !owned && !native::set_app_user_model_id(hwnd, &aumid) {
@@ -746,7 +750,9 @@ fn toggle_fullscreen(frame: HWND) {
             with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).map(|r| { r.fullscreen = false; r.reveal = false }));
             let _ = SetWindowPos(frame, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             let _ = SetWindowPos(frame, None, saved.left, saved.top, saved.right - saved.left, saved.bottom - saved.top, SWP_NOZORDER | SWP_NOACTIVATE);
-            native::round_corners(frame);
+            if !with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.comp.is_some())).flatten().unwrap_or(false) {
+                native::round_corners(frame);
+            }
             layout(frame);
             with_app(|a| a.link.send(&Message::WindowFullscreen { window_id: id, on: false }));
         }
