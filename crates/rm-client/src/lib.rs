@@ -5,6 +5,7 @@ use rm_core::{Event, SessionState};
 use rm_protocol::{negotiate, read_frame, read_message, write_message, AppInfo, CapabilityReport, Frame, Hello, Message, Negotiated, ProtocolError};
 
 pub mod e2e;
+pub mod record;
 use std::io::{Read, Write};
 
 pub struct Session<S: Read + Write> {
@@ -162,5 +163,54 @@ mod tests {
             assert!(c.1, "check failed: {} -> {}", c.0, c.2);
         }
         assert!(report.decoded >= 30 && report.fps() > 5.0, "decoded={} fps={}", report.decoded, report.fps());
+    }
+
+    /// Record a session with the fake agent, then replay it: the replayed client sees the same
+    /// windows, menu bar and decodable video.
+    #[test]
+    fn record_then_replay() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        std::thread::spawn(move || rm_relay::serve(l, Default::default()));
+        let tok = "record-token-0123456789";
+        let a = addr.clone();
+        std::thread::spawn(move || { let _ = rm_fakeagent::serve_via_relay(&a, "rec-1", tok); });
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let stream = join(&addr, "rec-1", Role::Client, tok).unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+        let mut sess = Session::handshake(stream).unwrap();
+        let mut file = vec![];
+        let plan = crate::record::Plan { apps: vec!["testapp".into(), "notes".into()], settle: std::time::Duration::from_secs(2), max: std::time::Duration::from_secs(10), on_segment_end: Box::new(|_| {}) };
+        let sum = crate::record::record(&mut sess, &mut file, plan).unwrap();
+        assert!(sum.apps.iter().all(|a| a.1 >= 1 && a.2 >= 10), "{:?}", sum.apps);
+
+        let rec = rm_fakeagent::replay::Recording::from_records(rm_protocol::recording::read_all(&mut file.as_slice()).unwrap());
+        let a = addr.clone();
+        let rec = std::sync::Arc::new(rec);
+        std::thread::spawn(move || {
+            let s = join(&a, "rep-1", Role::Agent, tok).unwrap();
+            let w = s.try_clone().unwrap();
+            let _ = rm_fakeagent::replay::serve_replay(s, w, rec);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let stream = join(&addr, "rep-1", Role::Client, tok).unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+        let mut sess = Session::handshake(stream).unwrap();
+        let apps = sess.list_apps().unwrap();
+        assert!(apps.iter().any(|a| a.id == "notes" && a.available), "{apps:?}");
+        sess.send(&Message::AppLaunch { application_id: "notes".into(), arguments: vec![], working_directory: None, environment: Default::default() }).unwrap();
+        let mut dec = rm_decode::H264Decoder::new().unwrap();
+        let (mut window, mut pictures, mut menu) = (None, 0, false);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while std::time::Instant::now() < until && !(window.is_some() && pictures >= 5 && menu) {
+            match sess.recv() {
+                Ok(Some(Frame::Msg(Message::WindowCreated { application_id, .. }))) => window = Some(application_id),
+                Ok(Some(Frame::Msg(Message::MenuBar { menus, .. }))) => menu = menus.iter().any(|m| m.title == "File"),
+                Ok(Some(Frame::Video(v))) => pictures += dec.decode(&v.data).ok().flatten().is_some() as usize,
+                _ => {}
+            }
+        }
+        assert_eq!(window.as_deref(), Some("notes"));
+        assert!(pictures >= 5 && menu, "pictures={pictures} menu={menu}");
     }
 }

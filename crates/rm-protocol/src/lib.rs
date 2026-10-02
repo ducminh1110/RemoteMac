@@ -805,3 +805,89 @@ mod tests {
         if let Message::MenuBar { menus, .. } = m { assert_eq!(MenuNode::count(&menus), 3) }
     }
 }
+
+/// Recordings of an agent session (`.rmrec`): what the agent sent, frame by frame, tagged with
+/// the application it belongs to and its time from the start of that application's segment.
+/// Lets a real Mac session be replayed to a viewer elsewhere (`rm-fakeagent --replay`).
+pub mod recording {
+    use super::ProtocolError;
+    use std::io::{Read, Write};
+
+    pub const MAGIC: &[u8; 7] = b"RMREC1\n";
+    /// Application tag for session-wide frames (capabilities, app list).
+    pub const SESSION: &str = "";
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Record {
+        pub app: String,
+        pub t_ms: u32,
+        /// One complete wire frame (length, channel, payload), as `encode` / `encode_video` make it.
+        pub frame: Vec<u8>,
+    }
+
+    pub fn write_header<W: Write>(w: &mut W) -> std::io::Result<()> {
+        w.write_all(MAGIC)
+    }
+
+    pub fn write_record<W: Write>(w: &mut W, r: &Record) -> std::io::Result<()> {
+        let app = r.app.as_bytes();
+        w.write_all(&(app.len() as u16).to_be_bytes())?;
+        w.write_all(app)?;
+        w.write_all(&r.t_ms.to_be_bytes())?;
+        w.write_all(&(r.frame.len() as u32).to_be_bytes())?;
+        w.write_all(&r.frame)
+    }
+
+    pub fn read_all<R: Read>(r: &mut R) -> Result<Vec<Record>, ProtocolError> {
+        let mut magic = [0u8; 7];
+        r.read_exact(&mut magic)?;
+        if &magic != MAGIC {
+            return Err(ProtocolError::Malformed("not an .rmrec recording".into()));
+        }
+        let mut out = vec![];
+        loop {
+            let mut l = [0u8; 2];
+            match r.read_exact(&mut l) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(out),
+                Err(e) => return Err(e.into()),
+            }
+            let mut app = vec![0u8; u16::from_be_bytes(l) as usize];
+            r.read_exact(&mut app)?;
+            let mut t = [0u8; 4];
+            r.read_exact(&mut t)?;
+            let mut n = [0u8; 4];
+            r.read_exact(&mut n)?;
+            let n = u32::from_be_bytes(n) as usize;
+            if n > 64 << 20 {
+                return Err(ProtocolError::Malformed("record too large".into()));
+            }
+            let mut frame = vec![0u8; n];
+            r.read_exact(&mut frame)?;
+            out.push(Record { app: String::from_utf8_lossy(&app).into_owned(), t_ms: u32::from_be_bytes(t), frame });
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::{encode, read_frame, Frame, Message};
+
+        #[test]
+        fn records_roundtrip_and_hold_wire_frames() {
+            let recs = vec![
+                Record { app: SESSION.into(), t_ms: 0, frame: encode(&Message::ListApps).unwrap() },
+                Record { app: "xcode".into(), t_ms: 1234, frame: encode(&Message::Ping { nonce: 7 }).unwrap() },
+            ];
+            let mut buf = vec![];
+            write_header(&mut buf).unwrap();
+            for r in &recs {
+                write_record(&mut buf, r).unwrap();
+            }
+            let back = read_all(&mut buf.as_slice()).unwrap();
+            assert_eq!(back, recs);
+            assert!(matches!(read_frame(&mut back[1].frame.as_slice()).unwrap(), Some(Frame::Msg(Message::Ping { nonce: 7 }))));
+            assert!(read_all(&mut &b"nope"[..]).is_err());
+        }
+    }
+}

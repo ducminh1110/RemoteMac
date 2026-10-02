@@ -1843,7 +1843,7 @@ fn showcase_tick() {
             }
         }
         Some((app, launched, seen)) => {
-            let drawn = with_app(|a| a.remotes.values().any(|r| r.app == app && r.frames >= 5)).unwrap_or(false);
+            let drawn = with_app(|a| a.remotes.values().any(|r| r.app == app && r.frames >= 1)).unwrap_or(false);
             if drawn && seen.is_none() {
                 showcase_note(format!("{app}: first window drawn after {:.1}s", launched.elapsed().as_secs_f64()));
                 with_app(|a| a.showcase.as_mut().map(|s| s.current = Some((app.clone(), launched, Some(Instant::now())))));
