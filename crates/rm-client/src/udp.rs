@@ -62,6 +62,7 @@ pub fn start(relay: &str, session: &str, token: &str, on_out: impl FnMut(Out) + 
     let bind = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
     let sock = UdpSocket::bind(bind)?;
     sock.connect(addr)?;
+    rm_relay::big_udp_buffers(&sock);
     sock.set_read_timeout(Some(Duration::from_millis(5)))?;
     let stats = Arc::new(Mutex::new(LinkStats::default()));
     let stop = Arc::new(AtomicBool::new(false));

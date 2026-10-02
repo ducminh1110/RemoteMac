@@ -29,6 +29,7 @@ impl AgentUdp {
         let addr = relay.to_socket_addrs()?.next().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "relay address"))?;
         let sock = UdpSocket::bind(if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" })?;
         sock.connect(addr)?;
+        rm_relay::big_udp_buffers(&sock);
         sock.set_read_timeout(Some(Duration::from_millis(50)))?;
         let me = Arc::new(Self { sock, last_report: Mutex::new(None), seq: Mutex::new(HashMap::new()), fec_pct: AtomicU64::new(20), sent_frames: AtomicU64::new(0) });
         let reg = rm_relay::udp_register(session, rm_relay::Role::Agent, token, rm_relay::env_key().as_deref());

@@ -202,7 +202,13 @@ struct WindowState {
     next: Option<u32>,
     pending: BTreeMap<u32, Partial>,
     waiting_key: bool,
+    /// last time this window asked for a keyframe (Out::Lost), while waiting for one
+    asked: Option<Instant>,
 }
+
+/// While a window waits for a keyframe (start, or after a loss), ask again this often: the
+/// keyframe itself can be lost too, and nothing else would ever bring the picture back.
+pub const KEY_RETRY: Duration = Duration::from_millis(500);
 
 /// Rebuilds frames from shards, in order per window. After a loss it hands out nothing but
 /// a keyframe (decoding past a hole would only show garbage).
@@ -235,7 +241,7 @@ impl Reassembler {
         if len > MAX_FRAME || blocks == 0 || block >= blocks || k == 0 || k > MAX_BLOCK || index >= k + m || k + m > fec::MAX_SHARDS {
             return out;
         }
-        let w = self.windows.entry(window).or_insert_with(|| WindowState { waiting_key: true, ..Default::default() });
+        let w = self.windows.entry(window).or_insert_with(|| WindowState { waiting_key: true, asked: Some(now), ..Default::default() });
         if w.next.is_some_and(|n| seq.wrapping_sub(n) > u32::MAX / 2) {
             return out; // older than what was already handed out
         }
@@ -286,6 +292,10 @@ impl Reassembler {
 
     fn flush(&mut self, window: u64, now: Instant, out: &mut Vec<Out>) {
         let Some(w) = self.windows.get_mut(&window) else { return };
+        if w.waiting_key && w.asked.is_some_and(|t| now.duration_since(t) >= KEY_RETRY) && !w.pending.values().any(|p| p.keyframe) {
+            w.asked = Some(now);
+            out.push(Out::Lost(window));
+        }
         loop {
             let Some((&seq, f)) = w.pending.iter().next() else { return };
             let in_order = w.next == Some(seq);
@@ -325,6 +335,11 @@ impl Reassembler {
                     // first loss since the last good frame: the decoder needs a keyframe
                     self.stats.lost += 1;
                     w.waiting_key = true;
+                    w.asked = Some(now);
+                    out.push(Out::Lost(window));
+                } else if f.keyframe || w.asked.is_none_or(|t| now.duration_since(t) >= KEY_RETRY) {
+                    // still no usable keyframe (it was lost as well): ask again
+                    w.asked = Some(now);
                     out.push(Out::Lost(window));
                 }
                 if w.next.is_some_and(|n| seq.wrapping_sub(n) < u32::MAX / 2) {
@@ -403,6 +418,25 @@ mod tests {
         assert!(matches!(send(&mut r, 4, true, 0, later)[..], [Out::Frame(ref f)] if f.keyframe));
         assert!(matches!(send(&mut r, 5, false, 0, later)[..], [Out::Frame(_)]));
         assert_eq!(r.stats.lost, 1);
+    }
+
+    #[test]
+    fn a_lost_keyframe_is_asked_for_again() {
+        let mut r = Reassembler::new();
+        let t0 = Instant::now();
+        // the first keyframe arrives incomplete (no parity): it expires
+        for p in packetize(&frame(3, 5000, true), 1, 0).iter().skip(1) {
+            assert!(r.push(p, t0).is_empty());
+        }
+        let out = r.tick(t0 + FRAME_TIMEOUT + Duration::from_millis(10));
+        assert!(matches!(out[..], [Out::Lost(3)]), "a dropped keyframe must ask for another: {out:?}");
+        // nothing arrives at all: still asking, every KEY_RETRY
+        assert!(r.tick(t0 + FRAME_TIMEOUT + Duration::from_millis(20)).is_empty());
+        let out = r.tick(t0 + FRAME_TIMEOUT + KEY_RETRY + Duration::from_millis(20));
+        assert!(matches!(out[..], [Out::Lost(3)]), "{out:?}");
+        // the new keyframe brings the picture back
+        let got: Vec<Out> = packetize(&frame(3, 5000, true), 9, 0).iter().flat_map(|p| r.push(p, t0 + Duration::from_secs(2))).collect();
+        assert!(matches!(got[..], [Out::Frame(ref f)] if f.keyframe));
     }
 
     #[test]

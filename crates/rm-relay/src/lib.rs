@@ -91,6 +91,14 @@ pub const UDP_WAITING: u8 = 0;
 pub const UDP_PEER_READY: u8 = 1;
 pub const UDP_REFUSED: u8 = 0xFF;
 
+/// Big socket buffers for UDP video: a keyframe is a burst of hundreds of datagrams, and the
+/// defaults (macOS: ~42 KB) drop part of it even on loopback.
+pub fn big_udp_buffers(sock: &UdpSocket) {
+    let s = socket2::SockRef::from(sock);
+    let _ = s.set_recv_buffer_size(4 << 20);
+    let _ = s.set_send_buffer_size(4 << 20);
+}
+
 /// "I am `role` of `session` (token, admission key)": sent until the relay answers UDP_STATUS,
 /// then now and then to keep NAT bindings open.
 pub fn udp_register(session_id: &str, role: Role, token: &str, key: Option<&str>) -> Vec<u8> {
@@ -231,6 +239,7 @@ pub fn serve(listener: TcpListener, cfg: Config) {
     // UDP on the same address and port number as the TCP listener
     match listener.local_addr().and_then(UdpSocket::bind) {
         Ok(sock) => {
+            big_udp_buffers(&sock);
             let (u, c) = (udp.clone(), cfg.clone());
             thread::spawn(move || udp_loop(sock, u, c));
         }
