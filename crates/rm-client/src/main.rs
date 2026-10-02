@@ -37,15 +37,26 @@ fn main() {
         _ => usage(),
     };
     let stream = rm_relay::join_with(&relay, &session, Role::Client, &token, wait).unwrap_or_else(|e| fail("relay", e));
+    let udp = std::env::var_os("RM_NO_UDP").is_none();
     if e2e.is_some() || record.is_some() {
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(1))).ok();
+        // short when UDP video comes in beside the TCP stream
+        stream.set_read_timeout(Some(std::time::Duration::from_millis(if udp { 20 } else { 1000 }))).ok();
     }
     let mut s = Session::handshake(stream).unwrap_or_else(|e| fail("handshake", e));
+    if udp && (e2e.is_some() || record.is_some()) {
+        if let Err(e) = s.attach_udp(&relay, &session, &token) {
+            eprintln!("UDP video unavailable: {e}");
+        }
+    }
     if let Some(app) = e2e {
         let r = rm_client::e2e::run(&mut s, &app);
         println!("E2E {}: {}/{} checks passed; frames={} decoded={} keyframes={} bytes={} fps={:.1} firstFrameMs={:?} titles={:?}",
             if r.all_ok() { "PASS" } else { "FAIL" }, r.checks.iter().filter(|c| c.1).count(), r.checks.len(),
             r.video_frames, r.decoded, r.keyframes, r.video_bytes, r.fps(), r.first_frame_ms, r.titles);
+        if let Some(u) = s.udp_stats() {
+            println!("UDP frames={} bytes={} recovered={} lost={} loss={:.1}% rtt_ms={} ready={}", u.frames, u.bytes, u.recovered, u.lost, u.loss * 100.0,
+                u.rtt_ms.map_or("-".into(), |r| format!("{r:.1}")), u.ready);
+        }
         std::process::exit(if r.all_ok() { 0 } else { 1 });
     }
     if let Some(path) = record {

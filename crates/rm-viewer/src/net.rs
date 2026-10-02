@@ -13,6 +13,18 @@ use std::sync::{Arc, Mutex};
 /// and asks the Mac for a fresh keyframe (Moonlight's "frame queue overflow -> IDR").
 const DECODE_QUEUE: usize = 4;
 
+/// Timing of one picture, for the stats overlay.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FrameMeta {
+    /// agent capture time (agent clock, microseconds)
+    pub pts_us: u64,
+    /// the agent's clock when the frame was fully received, if known (offset from pings)
+    pub received_agent_us: Option<i64>,
+    pub decode_us: u32,
+    pub via_udp: bool,
+    pub bytes: u32,
+}
+
 #[derive(Debug)]
 pub enum UiEvent {
     WindowCreated { id: u64, app: String, title: String, x: i32, y: i32, w: u32, h: u32, parent: Option<u64>, role: rm_protocol::WindowRole },
@@ -29,7 +41,7 @@ pub enum UiEvent {
     Resized { id: u64, w: u32, h: u32 },
     Title { id: u64, title: String },
     Destroyed { id: u64 },
-    Frame { id: u64, picture: Picture },
+    Frame { id: u64, picture: Picture, meta: FrameMeta },
     AppExited(String),
     Notice(String),
     Disconnected(String),
@@ -38,6 +50,8 @@ pub enum UiEvent {
 #[derive(Clone)]
 pub struct Link {
     writer: Arc<Mutex<TcpStream>>,
+    /// UDP video path (FEC); None when it could not be started
+    pub udp: Option<Arc<rm_client::udp::UdpVideo>>,
 }
 
 impl Link {
@@ -81,38 +95,106 @@ pub fn connect_with(relay: &str, session: &str, token: &str, app: Option<&str>, 
     let stream = rm_relay::join_with(relay, session, rm_relay::Role::Client, token, wait).map_err(|e| format!("relay: {e}"))?;
     let writer = Arc::new(Mutex::new(stream.try_clone().map_err(|e| e.to_string())?));
     let sess = Session::handshake(stream).map_err(|e| format!("handshake: {e}"))?;
-    let link = Link { writer };
+    let (tx, rx) = channel();
+    let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+    let mut link = Link { writer, udp: None };
+    let video = Arc::new(Video { decoders: Mutex::new(HashMap::new()), link: Mutex::new(link.clone()), tx: tx.clone(), wake: wake.clone(), udp: Mutex::new(None) });
+    // UDP video beside the TCP connection (RM_NO_UDP=1 keeps everything on TCP)
+    if std::env::var_os("RM_NO_UDP").is_none() {
+        let v = video.clone();
+        match rm_client::udp::start(relay, session, token, move |o| v.on_udp(o)) {
+            Ok(u) => {
+                let u = Arc::new(u);
+                *video.udp.lock().unwrap() = Some(u.clone());
+                link.udp = Some(u);
+                *video.link.lock().unwrap() = link.clone();
+            }
+            Err(e) => eprintln!("UDP video unavailable ({e}); using TCP"),
+        }
+    }
     if !sess.capabilities.can_stream_apps() {
         eprintln!("warning: host reports it cannot stream apps: {:?}", sess.capabilities);
     }
-    let (tx, rx) = channel();
     if let Some(app) = app {
         link.send(&Message::AppLaunch { application_id: app.into(), arguments: vec![], working_directory: None, environment: Default::default() });
     }
     let l2 = link.clone();
-    std::thread::spawn(move || recv_loop(sess, l2, tx, wake));
+    std::thread::spawn(move || recv_loop(sess, l2, video, tx, wake));
     Ok((link, rx))
 }
 
 /// One window's decoder on its own thread: the socket keeps being read (input echoes, menus,
 /// other windows) while a big frame decodes, and the UI only ever gets finished pictures.
 struct DecodeWorker {
-    tx: SyncSender<rm_protocol::VideoFrame>,
+    tx: SyncSender<(rm_protocol::VideoFrame, FrameMeta)>,
     /// frames are being dropped until the next keyframe
     resync: bool,
 }
 
+/// Where video goes, from TCP or UDP: one decode worker per window.
+struct Video {
+    decoders: Mutex<HashMap<u64, DecodeWorker>>,
+    link: Mutex<Link>,
+    tx: Sender<UiEvent>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+    udp: Mutex<Option<Arc<rm_client::udp::UdpVideo>>>,
+}
+
+impl Video {
+    fn link(&self) -> Link {
+        self.link.lock().unwrap().clone()
+    }
+
+    fn on_udp(&self, o: rm_protocol::udp::Out) {
+        match o {
+            rm_protocol::udp::Out::Frame(v) => self.push(v, true),
+            // lost even with FEC: the decoder needs a fresh keyframe
+            rm_protocol::udp::Out::Lost(id) => self.link().send(&Message::RequestKeyframe { window_id: id }),
+        }
+    }
+
+    fn push(&self, v: rm_protocol::VideoFrame, via_udp: bool) {
+        let id = v.window_id;
+        let received_agent_us = self.udp.lock().unwrap().as_ref().and_then(|u| u.agent_now_us());
+        let meta = FrameMeta { pts_us: v.pts_us, received_agent_us, decode_us: 0, via_udp, bytes: v.data.len() as u32 };
+        let mut decoders = self.decoders.lock().unwrap();
+        let w = decoders.entry(id).or_insert_with(|| spawn_decoder(id, self.link(), self.tx.clone(), self.wake.clone()));
+        if w.resync && !v.keyframe {
+            return;
+        }
+        w.resync = false;
+        match w.tx.try_send((v, meta)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                // decoding cannot keep up: skip ahead to a fresh keyframe instead of showing an
+                // ever older picture
+                w.resync = true;
+                self.link().send(&Message::RequestKeyframe { window_id: id });
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                decoders.remove(&id);
+            }
+        }
+    }
+
+    fn forget(&self, id: u64) {
+        self.decoders.lock().unwrap().remove(&id);
+    }
+}
+
 fn spawn_decoder(id: u64, link: Link, tx: Sender<UiEvent>, wake: Arc<dyn Fn() + Send + Sync>) -> DecodeWorker {
-    let (ftx, frx) = sync_channel::<rm_protocol::VideoFrame>(DECODE_QUEUE);
+    let (ftx, frx) = sync_channel::<(rm_protocol::VideoFrame, FrameMeta)>(DECODE_QUEUE);
     std::thread::Builder::new()
         .name(format!("rm-decode-{id}"))
         .spawn(move || {
             let Ok(mut d) = H264Decoder::new() else { return };
             let mut last_ask = std::time::Instant::now() - std::time::Duration::from_secs(1);
-            for v in frx {
+            for (v, mut meta) in frx {
+                let t = std::time::Instant::now();
                 match d.decode(&v.data) {
                     Ok(Some(picture)) => {
-                        if tx.send(UiEvent::Frame { id, picture }).is_err() {
+                        meta.decode_us = t.elapsed().as_micros() as u32;
+                        if tx.send(UiEvent::Frame { id, picture, meta }).is_err() {
                             return;
                         }
                         wake();
@@ -132,9 +214,7 @@ fn spawn_decoder(id: u64, link: Link, tx: Sender<UiEvent>, wake: Arc<dyn Fn() + 
     DecodeWorker { tx: ftx, resync: false }
 }
 
-fn recv_loop(mut sess: Session<TcpStream>, link: Link, tx: Sender<UiEvent>, wake: impl Fn() + Send + Sync + 'static) {
-    let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
-    let mut decoders: HashMap<u64, DecodeWorker> = HashMap::new();
+fn recv_loop(mut sess: Session<TcpStream>, _link: Link, video: Arc<Video>, tx: Sender<UiEvent>, wake: Arc<dyn Fn() + Send + Sync>) {
     let emit = |e: UiEvent| {
         if tx.send(e).is_ok() {
             wake();
@@ -142,26 +222,7 @@ fn recv_loop(mut sess: Session<TcpStream>, link: Link, tx: Sender<UiEvent>, wake
     };
     loop {
         match sess.recv() {
-            Ok(Some(Frame::Video(v))) => {
-                let id = v.window_id;
-                let w = decoders.entry(id).or_insert_with(|| spawn_decoder(id, link.clone(), tx.clone(), wake.clone()));
-                if w.resync && !v.keyframe {
-                    continue;
-                }
-                w.resync = false;
-                match w.tx.try_send(v) {
-                    Ok(()) => {}
-                    Err(TrySendError::Full(_)) => {
-                        // decoding cannot keep up: skip ahead to a fresh keyframe instead of
-                        // showing an ever older picture
-                        w.resync = true;
-                        link.send(&Message::RequestKeyframe { window_id: id });
-                    }
-                    Err(TrySendError::Disconnected(_)) => {
-                        decoders.remove(&id);
-                    }
-                }
-            }
+            Ok(Some(Frame::Video(v))) => video.push(v, false),
             Ok(Some(Frame::Msg(m))) => match m {
                 Message::WindowCreated { window_id, application_id, title, bounds, parent_id, role } => emit(UiEvent::WindowCreated { id: window_id, app: application_id, title, x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, parent: parent_id, role }),
                 Message::Apps { apps } => emit(UiEvent::Apps(apps)),
@@ -182,7 +243,7 @@ fn recv_loop(mut sess: Session<TcpStream>, link: Link, tx: Sender<UiEvent>, wake
                 Message::WindowMoved { window_id, bounds } => emit(UiEvent::Resized { id: window_id, w: bounds.w, h: bounds.h }),
                 Message::WindowTitleChanged { window_id, title } => emit(UiEvent::Title { id: window_id, title }),
                 Message::WindowDestroyed { window_id } => {
-                    decoders.remove(&window_id);
+                    video.forget(window_id);
                     emit(UiEvent::Destroyed { id: window_id });
                 }
                 Message::AppExited { application_id, .. } => emit(UiEvent::AppExited(application_id)),
@@ -264,6 +325,41 @@ mod tests {
             if let Ok(UiEvent::Destroyed { .. }) = rx.recv_timeout(Duration::from_millis(300)) { destroyed = true }
         }
         assert!(destroyed);
+    }
+
+    /// Video moves to UDP once the path works, and FEC carries it through a lossy relay.
+    fn udp_run(loss: Option<f64>, session: &str) -> (usize, usize, rm_client::udp::LinkStats) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        std::thread::spawn(move || rm_relay::serve(l, rm_relay::Config { udp_loss: loss, ..Default::default() }));
+        let (a, tok, s2) = (addr.clone(), "viewer-udp-token-0123456789", session.to_string());
+        std::thread::spawn(move || { let _ = rm_fakeagent::serve_via_relay(&a, &s2, tok); });
+        std::thread::sleep(Duration::from_millis(150));
+        let (link, rx) = connect(&addr, session, tok, Some("testapp"), || {}).unwrap();
+        let (mut tcp, mut udp) = (0, 0);
+        let deadline = std::time::Instant::now() + Duration::from_secs(12);
+        while std::time::Instant::now() < deadline && udp < 60 {
+            if let Ok(UiEvent::Frame { picture, meta, .. }) = rx.recv_timeout(Duration::from_millis(300)) {
+                assert_eq!(picture.bgra.len(), 480 * 352 * 4);
+                if meta.via_udp { udp += 1 } else { tcp += 1 }
+            }
+        }
+        let stats = link.udp.as_ref().unwrap().stats.lock().unwrap().clone();
+        (tcp, udp, stats)
+    }
+
+    #[test]
+    fn video_switches_to_udp() {
+        let (tcp, udp, stats) = udp_run(None, "v-udp-1");
+        assert!(udp >= 60, "frames over udp={udp} tcp={tcp} {stats:?}");
+        assert!(stats.rtt_ms.is_some() && stats.offset_us.is_some(), "{stats:?}");
+    }
+
+    #[test]
+    fn fec_carries_video_through_packet_loss() {
+        let (tcp, udp, stats) = udp_run(Some(0.10), "v-udp-2");
+        assert!(udp >= 60, "frames over a 10% lossy link: udp={udp} tcp={tcp} {stats:?}");
+        assert!(stats.recovered > 0, "parity must have rebuilt some frames: {stats:?}");
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! a child window, and file uploads. Lets clients be tested without a Mac.
 
 pub mod replay;
+pub mod udp_agent;
 
 use openh264::encoder::Encoder;
 use openh264::formats::{RgbaSliceU8, YUVBuffer};
@@ -13,7 +14,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub const WIDTH: usize = 480;
 pub const HEIGHT: usize = 352;
@@ -80,6 +81,10 @@ struct State {
     desktop: Option<u64>,
     /// the window that last got a click on the desktop (keyboard focus there)
     front: Option<u64>,
+    /// UDP video path (when served through a relay)
+    udp: Option<Arc<udp_agent::AgentUdp>>,
+    /// windows whose next frame must be a keyframe (the client lost one)
+    key_requests: std::collections::HashSet<u64>,
 }
 
 type Writer<W> = Arc<Mutex<W>>;
@@ -128,7 +133,8 @@ fn open_window<W: Write + Send + 'static>(
     send(writer, &Message::WindowCreated { window_id: id, application_id: app.into(), title: t, bounds, parent_id: parent, role })?;
     let wr = writer.clone();
     let hue = (60 * id % 256) as u8;
-    let handle = std::thread::spawn(move || video_loop(wr, id, w, h, hue, stop));
+    let st2 = st.clone();
+    let handle = std::thread::spawn(move || video_loop(wr, st2, id, w, h, hue, stop));
     st.lock().unwrap().windows.get_mut(&id).unwrap().video = Some(handle);
     Ok(id)
 }
@@ -198,7 +204,12 @@ fn menu_key(path: &[u32]) -> Option<&'static str> {
 }
 
 /// Serve one client.
-pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Result<(), ProtocolError> {
+pub fn serve<S: Read + Write + Send + 'static>(reader: S, writer: S) -> Result<(), ProtocolError> {
+    serve_with(reader, writer, None)
+}
+
+/// [`serve`], sending video over `udp` while the client's reports come in.
+pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, udp: Option<Arc<udp_agent::AgentUdp>>) -> Result<(), ProtocolError> {
     let writer: Writer<S> = Arc::new(Mutex::new(writer));
     match read_message(&mut reader)? {
         Some(Message::ClientHello(_)) => {}
@@ -206,7 +217,7 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
     }
     send(&writer, &Message::ServerHello(Hello::ours("rm-fakeagent", &["h264"], &["control", "video", "files"])))?;
     send(&writer, &Message::CapabilityReport(caps()))?;
-    let st = Arc::new(Mutex::new(State::default()));
+    let st = Arc::new(Mutex::new(State { udp, ..Default::default() }));
 
     while let Some(msg) = read_message(&mut reader)? {
         // A menu command does what its keyboard shortcut does, in the app's main window.
@@ -398,7 +409,8 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
                     send(&writer, &Message::WindowMoved { window_id, bounds })?;
                     let wr = writer.clone();
                     let hue = (60 * window_id % 256) as u8;
-                    let handle = std::thread::spawn(move || video_loop(wr, window_id, w as usize, h as usize, hue, stop));
+                    let st2 = st.clone();
+                    let handle = std::thread::spawn(move || video_loop(wr, st2, window_id, w as usize, h as usize, hue, stop));
                     if let Some(win) = st.lock().unwrap().windows.get_mut(&window_id) {
                         win.video = Some(handle);
                     }
@@ -411,6 +423,9 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
                 }
             }
             Message::Ping { nonce } => send(&writer, &Message::Pong { nonce })?,
+            Message::RequestKeyframe { window_id } => {
+                st.lock().unwrap().key_requests.insert(window_id);
+            }
             _ => {}
         }
     }
@@ -426,21 +441,34 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
     Ok(())
 }
 
-fn video_loop<W: Write>(w: Writer<W>, id: u64, width: usize, height: usize, hue: u8, stop: Arc<AtomicBool>) {
+fn video_loop<W: Write>(w: Writer<W>, st: Arc<Mutex<State>>, id: u64, width: usize, height: usize, hue: u8, stop: Arc<AtomicBool>) {
     let Ok(mut enc) = Encoder::new() else { return };
-    let start = Instant::now();
     let mut t = 0usize;
+    let mut on_udp = false;
     while !stop.load(Ordering::SeqCst) {
+        let (udp, asked) = {
+            let mut s = st.lock().unwrap();
+            (s.udp.clone().filter(|u| u.alive()), s.key_requests.remove(&id))
+        };
+        // a keyframe when asked, and when switching transport (the client resyncs on it)
+        if asked || udp.is_some() != on_udp {
+            enc.force_intra_frame();
+        }
+        on_udp = udp.is_some();
         let rgba = animated_frame(width, height, t, hue);
         let yuv = YUVBuffer::from_rgb_source(RgbaSliceU8::new(&rgba, (width, height)));
         let Ok(bs) = enc.encode(&yuv) else { continue };
         let data = bs.to_vec();
         let keyframe = data.windows(5).any(|x| x[..4] == [0, 0, 0, 1] && x[4] & 0x1f == 5);
         if !data.is_empty() {
-            let f = VideoFrame { window_id: id, pts_us: start.elapsed().as_micros() as u64, keyframe, codec: CODEC_H264, width: width as u16, height: height as u16, data };
-            let Ok(bytes) = encode_video(&f) else { continue };
-            if w.lock().unwrap().write_all(&bytes).is_err() {
-                return;
+            let f = VideoFrame { window_id: id, pts_us: udp_agent::clock_us(), keyframe, codec: CODEC_H264, width: width as u16, height: height as u16, data };
+            if let Some(u) = &udp {
+                u.send(&f);
+            } else {
+                let Ok(bytes) = encode_video(&f) else { continue };
+                if w.lock().unwrap().write_all(&bytes).is_err() {
+                    return;
+                }
             }
         }
         t += 1;
@@ -452,5 +480,7 @@ fn video_loop<W: Write>(w: Writer<W>, id: u64, width: usize, height: usize, hue:
 pub fn serve_via_relay(relay: &str, session: &str, token: &str) -> Result<(), String> {
     let s = rm_relay::join(relay, session, rm_relay::Role::Agent, token).map_err(|e| e.to_string())?;
     let w: TcpStream = s.try_clone().map_err(|e| e.to_string())?;
-    serve(s, w).map_err(|e| e.to_string())
+    // UDP video unless RM_NO_UDP is set (tests of the TCP path)
+    let udp = if std::env::var_os("RM_NO_UDP").is_some() { None } else { udp_agent::AgentUdp::start(relay, session, token).ok() };
+    serve_with(s, w, udp).map_err(|e| e.to_string())
 }

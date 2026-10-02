@@ -29,17 +29,22 @@ grep -q "session mismatch" out/client-wrong.log || { echo "wrong password: unexp
 ./target/release/remote-mac --relay 127.0.0.1:$PORT --id $ID --password "$PASS" --e2e testapp 2>out/client.log | tee out/e2e.txt
 RC=${PIPESTATUS[0]}
 [[ -n "${RC_BANNER:-}" && $RC == 0 ]] && RC=1
+# the Swift FEC must produce the same bytes as the Rust one, and video must have used UDP
+grep -q "fec self-test ok" out/agent.log || { echo "Swift FEC self-test failed (parity differs from Rust)"; [[ $RC == 0 ]] && RC=1; }
+UDP_FRAMES=$(sed -n 's/^UDP frames=\([0-9]*\).*/\1/p' out/e2e.txt)
+echo "video frames received over UDP: ${UDP_FRAMES:-0}"
+[[ "${UDP_FRAMES:-0}" -gt 30 ]] || { echo "video did not move to UDP"; [[ $RC == 0 ]] && RC=1; }
 
-# far link: the same session through a relay limited to 6 Mbit/s; the agent has to adapt its
-# bitrate and drop frames rather than queue seconds of video (informational, not gating)
-RM_RELAY_THROTTLE_KBPS=6000 ./target/release/rm-relay 127.0.0.1:$((PORT+1)) 2>out/relay-slow.log &
+# far, lossy link: a relay limited to 6 Mbit/s that drops 5% of UDP packets; FEC rebuilds them
+# and the agent adapts its bitrate instead of queueing video (informational, not gating)
+RM_RELAY_THROTTLE_KBPS=6000 RM_RELAY_UDP_LOSS_PCT=5 ./target/release/rm-relay 127.0.0.1:$((PORT+1)) 2>out/relay-slow.log &
 SLOW=$!
 sleep 1
 ./out/remote-agent-mac --relay 127.0.0.1:$((PORT+1)) --id 987654321 --password "$PASS" >/dev/null 2>out/agent-slow.log &
 AGENT_SLOW=$!
 sleep 2
 ./target/release/remote-mac --relay 127.0.0.1:$((PORT+1)) --id 987654321 --password "$PASS" --e2e testapp 2>out/client-slow.log | tee out/e2e-slow.txt || true
-echo "=== far-link agent (bitrate adaptation)"; grep -E "bitrate|dropped" out/agent-slow.log | tail -10
+echo "=== far-link agent (bitrate adaptation, FEC)"; grep -E "bitrate|dropped|UDP" out/agent-slow.log | tail -14
 kill $AGENT $AGENT_SLOW $RELAY $SLOW 2>/dev/null
 echo "=== client log"; cat out/client.log
 echo "=== agent log"; tail -40 out/agent.log

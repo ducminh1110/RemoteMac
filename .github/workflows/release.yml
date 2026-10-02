@@ -148,7 +148,8 @@ jobs:
 
           Installs the relay as a systemd service, opens the port in ufw/iptables,
           checks it and prints the ports to open in your provider's firewall:
-            TCP 7470 (relay) and TCP 22 (SSH). Running it again updates the relay.
+            TCP 7470 + UDP 7470 (relay; UDP carries the video) and TCP 22 (SSH).
+          Running it again updates the relay.
           TXT
           sed -i 's/^          //' dist/remotemac-relay/README.txt
           tar -C dist -czf dist/remotemac-relay.tar.gz remotemac-relay

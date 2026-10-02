@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -70,11 +70,140 @@ pub struct Config {
     pub key: Option<String>,
     /// Test aid: limit each direction to this many kilobits per second (a slow, far link).
     pub throttle_kbps: Option<u32>,
+    /// Test aid: drop this share (0..1) of forwarded UDP datagrams (a lossy link).
+    pub udp_loss: Option<f64>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { pair_timeout: Duration::from_secs(300), hello_timeout: Duration::from_secs(10), key: None, throttle_kbps: None }
+        Self { pair_timeout: Duration::from_secs(300), hello_timeout: Duration::from_secs(10), key: None, throttle_kbps: None, udp_loss: None }
+    }
+}
+
+// ---- UDP: the same port also forwards datagrams (video) between the two peers of a session
+// that is paired over TCP. Datagram: "RM" | type | ...; types below 16 are the relay's own.
+
+pub const UDP_REGISTER: u8 = 1;
+pub const UDP_STATUS: u8 = 2;
+pub const UDP_KEEPALIVE: u8 = 3;
+/// UDP_STATUS values
+pub const UDP_WAITING: u8 = 0;
+pub const UDP_PEER_READY: u8 = 1;
+pub const UDP_REFUSED: u8 = 0xFF;
+
+/// "I am `role` of `session` (token, admission key)": sent until the relay answers UDP_STATUS,
+/// then now and then to keep NAT bindings open.
+pub fn udp_register(session_id: &str, role: Role, token: &str, key: Option<&str>) -> Vec<u8> {
+    let mut d = vec![b'R', b'M', UDP_REGISTER, matches!(role, Role::Client) as u8];
+    for f in [session_id, token, key.unwrap_or("")] {
+        d.push(f.len().min(255) as u8);
+        d.extend_from_slice(&f.as_bytes()[..f.len().min(255)]);
+    }
+    d
+}
+
+fn parse_register(p: &[u8]) -> Option<(Role, String, String, String)> {
+    if p.len() < 5 || &p[..3] != b"RM\x01" {
+        return None;
+    }
+    let role = if p[3] == 1 { Role::Client } else { Role::Agent };
+    let mut fields = vec![];
+    let mut i = 4;
+    for _ in 0..3 {
+        let n = *p.get(i)? as usize;
+        fields.push(String::from_utf8(p.get(i + 1..i + 1 + n)?.to_vec()).ok()?);
+        i += 1 + n;
+    }
+    let key = fields.pop()?;
+    let token = fields.pop()?;
+    Some((role, fields.pop()?, token, key))
+}
+
+struct UdpPair {
+    token: String,
+    agent: Option<SocketAddr>,
+    client: Option<SocketAddr>,
+}
+
+#[derive(Default)]
+struct UdpState {
+    pairs: HashMap<String, UdpPair>,
+    by_addr: HashMap<SocketAddr, (String, Role)>,
+}
+
+type Udp = Arc<Mutex<UdpState>>;
+
+impl UdpState {
+    fn forget(&mut self, session: &str) {
+        if let Some(p) = self.pairs.remove(session) {
+            for a in [p.agent, p.client].into_iter().flatten() {
+                self.by_addr.remove(&a);
+            }
+        }
+    }
+}
+
+fn udp_loop(sock: UdpSocket, udp: Udp, cfg: Config) {
+    let mut buf = vec![0u8; 2048];
+    let mut rng: u64 = 0x9E37_79B9_7F4A_7C15 ^ std::process::id() as u64;
+    // token bucket per destination when throttled (drops what exceeds ~100 ms of burst)
+    let mut buckets: HashMap<SocketAddr, (f64, Instant)> = HashMap::new();
+    let rate = cfg.throttle_kbps.map(|k| k as f64 * 1000.0 / 8.0);
+    loop {
+        let Ok((n, from)) = sock.recv_from(&mut buf) else { continue };
+        let p = &buf[..n];
+        if n < 3 || &p[..2] != b"RM" {
+            continue;
+        }
+        match p[2] {
+            UDP_REGISTER => {
+                let Some((role, session, token, key)) = parse_register(p) else { continue };
+                let admitted = cfg.key.as_ref().is_none_or(|k| constant_time_eq(k, &key));
+                let mut st = udp.lock().unwrap();
+                let status = match st.pairs.get_mut(&session) {
+                    Some(pair) if admitted && constant_time_eq(&pair.token, &token) => {
+                        let slot = if role == Role::Agent { &mut pair.agent } else { &mut pair.client };
+                        let old = slot.replace(from);
+                        let ready = pair.agent.is_some() && pair.client.is_some();
+                        if let Some(o) = old.filter(|o| *o != from) {
+                            st.by_addr.remove(&o);
+                        }
+                        st.by_addr.insert(from, (session.clone(), role));
+                        if ready { UDP_PEER_READY } else { UDP_WAITING }
+                    }
+                    _ => UDP_REFUSED,
+                };
+                drop(st);
+                let _ = sock.send_to(&[b'R', b'M', UDP_STATUS, status], from);
+            }
+            UDP_KEEPALIVE | UDP_STATUS => {}
+            _ => {
+                let to = {
+                    let st = udp.lock().unwrap();
+                    st.by_addr.get(&from).and_then(|(s, role)| st.pairs.get(s).and_then(|p| if *role == Role::Agent { p.client } else { p.agent }))
+                };
+                let Some(to) = to else { continue };
+                if let Some(loss) = cfg.udp_loss {
+                    rng ^= rng << 13;
+                    rng ^= rng >> 7;
+                    rng ^= rng << 17;
+                    if (rng % 10_000) as f64 / 10_000.0 < loss {
+                        continue;
+                    }
+                }
+                if let Some(rate) = rate {
+                    let now = Instant::now();
+                    let b = buckets.entry(to).or_insert((rate * 0.1, now));
+                    b.0 = (b.0 + now.duration_since(b.1).as_secs_f64() * rate).min(rate * 0.1);
+                    b.1 = now;
+                    if b.0 < n as f64 {
+                        continue;
+                    }
+                    b.0 -= n as f64;
+                }
+                let _ = sock.send_to(p, to);
+            }
+        }
     }
 }
 
@@ -98,10 +227,19 @@ fn valid_session_id(s: &str) -> bool {
 pub fn serve(listener: TcpListener, cfg: Config) {
     let table: Table = Arc::new(Mutex::new(HashMap::new()));
     let failures: Failures = Arc::new(Mutex::new(HashMap::new()));
+    let udp: Udp = Arc::new(Mutex::new(UdpState::default()));
+    // UDP on the same address and port number as the TCP listener
+    match listener.local_addr().and_then(UdpSocket::bind) {
+        Ok(sock) => {
+            let (u, c) = (udp.clone(), cfg.clone());
+            thread::spawn(move || udp_loop(sock, u, c));
+        }
+        Err(e) => eprintln!("rm-relay: no UDP forwarding ({e}); video falls back to TCP"),
+    }
     for conn in listener.incoming().flatten() {
-        let (table, failures, cfg) = (table.clone(), failures.clone(), cfg.clone());
+        let (table, failures, udp, cfg) = (table.clone(), failures.clone(), udp.clone(), cfg.clone());
         thread::spawn(move || {
-            let _ = handle(conn, table, failures, cfg);
+            let _ = handle(conn, table, failures, udp, cfg);
         });
     }
 }
@@ -110,7 +248,7 @@ fn reject(mut s: TcpStream, why: &str) -> std::io::Result<()> {
     s.write_all(format!("ERR {why}\n").as_bytes())
 }
 
-fn handle(conn: TcpStream, table: Table, failures: Failures, cfg: Config) -> std::io::Result<()> {
+fn handle(conn: TcpStream, table: Table, failures: Failures, udp: Udp, cfg: Config) -> std::io::Result<()> {
     // small control/input messages must not wait for Nagle
     let _ = conn.set_nodelay(true);
     conn.set_read_timeout(Some(cfg.hello_timeout))?;
@@ -197,7 +335,11 @@ fn handle(conn: TcpStream, table: Table, failures: Failures, cfg: Config) -> std
             let mut b = conn;
             a.write_all(b"READY\n")?;
             b.write_all(b"READY\n")?;
+            // while the pair lives, its two peers may also exchange UDP datagrams
+            udp.lock().unwrap().forget(&join.session_id);
+            udp.lock().unwrap().pairs.insert(join.session_id.clone(), UdpPair { token: join.token.clone(), agent: None, client: None });
             pipe(a, b, cfg.throttle_kbps);
+            udp.lock().unwrap().forget(&join.session_id);
             Ok(())
         }
     }
@@ -344,7 +486,7 @@ mod tests {
 
     #[test]
     fn pair_timeout_evicts() {
-        let addr = start(Config { pair_timeout: Duration::from_millis(200), hello_timeout: Duration::from_secs(2), key: None, throttle_kbps: None });
+        let addr = start(Config { pair_timeout: Duration::from_millis(200), hello_timeout: Duration::from_secs(2), ..Default::default() });
         let r = join(&addr, "sess-4", Role::Agent, TOK);
         // the waiter is told READY never comes; it receives ERR pair timeout
         assert!(r.is_err());
@@ -404,6 +546,42 @@ mod tests {
         thread::sleep(Duration::from_millis(100));
         assert!(join_with(&addr, "offline-1", Role::Client, TOK, false).is_ok());
         assert!(agent.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn udp_flows_between_the_paired_peers_only() {
+        let addr = start(Config::default());
+        let a = addr.clone();
+        let agent = thread::spawn(move || join(&a, "udp-1", Role::Agent, TOK).unwrap());
+        thread::sleep(Duration::from_millis(100));
+        let _client_tcp = join(&addr, "udp-1", Role::Client, TOK).unwrap();
+        let _agent_tcp = agent.join().unwrap();
+        let sock = |s: &str| {
+            let u = UdpSocket::bind("127.0.0.1:0").unwrap();
+            u.connect(s).unwrap();
+            u.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+            u
+        };
+        let (ua, uc, intruder) = (sock(&addr), sock(&addr), sock(&addr));
+        let status = |u: &UdpSocket| {
+            let mut b = [0u8; 16];
+            let n = u.recv(&mut b).unwrap();
+            b[..n].to_vec()
+        };
+        intruder.send(&udp_register("udp-1", Role::Client, "wrong-token-0123456789", None)).unwrap();
+        assert_eq!(status(&intruder), [b'R', b'M', UDP_STATUS, UDP_REFUSED]);
+        ua.send(&udp_register("udp-1", Role::Agent, TOK, None)).unwrap();
+        assert_eq!(status(&ua), [b'R', b'M', UDP_STATUS, UDP_WAITING]);
+        uc.send(&udp_register("udp-1", Role::Client, TOK, None)).unwrap();
+        assert_eq!(status(&uc), [b'R', b'M', UDP_STATUS, UDP_PEER_READY]);
+        ua.send(b"RM\x10video").unwrap();
+        assert_eq!(status(&uc), b"RM\x10video");
+        uc.send(b"RM\x11feedback").unwrap();
+        assert_eq!(status(&ua), b"RM\x11feedback");
+        // the refused socket cannot inject anything
+        intruder.send(b"RM\x10evil").unwrap();
+        let mut b = [0u8; 16];
+        assert!(ua.recv(&mut b).is_err() && uc.recv(&mut b).is_err());
     }
 
     #[test]

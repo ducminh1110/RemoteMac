@@ -120,18 +120,22 @@ step "5/6  Local firewall"
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
   ufw allow 22/tcp >/dev/null
   ufw allow "$PORT"/tcp >/dev/null
-  ok "ufw: allowed $PORT/tcp (and 22/tcp for SSH)"
+  ufw allow "$PORT"/udp >/dev/null
+  ok "ufw: allowed $PORT/tcp + $PORT/udp (and 22/tcp for SSH)"
 elif command -v iptables >/dev/null && iptables -S INPUT 2>/dev/null | grep -qE -- "-j (REJECT|DROP)|-P INPUT DROP"; then
   # images that ship a closed iptables INPUT chain (e.g. Oracle Cloud)
-  iptables -C INPUT -p tcp --dport "$PORT" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$PORT" -j ACCEPT
+  for proto in tcp udp; do
+    iptables -C INPUT -p $proto --dport "$PORT" -j ACCEPT 2>/dev/null || iptables -I INPUT -p $proto --dport "$PORT" -j ACCEPT
+  done
   if command -v netfilter-persistent >/dev/null; then netfilter-persistent save >/dev/null 2>&1 || true; fi
-  ok "iptables: accepted $PORT/tcp"
+  ok "iptables: accepted $PORT/tcp + $PORT/udp"
 else
   ok "no active local firewall"
 fi
 
 step "6/6  Checks"
-ss -ltn | grep -q ":$PORT " && ok "listening on 0.0.0.0:$PORT" || warn "not listening on $PORT"
+ss -ltn | grep -q ":$PORT " && ok "listening on 0.0.0.0:$PORT/tcp" || warn "not listening on $PORT/tcp"
+ss -lun | grep -q ":$PORT " && ok "listening on 0.0.0.0:$PORT/udp (video)" || warn "not listening on $PORT/udp: video will use TCP"
 REPLY="$(printf '{"session_id":"probe","role":"agent","token":"0123456789abcdef0"}\n' | timeout 3 nc -q 1 127.0.0.1 "$PORT" 2>/dev/null || true)"
 if [[ -n "$KEY" ]]; then
   [[ "$REPLY" == "ERR not admitted"* ]] && ok "strangers are refused (admission key enforced)" || warn "unexpected probe reply: '$REPLY'"
@@ -146,9 +150,10 @@ echo
 bold "RemoteMac relay is installed."
 echo
 bold "Open these ports in your provider's firewall / security group (inbound):"
-echo "    TCP $PORT   RemoteMac relay (Mac and Windows both connect here)"
+echo "    TCP $PORT   RemoteMac relay: connection, control, input (Mac and Windows connect here)"
+echo "    UDP $PORT   RemoteMac relay: video with FEC (the smooth path; without it video uses TCP)"
 echo "    TCP 22     SSH (to administer the server)"
-echo "    (no UDP ports and nothing else are needed; the Mac and the PC open no ports at all)"
+echo "    (nothing else; the Mac and the PC open no ports at all, both only connect out)"
 echo
 echo "Check from Windows (PowerShell):  Test-NetConnection $DNS_NAME -Port $PORT"
 echo "Logs:     journalctl -u rm-relay -f"

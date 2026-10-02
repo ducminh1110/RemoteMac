@@ -127,12 +127,14 @@ struct VideoPacket {
 func num(_ v: Any?) -> Double { (v as? NSNumber)?.doubleValue ?? 0 }
 func int(_ v: Any?) -> Int { (v as? NSNumber)?.intValue ?? 0 }
 
+/// Admission key of a relay on a public address: the environment, else the one built in.
+func relayKey() -> String? {
+    ProcessInfo.processInfo.environment["RM_RELAY_KEY"].flatMap({ $0.isEmpty ? nil : $0 }) ?? (builtinRelayKey.isEmpty ? nil : builtinRelayKey)
+}
+
 func joinRelay(_ conn: Conn, session: String, token: String) throws {
     var join: [String: Any] = ["session_id": session, "role": "agent", "token": token]
-    // admission key of a relay on a public address
-    if let key = ProcessInfo.processInfo.environment["RM_RELAY_KEY"].flatMap({ $0.isEmpty ? nil : $0 }) ?? (builtinRelayKey.isEmpty ? nil : builtinRelayKey) {
-        join["key"] = key
-    }
+    if let key = relayKey() { join["key"] = key }
     let line = try JSONSerialization.data(withJSONObject: join)
     try conn.writeAll(line + Data([10]))
     let reply = try conn.readLine()
@@ -174,7 +176,11 @@ final class Sender {
         cond.lock(); control.append(d); cond.signal(); cond.unlock()
     }
 
+    /// UDP video path; used while it is alive, TCP otherwise.
+    var udp: UdpLink?
+
     func sendVideo(_ p: VideoPacket) {
+        if let u = udp, u.alive { u.sendVideo(p); return }
         var ask: UInt64?
         cond.lock()
         if waitingForKey.contains(p.windowID) && !p.keyframe {
@@ -208,6 +214,26 @@ final class Sender {
             cond.unlock()
             do { try conn.writeAll(item.0) } catch { log("send failed: \(error)"); return }
             if let q = item.1 { note(delay: CFAbsoluteTimeGetCurrent() - q) }
+        }
+    }
+
+    /// UDP: the client's report (every 200 ms) and how long frames waited in the pacer drive the
+    /// bitrate: loss after FEC or a growing queue cut it, a clean link lets it grow.
+    func udpReport(_ r: UdpReport, wait: Double) {
+        var change: Int?
+        cond.lock()
+        let now = CFAbsoluteTimeGetCurrent()
+        if r.lost > 0 || r.loss > 0.10 || wait > 0.08 {
+            if now - lastDecrease > 0.4 { bitrate = max(minBitrate, Int(Double(bitrate) * 0.7)); lastDecrease = now; change = bitrate }
+        } else if r.loss > 0.03 {
+            if now - lastDecrease > 1 { bitrate = max(minBitrate, Int(Double(bitrate) * 0.9)); lastDecrease = now; change = bitrate }
+        } else if r.loss < 0.01 && wait < 0.02 && now - lastDecrease > 3 && now - lastAdjust > 0.5 && bitrate < maxBitrate {
+            bitrate = min(maxBitrate, Int(Double(bitrate) * 1.08)); lastAdjust = now; change = bitrate
+        }
+        cond.unlock()
+        if let b = change {
+            udp?.paceBitsPerSecond = max(20_000_000, b * 3)
+            onBitrate?(b)
         }
     }
 

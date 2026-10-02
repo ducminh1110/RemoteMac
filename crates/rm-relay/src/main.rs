@@ -12,5 +12,10 @@ fn main() {
     if let Some(k) = throttle_kbps {
         eprintln!("test mode: each direction limited to {k} kbit/s");
     }
-    rm_relay::serve(l, rm_relay::Config { key, throttle_kbps, ..Default::default() });
+    let udp_loss = std::env::var("RM_RELAY_UDP_LOSS_PCT").ok().and_then(|v| v.parse::<f64>().ok()).map(|p| p / 100.0);
+    if let Some(p) = udp_loss {
+        eprintln!("test mode: dropping {:.1}% of UDP datagrams", p * 100.0);
+    }
+    eprintln!("UDP forwarding on {addr} (video; open this port for UDP too)");
+    rm_relay::serve(l, rm_relay::Config { key, throttle_kbps, udp_loss, ..Default::default() });
 }

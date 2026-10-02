@@ -408,7 +408,7 @@ pub fn read_message<R: Read>(r: &mut R) -> Result<Option<Message>, ProtocolError
     let mut head = [0u8; 4];
     match r.read(&mut head[..1])? {
         0 => return Ok(None),
-        _ => r.read_exact(&mut head[1..])?,
+        _ => read_full(r, &mut head[1..])?,
     }
     let len = u32::from_be_bytes(head) as usize;
     if len == 0 {
@@ -418,13 +418,13 @@ pub fn read_message<R: Read>(r: &mut R) -> Result<Option<Message>, ProtocolError
         return Err(ProtocolError::FrameTooLarge(len, MAX_BULK_FRAME));
     }
     let mut ch = [0u8; 1];
-    r.read_exact(&mut ch)?;
+    read_full(r, &mut ch)?;
     let channel = Channel::from_u8(ch[0])?;
     if len > channel.max_frame() {
         return Err(ProtocolError::FrameTooLarge(len, channel.max_frame()));
     }
     let mut payload = vec![0u8; len - 1];
-    r.read_exact(&mut payload)?;
+    read_full(r, &mut payload)?;
     serde_json::from_slice(&payload).map(Some).map_err(|e| ProtocolError::Malformed(e.to_string()))
 }
 
@@ -572,12 +572,28 @@ pub enum Frame {
     Video(VideoFrame),
 }
 
-/// Blocking read of one frame of either kind. `Ok(None)` on clean EOF.
+/// `read_exact` that rides out read timeouts: once a frame has started it is read to its end
+/// (a timeout there would lose bytes and desynchronise the stream).
+fn read_full<R: Read>(r: &mut R, mut buf: &mut [u8]) -> std::io::Result<()> {
+    use std::io::ErrorKind::*;
+    while !buf.is_empty() {
+        match r.read(buf) {
+            Ok(0) => return Err(std::io::Error::new(UnexpectedEof, "eof mid-frame")),
+            Ok(n) => buf = &mut buf[n..],
+            Err(e) if matches!(e.kind(), Interrupted | WouldBlock | TimedOut) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Blocking read of one frame of either kind. `Ok(None)` on clean EOF. A read timeout can only
+/// surface before the first byte of a frame, never in the middle of one.
 pub fn read_frame<R: Read>(r: &mut R) -> Result<Option<Frame>, ProtocolError> {
     let mut head = [0u8; 4];
     match r.read(&mut head[..1])? {
         0 => return Ok(None),
-        _ => r.read_exact(&mut head[1..])?,
+        _ => read_full(r, &mut head[1..])?,
     }
     let len = u32::from_be_bytes(head) as usize;
     if len == 0 {
@@ -587,13 +603,13 @@ pub fn read_frame<R: Read>(r: &mut R) -> Result<Option<Frame>, ProtocolError> {
         return Err(ProtocolError::FrameTooLarge(len, MAX_BULK_FRAME));
     }
     let mut ch = [0u8; 1];
-    r.read_exact(&mut ch)?;
+    read_full(r, &mut ch)?;
     let channel = Channel::from_u8(ch[0])?;
     if len > channel.max_frame() {
         return Err(ProtocolError::FrameTooLarge(len, channel.max_frame()));
     }
     let mut payload = vec![0u8; len - 1];
-    r.read_exact(&mut payload)?;
+    read_full(r, &mut payload)?;
     if channel == Channel::Video {
         VideoFrame::decode_payload(&payload).map(|v| Some(Frame::Video(v)))
     } else {
@@ -821,6 +837,9 @@ mod tests {
 /// Recordings of an agent session (`.rmrec`): what the agent sent, frame by frame, tagged with
 /// the application it belongs to and its time from the start of that application's segment.
 /// Lets a real Mac session be replayed to a viewer elsewhere (`rm-fakeagent --replay`).
+pub mod fec;
+pub mod udp;
+
 pub mod recording {
     use super::ProtocolError;
     use std::io::{Read, Write};

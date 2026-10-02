@@ -28,7 +28,7 @@ Workflow **Release builds** (tab Actions) tạo sẵn 3 gói, đã cài sẵn `r
 
 | Gói | Chạy ở đâu | Dùng thế nào |
 |---|---|---|
-| `remotemac-relay.tar.gz` | server | `tar -xzf remotemac-relay.tar.gz && cd remotemac-relay && sudo ./remotemac-relay-setup.sh` — tự cài từ A–Z, rồi in các cổng cần mở (**TCP 7470**, TCP 22) |
+| `remotemac-relay.tar.gz` | server | `tar -xzf remotemac-relay.tar.gz && cd remotemac-relay && sudo ./remotemac-relay-setup.sh` — tự cài từ A–Z, rồi in các cổng cần mở (**TCP 7470 + UDP 7470**, TCP 22) |
 | `remotemac-macos.tar.gz` | Mac | `tar -xzf remotemac-macos.tar.gz && cd remotemac && xattr -d com.apple.quarantine remotemac; ./remotemac --password MatKhau` → in ra `ID session to connect` + `Password` |
 | `RemoteMac-windows.zip` | Windows | mở `RemoteMac.exe`, gõ ID + mật khẩu, bấm **Connect** |
 
@@ -115,14 +115,18 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now rm-relay
 ```
 
-## 6. Mở cổng 7470/TCP
+## 6. Mở cổng 7470 (TCP và UDP)
 
 ```bash
-sudo ufw status | grep -q "Status: active" && sudo ufw allow 7470/tcp
+sudo ufw status | grep -q "Status: active" && sudo ufw allow 7470/tcp && sudo ufw allow 7470/udp
 ```
 
 Nếu nhà cung cấp server có **firewall riêng** (Security Group / Cloud Firewall trên trang quản
-lý): thêm luật cho phép **TCP 7470 inbound**. Chỉ cần cổng này (và 22 cho SSH).
+lý): thêm luật cho phép **TCP 7470 và UDP 7470 inbound** (và 22 cho SSH).
+
+- TCP 7470: kết nối, điều khiển, phím/chuột, menu, file.
+- UDP 7470: video có FEC (sửa lỗi mất gói, không phải chờ gửi lại) — đây là đường mượt. Nếu UDP
+  bị chặn, video tự quay về TCP (vẫn chạy, nhưng giật hơn khi mạng xa/mất gói).
 
 ### Kiểm tra
 

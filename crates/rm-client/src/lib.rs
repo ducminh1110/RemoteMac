@@ -6,6 +6,7 @@ use rm_protocol::{negotiate, read_frame, read_message, write_message, AppInfo, C
 
 pub mod e2e;
 pub mod record;
+pub mod udp;
 use std::io::{Read, Write};
 
 pub struct Session<S: Read + Write> {
@@ -13,6 +14,8 @@ pub struct Session<S: Read + Write> {
     pub state: SessionState,
     pub negotiated: Negotiated,
     pub capabilities: CapabilityReport,
+    /// UDP video (frames rebuilt from FEC shards) when attached
+    udp: Option<(udp::UdpVideo, std::sync::mpsc::Receiver<rm_protocol::udp::Out>)>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -43,7 +46,7 @@ impl<S: Read + Write> Session<S> {
             m => return Err(unexpected(m)),
         };
         let state = SessionState::Connecting.next(Event::HandshakeComplete).expect("valid transition");
-        Ok(Self { stream, state, negotiated, capabilities })
+        Ok(Self { stream, state, negotiated, capabilities, udp: None })
     }
 
     pub fn list_apps(&mut self) -> Result<Vec<AppInfo>, ClientError> {
@@ -69,8 +72,30 @@ impl<S: Read + Write> Session<S> {
         write_message(&mut self.stream, m)
     }
 
-    /// Next frame of any kind (control message or video).
+    /// Receive video over UDP too (through the same relay). Use a short read timeout on the
+    /// TCP stream so UDP frames are not held up behind it.
+    pub fn attach_udp(&mut self, relay: &str, session: &str, token: &str) -> std::io::Result<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let u = udp::start(relay, session, token, move |o| {
+            let _ = tx.send(o);
+        })?;
+        self.udp = Some((u, rx));
+        Ok(())
+    }
+
+    pub fn udp_stats(&self) -> Option<udp::LinkStats> {
+        self.udp.as_ref().and_then(|(u, _)| u.stats.lock().ok().map(|s| s.clone()))
+    }
+
+    /// Next frame of any kind (control message or video, from TCP or UDP).
     pub fn recv(&mut self) -> Result<Option<Frame>, ProtocolError> {
+        while let Some(o) = self.udp.as_ref().and_then(|(_, rx)| rx.try_recv().ok()) {
+            match o {
+                rm_protocol::udp::Out::Frame(v) => return Ok(Some(Frame::Video(v))),
+                // a frame lost even with FEC: ask for a keyframe and carry on
+                rm_protocol::udp::Out::Lost(id) => write_message(&mut self.stream, &Message::RequestKeyframe { window_id: id })?,
+            }
+        }
         read_frame(&mut self.stream)
     }
 
@@ -156,13 +181,17 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(150));
 
         let stream = join(&addr, "fake-1", Role::Client, tok).unwrap();
-        stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+        // as the CLI runs it: video over UDP beside a short-timeout TCP stream
+        stream.set_read_timeout(Some(std::time::Duration::from_millis(20))).unwrap();
         let mut sess = Session::handshake(stream).unwrap();
+        sess.attach_udp(&addr, "fake-1", tok).unwrap();
         let report = crate::e2e::run(&mut sess, "testapp");
         for c in &report.checks {
             assert!(c.1, "check failed: {} -> {}", c.0, c.2);
         }
         assert!(report.decoded >= 30 && report.fps() > 5.0, "decoded={} fps={}", report.decoded, report.fps());
+        let udp = sess.udp_stats().unwrap();
+        assert!(udp.frames >= 30, "video must have come over UDP: {udp:?}");
     }
 
     /// Record a session with the fake agent, then replay it: the replayed client sees the same

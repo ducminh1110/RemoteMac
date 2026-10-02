@@ -99,6 +99,7 @@ do {
 } catch { fail("handshake: \(error)") }
 log("handshake complete")
 let sender = Sender(conn: conn)
+log("fec self-test \(fecSelfTest() ? "ok" : "FAILED")")
 
 // ---- runtime -------------------------------------------------------------------------------------
 let apps = AppManager()
@@ -136,9 +137,28 @@ func axWindowFor(pid: pid_t, id: CGWindowID, rect: CGRect) -> AXUIElement? {
 func send(_ m: [String: Any]) { do { try sender.send(m) } catch { log("send failed: \(error)") } }
 sender.requestKeyframe = { wid in streamsLock.lock(); let ws = streams[CGWindowID(wid)]; streamsLock.unlock(); ws?.requestKeyframe() }
 sender.onBitrate = { b in
-    log("bitrate -> \(b / 1000) kbit/s (dropped frames so far: \(sender.dropped))")
+    log("bitrate -> \(b / 1000) kbit/s (dropped frames so far: \(sender.dropped + (sender.udp?.dropped ?? 0)))")
     streamsLock.lock(); let all = Array(streams.values); streamsLock.unlock()
     for ws in all { ws.setBitrate(b) }
+}
+// video over UDP + FEC beside the TCP connection (RM_NO_UDP=1: TCP only)
+if env["RM_NO_UDP"] == nil, let u = UdpLink(hostPort: relayAddr, session: sessionID, token: token, key: relayKey()) {
+    sender.udp = u
+    u.requestKeyframe = { wid in sender.requestKeyframe?(wid) }
+    u.onAlive = { up in
+        log("UDP video \(up ? "on" : "off (TCP)")")
+        // the client resynchronises on a keyframe after a transport change
+        streamsLock.lock(); let all = Array(streams.values); streamsLock.unlock()
+        for ws in all { ws.requestKeyframe() }
+    }
+    var reports = 0
+    u.onReport = { r in
+        sender.udpReport(r, wait: u.takeMaxWait())
+        reports += 1
+        if reports % 25 == 0 {
+            log(String(format: "UDP report: loss %.1f%% recovered %d lost %d fec %d%% frames sent %d", r.loss * 100, r.recovered, r.lost, u.fecPct, u.sentFrames))
+        }
+    }
 }
 
 let menuQueue = DispatchQueue(label: "rm.menus")

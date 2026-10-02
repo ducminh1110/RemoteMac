@@ -154,12 +154,34 @@ struct App {
 struct Stats {
     shown: u64,
     skipped: u64,
+    udp: u64,
+    bytes: u64,
+    decode_us: u64,
+    /// capture -> received, agent clock (ms), summed over `lat_n` pictures
+    lat_ms: f64,
+    lat_n: u64,
     since: Instant,
 }
 
 impl Default for Stats {
     fn default() -> Self {
-        Self { shown: 0, skipped: 0, since: Instant::now() }
+        Self { shown: 0, skipped: 0, udp: 0, bytes: 0, decode_us: 0, lat_ms: 0.0, lat_n: 0, since: Instant::now() }
+    }
+}
+
+impl Stats {
+    fn note(&mut self, m: &net::FrameMeta) {
+        self.shown += 1;
+        self.udp += m.via_udp as u64;
+        self.bytes += m.bytes as u64;
+        self.decode_us += m.decode_us as u64;
+        if let Some(r) = m.received_agent_us {
+            let ms = (r - m.pts_us as i64) as f64 / 1000.0;
+            if (0.0..5000.0).contains(&ms) {
+                self.lat_ms += ms;
+                self.lat_n += 1;
+            }
+        }
     }
 }
 
@@ -436,7 +458,10 @@ fn stats_tick() {
         let secs = a.stats.since.elapsed().as_secs_f64();
         if secs >= 5.0 {
             if a.stats.shown > 0 {
-                eprintln!("stream: {:.0} fps shown, {} stale pictures skipped", a.stats.shown as f64 / secs, a.stats.skipped);
+                let st = &a.stats;
+                let lat = if st.lat_n > 0 { format!("{:.1} ms", st.lat_ms / st.lat_n as f64) } else { "-".into() };
+                eprintln!("stream: {:.0} fps shown ({} over UDP), {:.1} Mbit/s, capture->received {lat}, decode {:.1} ms, {} stale pictures skipped",
+                    st.shown as f64 / secs, st.udp, st.bytes as f64 * 8.0 / secs / 1e6, st.decode_us as f64 / st.shown.max(1) as f64 / 1000.0, st.skipped);
             }
             a.stats = Stats::default();
         }
@@ -588,12 +613,12 @@ fn handle_event(ev: UiEvent) {
                 }
             }
         }
-        UiEvent::Frame { id, picture } => {
+        UiEvent::Frame { id, picture, meta } => {
             let key = with_app(|a| {
                 let key = *a.by_id.get(&id)?;
                 let r = a.remotes.get_mut(&key)?;
                 r.frames += 1;
-                a.stats.shown += 1;
+                a.stats.note(&meta);
                 let gpu_ok = match (r.comp.as_mut(), r.presenter.as_mut()) {
                     (Some(c), _) => c.present(&picture),
                     (None, Some(p)) => p.present(&picture),

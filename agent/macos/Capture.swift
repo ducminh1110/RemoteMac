@@ -149,7 +149,12 @@ final class WindowStream: NSObject, SCStreamOutput {
         let key = forceKey; forceKey = false
         lock.unlock()
         guard let sess = s, ok else { return }   // size changed: the owner restarts the stream
-        let ptsUs = UInt64(max(0, (CFAbsoluteTimeGetCurrent() - t0) * 1_000_000))
+        // capture time on the agent clock (host time, as pongs report it): the viewer turns it
+        // into end-to-end latency
+        let cap = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sb))
+        let nowUs = agentClockUs()
+        let capUs = cap.isFinite && cap > 0 ? UInt64(cap * 1_000_000) : nowUs
+        let ptsUs = (capUs <= nowUs && nowUs - capUs < 1_000_000) ? capUs : nowUs
         let wid = UInt64(windowID), ew = UInt16(w), eh = UInt16(h)
         VTCompressionSessionEncodeFrame(sess, imageBuffer: pb, presentationTimeStamp: CMSampleBufferGetPresentationTimeStamp(sb),
                                         duration: .invalid,
