@@ -120,7 +120,7 @@ fn video_loop<W: Write>(w: Writer<W>, st: Arc<Mutex<State>>, stop: Arc<AtomicBoo
         let yuv = YUVBuffer::from_rgb_source(RgbaSliceU8::new(&rgba, (WIDTH, HEIGHT)));
         let Ok(bs) = enc.encode(&yuv) else { continue };
         let data = bs.to_vec();
-        let keyframe = t % 30 == 0 || data.windows(5).any(|x| x[..4] == [0, 0, 0, 1] && x[4] & 0x1f == 5);
+        let keyframe = data.windows(5).any(|x| x[..4] == [0, 0, 0, 1] && x[4] & 0x1f == 5);
         if !data.is_empty() {
             let f = VideoFrame { window_id: WINDOW_ID, pts_us: start.elapsed().as_micros() as u64, keyframe, codec: CODEC_H264, width: WIDTH as u16, height: HEIGHT as u16, data };
             let Ok(bytes) = encode_video(&f) else { continue };

@@ -1,0 +1,37 @@
+name: Windows viewer
+
+# Builds the native Win32 viewer and runs its smoke test against the scripted fake agent.
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/inspiring-einstein-er2d37]
+    paths: [crates/**, scripts/windows-smoke.ps1, .github/workflows/windows-viewer.yml, Cargo.*]
+
+permissions:
+  contents: read
+
+jobs:
+  viewer:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests (portable crates, incl. fake-agent end-to-end)
+        run: cargo test --workspace
+      - name: Clippy (Windows target)
+        run: cargo clippy -p rm-viewer --all-targets -- -D warnings
+      - name: Smoke test the native viewer
+        shell: pwsh
+        run: ./scripts/windows-smoke.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-viewer-logs
+          path: out/*.log
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: remote-mac-viewer-windows-x64
+          path: |
+            target/release/remote-mac-viewer.exe
+            target/release/rm-relay.exe

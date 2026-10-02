@@ -39,7 +39,7 @@ impl Link {
 pub fn connect(relay: &str, session: &str, token: &str, app: Option<&str>, wake: impl Fn() + Send + 'static) -> Result<(Link, Receiver<UiEvent>), String> {
     let stream = rm_relay::join(relay, session, rm_relay::Role::Client, token).map_err(|e| format!("relay: {e}"))?;
     let writer = Arc::new(Mutex::new(stream.try_clone().map_err(|e| e.to_string())?));
-    let mut sess = Session::handshake(stream).map_err(|e| format!("handshake: {e}"))?;
+    let sess = Session::handshake(stream).map_err(|e| format!("handshake: {e}"))?;
     let link = Link { writer };
     if !sess.capabilities.can_stream_apps() {
         eprintln!("warning: host reports it cannot stream apps: {:?}", sess.capabilities);

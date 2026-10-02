@@ -1,0 +1,550 @@
+//! Win32 presentation: one native top-level window per remote window, pictures drawn with GDI
+//! (`StretchDIBits`). GDI is the portable baseline that also works on CI machines without a GPU;
+//! a Direct3D 11 swap-chain presenter is a drop-in replacement for `paint`.
+//!
+//! Threading: everything here runs on the UI thread. The network thread only posts `WM_UI_EVENT`.
+
+use crate::keymap::*;
+use crate::net::{self, Link, UiEvent};
+use rm_decode::Picture;
+use rm_protocol::{Message, MouseButton};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::ffi::c_void;
+use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
+use windows::core::{w, HSTRING};
+use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
+use windows::Win32::UI::WindowsAndMessaging::*;
+
+pub struct Options {
+    pub relay: String,
+    pub session: String,
+    pub token: String,
+    pub app: Option<String>,
+    pub ctrl_as_command: bool,
+    pub smoke: bool,
+}
+
+const WM_UI_EVENT: u32 = WM_APP + 1;
+const TIMER_ID: usize = 1;
+
+struct Remote {
+    id: u64,
+    rw: u32,
+    rh: u32,
+    picture: Option<Picture>,
+    frames: u32,
+    high_surrogate: Option<u16>,
+}
+
+struct App {
+    link: Link,
+    rx: Receiver<UiEvent>,
+    remotes: HashMap<isize, Remote>,
+    by_id: HashMap<u64, isize>,
+    ctrl_as_command: bool,
+    smoke: Option<Smoke>,
+    exit: Option<i32>,
+    hinst: isize,
+}
+
+thread_local! { static APP: RefCell<Option<App>> = const { RefCell::new(None) }; }
+
+/// Run `f` on the app state if it is not already borrowed (re-entrant window messages fall back to defaults).
+fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
+    APP.with(|a| a.try_borrow_mut().ok().and_then(|mut g| g.as_mut().map(f)))
+}
+
+fn hwnd_of(v: isize) -> HWND {
+    HWND(v as *mut c_void)
+}
+
+pub fn run(opts: Options) -> i32 {
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let hinst: HINSTANCE = GetModuleHandleW(None).expect("module handle").into();
+        let cursor = LoadCursorW(None, IDC_ARROW).ok().unwrap_or_default();
+        for (name, proc) in [(w!("RmController"), Some(controller_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT)), (w!("RmRemoteWindow"), Some(remote_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT))] {
+            let wc = WNDCLASSW { lpfnWndProc: proc, hInstance: hinst, lpszClassName: name, hCursor: cursor, ..Default::default() };
+            if RegisterClassW(&wc) == 0 {
+                eprintln!("RegisterClassW failed");
+                return 1;
+            }
+        }
+        let controller = match CreateWindowExW(WINDOW_EX_STYLE(0), w!("RmController"), w!("rm-controller"), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(hinst), None) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("controller window: {e}");
+                return 1;
+            }
+        };
+        let ctl = controller.0 as isize;
+        let wake = move || {
+            let _ = PostMessageW(Some(hwnd_of(ctl)), WM_UI_EVENT, WPARAM(0), LPARAM(0));
+        };
+        let (link, rx) = match net::connect(&opts.relay, &opts.session, &opts.token, opts.app.as_deref(), wake) {
+            Ok(x) => x,
+            Err(e) => {
+                eprintln!("connect failed: {e}");
+                return 1;
+            }
+        };
+        eprintln!("connected; waiting for windows");
+        let smoke = opts.smoke.then(Smoke::new);
+        APP.with(|a| {
+            *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, smoke, exit: None, hinst: hinst.0 as isize })
+        });
+        SetTimer(Some(controller), TIMER_ID, 100, None);
+
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        with_app(|a| a.exit.unwrap_or(0)).unwrap_or(0)
+    }
+}
+
+fn quit(code: i32) {
+    with_app(|a| a.exit = Some(code));
+    unsafe { PostQuitMessage(code) };
+}
+
+// ------------------------------------------------------------------ controller window
+
+unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_UI_EVENT => {
+            drain_events();
+            LRESULT(0)
+        }
+        WM_TIMER => {
+            smoke_tick();
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+fn drain_events() {
+    let events: Vec<UiEvent> = with_app(|a| a.rx.try_iter().collect()).unwrap_or_default();
+    for ev in events {
+        handle_event(ev);
+    }
+}
+
+fn handle_event(ev: UiEvent) {
+    match ev {
+        UiEvent::WindowCreated { id, title, w, h } => create_remote_window(id, &title, w, h),
+        UiEvent::Title { id, title } => {
+            if let Some(h) = with_app(|a| a.by_id.get(&id).copied()).flatten() {
+                unsafe { let _ = SetWindowTextW(hwnd_of(h), &HSTRING::from(title)); }
+            }
+        }
+        UiEvent::Resized { id, w, h } => {
+            let target = with_app(|a| {
+                let key = *a.by_id.get(&id)?;
+                let r = a.remotes.get_mut(&key)?;
+                r.rw = w;
+                r.rh = h;
+                Some(key)
+            })
+            .flatten();
+            if let Some(key) = target {
+                resize_client(hwnd_of(key), w as i32, h as i32);
+            }
+        }
+        UiEvent::Frame { id, picture } => {
+            let key = with_app(|a| {
+                let key = *a.by_id.get(&id)?;
+                let r = a.remotes.get_mut(&key)?;
+                r.picture = Some(picture);
+                r.frames += 1;
+                Some(key)
+            })
+            .flatten();
+            if let Some(k) = key {
+                unsafe { let _ = InvalidateRect(Some(hwnd_of(k)), None, false); }
+            }
+        }
+        UiEvent::Destroyed { id } => {
+            if let Some(h) = with_app(|a| a.by_id.remove(&id)).flatten() {
+                with_app(|a| a.remotes.remove(&h));
+                unsafe { let _ = DestroyWindow(hwnd_of(h)); }
+            }
+            smoke_note_destroyed(id);
+        }
+        UiEvent::AppExited(app) => eprintln!("remote app exited: {app}"),
+        UiEvent::Notice(n) => eprintln!("notice: {n}"),
+        UiEvent::Disconnected(why) => {
+            eprintln!("disconnected: {why}");
+            quit(if with_app(|a| a.smoke.is_some()).unwrap_or(false) { 1 } else { 0 });
+        }
+    }
+}
+
+fn create_remote_window(id: u64, title: &str, w: u32, h: u32) {
+    unsafe {
+        let hinst = with_app(|a| a.hinst).unwrap_or(0);
+        let style = WS_OVERLAPPEDWINDOW;
+        let mut r = RECT { left: 0, top: 0, right: w as i32, bottom: h as i32 };
+        let _ = AdjustWindowRectEx(&mut r, style, false, WINDOW_EX_STYLE(0));
+        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), w!("RmRemoteWindow"), &HSTRING::from(title), style, CW_USEDEFAULT, CW_USEDEFAULT,
+            r.right - r.left, r.bottom - r.top, None, None, Some(HINSTANCE(hinst as *mut c_void)), None);
+        let Ok(hwnd) = hwnd else {
+            eprintln!("CreateWindowExW failed for remote window {id}");
+            return;
+        };
+        with_app(|a| {
+            a.remotes.insert(hwnd.0 as isize, Remote { id, rw: w, rh: h, picture: None, frames: 0, high_surrogate: None });
+            a.by_id.insert(id, hwnd.0 as isize);
+        });
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        eprintln!("window created id={id} {w}x{h} title={title:?}");
+    }
+}
+
+fn resize_client(hwnd: HWND, w: i32, h: i32) {
+    unsafe {
+        let mut cur = RECT::default();
+        let _ = GetClientRect(hwnd, &mut cur);
+        if (cur.right - w).abs() <= 2 && (cur.bottom - h).abs() <= 2 {
+            return;
+        }
+        let mut r = RECT { left: 0, top: 0, right: w, bottom: h };
+        let style = WINDOW_STYLE(GetWindowLongW(hwnd, GWL_STYLE) as u32);
+        let _ = AdjustWindowRectEx(&mut r, style, false, WINDOW_EX_STYLE(0));
+        let _ = SetWindowPos(hwnd, None, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+// ------------------------------------------------------------------ remote windows
+
+fn send_for(hwnd: HWND, f: impl FnOnce(&Remote, bool) -> Option<Message>) {
+    with_app(|a| {
+        if let Some(r) = a.remotes.get(&(hwnd.0 as isize)) {
+            if let Some(m) = f(r, a.ctrl_as_command) {
+                a.link.send(&m);
+            }
+        }
+    });
+}
+
+fn client_size(hwnd: HWND) -> (i32, i32) {
+    let mut rc = RECT::default();
+    unsafe { let _ = GetClientRect(hwnd, &mut rc); }
+    (rc.right, rc.bottom)
+}
+
+fn lp_xy(lp: LPARAM) -> (i32, i32) {
+    ((lp.0 & 0xffff) as i16 as i32, ((lp.0 >> 16) & 0xffff) as i16 as i32)
+}
+
+fn current_mods() -> Mods {
+    let down = |vk: VIRTUAL_KEY| unsafe { GetKeyState(vk.0 as i32) } < 0;
+    Mods { ctrl: down(VK_CONTROL), alt: down(VK_MENU), shift: down(VK_SHIFT), win: down(VK_LWIN) || down(VK_RWIN) }
+}
+
+fn paint_into(hwnd: HWND, hdc: HDC) {
+    let (cw, ch) = client_size(hwnd);
+    unsafe {
+        let drew = with_app(|a| {
+            let Some(p) = a.remotes.get(&(hwnd.0 as isize)).and_then(|r| r.picture.as_ref()) else { return false };
+            let bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: p.width as i32, biHeight: -(p.height as i32), biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
+                ..Default::default()
+            };
+            SetStretchBltMode(hdc, HALFTONE);
+            StretchDIBits(hdc, 0, 0, cw, ch, 0, 0, p.width as i32, p.height as i32, Some(p.bgra.as_ptr() as *const c_void), &bmi, DIB_RGB_COLORS, SRCCOPY);
+            true
+        })
+        .unwrap_or(false);
+        if !drew {
+            FillRect(hdc, &RECT { left: 0, top: 0, right: cw, bottom: ch }, HBRUSH(GetStockObject(BLACK_BRUSH).0));
+        }
+    }
+}
+
+unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            paint_into(hwnd, hdc);
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        WM_PRINTCLIENT => {
+            paint_into(hwnd, HDC(wp.0 as *mut c_void));
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1),
+        WM_MOUSEMOVE => {
+            let (x, y) = lp_xy(lp);
+            let cs = client_size(hwnd);
+            send_for(hwnd, |r, _| {
+                let (px, py) = scale_point(x, y, cs, (r.rw, r.rh));
+                Some(Message::MouseMove { window_id: r.id, x: px, y: py })
+            });
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN | WM_MBUTTONUP => {
+            let (x, y) = lp_xy(lp);
+            let cs = client_size(hwnd);
+            let (button, down) = match msg {
+                WM_LBUTTONDOWN => (MouseButton::Left, true),
+                WM_LBUTTONUP => (MouseButton::Left, false),
+                WM_RBUTTONDOWN => (MouseButton::Right, true),
+                WM_RBUTTONUP => (MouseButton::Right, false),
+                WM_MBUTTONDOWN => (MouseButton::Middle, true),
+                _ => (MouseButton::Middle, false),
+            };
+            if down { SetCapture(hwnd); } else { let _ = ReleaseCapture(); }
+            send_for(hwnd, |r, _| {
+                let (px, py) = scale_point(x, y, cs, (r.rw, r.rh));
+                Some(Message::MouseButton { window_id: r.id, button, down, x: px, y: py })
+            });
+            LRESULT(0)
+        }
+        WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
+            let delta = ((wp.0 >> 16) & 0xffff) as i16 as f64 / 120.0 * 40.0;
+            send_for(hwnd, |r, _| {
+                Some(if msg == WM_MOUSEWHEEL { Message::Scroll { window_id: r.id, dx: 0.0, dy: delta } } else { Message::Scroll { window_id: r.id, dx: delta, dy: 0.0 } })
+            });
+            LRESULT(0)
+        }
+        WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP => {
+            let vk = wp.0 as u32;
+            let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+            if (msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP) && vk == VK_F4.0 as u32 {
+                return DefWindowProcW(hwnd, msg, wp, lp); // Alt+F4 closes the local window as usual
+            }
+            if is_modifier_vk(vk) {
+                return LRESULT(0);
+            }
+            let mods = current_mods();
+            if sends_as_text(vk, mods) {
+                return LRESULT(0); // WM_CHAR delivers the character, layout-correct
+            }
+            if let Some(name) = vk_to_physical(vk) {
+                send_for(hwnd, |r, cc| Some(Message::Key { window_id: r.id, physical_key: name.into(), modifiers: map_modifiers(mods, cc), down }));
+            }
+            LRESULT(0)
+        }
+        WM_CHAR => {
+            let unit = wp.0 as u16;
+            if current_mods().ctrl || current_mods().alt {
+                return LRESULT(0);
+            }
+            if is_text_char(unit) || (0xD800..=0xDFFF).contains(&unit) {
+                let text = with_app(|a| {
+                    let r = a.remotes.get_mut(&(hwnd.0 as isize))?;
+                    push_utf16(&mut r.high_surrogate, unit).map(|t| (r.id, t))
+                })
+                .flatten();
+                if let Some((id, text)) = text {
+                    with_app(|a| a.link.send(&Message::TextInput { window_id: id, text }));
+                }
+            }
+            LRESULT(0)
+        }
+        WM_EXITSIZEMOVE => {
+            let (cw, ch) = client_size(hwnd);
+            send_for(hwnd, |r, _| {
+                ((cw as u32).abs_diff(r.rw) > 2 || (ch as u32).abs_diff(r.rh) > 2).then_some(Message::WindowResizeRequest { window_id: r.id, width: cw as u32, height: ch as u32 })
+            });
+            LRESULT(0)
+        }
+        WM_CLOSE => {
+            // Closing the local window asks the remote window to close; we disappear when it does.
+            send_for(hwnd, |r, _| Some(Message::WindowClose { window_id: r.id }));
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            with_app(|a| {
+                if let Some(r) = a.remotes.remove(&(hwnd.0 as isize)) {
+                    a.by_id.remove(&r.id);
+                }
+            });
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+// ------------------------------------------------------------------ headless smoke test
+//
+// `--smoke` drives the real window procedures with synthetic messages and checks, end to end:
+// frames are decoded and *painted* (read back with PrintWindow), typing reaches the remote app
+// and comes back as a title change, mouse + resize requests are accepted, and closing the
+// window destroys it.
+
+struct Smoke {
+    stage: u32,
+    started: Instant,
+    stage_started: Instant,
+    destroyed: bool,
+    results: Vec<(String, bool, String)>,
+    resized: bool,
+}
+
+impl Smoke {
+    fn new() -> Self {
+        Self { stage: 0, started: Instant::now(), stage_started: Instant::now(), destroyed: false, results: vec![], resized: false }
+    }
+}
+
+fn smoke_note_destroyed(_id: u64) {
+    with_app(|a| {
+        if let Some(s) = a.smoke.as_mut() {
+            s.destroyed = true;
+        }
+    });
+}
+
+fn title_of(hwnd: HWND) -> String {
+    let mut buf = [0u16; 256];
+    let n = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
+fn painted_colors(hwnd: HWND) -> usize {
+    unsafe {
+        let (w, h) = client_size(hwnd);
+        if w <= 0 || h <= 0 {
+            return 0;
+        }
+        let hdc = GetDC(Some(hwnd));
+        let mem = CreateCompatibleDC(Some(hdc));
+        let bmp = CreateCompatibleBitmap(hdc, w, h);
+        let old = SelectObject(mem, bmp.into());
+        let _ = PrintWindow(hwnd, mem, PRINT_WINDOW_FLAGS(0x2)); // PW_RENDERFULLCONTENT
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
+            ..Default::default()
+        };
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        GetDIBits(mem, bmp, 0, h as u32, Some(buf.as_mut_ptr() as *mut c_void), &mut bmi, DIB_RGB_COLORS);
+        SelectObject(mem, old);
+        let _ = DeleteObject(bmp.into());
+        let _ = DeleteDC(mem);
+        ReleaseDC(Some(hwnd), hdc);
+        Picture { width: w as usize, height: h as usize, bgra: buf }.distinct_colors()
+    }
+}
+
+fn sendmsg(hwnd: HWND, msg: u32, wp: usize, lp: isize) {
+    unsafe { SendMessageW(hwnd, msg, Some(WPARAM(wp)), Some(LPARAM(lp))) };
+}
+
+fn type_char(hwnd: HWND, c: char) {
+    let vk = c.to_ascii_uppercase() as usize;
+    sendmsg(hwnd, WM_KEYDOWN, vk, 0);
+    sendmsg(hwnd, WM_CHAR, c as usize, 0);
+    sendmsg(hwnd, WM_KEYUP, vk, 0);
+}
+
+fn smoke_tick() {
+    // Snapshot under a short borrow; all Win32 calls happen outside it (they re-enter our window procs).
+    let Some((stage, since_stage, since_start, window, frames, destroyed, resized)) = with_app(|a| {
+        let s = a.smoke.as_ref()?;
+        let (key, frames) = a.remotes.iter().next().map(|(k, r)| (Some(*k), r.frames)).unwrap_or((None, 0));
+        let dims = key.and_then(|k| a.remotes.get(&k)).map(|r| (r.rw, r.rh));
+        Some((s.stage, s.stage_started.elapsed(), s.started.elapsed(), key.map(|k| (hwnd_of(k), dims.unwrap_or((0, 0)))), frames, s.destroyed, s.resized))
+    })
+    .flatten() else { return };
+
+    let finish = |name: &str, ok: bool, detail: String, next: u32| {
+        eprintln!("[{}] {name}: {detail}", if ok { "PASS" } else { "FAIL" });
+        with_app(|a| {
+            if let Some(s) = a.smoke.as_mut() {
+                s.results.push((name.into(), ok, detail));
+                s.stage = if ok { next } else { 99 };
+                s.stage_started = Instant::now();
+            }
+        });
+    };
+    if since_start > Duration::from_secs(60) || since_stage > Duration::from_secs(20) {
+        finish(&format!("stage {stage} timed out"), false, format!("frames={frames}"), 99);
+    }
+
+    match (stage, window) {
+        (0, Some((hwnd, _))) if frames >= 15 => {
+            std::thread::sleep(Duration::from_millis(200));
+            let colors = painted_colors(hwnd);
+            finish("decoded frames are painted into the native window", colors > 100, format!("frames={frames} distinctColors={colors}"), 1);
+        }
+        (1, Some((hwnd, _))) => {
+            "hello".chars().for_each(|c| type_char(hwnd, c));
+            with_app(|a| a.smoke.as_mut().map(|s| s.stage = 2));
+        }
+        (2, Some((hwnd, _))) => {
+            let t = title_of(hwnd);
+            if t.contains("[5 chars]") {
+                finish("typing reaches the remote app (WM_CHAR -> TextInput -> title)", true, t, 3);
+            }
+        }
+        (3, Some((hwnd, _))) => {
+            let pt: isize = (70 << 16) | 20;
+            sendmsg(hwnd, WM_MOUSEMOVE, 0, pt);
+            sendmsg(hwnd, WM_LBUTTONDOWN, 1, pt);
+            sendmsg(hwnd, WM_LBUTTONUP, 0, pt);
+            type_char(hwnd, 'X');
+            with_app(|a| a.smoke.as_mut().map(|s| s.stage = 4));
+        }
+        (4, Some((hwnd, _))) => {
+            let t = title_of(hwnd);
+            if t.contains("[6 chars]") {
+                finish("keyboard works after a mouse click", true, t, 5);
+            }
+        }
+        (5, Some((hwnd, _))) => {
+            sendmsg(hwnd, WM_KEYDOWN, VK_BACK.0 as usize, 0);
+            sendmsg(hwnd, WM_KEYUP, VK_BACK.0 as usize, 0);
+            with_app(|a| a.smoke.as_mut().map(|s| s.stage = 6));
+        }
+        (6, Some((hwnd, _))) => {
+            let t = title_of(hwnd);
+            if t.contains("[5 chars]") {
+                finish("non-text key (Backspace) is sent as a physical key", true, t, 7);
+            }
+        }
+        (7, Some((hwnd, _))) => unsafe {
+            // user drags the border to 640x400: client resized, then WM_EXITSIZEMOVE
+            let style = WINDOW_STYLE(GetWindowLongW(hwnd, GWL_STYLE) as u32);
+            let mut r = RECT { left: 0, top: 0, right: 640, bottom: 400 };
+            let _ = AdjustWindowRectEx(&mut r, style, false, WINDOW_EX_STYLE(0));
+            let _ = SetWindowPos(hwnd, None, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
+            sendmsg(hwnd, WM_EXITSIZEMOVE, 0, 0);
+            with_app(|a| a.smoke.as_mut().map(|s| { s.stage = 8; s.resized = true }));
+        },
+        (8, Some((_, (rw, rh)))) if resized => {
+            if (rw, rh) == (640, 400) {
+                finish("resize request accepted by the remote side", true, format!("remote now {rw}x{rh}"), 9);
+            }
+        }
+        (9, Some((hwnd, _))) => {
+            sendmsg(hwnd, WM_CLOSE, 0, 0);
+            with_app(|a| a.smoke.as_mut().map(|s| s.stage = 10));
+        }
+        (10, _) if destroyed => {
+            finish("closing the window closes the remote window", true, "WindowDestroyed received".into(), 100);
+        }
+        (99, _) | (100, _) => {
+            let (ok, n) = with_app(|a| {
+                let r = &a.smoke.as_ref().unwrap().results;
+                (stage == 100 && r.iter().all(|c| c.1), r.len())
+            })
+            .unwrap_or((false, 0));
+            eprintln!("SMOKE {}: {n} checks", if ok { "PASS" } else { "FAIL" });
+            quit(if ok { 0 } else { 1 });
+        }
+        _ => {}
+    }
+}
