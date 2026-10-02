@@ -139,6 +139,33 @@ fn retitle<W: Write>(writer: &Writer<W>, st: &Arc<Mutex<State>>, id: u64) -> Res
     Ok(())
 }
 
+fn menu_item(title: &str, shortcut: &str) -> MenuNode {
+    MenuNode { title: title.into(), enabled: true, shortcut: Some(shortcut.into()), ..Default::default() }
+}
+
+/// The test apps' menu bar (the Apple menu is never reported).
+pub fn menu_bar(app_name: &str) -> Vec<MenuNode> {
+    let top = |t: &str, children| MenuNode { title: t.into(), enabled: true, children, ..Default::default() };
+    vec![
+        top(app_name, vec![menu_item(&format!("About {app_name}"), "Cmd+I")]),
+        top("File", vec![menu_item("Open…", "Cmd+O"), MenuNode { separator: true, ..Default::default() }, menu_item("Close Window", "Cmd+W")]),
+        top("Edit", vec![menu_item("Select All", "Cmd+A"), menu_item("Copy", "Cmd+C"), menu_item("Paste", "Cmd+V")]),
+    ]
+}
+
+/// The key a menu item's shortcut presses.
+fn menu_key(path: &[u32]) -> Option<&'static str> {
+    Some(match path {
+        [0, 0] => "KeyI",
+        [1, 0] => "KeyO",
+        [1, 2] => "KeyW",
+        [2, 0] => "KeyA",
+        [2, 1] => "KeyC",
+        [2, 2] => "KeyV",
+        _ => return None,
+    })
+}
+
 /// Serve one client.
 pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Result<(), ProtocolError> {
     let writer: Writer<S> = Arc::new(Mutex::new(writer));
@@ -151,7 +178,22 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
     let st = Arc::new(Mutex::new(State::default()));
 
     while let Some(msg) = read_message(&mut reader)? {
+        // A menu command does what its keyboard shortcut does, in the app's main window.
+        let msg = match msg {
+            Message::MenuInvoke { application_id, path } => {
+                let main = st.lock().unwrap().windows.iter().find(|(_, w)| w.app == application_id && w.role == WindowRole::Window).map(|(k, _)| *k);
+                match (main, menu_key(&path)) {
+                    (Some(window_id), Some(key)) => Message::Key { window_id, physical_key: key.into(), modifiers: vec![Modifier::Command], down: true },
+                    _ => Message::Error { code: "menu_invoke_failed".into(), message: format!("{application_id} {path:?}") },
+                }
+            }
+            m => m,
+        };
         match msg {
+            Message::GetMenuBar { application_id } => {
+                let name = APPS.iter().find(|a| a.0 == application_id).map(|a| a.1).unwrap_or("App");
+                send(&writer, &Message::MenuBar { application_id, menus: menu_bar(name) })?;
+            }
             Message::ListApps => {
                 let apps = APPS.iter().map(|(id, name)| AppInfo { id: (*id).into(), name: (*name).into(), available: true, version: None }).collect();
                 send(&writer, &Message::Apps { apps })?;

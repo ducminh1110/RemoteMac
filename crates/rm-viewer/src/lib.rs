@@ -2,6 +2,7 @@
 //! everywhere; `ui` (Win32 windows + GDI presentation) only exists on Windows.
 pub mod ico;
 pub mod keymap;
+pub mod menu;
 pub mod net;
 #[cfg(windows)]
 pub mod d3d;

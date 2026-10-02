@@ -33,6 +33,11 @@ final class AppManager {
         lock.lock(); defer { lock.unlock() }
         return running.first(where: { $0.value.processIdentifier == pid })?.key ?? adopted.first(where: { $0.value == pid })?.key
     }
+    /// pid of a running (or adopted) app id.
+    func pidFor(_ id: String) -> pid_t? {
+        lock.lock(); defer { lock.unlock() }
+        return running[id].map { $0.processIdentifier } ?? adopted[id]
+    }
     var pids: [pid_t] { lock.lock(); defer { lock.unlock() }; return running.values.map { $0.processIdentifier } + Array(adopted.values) }
 
     /// Returns pid or an (code, message) error.

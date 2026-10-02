@@ -8,8 +8,9 @@ use crate::keymap::*;
 use crate::native;
 use crate::d3d;
 use crate::launcher::{self, Launcher};
+use crate::menu;
 use crate::shortcuts;
-use rm_protocol::WindowRole;
+use rm_protocol::{MenuNode, WindowRole};
 use crate::net::{self, Link, UiEvent};
 use rm_decode::Picture;
 use rm_protocol::{Message, MouseButton};
@@ -67,6 +68,8 @@ struct Remote {
     picture: Option<Picture>,
     frames: u32,
     high_surrogate: Option<u16>,
+    /// Menu command id -> path in the Mac app's menu bar (top-level windows only).
+    cmds: HashMap<u16, Vec<u32>>,
 }
 
 struct App {
@@ -98,6 +101,8 @@ struct App {
     shortcut_dir: Option<std::path::PathBuf>,
     app_names: Vec<(String, String)>,
     icon_rgba: HashMap<String, (u32, Vec<u8>)>,
+    /// Last menu bar seen per remote application; new windows of the app start with it.
+    menus: HashMap<String, Vec<MenuNode>>,
 }
 
 thread_local! { static APP: RefCell<Option<App>> = const { RefCell::new(None) }; }
@@ -163,7 +168,7 @@ pub fn run(opts: Options) -> i32 {
             *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, smoke, exit: None, hinst: hinst.0 as isize, controller: ctl,
                 icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_seq: 0, d3d: opts.d3d,
                 launcher, panels: HashMap::new(), uploads: HashMap::new(), next_transfer: 1, redirect_panels: opts.windows_file_picker,
-                shortcut_dir, app_names: vec![], icon_rgba: HashMap::new() })
+                shortcut_dir, app_names: vec![], icon_rgba: HashMap::new(), menus: HashMap::new() })
         });
         SetTimer(Some(controller), TIMER_ID, 100, None);
         if opts.clipboard && !native::listen_clipboard(controller) {
@@ -369,6 +374,19 @@ fn handle_event(ev: UiEvent) {
             });
             sync_shortcuts();
         }
+        UiEvent::MenuBar { app, menus } => {
+            let windows = with_app(|a| {
+                if a.menus.get(&app) == Some(&menus) {
+                    return vec![]; // unchanged (it is re-sent on every focus): no rebuild, no flicker
+                }
+                a.menus.insert(app.clone(), menus.clone());
+                a.remotes.iter().filter(|(_, r)| r.app == app && r.role == WindowRole::Window).map(|(k, _)| *k).collect()
+            })
+            .unwrap_or_default();
+            for w in windows {
+                set_window_menu(hwnd_of(w), &menus);
+            }
+        }
         UiEvent::Uploaded { transfer_id, remote_path } => {
             with_app(|a| {
                 if let Some(panel) = a.uploads.remove(&transfer_id) {
@@ -503,7 +521,7 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         }
         let scale = native::dpi_scale(hwnd);
         let (cached, parent_origin) = with_app(|a| {
-            a.remotes.insert(hwnd.0 as isize, Remote { id, app: app.into(), role, parent, rx: x, ry: y, rw: w, rh: h, scale, maximized: false, presenter: None, picture: None, frames: 0, high_surrogate: None });
+            a.remotes.insert(hwnd.0 as isize, Remote { id, app: app.into(), role, parent, rx: x, ry: y, rw: w, rh: h, scale, maximized: false, presenter: None, picture: None, frames: 0, high_surrogate: None, cmds: HashMap::new() });
             a.by_id.insert(id, hwnd.0 as isize);
             let cached = a.icons.get(app).copied();
             if cached.is_none() && a.icons_requested.insert(app.to_string()) {
@@ -513,6 +531,20 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
             (cached, parent_origin)
         })
         .unwrap_or((None, None));
+        if !owned {
+            // The Mac app's menu bar comes down into its window, like on the Mac but per window.
+            let menus = with_app(|a| {
+                let m = a.menus.get(app).cloned();
+                if m.is_none() {
+                    a.link.send(&Message::GetMenuBar { application_id: app.into() });
+                }
+                m
+            })
+            .flatten();
+            if let Some(m) = menus {
+                set_window_menu(hwnd, &m);
+            }
+        }
         if let Some(icon) = cached {
             native::set_window_icon(hwnd, HICON(icon as *mut c_void));
         }
@@ -552,10 +584,70 @@ fn resize_client(hwnd: HWND, w: i32, h: i32) {
         if (cur.right - w).abs() <= 2 && (cur.bottom - h).abs() <= 2 {
             return;
         }
-        let mut r = RECT { left: 0, top: 0, right: w, bottom: h };
-        let style = WINDOW_STYLE(GetWindowLongW(hwnd, GWL_STYLE) as u32);
-        let _ = AdjustWindowRectEx(&mut r, style, false, WINDOW_EX_STYLE(0));
-        let _ = SetWindowPos(hwnd, None, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        let (ow, oh) = outer_for_client(hwnd, w, h);
+        let _ = SetWindowPos(hwnd, None, 0, 0, ow, oh, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+/// Outer window size giving a `w`x`h` client area, from the window's current frame (caption,
+/// borders and the menu bar, also when the menu bar wraps onto several lines).
+fn outer_for_client(hwnd: HWND, w: i32, h: i32) -> (i32, i32) {
+    let (mut wr, mut cr) = (RECT::default(), RECT::default());
+    unsafe {
+        let _ = GetWindowRect(hwnd, &mut wr);
+        let _ = GetClientRect(hwnd, &mut cr);
+    }
+    (w + (wr.right - wr.left) - cr.right, h + (wr.bottom - wr.top) - cr.bottom)
+}
+
+fn build_popup(nodes: &[MenuNode], cc: bool, ids: &mut std::vec::IntoIter<(u16, Vec<u32>)>) -> HMENU {
+    unsafe {
+        let m = CreatePopupMenu().unwrap_or_default();
+        for n in nodes {
+            if n.separator {
+                let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+                continue;
+            }
+            let text = HSTRING::from(menu::label(n, cc));
+            let grayed = if n.enabled { MENU_ITEM_FLAGS(0) } else { MF_GRAYED };
+            if n.children.is_empty() {
+                let id = ids.next().map(|(id, _)| id).unwrap_or(0);
+                let _ = AppendMenuW(m, MF_STRING | grayed, id as usize, &text);
+            } else {
+                let sub = build_popup(&n.children, cc, ids);
+                let _ = AppendMenuW(m, MF_POPUP | grayed, sub.0 as usize, &text);
+            }
+        }
+        m
+    }
+}
+
+/// Give a top-level window the Mac app's menu bar as a native Windows menu, keeping its client size.
+fn set_window_menu(hwnd: HWND, menus: &[MenuNode]) {
+    let cc = with_app(|a| a.ctrl_as_command).unwrap_or(true);
+    let table = menu::commands(menus);
+    unsafe {
+        let mut cr = RECT::default();
+        let _ = GetClientRect(hwnd, &mut cr);
+        let bar = CreateMenu().unwrap_or_default();
+        // ids are handed out in the same depth-first order `menu::commands` uses
+        let mut ids = table.clone().into_iter();
+        for top in menus {
+            let sub = build_popup(&top.children, cc, &mut ids);
+            let grayed = if top.enabled { MENU_ITEM_FLAGS(0) } else { MF_GRAYED };
+            let _ = AppendMenuW(bar, MF_POPUP | grayed, sub.0 as usize, &HSTRING::from(top.title.replace('&', "&&")));
+        }
+        let old = GetMenu(hwnd);
+        let _ = SetMenu(hwnd, Some(bar));
+        if !old.is_invalid() {
+            let _ = DestroyMenu(old);
+        }
+        let _ = DrawMenuBar(hwnd);
+        with_app(|a| a.remotes.get_mut(&(hwnd.0 as isize)).map(|r| r.cmds = table.into_iter().collect()));
+        // the menu bar takes room from the client area: grow the window so the picture keeps its size
+        if cr.right > 0 && cr.bottom > 0 && !IsZoomed(hwnd).as_bool() {
+            resize_client(hwnd, cr.right, cr.bottom);
+        }
     }
 }
 
@@ -702,6 +794,18 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             }
             LRESULT(0)
         }
+        WM_COMMAND if (wp.0 >> 16) & 0xffff == 0 => {
+            // a click in the Mac app's menu bar: the Mac app runs that menu item
+            let id = (wp.0 & 0xffff) as u16;
+            with_app(|a| {
+                if let Some(r) = a.remotes.get(&(hwnd.0 as isize)) {
+                    if let Some(path) = r.cmds.get(&id) {
+                        a.link.send(&Message::MenuInvoke { application_id: r.app.clone(), path: path.clone() });
+                    }
+                }
+            });
+            LRESULT(0)
+        }
         WM_EXITSIZEMOVE => {
             request_remote_resize(hwnd);
             LRESULT(0)
@@ -822,6 +926,30 @@ fn painted_colors(hwnd: HWND) -> usize {
     }
 }
 
+fn menu_text(m: HMENU, pos: u32) -> String {
+    let mut buf = [0u16; 256];
+    let n = unsafe { GetMenuStringW(m, pos, Some(&mut buf), MF_BYPOSITION) };
+    String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
+/// (top-level titles, label of File's first item, command id of the first menu's first item).
+fn menu_snapshot(hwnd: HWND) -> Option<(Vec<String>, String, u32)> {
+    unsafe {
+        let bar = GetMenu(hwnd);
+        if bar.is_invalid() {
+            return None;
+        }
+        let n = GetMenuItemCount(Some(bar));
+        if n < 2 {
+            return None;
+        }
+        let tops: Vec<String> = (0..n as u32).map(|i| menu_text(bar, i)).collect();
+        let file = GetSubMenu(bar, 1);
+        let about = GetMenuItemID(GetSubMenu(bar, 0), 0);
+        Some((tops, menu_text(file, 0), about))
+    }
+}
+
 fn sendmsg(hwnd: HWND, msg: u32, wp: usize, lp: isize) {
     unsafe { SendMessageW(hwnd, msg, Some(WPARAM(wp)), Some(LPARAM(lp))) };
 }
@@ -902,11 +1030,9 @@ fn smoke_tick() {
         }
         (7, Some((hwnd, _))) => unsafe {
             // user drags the border to 640x400: client resized, then WM_EXITSIZEMOVE
-            let style = WINDOW_STYLE(GetWindowLongW(hwnd, GWL_STYLE) as u32);
             let sc = native::dpi_scale(hwnd);
-            let mut r = RECT { left: 0, top: 0, right: (640.0 * sc).round() as i32, bottom: (400.0 * sc).round() as i32 };
-            let _ = AdjustWindowRectEx(&mut r, style, false, WINDOW_EX_STYLE(0));
-            let _ = SetWindowPos(hwnd, None, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
+            let (ow, oh) = outer_for_client(hwnd, (640.0 * sc).round() as i32, (400.0 * sc).round() as i32);
+            let _ = SetWindowPos(hwnd, None, 0, 0, ow, oh, SWP_NOMOVE | SWP_NOZORDER);
             sendmsg(hwnd, WM_EXITSIZEMOVE, 0, 0);
             with_app(|a| a.smoke.as_mut().map(|s| { s.stage = 8; s.resized = true }));
         },
@@ -976,8 +1102,28 @@ fn smoke_tick() {
             if let Some((notes, _)) = find_window("notes", WindowRole::Window) {
                 let (tn, tm) = (title_of(notes), title_of(main));
                 if tn.contains("[2 chars]") {
-                    finish("input goes to the right app when several run", tm.contains("[17 chars]"), format!("notes={tn:?} testapp={tm:?}"), 33);
+                    finish("input goes to the right app when several run", tm.contains("[17 chars]"), format!("notes={tn:?} testapp={tm:?}"), 40);
                 }
+            }
+        }
+        (40, Some((main, _))) => {
+            // the Mac menu bar is in the window: "RM Test App  File  Edit", shortcuts in Windows terms
+            let Some((tops, open_label, about)) = menu_snapshot(main) else { return };
+            let ok = tops == ["RM Test App", "File", "Edit"] && open_label == "Open…\tCtrl+O";
+            finish("Mac menu bar shown as the window's native menu", ok, format!("{tops:?} File[0]={open_label:?}"), 41);
+            if ok {
+                sendmsg(main, WM_COMMAND, about as usize, 0); // user clicks RM Test App > About
+            }
+        }
+        (41, Some((main, _))) => {
+            if let Some((dlg, _)) = find_window("testapp", WindowRole::Dialog) {
+                finish("clicking a menu item runs it in the Mac app (About opens its dialog)", true, format!("dialog for {:?}", main.0), 42);
+                sendmsg(dlg, WM_CLOSE, 0, 0);
+            }
+        }
+        (42, Some(_)) => {
+            if find_window("testapp", WindowRole::Dialog).is_none() {
+                with_app(|a| a.smoke.as_mut().map(|s| s.stage = 33));
             }
         }
         (33, Some((_, _))) => {

@@ -211,6 +211,30 @@ pub enum WindowRole {
     SavePanel,
 }
 
+/// One entry of an application's menu bar, as read from the Mac (Accessibility).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct MenuNode {
+    pub title: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub separator: bool,
+    /// Mac shortcut, e.g. "Cmd+Shift+S".
+    #[serde(default)]
+    pub shortcut: Option<String>,
+    #[serde(default)]
+    pub children: Vec<MenuNode>,
+}
+
+pub const MAX_MENU_ITEMS: usize = 3000;
+
+impl MenuNode {
+    /// Total number of nodes (bounded so a hostile agent cannot make the client build huge menus).
+    pub fn count(nodes: &[MenuNode]) -> usize {
+        nodes.iter().map(|n| 1 + MenuNode::count(&n.children)).sum()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Message {
@@ -261,6 +285,13 @@ pub enum Message {
     GetAppIcon { application_id: String },
     /// Agent -> client: square RGBA icon (straight alpha), base64 encoded.
     AppIcon { application_id: String, size: u32, rgba_base64: String },
+
+    /// Client -> agent: send this application's menu bar.
+    GetMenuBar { application_id: String },
+    /// Agent -> client: the application's menu bar (the Apple menu is left out).
+    MenuBar { application_id: String, menus: Vec<MenuNode> },
+    /// Client -> agent: choose the item at `path` (indices from the top of `MenuBar.menus`).
+    MenuInvoke { application_id: String, path: Vec<u32> },
 
     /// Either direction: the clipboard now holds this text. `seq` lets each side ignore
     /// the echo of a change it applied itself.
@@ -761,5 +792,16 @@ mod tests {
         assert_eq!(sanitize_upload_name("a\u{0}b\nc:d"), "abcd");
         assert_eq!(sanitize_upload_name(""), "upload");
         assert_eq!(sanitize_upload_name(&"x".repeat(500)).len(), 200);
+    }
+
+    #[test]
+    fn menu_bar_roundtrip() {
+        let m = Message::MenuBar { application_id: "xcode".into(), menus: vec![MenuNode { title: "File".into(), enabled: true, children: vec![
+            MenuNode { title: "Save".into(), enabled: true, shortcut: Some("Cmd+S".into()), ..Default::default() },
+            MenuNode { separator: true, ..Default::default() },
+        ], ..Default::default() }] };
+        let b = encode(&m).unwrap();
+        assert_eq!(decode(&b).unwrap().unwrap().0, m);
+        if let Message::MenuBar { menus, .. } = m { assert_eq!(MenuNode::count(&menus), 3) }
     }
 }

@@ -90,6 +90,15 @@ func axWindowFor(pid: pid_t, id: CGWindowID, rect: CGRect) -> AXUIElement? {
 
 func send(_ m: [String: Any]) { do { try conn.send(m) } catch { log("send failed: \(error)") } }
 
+let menuQueue = DispatchQueue(label: "rm.menus")
+/// Read (off the main path: big apps take a moment) and send an app's menu bar.
+func sendMenuBar(_ id: String) {
+    menuQueue.async {
+        guard let pid = apps.pidFor(id) else { return }
+        send(["type": "menu_bar", "application_id": id, "menus": readMenuBar(pid: pid)])
+    }
+}
+
 func startStream(_ id: CGWindowID) {
     let ws = WindowStream(windowID: id) { pkt in do { try conn.sendVideo(pkt) } catch { log("video send failed: \(error)") } }
     streamsLock.lock(); streams[id] = ws; streamsLock.unlock()
@@ -107,6 +116,7 @@ tracker.onCreated = { w in
     send(["type": "window_created", "window_id": Int(w.id), "application_id": w.appID, "title": w.title, "bounds": rectJSON(w.rect),
           "parent_id": w.parent.map { Int($0) as Any } ?? NSNull(), "role": w.role.rawValue])
     startStream(w.id)
+    if w.role == .window { DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { sendMenuBar(w.appID) } }
 }
 tracker.onDestroyed = { id in
     log("window destroyed id=\(id)")
@@ -196,6 +206,7 @@ func handle(_ m: [String: Any]) {
     case "window_focus":
         let wid = CGWindowID(int(m["window_id"]))
         if let w = tracker.current(wid) {
+            sendMenuBar(w.appID)
             NSRunningApplication(processIdentifier: w.pid)?.activate(options: [.activateIgnoringOtherApps])
             if let aw = axWindowFor(pid: w.pid, id: wid, rect: w.rect) { AXUIElementPerformAction(aw, kAXRaiseAction as CFString) }
         }
@@ -218,6 +229,16 @@ func handle(_ m: [String: Any]) {
         chooseInPanel(pid: w.pid, path: path)
     case "panel_cancel":
         if let w = tracker.current(CGWindowID(int(m["window_id"]))), w.role == .open_panel || w.role == .save_panel { keyTo(w.pid, 53) }
+    case "get_menu_bar":
+        sendMenuBar(m["application_id"] as? String ?? "")
+    case "menu_invoke":
+        let id = m["application_id"] as? String ?? ""
+        let path = (m["path"] as? [Any] ?? []).map { int($0) }
+        guard let pid = apps.pidFor(id) else { send(["type": "error", "code": "not_running", "message": id]); break }
+        NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
+        if !invokeMenu(pid: pid, path: path) { send(["type": "error", "code": "menu_invoke_failed", "message": "\(id) \(path)"]) }
+        // menus often change after a command (enabled items, window list)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.8) { sendMenuBar(id) }
     case "clipboard_set":
         clipboard.apply(m["text"] as? String ?? "")
     case "ping":

@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 pub enum UiEvent {
     WindowCreated { id: u64, app: String, title: String, x: i32, y: i32, w: u32, h: u32, parent: Option<u64>, role: rm_protocol::WindowRole },
     Apps(Vec<rm_protocol::AppInfo>),
+    MenuBar { app: String, menus: Vec<rm_protocol::MenuNode> },
     Uploaded { transfer_id: u64, remote_path: String },
     UploadFailed { transfer_id: u64, reason: String },
     /// Square RGBA icon (straight alpha) for an application id.
@@ -77,6 +78,9 @@ fn recv_loop(mut sess: Session<TcpStream>, tx: Sender<UiEvent>, wake: impl Fn())
             Ok(Some(Frame::Msg(m))) => match m {
                 Message::WindowCreated { window_id, application_id, title, bounds, parent_id, role } => emit(UiEvent::WindowCreated { id: window_id, app: application_id, title, x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, parent: parent_id, role }),
                 Message::Apps { apps } => emit(UiEvent::Apps(apps)),
+                Message::MenuBar { application_id, menus } if rm_protocol::MenuNode::count(&menus) <= rm_protocol::MAX_MENU_ITEMS => {
+                    emit(UiEvent::MenuBar { app: application_id, menus })
+                }
                 Message::FileUploaded { transfer_id, remote_path } => emit(UiEvent::Uploaded { transfer_id, remote_path }),
                 Message::FileUploadFailed { transfer_id, reason } => emit(UiEvent::UploadFailed { transfer_id, reason }),
                 Message::AppIcon { application_id, size, rgba_base64 } => {

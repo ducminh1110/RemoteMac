@@ -61,6 +61,7 @@ struct Ctx<'a, S: Read + Write> {
     created: Vec<(u64, rm_protocol::WindowRole, Option<u64>)>,
     destroyed_ids: Vec<u64>,
     uploaded: Option<String>,
+    menus: Option<Vec<rm_protocol::MenuNode>>,
 }
 
 fn is_timeout(e: &ProtocolError) -> bool {
@@ -117,6 +118,7 @@ impl<S: Read + Write> Ctx<'_, S> {
             }
             Frame::Msg(Message::FileUploaded { remote_path, .. }) => self.uploaded = Some(remote_path),
             Frame::Msg(Message::FileUploadFailed { reason, .. }) => self.errors.push(format!("upload: {reason}")),
+            Frame::Msg(Message::MenuBar { menus, .. }) => self.menus = Some(menus),
             Frame::Msg(Message::AppExited { .. }) => self.exited = true,
             Frame::Msg(Message::AppLaunched { pid, .. }) => self.launched_pid = Some(pid),
             Frame::Msg(Message::ClipboardSet { text, .. }) => self.clipboard = Some(text),
@@ -161,7 +163,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let caps_dump = serde_json::to_string(&sess.capabilities).unwrap_or_default();
     let mut c = Ctx { sess, r: Report::default(), started: Instant::now(), first_video: None, last_title: String::new(),
         destroyed: false, exited: false, launched_pid: None, errors: vec![], non_annexb: 0,
-        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None };
+        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None };
 
     c.r.check("agent reports capture+input+GUI", caps_ok, caps_dump);
 
@@ -271,10 +273,35 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     c.r.check("app icon delivered (square RGBA, not empty)", icon_ok, icon_detail);
     c.send(Message::WindowFocus { window_id: wid });
 
+    // ---- the menu bar (shown by clients inside the app's windows), and running an item from it
+    c.menus = None;
+    c.send(Message::GetMenuBar { application_id: app.into() });
+    let got = c.pump(10, |c| c.menus.is_some());
+    let menus = c.menus.clone().unwrap_or_default();
+    let tops: Vec<&str> = menus.iter().map(|m| m.title.as_str()).collect();
+    let open_sc = menus.iter().find(|m| m.title == "File").and_then(|f| f.children.iter().find(|i| i.title.starts_with("Open"))).and_then(|i| i.shortcut.clone());
+    c.r.check("menu bar read (File > Open… with Cmd+O)", got && open_sc.as_deref() == Some("Cmd+O"), format!("tops={tops:?} open={open_sc:?}"));
+    let about = menus.iter().enumerate().find_map(|(t, m)| m.children.iter().position(|i| i.title.starts_with("About")).map(|i| vec![t as u32, i as u32]));
+    if let Some(path) = about {
+        let before = c.created.len();
+        c.send(Message::MenuInvoke { application_id: app.into(), path: path.clone() });
+        let found = c.pump(10, move |c| c.created[before..].iter().any(|(_, r, _)| *r == rm_protocol::WindowRole::Dialog));
+        let dlg = c.created[before..].iter().find(|(_, r, _)| *r == rm_protocol::WindowRole::Dialog).copied();
+        c.r.check("menu item invoked from the client runs on the Mac (About opens its dialog)", found, format!("path={path:?} created={:?} errors={:?}", c.created, c.errors));
+        if let Some((did, _, _)) = dlg {
+            c.send(Message::WindowClose { window_id: did });
+            c.pump(8, |c| c.destroyed_ids.contains(&did));
+        }
+    } else {
+        c.r.check("menu item invoked from the client runs on the Mac (About opens its dialog)", false, "no About item");
+    }
+    c.send(Message::WindowFocus { window_id: wid });
+
     // ---- an app dialog appears as a child window of its parent, and can be closed from the client
+    let before = c.created.len();
     key(&mut c, "KeyI", vec![Modifier::Command]);
-    let found = c.pump(10, |c| c.created.iter().any(|(_, r, _)| *r == rm_protocol::WindowRole::Dialog));
-    let dlg = c.created.iter().find(|(_, r, _)| *r == rm_protocol::WindowRole::Dialog).copied();
+    let found = c.pump(10, move |c| c.created[before..].iter().any(|(_, r, _)| *r == rm_protocol::WindowRole::Dialog));
+    let dlg = c.created[before..].iter().find(|(_, r, _)| *r == rm_protocol::WindowRole::Dialog).copied();
     c.r.check("app dialog reported as a child window (role=dialog, parent=main)", found && dlg.map(|d| d.2) == Some(Some(wid)), format!("created={:?}", c.created));
     if let Some((did, _, _)) = dlg {
         c.send(Message::WindowClose { window_id: did });
