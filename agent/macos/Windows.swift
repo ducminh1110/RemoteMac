@@ -188,6 +188,11 @@ final class WindowTracker {
             onCreated?(w)
         }
         for id in Array(pending.keys) where !seen.contains(id) { pending.removeValue(forKey: id) }
+        // a window that left the on-screen list but still exists (another display, another Space)
+        // is not gone; it is only reported destroyed once the window server forgets it
+        for id in known.keys where !seen.contains(id) {
+            if (CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]])?.isEmpty == false { seen.insert(id) }
+        }
         // children are reported gone before their parents
         let gone = known.keys.filter { !seen.contains($0) }.sorted { (known[$0]?.parent != nil ? 0 : 1) < (known[$1]?.parent != nil ? 0 : 1) }
         for id in gone { known.removeValue(forKey: id); onDestroyed?(id) }

@@ -36,7 +36,7 @@ final class DisplayManager {
     }
 
     /// Usable area of a display (global, top-left origin): below its menu bar.
-    private func usable(_ id: CGDirectDisplayID) -> CGRect {
+    func usable(_ id: CGDirectDisplayID) -> CGRect {
         let b = CGDisplayBounds(id)
         let key = NSDeviceDescriptionKey("NSScreenNumber")
         guard let scr = NSScreen.screens.first(where: { ($0.deviceDescription[key] as? NSNumber)?.uint32Value == id }) else { return b }
@@ -52,8 +52,14 @@ final class DisplayManager {
         if on && saved[w.id] == nil { saved[w.id] = w.rect }
         lock.unlock()
         let frame: CGRect
-        if on {
-            let area = usable(id != 0 ? id : CGMainDisplayID())
+        if on && id != 0 {
+            // straight from the display's bounds (NSScreen can be stale without an AppKit run loop):
+            // below its menu bar, the content exactly the client's monitor
+            let b = CGDisplayBounds(id)
+            let top = b.minY + CGFloat(headroom) - w.inset - 2
+            frame = CGRect(x: b.minX, y: top, width: size.width, height: size.height + w.inset)
+        } else if on {
+            let area = usable(CGMainDisplayID())
             let cw = id != 0 ? size.width : area.width, ch = id != 0 ? size.height : area.height - w.inset
             frame = CGRect(x: area.minX, y: area.minY, width: min(cw, area.width), height: min(ch + w.inset, area.height))
         } else {
@@ -63,6 +69,7 @@ final class DisplayManager {
         NSRunningApplication(processIdentifier: w.pid)?.activate(options: [.activateIgnoringOtherApps])
         setFrame(aw, frame)
         log("window \(w.id) fullscreen=\(on) -> \(Int(frame.width))x\(Int(frame.height)) at \(Int(frame.minX)),\(Int(frame.minY))")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.7) { logWindowState(w.id, display: id) }
         return true
     }
 
@@ -73,4 +80,12 @@ final class DisplayManager {
         if let v = AXValueCreate(.cgSize, &s) { AXUIElementSetAttributeValue(aw, kAXSizeAttribute as CFString, v) }
         if let v = AXValueCreate(.cgPoint, &p) { AXUIElementSetAttributeValue(aw, kAXPositionAttribute as CFString, v) }
     }
+}
+
+/// Diagnostics: where the window server has a window, and the virtual display's state.
+func logWindowState(_ id: CGWindowID, display: CGDirectDisplayID) {
+    let info = (CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]])?.first
+    let onscreen = info?[kCGWindowIsOnscreen as String] as? Bool ?? false
+    let bounds = (info?[kCGWindowBounds as String] as? NSDictionary).flatMap { CGRect(dictionaryRepresentation: $0 as CFDictionary) } ?? .zero
+    log("window \(id) state: exists=\(info != nil) onscreen=\(onscreen) bounds=\(Int(bounds.minX)),\(Int(bounds.minY)) \(Int(bounds.width))x\(Int(bounds.height)) display \(display): active=\(CGDisplayIsActive(display) != 0) online=\(CGDisplayIsOnline(display) != 0) mirrors=\(CGDisplayMirrorsDisplay(display))")
 }

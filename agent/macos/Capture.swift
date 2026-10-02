@@ -53,7 +53,7 @@ final class WindowStream: NSObject, SCStreamOutput {
     init(windowID: CGWindowID, inset: CGFloat = 0, onPacket: @escaping (VideoPacket) -> Void) { self.windowID = windowID; self.inset = inset; self.onPacket = onPacket }
 
     func start() async throws {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         guard let w = content.windows.first(where: { $0.windowID == windowID }) else { throw WireError(description: "window \(windowID) not shareable") }
         let cfg = SCStreamConfiguration()
         let cut = min(inset, max(0, w.frame.height - 2))

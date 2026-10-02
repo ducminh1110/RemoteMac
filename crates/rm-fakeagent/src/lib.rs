@@ -68,6 +68,9 @@ struct State {
     files: HashMap<String, usize>,
     /// virtual display (points), once the client configured one
     display: Option<(u32, u32)>,
+    /// window sizes (last requested), and sizes before fullscreen
+    sizes: HashMap<u64, (u32, u32)>,
+    before_fullscreen: HashMap<u64, (u32, u32)>,
 }
 
 type Writer<W> = Arc<Mutex<W>>;
@@ -318,6 +321,7 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
             }
             Message::PanelCancel { window_id } => close_window(&writer, &st, window_id)?,
             Message::WindowResizeRequest { window_id, width, height } => {
+                st.lock().unwrap().sizes.insert(window_id, (width, height));
                 send(&writer, &Message::WindowMoved { window_id, bounds: Rect { x: 200, y: 216, w: width, h: height } })?;
             }
             Message::WindowClose { window_id } => close_window(&writer, &st, window_id)?,
@@ -327,7 +331,17 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
                 send(&writer, &Message::DisplayStatus { available: true, display_id: 77, width: w, height: h, reason: None })?;
             }
             Message::WindowFullscreen { window_id, on } => {
-                let (w, h) = if on { st.lock().unwrap().display.unwrap_or((1440, 900)) } else { (WIDTH as u32, HEIGHT as u32) };
+                let (w, h) = {
+                    let mut s = st.lock().unwrap();
+                    let current = s.sizes.get(&window_id).copied().unwrap_or((WIDTH as u32, HEIGHT as u32));
+                    if on {
+                        s.before_fullscreen.insert(window_id, current);
+                        s.display.unwrap_or((1440, 900))
+                    } else {
+                        s.before_fullscreen.remove(&window_id).unwrap_or(current)
+                    }
+                };
+                st.lock().unwrap().sizes.insert(window_id, (w, h));
                 // the window now has that size: its video restarts at it, as the real agent's does
                 let old = st.lock().unwrap().windows.get_mut(&window_id).map(|win| {
                     win.stop.store(true, Ordering::SeqCst);
