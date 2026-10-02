@@ -57,17 +57,20 @@ private func buttonTitles(_ root: AXUIElement) -> Set<String> {
     return out
 }
 
-/// Window / dialog / open panel / save panel, from the AX subrole and the panel's buttons.
-func classify(pid: pid_t, rect: CGRect, fromPanelService: Bool) -> Role {
+/// Window / dialog / open panel / save panel, from the AX subrole and the window's buttons.
+/// File panels of non-sandboxed apps are drawn in-process and report AXStandardWindow, so every
+/// window after an app's first one is checked for the panel's buttons, whatever its subrole.
+func classify(pid: pid_t, rect: CGRect, fromPanelService: Bool, isFirstWindow: Bool) -> Role {
     guard let w = axWindowMatching(pid: pid, rect: rect) else { return fromPanelService ? .dialog : .window }
-    let subrole = wAXString(w, kAXSubroleAttribute as String) ?? ""
-    if subrole == (kAXStandardWindowSubrole as String) && !fromPanelService { return .window }
-    let buttons = buttonTitles(w)
-    if buttons.contains("Cancel") {
-        if buttons.contains("Open") || buttons.contains("Choose") { return .open_panel }
-        if buttons.contains("Save") { return .save_panel }
+    let standard = wAXString(w, kAXSubroleAttribute as String) == (kAXStandardWindowSubrole as String)
+    if !isFirstWindow || fromPanelService || !standard {
+        let buttons = buttonTitles(w)
+        if buttons.contains("Cancel") {
+            if buttons.contains("Open") || buttons.contains("Choose") { return .open_panel }
+            if buttons.contains("Save") { return .save_panel }
+        }
     }
-    return .dialog
+    return standard && !fromPanelService ? .window : .dialog
 }
 
 final class WindowTracker {
@@ -157,7 +160,8 @@ final class WindowTracker {
             if age < 3 { continue }
             pending.removeValue(forKey: id)
             guard let appID = apps.appID(forPid: pid) ?? companions[pid] ?? (fromService ? frontLaunchedApp() : nil) else { continue }
-            let role = companions[pid] != nil ? Role.window : classify(pid: pid, rect: rect, fromPanelService: fromService)
+            let first = !known.values.contains { $0.appID == appID && $0.role == .window }
+            let role = companions[pid] != nil ? Role.window : classify(pid: pid, rect: rect, fromPanelService: fromService, isFirstWindow: first)
             var w = WinInfo(id: id, pid: pid, title: title, rect: rect, appID: appID, role: role)
             if role != .window { w.parent = parentFor(appID: appID, rect: rect) }
             known[id] = w

@@ -16,6 +16,7 @@ $port = 47901
 foreach ($renderer in @("d3d11", "gdi")) {
   $port++
   $env:RM_SESSION_TOKEN = "smoke-" + [guid]::NewGuid().ToString("N")
+  $env:RM_SHORTCUT_DIR = Join-Path $PWD "out\shortcuts-$renderer"
   $relay = Start-Process -PassThru -NoNewWindow -FilePath target\release\rm-relay.exe -ArgumentList "127.0.0.1:$port" -RedirectStandardError "out\relay-$renderer.log"
   Start-Sleep -Seconds 1
   $agent = Start-Process -PassThru -NoNewWindow -FilePath target\release\rm-fakeagent.exe -ArgumentList "--relay 127.0.0.1:$port --session smoke-$renderer" -RedirectStandardError "out\fakeagent-$renderer.log"
@@ -26,5 +27,7 @@ foreach ($renderer in @("d3d11", "gdi")) {
   Write-Host "=== viewer log ($renderer)"; Get-Content "out\viewer-$renderer.log"
   Write-Host "viewer exit code ($renderer): $code"
   if ($code -ne 0) { $failed++ }
+  $left = @(Get-ChildItem -Path $env:RM_SHORTCUT_DIR -Filter *.lnk -ErrorAction SilentlyContinue)
+  if ($left.Count -ne 0) { Write-Host "shortcuts left after the viewer exited: $($left.Name)"; $failed++ }
 }
 exit $failed

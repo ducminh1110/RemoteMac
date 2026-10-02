@@ -3,13 +3,13 @@ fn main() {
     let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let has = |k: &str| args.iter().any(|a| a == k);
     let (Some(relay), Some(session)) = (get("--relay"), get("--session")) else {
-        eprintln!("usage: RM_SESSION_TOKEN=.. remote-mac-viewer --relay HOST:PORT --session ID [--app testapp] [--raw-ctrl] [--no-clipboard] [--renderer d3d11|gdi] [--mac-file-panel] [--smoke]");
+        eprintln!("usage: RM_SESSION_TOKEN=.. remote-mac-viewer --relay HOST:PORT --session ID [--app testapp] [--raw-ctrl] [--no-clipboard] [--renderer d3d11|gdi] [--mac-file-panel] [--no-shortcuts] [--smoke]");
         std::process::exit(2)
     };
     let token = std::env::var("RM_SESSION_TOKEN").unwrap_or_default();
     #[cfg(windows)]
     {
-        let opts = rm_viewer::ui::Options { relay, session, token, app: get("--app"), ctrl_as_command: !has("--raw-ctrl"), smoke: has("--smoke"), clipboard: !has("--no-clipboard"), d3d: get("--renderer").as_deref() != Some("gdi"), windows_file_picker: !has("--mac-file-panel") };
+        let opts = rm_viewer::ui::Options { relay, session, token, app: get("--app"), ctrl_as_command: !has("--raw-ctrl"), smoke: has("--smoke"), clipboard: !has("--no-clipboard"), d3d: get("--renderer").as_deref() != Some("gdi"), windows_file_picker: !has("--mac-file-panel"), shortcuts: !has("--no-shortcuts") };
         std::process::exit(rm_viewer::ui::run(opts));
     }
     #[cfg(not(windows))]

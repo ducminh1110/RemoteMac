@@ -1,5 +1,6 @@
 //! Windows viewer for remote Mac applications. `keymap` and `net` are portable and unit-tested
 //! everywhere; `ui` (Win32 windows + GDI presentation) only exists on Windows.
+pub mod ico;
 pub mod keymap;
 pub mod net;
 #[cfg(windows)]
@@ -8,5 +9,7 @@ pub mod d3d;
 pub mod launcher;
 #[cfg(windows)]
 pub mod native;
+#[cfg(windows)]
+pub mod shortcuts;
 #[cfg(windows)]
 pub mod ui;

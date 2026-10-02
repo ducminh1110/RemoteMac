@@ -8,6 +8,7 @@ use crate::keymap::*;
 use crate::native;
 use crate::d3d;
 use crate::launcher::{self, Launcher};
+use crate::shortcuts;
 use rm_protocol::WindowRole;
 use crate::net::{self, Link, UiEvent};
 use rm_decode::Picture;
@@ -38,6 +39,8 @@ pub struct Options {
     pub d3d: bool,
     /// Replace the Mac's file Open panel with the Windows one (uploading the chosen file).
     pub windows_file_picker: bool,
+    /// Put each Mac app in the Start menu (and so in Windows Search) while connected.
+    pub shortcuts: bool,
 }
 
 const WM_UI_EVENT: u32 = WM_APP + 1;
@@ -91,6 +94,10 @@ struct App {
     uploads: HashMap<u64, u64>,
     next_transfer: u64,
     redirect_panels: bool,
+    /// Start-menu folder for this Mac's app shortcuts; they exist only while the Mac is connected.
+    shortcut_dir: Option<std::path::PathBuf>,
+    app_names: Vec<(String, String)>,
+    icon_rgba: HashMap<String, (u32, Vec<u8>)>,
 }
 
 thread_local! { static APP: RefCell<Option<App>> = const { RefCell::new(None) }; }
@@ -141,6 +148,11 @@ pub fn run(opts: Options) -> i32 {
             }
         };
         eprintln!("connected; waiting for windows");
+        // Shortcuts left behind by a crash point at a Mac that may be gone: clean them first.
+        let shortcut_dir = if opts.shortcuts { shortcuts::folder() } else { None };
+        if let Some(d) = &shortcut_dir {
+            shortcuts::remove_all(d);
+        }
         link.send(&Message::ListApps);
         let launcher = Launcher::create(hinst, opts.app.is_none() && !opts.smoke);
         if launcher.is_none() {
@@ -150,7 +162,8 @@ pub fn run(opts: Options) -> i32 {
         APP.with(|a| {
             *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, smoke, exit: None, hinst: hinst.0 as isize, controller: ctl,
                 icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_seq: 0, d3d: opts.d3d,
-                launcher, panels: HashMap::new(), uploads: HashMap::new(), next_transfer: 1, redirect_panels: opts.windows_file_picker })
+                launcher, panels: HashMap::new(), uploads: HashMap::new(), next_transfer: 1, redirect_panels: opts.windows_file_picker,
+                shortcut_dir, app_names: vec![], icon_rgba: HashMap::new() })
         });
         SetTimer(Some(controller), TIMER_ID, 100, None);
         if opts.clipboard && !native::listen_clipboard(controller) {
@@ -166,7 +179,30 @@ pub fn run(opts: Options) -> i32 {
     }
 }
 
+/// The Mac is no longer reachable from this viewer: its apps leave the Start menu and Search.
+fn on_mac_gone() {
+    if let Some(d) = with_app(|a| a.shortcut_dir.clone()).flatten() {
+        shortcuts::remove_all(&d);
+    }
+}
+
+fn sync_shortcuts() {
+    let Some((dir, apps)) = with_app(|a| {
+        let dir = a.shortcut_dir.clone()?;
+        let apps: Vec<shortcuts::AppEntry> = a.app_names.iter().map(|(id, n)| (id.clone(), n.clone(), a.icon_rgba.get(id).cloned())).collect();
+        Some((dir, apps))
+    })
+    .flatten() else { return };
+    let Ok(exe) = std::env::current_exe() else { return };
+    for r in shortcuts::sync(&dir, &exe, &apps) {
+        if let Err(e) = r {
+            eprintln!("warning: shortcut not written: {e}");
+        }
+    }
+}
+
 fn quit(code: i32) {
+    on_mac_gone();
     with_app(|a| a.exit = Some(code));
     unsafe { PostQuitMessage(code) };
 }
@@ -317,6 +353,7 @@ fn handle_event(ev: UiEvent) {
         UiEvent::Apps(apps) => {
             with_app(|a| {
                 let rows: Vec<(String, String, bool)> = apps.iter().map(|x| (x.id.clone(), x.name.clone(), x.available)).collect();
+                a.app_names = apps.iter().filter(|x| x.available).map(|x| (x.id.clone(), x.name.clone())).collect();
                 if let Some(l) = a.launcher.as_mut() {
                     l.set_apps(&rows);
                 }
@@ -330,6 +367,7 @@ fn handle_event(ev: UiEvent) {
                     }
                 }
             });
+            sync_shortcuts();
         }
         UiEvent::Uploaded { transfer_id, remote_path } => {
             with_app(|a| {
@@ -350,6 +388,14 @@ fn handle_event(ev: UiEvent) {
         }
         UiEvent::Icon { app, size, rgba } => {
             let Some(icon) = native::make_icon(size, &rgba) else { return };
+            let known = with_app(|a| {
+                a.icon_rgba.insert(app.clone(), (size, rgba.clone()));
+                a.app_names.iter().any(|(id, _)| *id == app)
+            })
+            .unwrap_or(false);
+            if known {
+                sync_shortcuts();
+            }
             let windows: Vec<isize> = with_app(|a| {
                 a.icons.insert(app.clone(), icon.0 as isize);
                 if let Some(l) = a.launcher.as_ref() {
@@ -431,6 +477,7 @@ fn handle_event(ev: UiEvent) {
         UiEvent::Notice(n) => eprintln!("notice: {n}"),
         UiEvent::Disconnected(why) => {
             eprintln!("disconnected: {why}");
+            on_mac_gone();
             quit(if with_app(|a| a.smoke.is_some()).unwrap_or(false) { 1 } else { 0 });
         }
     }
@@ -968,7 +1015,25 @@ fn smoke_tick() {
         }
         (10, _) if !destroyed.is_empty() && find_window("testapp", WindowRole::Window).is_none() => {
             let notes_alive = find_window("notes", WindowRole::Window).is_some();
-            finish("closing one app's window leaves the other app running", notes_alive, format!("destroyed={destroyed:?}"), 100);
+            finish("closing one app's window leaves the other app running", notes_alive, format!("destroyed={destroyed:?}"), 37);
+        }
+        (37, _) => {
+            let Some(dir) = with_app(|a| a.shortcut_dir.clone()).flatten() else {
+                finish("Start-menu shortcuts", false, "no shortcut folder".into(), 99);
+                return;
+            };
+            let found: Vec<(String, Option<String>)> = shortcuts::list(&dir).iter().filter_map(|p| shortcuts::read(p)).collect();
+            let want = [("--app testapp".to_string(), Some("RemoteMac.testapp".to_string())), ("--app notes".to_string(), Some("RemoteMac.notes".to_string()))];
+            let icons = dir.join("icons").read_dir().map(|d| d.count()).unwrap_or(0);
+            if want.iter().all(|w| found.contains(w)) && icons >= 2 {
+                finish("each Mac app is in the Start menu / Windows Search (shortcut + icon + AUMID)", found.len() == 2, format!("{found:?} icons={icons}"), 38);
+            }
+        }
+        (38, _) => {
+            on_mac_gone(); // what a disconnect does
+            let dir = with_app(|a| a.shortcut_dir.clone()).flatten();
+            let left = dir.as_deref().map(shortcuts::list).unwrap_or_default();
+            finish("disconnecting the Mac removes its shortcuts", left.is_empty(), format!("left={left:?}"), 100);
         }
         (99, _) | (100, _) => {
             let (ok, n) = with_app(|a| {
