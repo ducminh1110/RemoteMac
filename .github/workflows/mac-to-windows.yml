@@ -22,7 +22,11 @@ env:
 
 jobs:
   mac:
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -31,7 +35,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: mac-recording
+          name: mac-recording-${{ matrix.os }}
           path: |
             out/recording/*
             out/*.log
@@ -39,6 +43,10 @@ jobs:
 
   windows:
     needs: mac
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -47,7 +55,7 @@ jobs:
         run: cargo build --release -p rm-viewer -p rm-relay -p rm-fakeagent
       - uses: actions/download-artifact@v4
         with:
-          name: mac-recording
+          name: mac-recording-${{ matrix.os }}
           path: mac-recording
       - name: Replay the Mac session into the viewer and take screenshots
         shell: pwsh
@@ -66,7 +74,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-screenshots
+          name: windows-screenshots-${{ matrix.os }}
           path: |
             out/showcase/*
             mac-recording/recording/*.png
