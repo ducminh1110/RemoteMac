@@ -154,28 +154,6 @@ func keyTo(_ pid: pid_t, _ code: CGKeyCode, _ flags: CGEventFlags = []) {
 }
 
 /// Make a file panel open `path`: "Go to folder" (Cmd+Shift+G), type the full path, confirm twice.
-func chooseInPanel(pid: pid_t, path: String) {
-    NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
-    usleep(300_000)
-    keyTo(pid, 5, [.maskCommand, .maskShift])          // G
-    usleep(700_000)
-    for ch in path {
-        let units = Array(String(ch).utf16)
-        for down in [true, false] {
-            guard let e = CGEvent(keyboardEventSource: CGEventSource(stateID: .hidSystemState), virtualKey: 0, keyDown: down) else { continue }
-            e.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
-            e.postToPid(pid)
-            usleep(8_000)
-        }
-    }
-    usleep(400_000)
-    keyTo(pid, 36)                                      // Return: go to the file
-    usleep(900_000)
-    keyTo(pid, 36)                                      // Return: Open
-    log("panel pid=\(pid) asked to open \(path.split(separator: "/").last ?? "")")
-}
-
-
 let inputTypes: Set<String> = ["mouse_move", "mouse_button", "scroll", "key", "text_input"]
 
 func handle(_ m: [String: Any]) {
@@ -226,7 +204,7 @@ func handle(_ m: [String: Any]) {
               path.hasPrefix(uploads.dir.path + "/"), FileManager.default.fileExists(atPath: path) else {
             send(["type": "error", "code": "panel_choose_failed", "message": "\(wid)"]); break
         }
-        chooseInPanel(pid: w.pid, path: path)
+        DispatchQueue.global().async { chooseInPanel(pid: w.pid, rect: w.rect, path: path) }
     case "panel_cancel":
         if let w = tracker.current(CGWindowID(int(m["window_id"]))), w.role == .open_panel || w.role == .save_panel { keyTo(w.pid, 53) }
     case "get_menu_bar":
