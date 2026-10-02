@@ -83,8 +83,21 @@ func titleBarInset(pid: pid_t, rect: CGRect) -> CGFloat {
     guard let w = axWindowMatching(pid: pid, rect: rect),
           wAXString(w, kAXSubroleAttribute as String) == (kAXStandardWindowSubrole as String) else { return 0 }
     let kids = wAX(w, kAXChildrenAttribute as String) as? [AXUIElement] ?? []
-    if kids.contains(where: { wAXString($0, kAXRoleAttribute as String) == (kAXToolbarRole as String) }) { return 0 }
-    guard let cb = wAX(w, kAXCloseButtonAttribute as String) else { return 0 }
+    func top(_ el: AXUIElement) -> CGFloat? {
+        var p = CGPoint.zero
+        guard let pv = wAX(el, kAXPositionAttribute as String), AXValueGetValue(pv as! AXValue, .cgPoint, &p) else { return nil }
+        return p.y - rect.minY
+    }
+    // a toolbar that shares the title bar (unified, starts at the window's top) keeps it
+    let unified = kids.contains { wAXString($0, kAXRoleAttribute as String) == (kAXToolbarRole as String) && (top($0) ?? 99) < 8 }
+    if unified {
+        log("title bar kept (unified toolbar) pid=\(pid)")
+        return 0
+    }
+    guard let cb = wAX(w, kAXCloseButtonAttribute as String) else {
+        log("title bar kept (no close button) pid=\(pid) kids=\(kids.map { (wAXString($0, kAXRoleAttribute as String) ?? "?") + "@" + String(Int(top($0) ?? -1)) })")
+        return 0
+    }
     var p = CGPoint.zero, s = CGSize.zero
     guard let pv = wAX(cb as! AXUIElement, kAXPositionAttribute as String), let sv = wAX(cb as! AXUIElement, kAXSizeAttribute as String),
           AXValueGetValue(pv as! AXValue, .cgPoint, &p), AXValueGetValue(sv as! AXValue, .cgSize, &s) else { return 0 }

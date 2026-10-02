@@ -1580,6 +1580,31 @@ fn capture_screen(hwnd: HWND, whole: bool) -> Option<Shot> {
     }
 }
 
+/// Screen pixels of a rectangle, as composed now.
+fn screen_pixels(x: i32, y: i32, w: i32, h: i32) -> Option<Shot> {
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    unsafe {
+        let screen = GetDC(None);
+        let mem = CreateCompatibleDC(Some(screen));
+        let bmp = CreateCompatibleBitmap(screen, w, h);
+        let old = SelectObject(mem, bmp.into());
+        let _ = BitBlt(mem, 0, 0, w, h, Some(screen), x, y, SRCCOPY);
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
+            ..Default::default()
+        };
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        GetDIBits(mem, bmp, 0, h as u32, Some(px.as_mut_ptr() as *mut c_void), &mut bmi, DIB_RGB_COLORS);
+        SelectObject(mem, old);
+        let _ = DeleteObject(bmp.into());
+        let _ = DeleteDC(mem);
+        ReleaseDC(None, screen);
+        Some(Shot { w, h, px })
+    }
+}
+
 /// The window's picture: PrintWindow (full content), or the screen when that comes back blank
 /// (composition windows).
 fn capture(hwnd: HWND, whole: bool) -> Option<Shot> {
@@ -1691,7 +1716,7 @@ fn smoke_tick() {
         (0, Some((hwnd, _))) if frames >= 15 => {
             std::thread::sleep(Duration::from_millis(200));
             let colors = painted_colors(hwnd);
-            let renderer = with_app(|a| a.remotes.get(&(hwnd.0 as isize)).map(|r| r.presenter.as_ref().map(|p| p.kind).unwrap_or("gdi"))).flatten().unwrap_or("?");
+            let renderer = with_app(|a| a.remotes.get(&(hwnd.0 as isize)).map(|r| r.comp.as_ref().map(|c| c.kind).or(r.presenter.as_ref().map(|p| p.kind)).unwrap_or("gdi"))).flatten().unwrap_or("?");
             finish("decoded frames are painted into the native window", colors > 100, format!("renderer={renderer} frames={frames} distinctColors={colors}"), 1);
         }
         (1, Some((hwnd, _))) => {
@@ -1856,13 +1881,23 @@ fn smoke_tick() {
             // the bar a few pixels along is the bar
             let composed = with_app(|a| a.remotes.get(&(main.0 as isize)).map(|r| r.comp.is_some())).flatten().unwrap_or(false);
             if composed {
+                // what is behind the window at its corner, then the window itself there: a rounded
+                // (transparent) corner shows exactly what is behind; the bar shows the bar
                 let shot = capture_screen(main, false);
+                let mut org = POINT::default();
+                unsafe { let _ = ClientToScreen(main, &mut org); }
+                let (w, _) = client_size(main);
+                unsafe { let _ = ShowWindow(main, SW_HIDE); }
+                std::thread::sleep(Duration::from_millis(300));
+                let behind = screen_pixels(org.x, org.y, w, 3);
+                unsafe { let _ = ShowWindow(main, SW_SHOW); }
                 let active = with_app(|a| a.remotes.get(&(main.0 as isize)).map(|r| r.active)).flatten().unwrap_or(false);
                 let bg = chrome::title_bg(active);
                 let far = |a: (u8, u8, u8), b: (u8, u8, u8)| a.0.abs_diff(b.0) as u32 + a.1.abs_diff(b.1) as u32 + a.2.abs_diff(b.2) as u32;
                 let (corner, edge) = shot.as_ref().map(|s| (s.pixel(0, 0), s.pixel(s.w / 2, 2))).unwrap_or_default();
-                let ok = far(corner, bg) > 24 && far(edge, bg) < 12;
-                finish("rounded window corners (DirectComposition clip)", ok, format!("corner={corner:?} barEdge={edge:?} bar={bg:?}"), 44);
+                let (behind_corner, behind_edge) = behind.as_ref().map(|s| (s.pixel(0, 0), s.pixel(s.w / 2, 2))).unwrap_or_default();
+                let ok = far(corner, behind_corner) < 12 && far(edge, bg) < 12 && (far(behind_edge, bg) > 12 || far(behind_corner, bg) > 12 || corner == behind_corner);
+                finish("rounded window corners (DirectComposition clip)", ok, format!("corner={corner:?} behindCorner={behind_corner:?} barEdge={edge:?} bar={bg:?}"), 44);
             } else {
                 finish("square corners with the GDI renderer", true, "gdi".into(), 44);
             }
@@ -2155,7 +2190,7 @@ fn showcase_tick() {
 
 fn save_app_windows(app: &str, index: usize, dir: &std::path::Path) {
     let wins: Vec<(isize, String, String, u32, u32, u32, &'static str)> = with_app(|a| {
-        let mut v: Vec<_> = a.remotes.iter().filter(|(_, r)| r.app == app).map(|(k, r)| (*k, format!("{:?}", r.role), r.id.to_string(), r.rw, r.rh, r.frames, r.presenter.as_ref().map(|p| p.kind).unwrap_or("gdi"))).collect();
+        let mut v: Vec<_> = a.remotes.iter().filter(|(_, r)| r.app == app).map(|(k, r)| (*k, format!("{:?}", r.role), r.id.to_string(), r.rw, r.rh, r.frames, r.comp.as_ref().map(|c| c.kind).or(r.presenter.as_ref().map(|p| p.kind)).unwrap_or("gdi"))).collect();
         v.sort_by_key(|w| w.2.clone());
         v
     })

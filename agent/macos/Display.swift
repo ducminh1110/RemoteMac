@@ -67,7 +67,22 @@ final class DisplayManager {
             frame = r
         }
         NSRunningApplication(processIdentifier: w.pid)?.activate(options: [.activateIgnoringOtherApps])
-        setFrame(aw, frame)
+        // the app may not know the new display yet (screens are re-read on its run loop):
+        // set, check where the window really is, retry for a few seconds
+        for attempt in 0..12 {
+            setFrame(aw, frame)
+            usleep(250_000)
+            var p = CGPoint.zero, sz = CGSize.zero
+            if let pv = axAttr(aw, kAXPositionAttribute as String), let sv = axAttr(aw, kAXSizeAttribute as String),
+               AXValueGetValue(pv as! AXValue, .cgPoint, &p), AXValueGetValue(sv as! AXValue, .cgSize, &sz) {
+                if abs(p.x - frame.minX) < 4 && abs(p.y - frame.minY) < 4 && abs(sz.width - frame.width) < 4 && abs(sz.height - frame.height) < 4 {
+                    if attempt > 0 { log("window \(w.id) took its new frame after \(attempt + 1) tries") }
+                    break
+                }
+                if attempt == 11 { log("window \(w.id) stays at \(Int(p.x)),\(Int(p.y)) \(Int(sz.width))x\(Int(sz.height))") }
+            }
+            usleep(250_000)
+        }
         log("window \(w.id) fullscreen=\(on) -> \(Int(frame.width))x\(Int(frame.height)) at \(Int(frame.minX)),\(Int(frame.minY))")
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.7) { logWindowState(w.id, display: id) }
         return true

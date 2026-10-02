@@ -63,6 +63,7 @@ impl Launcher {
             let _ = windows::Win32::UI::Controls::SetWindowTheme(list, w!("Explorer"), PCWSTR::null());
             let l = Self { hwnd, list, images, ids: vec![], footer: String::new(), _font: ui };
             let mut l = l;
+            l.fit(); // WM_SIZE during creation came before the viewer's state existed
             l.status("connecting…");
             if show {
                 let _ = ShowWindow(hwnd, SW_SHOW);
