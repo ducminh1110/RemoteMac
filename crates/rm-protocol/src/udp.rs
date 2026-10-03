@@ -162,6 +162,19 @@ pub fn parse_pong(p: &[u8]) -> Option<(u64, u64)> {
 // can make one. The first address a valid punch or punch-ack comes from becomes the direct path,
 // and everything UDP (video, reports, pings, input) goes there instead of through the relay.
 
+/// agent -> client: one Sunshine/GameStream video packet (crates/rm-gamestream) behind
+/// `"RM" 24 0 width u16 height u16` (BE); the RTP SSRC is the window
+pub const T_GS_VIDEO: u8 = 24;
+pub const GS_TAG: usize = 8;
+/// GameStream packet size RemoteMac uses (packets are this + 16 bytes; + the tag < 1280)
+pub const GS_PACKET_SIZE: usize = 1200;
+pub const GS_MIN_FEC: usize = 2;
+
+pub fn gs_tag(width: u16, height: u16) -> [u8; GS_TAG] {
+    let (w, h) = (width.to_be_bytes(), height.to_be_bytes());
+    [MAGIC[0], MAGIC[1], T_GS_VIDEO, 0, w[0], w[1], h[0], h[1]]
+}
+
 /// either way: `"RM" 20 ack(0/1) secret[16]`
 pub const T_PUNCH: u8 = 20;
 /// client -> agent: input messages, reliable and in order (see [`InputQueue`])

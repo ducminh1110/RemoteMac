@@ -348,34 +348,47 @@ final class UdpLink {
         return nil
     }
 
+    /// Sunshine's packet format (crates/rm-gamestream, the Moonlight protocol): RTP +
+    /// NV_VIDEO_PACKET + frame header, Reed-Solomon parity in FEC blocks; the RTP SSRC is the
+    /// window. Each packet goes out behind an 8-byte tag ("RM", 24, 0, width, height BE) so
+    /// relays and the client's demultiplexer know it.
+    static let gsPacketSize: UInt32 = 1200, gsMinFec: UInt32 = 2
+    private var packetizers: [UInt64: OpaquePointer] = [:]
+    private var frameIndex: [UInt64: UInt32] = [:]
+
+    func forgetWindow(_ id: UInt64) {
+        cond.lock(); let p = packetizers.removeValue(forKey: id); frameIndex.removeValue(forKey: id); cond.unlock()
+        if let p = p { rm_gs_packetizer_free(p) }
+    }
+
     private func packetize(_ p: VideoPacket) -> [Data] {
-        cond.lock(); let s = (seq[p.windowID] ?? 0) &+ 1; seq[p.windowID] = s; cond.unlock()
-        let bytes = [UInt8](p.data), len = bytes.count
-        let n = max(1, (len + Self.shard - 1) / Self.shard)
-        let size = max(1, (len + n - 1) / n)
-        let blocks = (n + Self.maxBlock - 1) / Self.maxBlock
-        var out: [Data] = []
-        var head = Data()
-        func be<T: FixedWidthInteger>(_ v: T) { var x = v.bigEndian; withUnsafeBytes(of: &x) { head.append(contentsOf: $0) } }
-        head.append(contentsOf: [0x52, 0x4D, 16, p.keyframe ? 1 : 0])
-        be(p.windowID); be(s); be(p.ptsMicros); be(p.width); be(p.height); be(UInt32(len))
-        for b in 0..<blocks {
-            let first = b * Self.maxBlock, k = min(Self.maxBlock, n - first)
-            let pct: Int = fecPct
-            let m: Int = pct == 0 ? 0 : max(1, min(255 - k, (k * pct + 99) / 100))
-            let shards: [[UInt8]] = (0..<k).map { j in
-                let start = min(len, (first + j) * size), end = min(len, start + size)
-                var sh = Array(bytes[start..<end]); if sh.count < size { sh += [UInt8](repeating: 0, count: size - sh.count) }
-                return sh
-            }
-            let parity = fecEncode(shards, m: m)
-            for (i, sh) in (shards + parity).enumerated() {
-                var d = head
-                d.append(contentsOf: [UInt8(b), UInt8(blocks), UInt8(i), UInt8(k), UInt8(m), 0])
-                d.append(contentsOf: sh)
-                out.append(d)
-            }
+        cond.lock()
+        let pz: OpaquePointer
+        if let x = packetizers[p.windowID] { pz = x } else {
+            pz = rm_gs_packetizer_new(Self.gsPacketSize, UInt32(fecPct), Self.gsMinFec, UInt32(truncatingIfNeeded: p.windowID))!
+            packetizers[p.windowID] = pz
         }
+        let index = (frameIndex[p.windowID] ?? 0) &+ 1
+        frameIndex[p.windowID] = index
+        rm_gs_packetizer_set_fec(pz, UInt32(fecPct))
+        // 90 kHz RTP clock from the capture time; latency in 1/10 ms (Sunshine's frame header)
+        let ts = UInt32(truncatingIfNeeded: p.ptsMicros &* 9 / 100)
+        let now = agentClockUs()
+        let latency = UInt16(min(65535, now > p.ptsMicros ? (now - p.ptsMicros) / 100 : 0))
+        var count = 0
+        let bytes = [UInt8](p.data)
+        let ptr = bytes.withUnsafeBufferPointer { rm_gs_packetize(pz, $0.baseAddress, $0.count, index, p.keyframe, ts, latency, &count) }
+        cond.unlock()
+        guard let base = ptr else { return [] }
+        let size = Int(Self.gsPacketSize) + 16
+        var out: [Data] = []
+        out.reserveCapacity(count)
+        for i in 0..<count {
+            var d = Data([0x52, 0x4D, 24, 0, UInt8(p.width >> 8), UInt8(p.width & 0xff), UInt8(p.height >> 8), UInt8(p.height & 0xff)])
+            d.append(base + i * size, count: size)
+            out.append(d)
+        }
+        rm_gs_free(base, count * size)
         return out
     }
 }

@@ -163,8 +163,7 @@ impl Depacketizer {
         }
         // deliver what is complete, in order; give up on frames left behind
         let newest = *self.frames.keys().next_back().unwrap();
-        loop {
-            let Some((&idx, f)) = self.frames.iter().next() else { break };
+        while let Some((&idx, f)) = self.frames.iter().next() {
             let complete = f.blocks.len() == f.last_block + 1 && f.blocks.iter().all(|b| b.done.is_some());
             if complete {
                 let f = self.frames.remove(&idx).unwrap();

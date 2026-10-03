@@ -33,7 +33,8 @@ pub struct AgentUdp {
     secret: [u8; 16],
     direct: Mutex<Direct>,
     last_report: Mutex<Option<Instant>>,
-    seq: Mutex<HashMap<u64, u32>>,
+    /// one Sunshine-format packetizer and frame counter per window (as the Swift agent)
+    seq: Mutex<HashMap<u64, (rm_gamestream::video::Packetizer, u32)>>,
     /// input that came over UDP goes to the session's message loop
     pub inputs: Mutex<Option<Sender<Message>>>,
     /// false: never take a direct path (tests of the relay path)
@@ -187,14 +188,23 @@ impl AgentUdp {
     }
 
     pub fn send(&self, v: &VideoFrame) {
-        let seq = {
+        let packets = {
             let mut s = self.seq.lock().unwrap();
-            let e = s.entry(v.window_id).or_insert(0);
-            *e = e.wrapping_add(1);
-            *e
+            let e = s.entry(v.window_id).or_insert_with(|| {
+                let mut p = rm_gamestream::video::Packetizer::new(udp::GS_PACKET_SIZE, 20, udp::GS_MIN_FEC);
+                p.ssrc = v.window_id as u32;
+                (p, 0)
+            });
+            e.1 = e.1.wrapping_add(1);
+            e.0.fec_percentage = self.fec_pct.load(Ordering::Relaxed) as usize;
+            let ts = (v.pts_us.wrapping_mul(9) / 100) as u32;
+            e.0.packetize(&v.data, e.1, v.keyframe, ts, 0)
         };
         let to = self.dest();
-        for d in udp::packetize(v, seq, self.fec_pct.load(Ordering::Relaxed) as u32) {
+        let tag = udp::gs_tag(v.width, v.height);
+        for p in packets {
+            let mut d = tag.to_vec();
+            d.extend_from_slice(&p);
             let _ = self.sock.send_to(&d, to);
         }
         self.sent_frames.fetch_add(1, Ordering::Relaxed);

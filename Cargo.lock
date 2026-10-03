@@ -321,6 +321,7 @@ dependencies = [
  "rm-core",
  "rm-decode",
  "rm-fakeagent",
+ "rm-gamestream",
  "rm-protocol",
  "rm-relay",
  "serde",
@@ -350,6 +351,7 @@ name = "rm-fakeagent"
 version = "0.1.0"
 dependencies = [
  "openh264",
+ "rm-gamestream",
  "rm-protocol",
  "rm-relay",
  "serde_json",

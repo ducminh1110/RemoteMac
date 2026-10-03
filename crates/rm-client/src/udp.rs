@@ -8,7 +8,9 @@
 //! reports, pings and input go straight between the PC and the Mac (same LAN, or across NATs).
 //! The relay stays the meeting point and the fallback.
 
+use rm_gamestream::depacketizer::Depacketizer;
 use rm_protocol::udp::{self, InputQueue, Out, Reassembler};
+use std::collections::HashMap;
 use rm_relay::Role;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -146,6 +148,10 @@ fn is_private(a: &SocketAddr) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn run(sock: UdpSocket, relay: SocketAddr, register: Vec<u8>, stats: Arc<Mutex<LinkStats>>, stop: Arc<AtomicBool>, epoch: Instant, p2p: Arc<Mutex<P2p>>, mut on_out: impl FnMut(Out), mut offer: Option<OnOffer>) {
     let mut r = Reassembler::new();
+    // GameStream (Sunshine-format) streams, one per window (RTP SSRC), and their sequence
+    // numbers for the loss report
+    let mut gs: HashMap<u32, (Depacketizer, Option<u16>)> = HashMap::new();
+    let (mut gs_expected, mut gs_received, mut gs_recovered, mut gs_lost, mut gs_frames) = (0u32, 0u32, 0u64, 0u32, 0u32);
     let mut buf = vec![0u8; 2048];
     let (mut last_reg, mut last_fb, mut last_ping, mut last_video) = (None::<Instant>, Instant::now(), None::<Instant>, None::<Instant>);
     let mut registered = false;
@@ -213,6 +219,13 @@ fn run(sock: UdpSocket, relay: SocketAddr, register: Vec<u8>, stats: Arc<Mutex<L
         }
         if registered && now.duration_since(last_fb) >= Duration::from_millis(200) {
             let mut fb = r.take_stats();
+            let rec_now: u64 = gs.values().map(|(d, _)| d.recovered).sum();
+            fb.expected += gs_expected;
+            fb.received += gs_received.min(gs_expected);
+            fb.recovered += (rec_now - gs_recovered) as u32;
+            fb.lost += gs_lost;
+            fb.frames += gs_frames;
+            (gs_expected, gs_received, gs_recovered, gs_lost, gs_frames) = (0, 0, rec_now, 0, 0);
             fb.rtt_ms = stats.lock().ok().and_then(|s| s.rtt_ms).map_or(0, |r| r.round() as u32);
             let _ = sock.send_to(&fb.encode(), dest(&p2p));
             last_fb = now;
@@ -281,6 +294,47 @@ fn run(sock: UdpSocket, relay: SocketAddr, register: Vec<u8>, stats: Arc<Mutex<L
                         registered = p[3] != rm_relay::UDP_REFUSED;
                         if let Ok(mut s) = stats.lock() {
                             s.ready = p[3] == rm_relay::UDP_PEER_READY;
+                        }
+                    }
+                    udp::T_GS_VIDEO if n > udp::GS_TAG => {
+                        last_video = Some(now);
+                        bytes += n as u64;
+                        let (w, h) = (u16::from_be_bytes([p[4], p[5]]), u16::from_be_bytes([p[6], p[7]]));
+                        let pkt = &p[udp::GS_TAG..];
+                        let Some(hd) = rm_gamestream::depacketizer::header(pkt) else { continue };
+                        let seq = u16::from_be_bytes([pkt[2], pkt[3]]);
+                        let e = gs.entry(hd.ssrc).or_insert_with(|| (Depacketizer::new(udp::GS_PACKET_SIZE), None));
+                        gs_received += 1;
+                        match e.1 {
+                            None => gs_expected += 1,
+                            Some(hi) => {
+                                let d = seq.wrapping_sub(hi) as i16;
+                                if d > 0 {
+                                    gs_expected += d as u32;
+                                }
+                            }
+                        }
+                        if e.1.is_none_or(|hi| (seq.wrapping_sub(hi) as i16) > 0) {
+                            e.1 = Some(seq);
+                        }
+                        // the frame's capture time on the agent clock, from the 90 kHz RTP stamp
+                        let agent_now = stats.lock().ok().and_then(|s| s.offset_us).map(|o| (epoch.elapsed().as_micros() as i64 + o).max(0) as u64);
+                        for o in e.0.push(pkt) {
+                            match o {
+                                rm_gamestream::depacketizer::Out::Frame(f) => {
+                                    frames += 1;
+                                    gs_frames += 1;
+                                    let pts_us = agent_now.map_or(0, |a| {
+                                        let back = ((a.wrapping_mul(9) / 100) as u32).wrapping_sub(f.timestamp) as u64;
+                                        a.saturating_sub(back * 100 / 9)
+                                    });
+                                    on_out(Out::Frame(rm_protocol::VideoFrame { window_id: hd.ssrc as u64, pts_us, keyframe: f.idr, codec: rm_protocol::CODEC_H264, width: w, height: h, data: f.data }));
+                                }
+                                rm_gamestream::depacketizer::Out::Lost(_) => {
+                                    gs_lost += 1;
+                                    on_out(Out::Lost(hd.ssrc as u64));
+                                }
+                            }
                         }
                     }
                     udp::T_VIDEO => {

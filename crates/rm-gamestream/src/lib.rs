@@ -8,6 +8,7 @@
 
 pub mod crypto;
 pub mod depacketizer;
+pub mod ffi;
 pub mod input;
 pub mod video;
 

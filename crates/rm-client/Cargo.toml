@@ -12,6 +12,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 rm-protocol = { path = "../rm-protocol" }
+rm-gamestream = { path = "../rm-gamestream" }
 rm-core = { path = "../rm-core" }
 rm-decode = { path = "../rm-decode" }
 rm-relay = { path = "../rm-relay" }
