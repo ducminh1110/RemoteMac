@@ -102,12 +102,32 @@ final class InputInjector {
             activatedPid = pid
             if !front { usleep(60_000) }
         }
-        CGWarpMouseCursorPosition(p); CGAssociateMouseAndMouseCursorPosition(1)
-        guard let e = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: button) else { return }
-        e.setIntegerValueField(.mouseEventClickState, value: 1)
+        // No CGWarpMouseCursorPosition: a warp makes macOS hold back mouse events for 0.25 s, so a
+        // button-up right after it came late and the Dock took the click for a press-and-hold
+        // (its Quit / Options menu). A mouse event posted at a point moves the pointer itself.
+        guard let e = CGEvent(mouseEventSource: Self.source, mouseType: type, mouseCursorPosition: p, mouseButton: button) else { return }
+        // double and triple clicks: a press soon after the last one, close to it, counts up
+        // (Finder opens on a double click, text selects words and lines)
+        if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown {
+            let now = CFAbsoluteTimeGetCurrent()
+            let near = abs(p.x - lastDown.x) <= 4 && abs(p.y - lastDown.y) <= 4
+            clicks = (near && now - lastDownAt <= NSEvent.doubleClickInterval && button == lastButton) ? clicks + 1 : 1
+            lastDown = p; lastDownAt = now; lastButton = button
+        }
+        e.setIntegerValueField(.mouseEventClickState, value: Int64(type == .mouseMoved ? 0 : clicks))
         e.setIntegerValueField(.mouseEventButtonNumber, value: Int64(button.rawValue))
         e.post(tap: .cghidEventTap)
     }
+
+    /// Our own event source with no suppression of local events after synthetic ones.
+    private static let source: CGEventSource? = {
+        let s = CGEventSource(stateID: .hidSystemState)
+        s?.localEventsSuppressionInterval = 0
+        return s
+    }()
+    private var clicks: Int64 = 1
+    private var lastDown = CGPoint(x: -100, y: -100), lastDownAt: CFAbsoluteTime = 0
+    private var lastButton: CGMouseButton = .left
 
     private func typeUnicode(_ s: String, pid: pid_t) {
         for ch in s {
