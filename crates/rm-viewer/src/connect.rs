@@ -8,7 +8,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const CLASS: PCWSTR = w!("RmConnect");
@@ -62,9 +62,11 @@ pub fn last_id() -> Option<String> {
     last_id_path().and_then(|p| std::fs::read_to_string(p).ok()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
-/// Show the window; `id` prefills the ID, `error` is shown in red (a failed attempt).
-/// Returns the typed (id, password), or None if the user closed the window.
-pub fn ask(id: Option<&str>, error: Option<&str>) -> Option<(String, String)> {
+/// Show the window and connect from it: `try_connect(id, password)` runs on a background
+/// thread while the window stays responsive ("Connecting…"); a failure is shown in red and the
+/// user can try again. `id` prefills the ID, `error` starts with a message (a lost connection).
+/// Returns what `try_connect` returned, or None if the user closed the window.
+pub fn connect_window<T: Send>(id: Option<&str>, error: Option<&str>, try_connect: impl Fn(&str, &str) -> Result<T, String> + Sync) -> Option<T> {
     unsafe {
         let hinst: HINSTANCE = GetModuleHandleW(None).ok()?.into();
         let wc = WNDCLASSW { lpfnWndProc: Some(proc), hInstance: hinst, lpszClassName: CLASS, hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), ..Default::default() };
@@ -103,20 +105,59 @@ pub fn ask(id: Option<&str>, error: Option<&str>) -> Option<(String, String)> {
         let _ = SetForegroundWindow(hwnd);
         let _ = SetFocus(Some(if id.is_some() { pw_edit } else { id_edit }));
 
+        let button = GetDlgItem(Some(hwnd), IDOK.0).unwrap_or_default();
         let mut msg = MSG::default();
-        let result = loop {
-            if let Some(done) = STATE.with(|st| st.borrow_mut().as_mut().and_then(|s| s.done.take())) {
-                break done;
+        let result = std::thread::scope(|scope| {
+            let mut attempt: Option<(String, std::thread::ScopedJoinHandle<'_, Result<T, String>>)> = None;
+            loop {
+                // a connection attempt finished?
+                if attempt.as_ref().is_some_and(|(_, h)| h.is_finished()) {
+                    let (typed, h) = attempt.take().unwrap();
+                    match h.join().unwrap_or_else(|_| Err("internal error while connecting".into())) {
+                        Ok(t) => {
+                            remember_id(&typed);
+                            break Some(t);
+                        }
+                        Err(e) => {
+                            set_text(error_of(), &e);
+                            let _ = EnableWindow(button, true);
+                            let _ = EnableWindow(edit_of(true), true);
+                            let _ = EnableWindow(edit_of(false), true);
+                            let _ = SetFocus(Some(edit_of(false)));
+                        }
+                    }
+                }
+                match STATE.with(|st| st.borrow_mut().as_mut().and_then(|s| s.done.take())) {
+                    Some(None) => break None,
+                    Some(Some((typed, pw))) if attempt.is_none() => {
+                        let _ = EnableWindow(button, false);
+                        let _ = EnableWindow(edit_of(true), false);
+                        let _ = EnableWindow(edit_of(false), false);
+                        let f = &try_connect;
+                        let t2 = typed.clone();
+                        attempt = Some((typed, scope.spawn(move || f(&t2, &pw))));
+                    }
+                    _ => {}
+                }
+                // pump without blocking for long, so the attempt is noticed when it ends
+                if attempt.is_some() {
+                    if !PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                        let _ = MsgWaitForMultipleObjects(None, false, 50, QS_ALLINPUT);
+                        continue;
+                    }
+                    if msg.message == WM_QUIT {
+                        break None;
+                    }
+                } else if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                    break None;
+                }
+                // Tab between fields, Enter = Connect
+                if !IsDialogMessageW(hwnd, &msg).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
             }
-            if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
-                break None;
-            }
-            // Tab between fields, Enter = Connect
-            if !IsDialogMessageW(hwnd, &msg).as_bool() {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-        };
+        });
         let _ = DestroyWindow(hwnd);
         if let Some(s) = STATE.with(|st| st.borrow_mut().take()) {
             let _ = DeleteObject(s.heading.into());
@@ -126,6 +167,20 @@ pub fn ask(id: Option<&str>, error: Option<&str>) -> Option<(String, String)> {
         let _ = DeleteObject(mono.into());
         result
     }
+}
+
+fn set_text(h: HWND, t: &str) {
+    unsafe {
+        let _ = SetWindowTextW(h, &HSTRING::from(t));
+    }
+}
+
+fn error_of() -> HWND {
+    STATE.with(|st| st.borrow().as_ref().map(|s| s.error)).unwrap_or_default()
+}
+
+fn edit_of(id: bool) -> HWND {
+    STATE.with(|st| st.borrow().as_ref().map(|s| if id { s.id } else { s.pw })).unwrap_or_default()
 }
 
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -171,26 +226,28 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             })
         }
         WM_COMMAND if (wp.0 & 0xFFFF) as i32 == IDOK.0 => {
-            STATE.with(|st| {
-                if let Some(st) = st.borrow_mut().as_mut() {
-                    let (id, pw) = (text_of(st.id), text_of(st.pw));
-                    match rm_protocol::session::normalize_id(&id) {
-                        None => {
-                            let _ = SetWindowTextW(st.error, w!("The ID is the 9 digits shown on the Mac."));
-                            let _ = SetFocus(Some(st.id));
-                        }
-                        Some(_) if pw.is_empty() => {
-                            let _ = SetWindowTextW(st.error, w!("Type the password shown on the Mac."));
-                            let _ = SetFocus(Some(st.pw));
-                        }
-                        Some(id) => {
-                            let _ = SetWindowTextW(st.error, w!("Connecting…"));
-                            st.done = Some(Some((id, pw)));
-                            let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
-                        }
-                    }
+            // read under a short borrow; every Win32 call below may re-enter this procedure
+            let Some((id_h, pw_h, err_h)) = STATE.with(|st| st.borrow().as_ref().map(|s| (s.id, s.pw, s.error))) else { return LRESULT(0) };
+            let (id, pw) = (text_of(id_h), text_of(pw_h));
+            match rm_protocol::session::normalize_id(&id) {
+                None => {
+                    set_text(err_h, "The ID is the 9 digits shown on the Mac.");
+                    let _ = SetFocus(Some(id_h));
                 }
-            });
+                Some(_) if pw.is_empty() => {
+                    set_text(err_h, "Type the password shown on the Mac.");
+                    let _ = SetFocus(Some(pw_h));
+                }
+                Some(id) => {
+                    set_text(err_h, "Connecting…");
+                    STATE.with(|st| {
+                        if let Some(s) = st.borrow_mut().as_mut() {
+                            s.done = Some(Some((id, pw)));
+                        }
+                    });
+                    let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+                }
+            }
             LRESULT(0)
         }
         WM_CLOSE => {

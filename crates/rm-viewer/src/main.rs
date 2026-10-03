@@ -24,6 +24,17 @@ fn main() {
     };
     #[cfg(windows)]
     {
+        // no console in the release build: log to a file, and never die without a word
+        rm_viewer::native::log_to_file(&rm_viewer::log_path());
+        let quiet = has("--smoke") || has("--showcase");
+        std::panic::set_hook(Box::new(move |info| {
+            let msg = format!("RemoteMac stopped because of an internal error:\n\n{info}\n\nLog: {}", rm_viewer::log_path().display());
+            eprintln!("{msg}");
+            if !quiet {
+                rm_viewer::native::message_box("RemoteMac", &msg);
+            }
+        }));
+        eprintln!("RemoteMac viewer {} starting (relay {relay})", env!("CARGO_PKG_VERSION"));
         let opts = rm_viewer::ui::Options { relay, session, token, prompt: prompt && !has("--smoke") && !has("--showcase"), app: get("--app"), ctrl_as_command: !has("--raw-ctrl"), smoke: has("--smoke"), clipboard: !has("--no-clipboard"), d3d: get("--renderer").as_deref() != Some("gdi"), windows_file_picker: !has("--mac-file-panel") && !has("--showcase"), shortcuts: !has("--no-shortcuts"),
             showcase: get("--showcase").map(|dir| rm_viewer::ui::ShowcaseOptions {
                 apps: get("--apps").unwrap_or_else(|| "xcode".into()).split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),

@@ -279,24 +279,22 @@ pub fn run(opts: Options) -> i32 {
         eprintln!("video decoder: {:?}", net::decoder_kind());
         let mut opts = opts;
         let (link, rx) = if opts.prompt {
-            // ID + password window; a failed attempt shows why and asks again
-            let (mut id, mut error) = (crate::connect::last_id(), None::<String>);
-            loop {
-                let Some((typed, password)) = crate::connect::ask(id.as_deref(), error.as_deref()) else { return 0 };
-                let (session, token) = (rm_protocol::session::relay_session(&typed), rm_protocol::session::token(&typed, &password));
-                match net::connect_with(&opts.relay, &session, &token, opts.app.as_deref(), false, wake) {
-                    Ok(x) => {
-                        crate::connect::remember_id(&typed);
-                        opts.session = rm_protocol::session::display_id(&typed);
-                        break x;
-                    }
-                    Err(e) => {
+            // ID + password window; it connects in the background and shows why an attempt failed
+            let relay = opts.relay.clone();
+            let app = opts.app.clone();
+            let id = crate::connect::last_id();
+            let got = crate::connect::connect_window(id.as_deref(), None, |typed, password| {
+                let (session, token) = (rm_protocol::session::relay_session(typed), rm_protocol::session::token(typed, password));
+                net::connect_with(&relay, &session, &token, app.as_deref(), false, wake)
+                    .map(|x| (x, rm_protocol::session::display_id(typed)))
+                    .map_err(|e| {
                         eprintln!("connect failed: {e}");
-                        error = Some(net::friendly_error(&e));
-                        id = Some(rm_protocol::session::display_id(&typed));
-                    }
-                }
-            }
+                        net::friendly_error(&e)
+                    })
+            });
+            let Some((x, shown_id)) = got else { return 0 };
+            opts.session = shown_id;
+            x
         } else {
             match net::connect(&opts.relay, &opts.session, &opts.token, opts.app.as_deref(), wake) {
                 Ok(x) => x,
@@ -378,12 +376,32 @@ fn choose_decoder(use_comp: bool) -> net::DecoderKind {
 
 /// The Mac is no longer reachable from this viewer: its apps leave the Start menu and Search.
 fn on_mac_gone() {
+    MAC_GONE.store(true, std::sync::atomic::Ordering::Release);
     if let Some(d) = with_app(|a| a.shortcut_dir.clone()).flatten() {
+        let _guard = SHORTCUT_LOCK.lock(); // after a sync in flight
         shortcuts::remove_all(&d);
     }
 }
 
+/// Shortcuts are (re)written on a worker thread, at most once a second: with every Mac app in
+/// the Start menu, writing them on the UI thread at each icon froze the viewer.
+static SHORTCUT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static SHORTCUTS_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static MAC_GONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+thread_local! { static SHORTCUTS_DIRTY: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) }; }
+
 fn sync_shortcuts() {
+    // note it; shortcuts_tick writes them shortly
+    SHORTCUTS_DIRTY.with(|d| if d.get().is_none() { d.set(Some(Instant::now())) });
+}
+
+fn shortcuts_tick() {
+    use std::sync::atomic::Ordering;
+    let due = SHORTCUTS_DIRTY.with(|d| d.get().is_some_and(|t| t.elapsed() >= Duration::from_millis(700)));
+    if !due || SHORTCUTS_BUSY.load(Ordering::Acquire) {
+        return;
+    }
+    SHORTCUTS_DIRTY.with(|d| d.set(None));
     let Some((dir, apps)) = with_app(|a| {
         let dir = a.shortcut_dir.clone()?;
         let apps: Vec<shortcuts::AppEntry> = a.app_names.iter().map(|(id, n)| (id.clone(), n.clone(), a.icon_rgba.get(id).cloned())).collect();
@@ -391,11 +409,21 @@ fn sync_shortcuts() {
     })
     .flatten() else { return };
     let Ok(exe) = std::env::current_exe() else { return };
-    for r in shortcuts::sync(&dir, &exe, &apps) {
-        if let Err(e) = r {
-            eprintln!("warning: shortcut not written: {e}");
+    SHORTCUTS_BUSY.store(true, Ordering::Release);
+    std::thread::spawn(move || {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
-    }
+        let _guard = SHORTCUT_LOCK.lock();
+        if !MAC_GONE.load(Ordering::Acquire) {
+            for r in shortcuts::sync(&dir, &exe, &apps) {
+                if let Err(e) = r {
+                    eprintln!("warning: shortcut not written: {e}");
+                }
+            }
+        }
+        SHORTCUTS_BUSY.store(false, Ordering::Release);
+    });
 }
 
 fn quit(code: i32) {
@@ -418,6 +446,7 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
         }
         WM_TIMER => {
             stats_tick();
+            shortcuts_tick();
             smoke_tick();
             showcase_tick();
             LRESULT(0)
@@ -884,6 +913,11 @@ fn handle_event(ev: UiEvent) {
         UiEvent::Notice(n) => eprintln!("notice: {n}"),
         UiEvent::Disconnected(why) => {
             eprintln!("disconnected: {why}");
+            let interactive = with_app(|a| a.smoke.is_none() && a.showcase.is_none()).unwrap_or(false);
+            if interactive {
+                // never vanish without a word
+                native::message_box("RemoteMac", &format!("The connection to the Mac was closed.\n\n{why}\n\nLog: {}", crate::log_path().display()));
+            }
             on_mac_gone();
             quit(if with_app(|a| a.smoke.is_some()).unwrap_or(false) { 1 } else { 0 });
         }

@@ -23,3 +23,8 @@ pub mod native;
 pub mod shortcuts;
 #[cfg(windows)]
 pub mod ui;
+
+/// The viewer's log: %APPDATA%\\RemoteMac\\viewer.log (release builds have no console).
+pub fn log_path() -> std::path::PathBuf {
+    std::env::var_os("APPDATA").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir).join("RemoteMac").join("viewer.log")
+}

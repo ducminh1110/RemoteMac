@@ -266,3 +266,30 @@ pub fn corner_remedy(hwnd: HWND, remedy: &str, radius: i32) {
         }
     }
 }
+
+/// A plain message box (errors the user must see: the release build has no console).
+pub fn message_box(title: &str, text: &str) {
+    unsafe {
+        let _ = MessageBoxW(None, &HSTRING::from(text), &HSTRING::from(title), MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+    }
+}
+
+/// Send this process's stderr (all the viewer's logging) to `path` when it has no console
+/// (the release build is a GUI app), so problems can be read afterwards.
+pub fn log_to_file(path: &std::path::Path) {
+    use std::os::windows::io::IntoRawHandle;
+    use windows::Win32::System::Console::{GetStdHandle, SetStdHandle, STD_ERROR_HANDLE};
+    unsafe {
+        let current = GetStdHandle(STD_ERROR_HANDLE).unwrap_or_default();
+        if !current.is_invalid() && !current.0.is_null() {
+            return; // a console or a redirect already takes it
+        }
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(f) = std::fs::File::create(path) {
+            let h = windows::Win32::Foundation::HANDLE(f.into_raw_handle());
+            let _ = SetStdHandle(STD_ERROR_HANDLE, h);
+        }
+    }
+}

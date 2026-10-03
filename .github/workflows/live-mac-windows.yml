@@ -33,9 +33,10 @@ jobs:
       - name: Serve this Mac's apps through the relay
         run: |
           [[ -n "$RM_RELAY_KEY" ]] || { echo "::error::repository secret RM_RELAY_KEY is missing (deploy/RELAY-SETUP.md)"; exit 1; }
-          export RM_SESSION="live-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          export RM_SESSION_TOKEN=$(printf '%s' "$RM_RELAY_KEY:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" | shasum -a 256 | cut -c1-48)
-          echo "::add-mask::$RM_SESSION_TOKEN"
+          # what a user does: ./remotemac --id ... --password ... (ID and password made per run)
+          export RM_LIVE_ID=$(printf '%09d' $(( (GITHUB_RUN_ID + GITHUB_RUN_ATTEMPT) % 1000000000 )))
+          export RM_LIVE_PASSWORD=$(printf '%s' "$RM_RELAY_KEY:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" | shasum -a 256 | cut -c1-12)
+          echo "::add-mask::$RM_LIVE_PASSWORD"
           ./scripts/mac-live.sh
       - uses: actions/upload-artifact@v4
         if: always()
@@ -71,11 +72,17 @@ jobs:
       - name: Connect to the Mac, open apps, type, take screenshots
         shell: pwsh
         run: |
-          $session = "live-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $id = "{0:D9}" -f (([int64]$env:GITHUB_RUN_ID + [int64]$env:GITHUB_RUN_ATTEMPT) % 1000000000)
           $bytes = [System.Text.Encoding]::UTF8.GetBytes("$($env:RM_RELAY_KEY):$($env:GITHUB_RUN_ID):$($env:GITHUB_RUN_ATTEMPT)")
-          $env:RM_SESSION_TOKEN = (-join ([System.Security.Cryptography.SHA256]::HashData($bytes) | ForEach-Object { $_.ToString("x2") })).Substring(0, 48)
-          Write-Host "::add-mask::$($env:RM_SESSION_TOKEN)"
-          ./scripts/windows-showcase.ps1 -Relay $env:RM_RELAY -Session $session -Apps $env:APPS -Out out\live -Settle 12 -Type "Hello from Windows" -TimeoutSec 1200
+          $password = (-join ([System.Security.Cryptography.SHA256]::HashData($bytes) | ForEach-Object { $_.ToString("x2") })).Substring(0, 12)
+          Write-Host "::add-mask::$password"
+          ./scripts/windows-showcase.ps1 -Relay $env:RM_RELAY -Id $id -Password $password -Apps $env:APPS -Out out\live -Settle 12 -Type "Hello from Windows" -TimeoutSec 1200
+          $code = $LASTEXITCODE
+          # how the video travelled through the real server: UDP (smooth) or the TCP fallback
+          $stats = Get-Content out\live\viewer.log -ErrorAction SilentlyContinue | Select-String -Pattern "stream:|video decoder|frame pacing|UDP"
+          $stats | ForEach-Object { Write-Host $_.Line }
+          if (-not ($stats | Select-String -Pattern "Network UDP\+FEC")) { Write-Host "::warning::video did not use UDP through $env:RM_RELAY: is UDP 7470 open on the server (ufw and the provider's firewall)?" }
+          exit $code
       - uses: actions/upload-artifact@v4
         if: always()
         with:
