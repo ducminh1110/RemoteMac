@@ -265,6 +265,7 @@ pub fn run(opts: Options) -> i32 {
             }
         }
         crate::splash::register(hinst);
+        crate::settings_ui::register(hinst);
         let controller = match CreateWindowExW(WINDOW_EX_STYLE(0), w!("RmController"), w!("rm-controller"), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(hinst), None) {
             Ok(h) => h,
             Err(e) => {
@@ -369,6 +370,12 @@ fn choose_decoder(use_comp: bool) -> net::DecoderKind {
     };
     if let Some(k) = forced {
         return k;
+    }
+    // the user's choice in Settings (CPU, or GPU when this PC has one)
+    match crate::settings::Settings::load().decoder {
+        2 => return Platform,
+        1 if use_comp && crate::gpu::shared().is_some_and(|g| g.hardware) => return Hardware,
+        _ => {}
     }
     // probe on a thread of its own (Media Foundation wants a multithreaded COM apartment)
     std::thread::spawn(move || {
@@ -494,6 +501,10 @@ unsafe extern "system" fn launcher_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             with_app(|a| a.launcher.as_ref().map(|l| l.fit()));
             LRESULT(0)
         }
+        WM_COMMAND if wp.0 & 0xffff == launcher::ID_SETTINGS => {
+            open_settings(Some(hwnd));
+            LRESULT(0)
+        }
         WM_NOTIFY => {
             if let Some(app) = with_app(|a| a.launcher.as_ref().and_then(|l| l.activated(lp))).flatten() {
                 launch_app(&app);
@@ -517,6 +528,20 @@ unsafe extern "system" fn launcher_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }
+}
+
+/// The Settings window; saving applies what can be applied now (frame rate, bitrate,
+/// sharpness on the Mac; the pointer here) and keeps the rest for windows opened later.
+fn open_settings(owner: Option<HWND>) {
+    let Some(hinst) = with_app(|a| a.hinst) else { return };
+    crate::settings_ui::show(HINSTANCE(hinst as *mut c_void), owner, crate::settings::Settings::load(), |s| {
+        if let Err(e) = s.save() {
+            eprintln!("settings not saved: {e}");
+        }
+        local_cursor().store(s.local_cursor, std::sync::atomic::Ordering::Relaxed);
+        with_app(|a| a.link.send(&s.message(net::display_scale())));
+        eprintln!("settings: {s:?}");
+    });
 }
 
 /// "fit=W,H,S" for the Mac Desktop: the monitor the launcher is on, as a Mac display request.
@@ -744,7 +769,7 @@ fn overlay_bitmap(lines: &[String], scale: f64) -> (i32, i32, Vec<u8>) {
 /// anyway, and waiting for a vblank first only adds up to a frame of delay.
 fn start_pacer(ctl: isize) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
     use std::sync::atomic::{AtomicBool, Ordering};
-    if std::env::var("RM_PACING").ok().as_deref() != Some("1") {
+    if std::env::var("RM_PACING").ok().as_deref() != Some("1") && !crate::settings::Settings::load().pacing {
         return None;
     }
     let g = crate::gpu::shared().filter(|g| g.hardware)?;
@@ -1855,7 +1880,7 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
 static LOCAL_CURSOR: std::sync::OnceLock<std::sync::atomic::AtomicBool> = std::sync::OnceLock::new();
 
 fn local_cursor() -> &'static std::sync::atomic::AtomicBool {
-    LOCAL_CURSOR.get_or_init(|| std::sync::atomic::AtomicBool::new(std::env::var_os("RM_LOCAL_CURSOR").is_some()))
+    LOCAL_CURSOR.get_or_init(|| std::sync::atomic::AtomicBool::new(std::env::var_os("RM_LOCAL_CURSOR").is_some() || crate::settings::Settings::load().local_cursor))
 }
 
 unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -1948,6 +1973,13 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 return LRESULT(0);
             }
             let mods = current_mods();
+            // Ctrl+Alt+Shift+P: Settings (frame rate, bitrate, sharpness, ...)
+            if vk == 'P' as u32 && mods.ctrl && mods.alt && mods.shift {
+                if down {
+                    open_settings(Some(frame));
+                }
+                return LRESULT(0);
+            }
             // Ctrl+Alt+Shift+C: this PC's pointer over the picture on/off, as in Moonlight
             if vk == 'C' as u32 && mods.ctrl && mods.alt && mods.shift {
                 if down {

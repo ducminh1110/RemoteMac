@@ -44,6 +44,8 @@ func even(_ v: Int) -> Int { max(2, v + (v & 1)) }
 /// Pixels per point the client shows (its display scale, 1...3): windows are captured at that
 /// density so the client draws them 1:1, as sharp as its own windows. Capped near 4K.
 var captureScale: CGFloat = 1
+/// frames per second (the viewer's settings; Moonlight's FPS choice)
+var targetFPS: Int32 = 60
 func capturePixels(_ w: CGFloat, _ h: CGFloat) -> (Int, Int) {
     var s = max(1, min(3, captureScale))
     let maxPixels: CGFloat = 3840 * 2400
@@ -184,7 +186,7 @@ final class WindowStream: NSObject, SCStreamOutput {
             guard let d = content.displays.first(where: { $0.displayID == did }) else { throw WireError(description: "display \(did) not shareable") }
             let cfg = SCStreamConfiguration()
             (cfg.width, cfg.height) = capturePixels(CGFloat(d.width), CGFloat(d.height))
-            cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+            cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
             cfg.queueDepth = 6; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true // the Mac's pointer is in the picture (as Sunshine); content fills the output at any density
             let s = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: cfg, delegate: nil)
@@ -201,7 +203,7 @@ final class WindowStream: NSObject, SCStreamOutput {
         // 4:2:0 needs even sizes (an odd one gets no frames at all): round up a pixel
         (cfg.width, cfg.height) = capturePixels(w.frame.width, w.frame.height - cut)
         pointsWide = w.frame.width
-        cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+        cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
         cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
         cfg.queueDepth = 6; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true // fill the output at any capture density (never a corner of it, never cropped)
         let s = SCStream(filter: SCContentFilter(desktopIndependentWindow: w), configuration: cfg, delegate: nil)
@@ -234,7 +236,7 @@ final class WindowStream: NSObject, SCStreamOutput {
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ProfileLevel, value: useHighProfile ? kVTProfileLevel_H264_High_AutoLevel : kVTProfileLevel_H264_Main_AutoLevel)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 60 as CFNumber)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: targetFPS as CFNumber)
         // signal BT.709 in the stream (the viewer's GPU colour conversion uses it)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ColorPrimaries, value: kCVImageBufferColorPrimaries_ITU_R_709_2)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_TransferFunction, value: kCVImageBufferTransferFunction_ITU_R_709_2)

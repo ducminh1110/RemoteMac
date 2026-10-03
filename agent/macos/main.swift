@@ -508,6 +508,24 @@ func handle(_ m: [String: Any]) {
             }
         }
         log("client decoder: high_profile=\(useHighProfile) hardware=\(m["hardware"] as? Bool ?? false) scale=\(captureScale)")
+    case "stream_settings":
+        // the viewer's settings (as Moonlight's): frame rate, bitrate (nil: Auto), sharpness
+        let fps = Int32(max(10, min(144, int(m["fps"]))))
+        let sc = num(m["scale"])
+        let changed = fps != targetFPS || (sc > 0 && CGFloat(sc) != captureScale)
+        targetFPS = fps
+        if sc > 0 { captureScale = CGFloat(max(0.5, min(3, sc))) }
+        let kbps = int(m["bitrate_kbps"])
+        sender.setCeiling(kbps > 0 ? kbps * 1000 : nil)
+        log("settings: \(fps) fps, bitrate \(kbps > 0 ? "\(kbps) kbit/s" : "auto"), \(captureScale) px per point")
+        if changed {
+            // capture size and rate are fixed per stream: restart the windows' streams
+            streamsLock.lock(); let ids = streams.keys.filter { $0 != desktopWindowID }; streamsLock.unlock()
+            for id in ids {
+                guard let w = tracker.current(id) else { continue }
+                stopStream(id); startStream(id, inset: w.inset)
+            }
+        }
     case "ping":
         send(["type": "pong", "nonce": m["nonce"] ?? 0])
     case "gs_tunnel":

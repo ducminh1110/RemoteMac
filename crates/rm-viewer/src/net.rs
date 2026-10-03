@@ -259,6 +259,8 @@ pub fn connect_with(relay: &str, session: &str, token: &str, app: Option<&str>, 
     }
     let kind = decoder_kind();
     link.send(&Message::VideoDecoder { high_profile: kind != DecoderKind::Software, hardware: kind == DecoderKind::Hardware, scale: Some(display_scale()), screen: screen_fit() });
+    // the user's settings (frame rate, bitrate, sharpness)
+    link.send(&crate::settings::Settings::load().message(display_scale()));
     if let Some(app) = app {
         link.send(&Message::AppLaunch { application_id: app.into(), arguments: vec![], working_directory: None, environment: Default::default() });
     }

@@ -5,6 +5,7 @@ pub mod ico;
 pub mod keymap;
 pub mod menu;
 pub mod gsdesktop;
+pub mod settings;
 pub mod net;
 #[cfg(windows)]
 pub mod d3d;
@@ -24,6 +25,8 @@ pub mod launcher;
 pub mod native;
 #[cfg(windows)]
 pub mod shortcuts;
+#[cfg(windows)]
+pub mod settings_ui;
 #[cfg(windows)]
 pub mod splash;
 #[cfg(windows)]

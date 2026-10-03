@@ -304,6 +304,7 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
                 retitle(&writer, &st, window_id)?;
             }
             Message::ClipboardSet { text, .. } => st.lock().unwrap().clipboard = text,
+            Message::StreamSettings { .. } => {}
             Message::GsTunnel { id, op, data_base64 } => {
                 if let Some(t) = st.lock().unwrap().gs.clone() {
                     match op.as_str() {

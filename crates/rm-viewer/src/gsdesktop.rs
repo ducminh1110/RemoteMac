@@ -70,7 +70,9 @@ pub fn start(window_id: u64, key: [u8; 16], points: (u32, u32), pixels: (u16, u1
     std::thread::Builder::new()
         .name("rm-moonlight".into())
         .spawn(move || {
-            let params = moonlight::Params { rtsp_port: port, key, width: pixels.0 as u32, height: pixels.1 as u32, fps: 60, bitrate_kbps: 40_000, packet_size: 1200, remote: true };
+            let st = crate::settings::Settings::load();
+            let bitrate = if st.bitrate_mbps > 0 { st.bitrate_mbps * 1000 } else { 40_000 };
+            let params = moonlight::Params { rtsp_port: port, key, width: pixels.0 as u32, height: pixels.1 as u32, fps: st.fps, bitrate_kbps: bitrate, packet_size: 1200, remote: true };
             let r = moonlight::connect(params, move |data, idr| {
                 let (id, (w, h)) = {
                     let mut st = STATE.lock().unwrap();

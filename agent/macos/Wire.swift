@@ -165,6 +165,18 @@ final class Sender {
     private var rttFloor: Double = 0
     private var rttFloorAt: CFAbsoluteTime = 0
     let minBitrate = 1_000_000, maxBitrate = 80_000_000
+    /// highest bitrate the adaptation may reach: the user's setting, or maxBitrate (Auto)
+    private(set) var ceiling = 80_000_000
+
+    /// The user's bitrate (settings): start there and never go above it; nil: Auto.
+    func setCeiling(_ c: Int?) {
+        cond.lock()
+        ceiling = c.map { max(minBitrate, min(maxBitrate, $0)) } ?? maxBitrate
+        if c != nil { bitrate = ceiling } else { bitrate = min(bitrate, ceiling) }
+        let b = bitrate
+        cond.unlock()
+        onBitrate?(b)
+    }
     /// Ask a window's encoder for an IDR frame.
     var requestKeyframe: ((UInt64) -> Void)?
     var onBitrate: ((Int) -> Void)?
@@ -255,8 +267,8 @@ final class Sender {
         // lost despite FEC, a growing queue on the path or here, a very lossy link - costs bitrate
         if r.lost > 0 || r.loss > 0.15 || wait > 0.05 || queued {
             if now - lastDecrease > 0.3 { bitrate = max(minBitrate, Int(Double(bitrate) * 0.75)); lastDecrease = now; change = bitrate }
-        } else if r.loss < 0.05 && wait < 0.02 && now - lastDecrease > 2 && now - lastAdjust > 0.4 && bitrate < maxBitrate {
-            bitrate = min(maxBitrate, Int(Double(bitrate) * 1.06)); lastAdjust = now; change = bitrate
+        } else if r.loss < 0.05 && wait < 0.02 && now - lastDecrease > 2 && now - lastAdjust > 0.4 && bitrate < ceiling {
+            bitrate = min(ceiling, Int(Double(bitrate) * 1.06)); lastAdjust = now; change = bitrate
         }
         cond.unlock()
         if let b = change {
@@ -274,8 +286,8 @@ final class Sender {
         if now - lastAdjust >= 0.5 {
             if congested || maxDelay > 0.12 {
                 bitrate = max(minBitrate, Int(Double(bitrate) * 0.7)); lastDecrease = now; change = bitrate
-            } else if maxDelay < 0.03 && now - lastDecrease > 3 && bitrate < maxBitrate {
-                bitrate = min(maxBitrate, Int(Double(bitrate) * 1.12)); change = bitrate
+            } else if maxDelay < 0.03 && now - lastDecrease > 3 && bitrate < ceiling {
+                bitrate = min(ceiling, Int(Double(bitrate) * 1.12)); change = bitrate
             }
             maxDelay = 0; congested = false; lastAdjust = now
         }
