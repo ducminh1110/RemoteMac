@@ -15,6 +15,7 @@ rm-protocol = { path = "../rm-protocol" }
 rm-client = { path = "../rm-client" }
 rm-relay = { path = "../rm-relay" }
 rm-decode = { path = "../rm-decode" }
+serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.61"

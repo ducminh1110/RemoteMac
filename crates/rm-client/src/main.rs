@@ -58,8 +58,8 @@ fn main() {
             if r.all_ok() { "PASS" } else { "FAIL" }, r.checks.iter().filter(|c| c.1).count(), r.checks.len(),
             r.video_frames, r.decoded, r.keyframes, r.video_bytes, r.fps(), r.first_frame_ms, r.titles);
         if let Some(u) = s.udp_stats() {
-            println!("UDP frames={} bytes={} recovered={} lost={} loss={:.1}% rtt_ms={} ready={}", u.frames, u.bytes, u.recovered, u.lost, u.loss * 100.0,
-                u.rtt_ms.map_or("-".into(), |r| format!("{r:.1}")), u.ready);
+            println!("UDP frames={} bytes={} recovered={} lost={} loss={:.1}% rtt_ms={} ready={} path={}", u.frames, u.bytes, u.recovered, u.lost, u.loss * 100.0,
+                u.rtt_ms.map_or("-".into(), |r| format!("{r:.1}")), u.ready, u.direct.map_or("relay".into(), |d| format!("direct:{d}")));
         }
         std::process::exit(if r.all_ok() { 0 } else { 1 });
     }

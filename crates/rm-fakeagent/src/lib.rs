@@ -217,9 +217,33 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
     }
     send(&writer, &Message::ServerHello(Hello::ours("rm-fakeagent", &["h264"], &["control", "video", "files"])))?;
     send(&writer, &Message::CapabilityReport(caps()))?;
+    // TCP messages and input that came over UDP (the direct path) go through one loop
+    let (tx, rx) = std::sync::mpsc::channel::<Result<Option<Message>, ProtocolError>>();
+    if let Some(u) = &udp {
+        if u.p2p.load(std::sync::atomic::Ordering::Relaxed) {
+            send(&writer, &u.offer())?;
+        }
+        let (itx, irx) = std::sync::mpsc::channel::<Message>();
+        *u.inputs.lock().unwrap() = Some(itx);
+        let t = tx.clone();
+        std::thread::spawn(move || {
+            for m in irx {
+                if t.send(Ok(Some(m))).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+    std::thread::spawn(move || loop {
+        let r = read_message(&mut reader);
+        let end = !matches!(r, Ok(Some(_)));
+        if tx.send(r).is_err() || end {
+            return;
+        }
+    });
     let st = Arc::new(Mutex::new(State { udp, ..Default::default() }));
 
-    while let Some(msg) = read_message(&mut reader)? {
+    while let Some(msg) = rx.recv().map_err(|_| ProtocolError::Io(std::io::Error::other("reader gone")))?? {
         // A menu command does what its keyboard shortcut does, in the app's main window.
         let msg = match msg {
             Message::MenuInvoke { application_id, path } => {
@@ -269,6 +293,11 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
                 retitle(&writer, &st, window_id)?;
             }
             Message::ClipboardSet { text, .. } => st.lock().unwrap().clipboard = text,
+            Message::P2pOffer { secret, candidates } => {
+                if let Some(u) = st.lock().unwrap().udp.clone() {
+                    u.peer_offer(&secret, &candidates);
+                }
+            }
             Message::GetAppIcon { application_id } => {
                 let size = 64u32;
                 let tint = if application_id == "notes" { 60 } else { 200 };
@@ -478,9 +507,17 @@ fn video_loop<W: Write>(w: Writer<W>, st: Arc<Mutex<State>>, id: u64, width: usi
 
 /// Bind to a relay as the agent and serve one client.
 pub fn serve_via_relay(relay: &str, session: &str, token: &str) -> Result<(), String> {
+    serve_via_relay_with(relay, session, token, true)
+}
+
+/// [`serve_via_relay`]; `p2p: false` keeps all UDP on the relay (no direct path).
+pub fn serve_via_relay_with(relay: &str, session: &str, token: &str, p2p: bool) -> Result<(), String> {
     let s = rm_relay::join(relay, session, rm_relay::Role::Agent, token).map_err(|e| e.to_string())?;
     let w: TcpStream = s.try_clone().map_err(|e| e.to_string())?;
     // UDP video unless RM_NO_UDP is set (tests of the TCP path)
     let udp = if std::env::var_os("RM_NO_UDP").is_some() { None } else { udp_agent::AgentUdp::start(relay, session, token).ok() };
+    if let Some(u) = &udp {
+        u.p2p.store(p2p, std::sync::atomic::Ordering::Relaxed);
+    }
     serve_with(s, w, udp).map_err(|e| e.to_string())
 }

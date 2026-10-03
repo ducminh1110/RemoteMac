@@ -234,6 +234,9 @@ final class Sender {
 
     /// UDP: the client's report (every 200 ms) and how long frames waited in the pacer drive the
     /// bitrate: loss after FEC or a growing queue cut it, a clean link lets it grow.
+    /// The UDP path changed (direct <-> relay): its round trip is a new floor.
+    func pathChanged() { cond.lock(); rttFloor = 0; cond.unlock() }
+
     func udpReport(_ r: UdpReport, wait: Double) {
         var change: Int?
         cond.lock()

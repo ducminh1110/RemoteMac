@@ -230,6 +230,7 @@ dependencies = [
  "openh264",
  "rm-protocol",
  "rm-relay",
+ "serde_json",
 ]
 
 [[package]]
@@ -262,6 +263,7 @@ dependencies = [
  "rm-fakeagent",
  "rm-protocol",
  "rm-relay",
+ "serde_json",
  "windows",
 ]
 

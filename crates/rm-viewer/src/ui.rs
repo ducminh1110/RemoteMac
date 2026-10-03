@@ -215,7 +215,8 @@ impl Stats {
         let mut v = vec![format!("Video   {}x{}  {:.0} fps  {:.1} Mbit/s", self.size.0, self.size.1, self.shown as f64 / secs, self.bytes as f64 * 8.0 / secs / 1e6)];
         match link {
             Some(l) if l.active => v.push(format!(
-                "Network UDP+FEC  RTT {}  loss {:.1}%  fixed {}  lost {}",
+                "Network UDP+FEC {}  RTT {}  loss {:.1}%  fixed {}  lost {}",
+                l.direct.map_or("via relay".into(), |d| format!("direct {d}")),
                 l.rtt_ms.map_or("-".into(), |r| format!("{r:.0} ms")),
                 l.loss * 100.0,
                 l.recovered,
@@ -713,12 +714,13 @@ fn overlay_bitmap(lines: &[String], scale: f64) -> (i32, i32, Vec<u8>) {
     }
 }
 
-/// Frame pacing (as Moonlight's): a thread waits for the monitor's vertical blank and, when
-/// pictures are waiting, has the UI show them then. Every picture lands on a refresh, at most
-/// one per window per refresh. RM_PACING=0 shows pictures as soon as they are decoded.
+/// Frame pacing (RM_PACING=1): a thread waits for the monitor's vertical blank and, when
+/// pictures are waiting, has the UI show them then. By default a picture is shown the moment it
+/// is decoded (Moonlight's lowest-latency setting): the compositor puts it on the next refresh
+/// anyway, and waiting for a vblank first only adds up to a frame of delay.
 fn start_pacer(ctl: isize) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
     use std::sync::atomic::{AtomicBool, Ordering};
-    if std::env::var("RM_PACING").ok().as_deref() == Some("0") {
+    if std::env::var("RM_PACING").ok().as_deref() != Some("1") {
         return None;
     }
     let g = crate::gpu::shared().filter(|g| g.hardware)?;

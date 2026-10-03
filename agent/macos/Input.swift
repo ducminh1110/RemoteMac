@@ -64,7 +64,7 @@ final class InputInjector {
             guard let e = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: (msg["down"] as? Bool) ?? true) else { return "event failed" }
             e.flags = flags(msg["modifiers"] as? [String] ?? [])
             if w.pid == 0 { e.post(tap: .cghidEventTap) } else { e.postToPid(w.pid) }
-            usleep(15_000)
+            usleep(2_000)
         case "mouse_move":
             let p = CGPoint(x: w.content.minX + num(msg["x"]), y: w.content.minY + num(msg["y"]))
             lastPoint = p
@@ -94,9 +94,13 @@ final class InputInjector {
     }
 
     private func post(_ type: CGEventType, _ p: CGPoint, button: CGMouseButton, pid: pid_t) {
-        if pid != 0 && (activatedPid != pid || type == .leftMouseDown) {
+        // bring the app forward only when it is not already (waiting on every click made each
+        // one land 150 ms late)
+        if pid != 0 && (activatedPid != pid || (type == .leftMouseDown && NSWorkspace.shared.frontmostApplication?.processIdentifier != pid)) {
+            let front = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
             NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
-            activatedPid = pid; usleep(150_000)
+            activatedPid = pid
+            if !front { usleep(60_000) }
         }
         CGWarpMouseCursorPosition(p); CGAssociateMouseAndMouseCursorPosition(1)
         guard let e = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: button) else { return }
@@ -112,7 +116,7 @@ final class InputInjector {
                 guard let e = CGEvent(keyboardEventSource: CGEventSource(stateID: .hidSystemState), virtualKey: 0, keyDown: down) else { continue }
                 e.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
                 if pid == 0 { e.post(tap: .cghidEventTap) } else { e.postToPid(pid) }
-                usleep(15_000)
+                usleep(2_000)
             }
         }
     }

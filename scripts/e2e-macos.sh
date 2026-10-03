@@ -38,9 +38,14 @@ echo "video frames received over UDP: ${UDP_FRAMES:-0}"
 LOSS=$(sed -n 's/^UDP .* loss=\([0-9.]*\)%.*/\1/p' out/e2e.txt)
 echo "measured loss on loopback: ${LOSS:-?}%"
 awk -v l="${LOSS:-100}" 'BEGIN { exit !(l < 3) }' || { echo "loss misreported on a clean link"; [[ $RC == 0 ]] && RC=1; }
+# client and agent swap addresses and punch through: video ends up on the direct path
+grep -q "path=direct:" out/e2e.txt || { echo "no direct path between client and agent"; [[ $RC == 0 ]] && RC=1; }
+grep -q "direct path to the client" out/agent.log || { echo "agent never saw a direct path"; [[ $RC == 0 ]] && RC=1; }
 
 # far, lossy link: a relay limited to 6 Mbit/s that drops 5% of UDP packets; FEC rebuilds them
 # and the agent adapts its bitrate instead of queueing video (informational, not gating)
+# (RM_NO_P2P: this one must go through the throttled relay)
+export RM_NO_P2P=1
 RM_RELAY_THROTTLE_KBPS=6000 RM_RELAY_UDP_LOSS_PCT=5 ./target/release/rm-relay 127.0.0.1:$((PORT+1)) 2>out/relay-slow.log &
 SLOW=$!
 sleep 1

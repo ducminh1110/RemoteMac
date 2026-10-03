@@ -175,6 +175,16 @@ pub struct Link {
 
 impl Link {
     pub fn send(&self, m: &Message) {
+        // input goes straight to the Mac when there is a direct path (reliable UDP, no detour
+        // through the relay, no TCP head-of-line wait)
+        let pointer = matches!(m, Message::MouseMove { .. });
+        if matches!(m, Message::MouseMove { .. } | Message::MouseButton { .. } | Message::Scroll { .. } | Message::Key { .. } | Message::TextInput { .. }) {
+            if let (Some(u), Ok(json)) = (&self.udp, serde_json::to_vec(m)) {
+                if u.send_input(json, pointer) {
+                    return;
+                }
+            }
+        }
         if let Ok(mut w) = self.writer.lock() {
             let _ = write_message(&mut *w, m);
         }
@@ -221,7 +231,13 @@ pub fn connect_with(relay: &str, session: &str, token: &str, app: Option<&str>, 
     // UDP video beside the TCP connection (RM_NO_UDP=1 keeps everything on TCP)
     if std::env::var_os("RM_NO_UDP").is_none() {
         let v = video.clone();
-        match rm_client::udp::start(relay, session, token, move |o| v.on_udp(o)) {
+        let w = link.writer.clone();
+        let offer = move |secret, candidates| {
+            if let Ok(mut w) = w.lock() {
+                let _ = write_message(&mut *w, &Message::P2pOffer { secret, candidates });
+            }
+        };
+        match rm_client::udp::start(relay, session, token, move |o| v.on_udp(o), offer) {
             Ok(u) => {
                 let u = Arc::new(u);
                 *video.udp.lock().unwrap() = Some(u.clone());
@@ -399,6 +415,11 @@ fn recv_loop(mut sess: Session<TcpStream>, _link: Link, video: Arc<Video>, tx: S
                 Message::AppExited { application_id, .. } => emit(UiEvent::AppExited(application_id)),
                 Message::Error { code, message } => emit(UiEvent::Notice(format!("{code}: {message}"))),
                 Message::CapabilityUnavailable { capability, reason } => emit(UiEvent::Notice(format!("{capability} unavailable: {reason}"))),
+                Message::P2pOffer { secret, candidates } => {
+                    if let Some(u) = video.udp.lock().unwrap().as_ref() {
+                        u.peer_offer(&secret, &candidates);
+                    }
+                }
                 _ => {}
             },
             Ok(None) => return emit(UiEvent::Disconnected("connection closed".into())),
@@ -482,7 +503,9 @@ mod tests {
         let addr = l.local_addr().unwrap().to_string();
         std::thread::spawn(move || rm_relay::serve(l, rm_relay::Config { udp_loss: loss, ..Default::default() }));
         let (a, tok, s2) = (addr.clone(), "viewer-udp-token-0123456789", session.to_string());
-        std::thread::spawn(move || { let _ = rm_fakeagent::serve_via_relay(&a, &s2, tok); });
+        // a lossy relay must stay in the path: no direct path here
+        let p2p = loss.is_none();
+        std::thread::spawn(move || { let _ = rm_fakeagent::serve_via_relay_with(&a, &s2, tok, p2p); });
         std::thread::sleep(Duration::from_millis(150));
         let (link, rx) = connect(&addr, session, tok, Some("testapp"), || {}).unwrap();
         let (mut tcp, mut udp) = (0, 0);
@@ -504,6 +527,39 @@ mod tests {
         assert!(stats.rtt_ms.is_some() && stats.offset_us.is_some(), "{stats:?}");
         // a clean link must not read as lossy (that would push the bitrate down for nothing)
         assert!(stats.loss < 0.02 && stats.lost == 0, "{stats:?}");
+    }
+
+    #[test]
+    fn goes_direct_and_input_takes_it() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        std::thread::spawn(move || rm_relay::serve(l, Default::default()));
+        let (a, tok) = (addr.clone(), "viewer-p2p-token-0123456789");
+        std::thread::spawn(move || { let _ = rm_fakeagent::serve_via_relay(&a, "v-p2p", tok); });
+        std::thread::sleep(Duration::from_millis(150));
+        let (link, rx) = connect(&addr, "v-p2p", tok, Some("testapp"), || {}).unwrap();
+        let u = link.udp.clone().unwrap();
+        let (mut win, mut typed, mut titled, mut frames_after) = (None, false, false, 0);
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while std::time::Instant::now() < deadline && !(titled && frames_after >= 20) {
+            let direct = u.stats.lock().unwrap().direct;
+            if let (Some(id), Some(_), false) = (win, direct, typed) {
+                // the direct path is up: input goes over it, not over TCP
+                link.send(&Message::TextInput { window_id: id, text: "direct".into() });
+                typed = true;
+            }
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(UiEvent::WindowCreated { id, .. }) => win = Some(id),
+                Ok(UiEvent::Title { .. }) if typed => titled = true, // the window counts what was typed
+                Ok(UiEvent::Frame { meta, .. }) if typed && meta.via_udp => frames_after += 1,
+                _ => {}
+            }
+        }
+        let st = u.stats.lock().unwrap().clone();
+        let direct = st.direct.expect("a direct path between two sockets on one host");
+        assert_ne!(direct.port(), addr.parse::<std::net::SocketAddr>().unwrap().port(), "{st:?}");
+        assert!(typed && titled, "text sent over the direct path must arrive (typed={typed} titled={titled})");
+        assert!(frames_after >= 20, "video keeps coming over the direct path: {frames_after} {st:?}");
     }
 
     #[test]

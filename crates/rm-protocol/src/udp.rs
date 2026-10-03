@@ -153,6 +153,217 @@ pub fn parse_pong(p: &[u8]) -> Option<(u64, u64)> {
     (p.len() >= 20 && p[..2] == MAGIC && p[2] == T_PONG).then(|| (be64(p, 4), be64(p, 12)))
 }
 
+// ---- direct path (as Moonlight connects straight to the host; the relay is only the meeting
+// point and the fallback) ------------------------------------------------------------------------
+//
+// Each side sends its candidates (LAN addresses, its public address as STUN sees it) and a random
+// secret over the authenticated TCP connection (`Message::P2pOffer`). Both then send punches to
+// every candidate of the other; a punch carries the *receiver's* secret, so only the real peer
+// can make one. The first address a valid punch or punch-ack comes from becomes the direct path,
+// and everything UDP (video, reports, pings, input) goes there instead of through the relay.
+
+/// either way: `"RM" 20 ack(0/1) secret[16]`
+pub const T_PUNCH: u8 = 20;
+/// client -> agent: input messages, reliable and in order (see [`InputQueue`])
+pub const T_INPUT: u8 = 22;
+/// agent -> client: `seq u32`, every input up to it has been applied
+pub const T_INPUT_ACK: u8 = 23;
+
+pub fn punch(secret: &[u8; 16], ack: bool) -> Vec<u8> {
+    let mut d = vec![MAGIC[0], MAGIC[1], T_PUNCH, ack as u8];
+    d.extend_from_slice(secret);
+    d
+}
+
+/// (secret, is an ack)
+pub fn parse_punch(p: &[u8]) -> Option<([u8; 16], bool)> {
+    (p.len() >= 20 && p[..2] == MAGIC && p[2] == T_PUNCH).then(|| (p[4..20].try_into().unwrap(), p[3] == 1))
+}
+
+pub fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+pub fn unhex16(s: &str) -> Option<[u8; 16]> {
+    let b = s.as_bytes();
+    if b.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = u8::from_str_radix(std::str::from_utf8(&b[i * 2..i * 2 + 2]).ok()?, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// A fresh random secret (OS randomness through the std hasher's seed, mixed with the time).
+pub fn random_secret() -> [u8; 16] {
+    use std::hash::{BuildHasher, Hasher};
+    let mut out = [0u8; 16];
+    for (i, c) in out.chunks_mut(8).enumerate() {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
+        h.write_usize(i);
+        c.copy_from_slice(&h.finish().to_le_bytes());
+    }
+    out
+}
+
+/// STUN binding request (RFC 5389) with transaction id `tx`.
+pub fn stun_request(tx: &[u8; 12]) -> Vec<u8> {
+    let mut d = vec![0x00, 0x01, 0x00, 0x00, 0x21, 0x12, 0xA4, 0x42];
+    d.extend_from_slice(tx);
+    d
+}
+
+/// The public address in a STUN binding response for `tx` (XOR-MAPPED-ADDRESS, else MAPPED-ADDRESS).
+pub fn parse_stun(p: &[u8], tx: &[u8; 12]) -> Option<std::net::SocketAddr> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    if p.len() < 20 || p[0..2] != [0x01, 0x01] || p[4..8] != [0x21, 0x12, 0xA4, 0x42] || &p[8..20] != tx {
+        return None;
+    }
+    let end = (20 + be16(p, 2) as usize).min(p.len());
+    let (mut o, mut plain) = (20, None);
+    while o + 4 <= end {
+        let (t, l) = (be16(p, o), be16(p, o + 2) as usize);
+        let v = p.get(o + 4..o + 4 + l)?;
+        if (t == 0x0020 || t == 0x0001) && l >= 8 {
+            let x = t == 0x0020;
+            let port = be16(v, 2) ^ if x { 0x2112 } else { 0 };
+            let ip = match v[1] {
+                1 => {
+                    let mut a: [u8; 4] = v[4..8].try_into().ok()?;
+                    if x {
+                        for (i, b) in a.iter_mut().enumerate() {
+                            *b ^= p[4 + i];
+                        }
+                    }
+                    IpAddr::V4(Ipv4Addr::from(a))
+                }
+                2 if l >= 20 => {
+                    let mut a: [u8; 16] = v[4..20].try_into().ok()?;
+                    if x {
+                        for (i, b) in a.iter_mut().enumerate() {
+                            *b ^= p[4 + i];
+                        }
+                    }
+                    IpAddr::V6(Ipv6Addr::from(a))
+                }
+                _ => return None,
+            };
+            let a = SocketAddr::new(ip, port);
+            if x {
+                return Some(a);
+            }
+            plain = Some(a);
+        }
+        o += 4 + l.div_ceil(4) * 4;
+    }
+    plain
+}
+
+/// Client end of the input channel: every input message gets a sequence number and stays queued
+/// until the agent acknowledges it; each datagram carries the oldest unacknowledged messages, so a
+/// lost one is repeated by the next datagram or the resend timer (no TCP head-of-line wait).
+/// A pointer move replaces a not yet acknowledged one before it (only the latest position counts).
+#[derive(Default)]
+pub struct InputQueue {
+    next: u32,
+    unacked: std::collections::VecDeque<(u32, bool, Vec<u8>)>,
+    last_sent: Option<Instant>,
+}
+
+impl InputQueue {
+    /// Queue a message (`json`), returns the datagram to send now.
+    pub fn push(&mut self, json: Vec<u8>, pointer_move: bool, now: Instant) -> Vec<u8> {
+        if pointer_move && self.unacked.back().is_some_and(|b| b.1) {
+            self.unacked.pop_back();
+        }
+        self.next = self.next.wrapping_add(1);
+        self.unacked.push_back((self.next, pointer_move, json));
+        // never let a stuck path grow without bound
+        while self.unacked.len() > 512 {
+            self.unacked.pop_front();
+        }
+        self.datagram(now)
+    }
+
+    pub fn ack(&mut self, seq: u32) {
+        while self.unacked.front().is_some_and(|f| (seq.wrapping_sub(f.0) as i32) >= 0) {
+            self.unacked.pop_front();
+        }
+    }
+
+    pub fn pending(&self) -> usize {
+        self.unacked.len()
+    }
+
+    /// A resend when messages are still unacknowledged after `every`.
+    pub fn resend(&mut self, now: Instant, every: Duration) -> Option<Vec<u8>> {
+        (!self.unacked.is_empty() && self.last_sent.is_none_or(|t| now.duration_since(t) >= every)).then(|| self.datagram(now))
+    }
+
+    fn datagram(&mut self, now: Instant) -> Vec<u8> {
+        self.last_sent = Some(now);
+        let mut d = vec![MAGIC[0], MAGIC[1], T_INPUT, 0];
+        for (seq, _, j) in &self.unacked {
+            if d.len() > 4 && d.len() + 6 + j.len() > SHARD {
+                break;
+            }
+            d.extend_from_slice(&seq.to_be_bytes());
+            d.extend_from_slice(&(j.len() as u16).to_be_bytes());
+            d.extend_from_slice(j);
+        }
+        d
+    }
+}
+
+/// The records of an input datagram: (seq, json).
+pub fn parse_input(p: &[u8]) -> Vec<(u32, &[u8])> {
+    let mut out = vec![];
+    if p.len() < 4 || p[..2] != MAGIC || p[2] != T_INPUT {
+        return out;
+    }
+    let mut o = 4;
+    while o + 6 <= p.len() {
+        let (seq, l) = (be32(p, o), be16(p, o + 4) as usize);
+        let Some(j) = p.get(o + 6..o + 6 + l) else { break };
+        out.push((seq, j));
+        o += 6 + l;
+    }
+    out
+}
+
+/// Agent end: applies each input once, in order (a gap is a replaced pointer move: skip it).
+#[derive(Default)]
+pub struct InputOrder {
+    last: u32,
+}
+
+impl InputOrder {
+    /// The messages of `p` not applied yet, and the ack to send back.
+    pub fn take<'a>(&mut self, p: &'a [u8]) -> (Vec<&'a [u8]>, Option<Vec<u8>>) {
+        let recs = parse_input(p);
+        if recs.is_empty() {
+            return (vec![], None);
+        }
+        let mut new = vec![];
+        for (seq, j) in recs {
+            if self.last == 0 || (seq.wrapping_sub(self.last) as i32) > 0 {
+                self.last = seq;
+                new.push(j);
+            }
+        }
+        let mut ack = vec![MAGIC[0], MAGIC[1], T_INPUT_ACK, 0];
+        ack.extend_from_slice(&self.last.to_be_bytes());
+        (new, Some(ack))
+    }
+}
+
+pub fn parse_input_ack(p: &[u8]) -> Option<u32> {
+    (p.len() >= 8 && p[..2] == MAGIC && p[2] == T_INPUT_ACK).then(|| be32(p, 4))
+}
+
 struct Block {
     k: usize,
     m: usize,
@@ -456,5 +667,57 @@ mod tests {
         assert!((f.loss() - 0.07).abs() < 1e-9);
         assert_eq!(parse_ping(&ping(77)), Some(77));
         assert_eq!(parse_pong(&pong(77, 99)), Some((77, 99)));
+    }
+
+    #[test]
+    fn punch_and_secret() {
+        let s = random_secret();
+        assert_ne!(s, random_secret());
+        assert_eq!(unhex16(&hex(&s)), Some(s));
+        assert_eq!(parse_punch(&punch(&s, true)), Some((s, true)));
+        assert_eq!(parse_punch(b"RM\x14\x00short"), None);
+    }
+
+    #[test]
+    fn stun_response() {
+        let tx = [7u8; 12];
+        assert_eq!(&stun_request(&tx)[8..], &tx);
+        // XOR-MAPPED-ADDRESS 203.0.113.5:40000
+        let mut r = vec![0x01, 0x01, 0, 12, 0x21, 0x12, 0xA4, 0x42];
+        r.extend_from_slice(&tx);
+        r.extend_from_slice(&[0x00, 0x20, 0, 8, 0, 1]);
+        r.extend_from_slice(&(40000u16 ^ 0x2112).to_be_bytes());
+        for (i, b) in [203u8, 0, 113, 5].iter().enumerate() {
+            r.push(b ^ [0x21, 0x12, 0xA4, 0x42][i]);
+        }
+        assert_eq!(parse_stun(&r, &tx), Some("203.0.113.5:40000".parse().unwrap()));
+        assert_eq!(parse_stun(&r, &[8u8; 12]), None);
+    }
+
+    #[test]
+    fn input_is_reliable_and_ordered() {
+        let t = Instant::now();
+        let (mut q, mut o) = (InputQueue::default(), InputOrder::default());
+        let a = q.push(b"key-a".to_vec(), false, t);
+        let _lost = q.push(b"key-b".to_vec(), false, t);
+        // the datagram with b is lost; the next one repeats it
+        let c = q.push(b"key-c".to_vec(), false, t);
+        let (got, _) = o.take(&a);
+        assert_eq!(got, vec![&b"key-a"[..]]);
+        let (got, ack) = o.take(&c);
+        assert_eq!(got, vec![&b"key-b"[..], &b"key-c"[..]]);
+        q.ack(parse_input_ack(&ack.unwrap()).unwrap());
+        assert_eq!(q.pending(), 0);
+        assert!(q.resend(t + Duration::from_secs(1), Duration::from_millis(50)).is_none());
+        // pointer moves: only the latest unacknowledged one is kept
+        q.push(b"move-1".to_vec(), true, t);
+        let m = q.push(b"move-2".to_vec(), true, t);
+        assert_eq!(q.pending(), 1);
+        let (got, _) = o.take(&m);
+        assert_eq!(got, vec![&b"move-2"[..]]);
+        // a repeat is not applied twice
+        let (got, _) = o.take(&m);
+        assert!(got.is_empty());
+        assert!(q.resend(t + Duration::from_millis(60), Duration::from_millis(50)).is_some());
     }
 }

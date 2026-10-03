@@ -16,6 +16,8 @@ pub struct Session<S: Read + Write> {
     pub capabilities: CapabilityReport,
     /// UDP video (frames rebuilt from FEC shards) when attached
     udp: Option<(udp::UdpVideo, std::sync::mpsc::Receiver<rm_protocol::udp::Out>)>,
+    /// our direct-path offer, once the UDP thread knows our addresses (sent by `recv`)
+    offer: Option<std::sync::mpsc::Receiver<Message>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -46,12 +48,12 @@ impl<S: Read + Write> Session<S> {
             m => return Err(unexpected(m)),
         };
         let state = SessionState::Connecting.next(Event::HandshakeComplete).expect("valid transition");
-        Ok(Self { stream, state, negotiated, capabilities, udp: None })
+        Ok(Self { stream, state, negotiated, capabilities, udp: None, offer: None })
     }
 
     pub fn list_apps(&mut self) -> Result<Vec<AppInfo>, ClientError> {
         write_message(&mut self.stream, &Message::ListApps)?;
-        match next(&mut self.stream)? {
+        match self.next_msg()? {
             Message::Apps { apps } => Ok(apps),
             m => Err(unexpected(m)),
         }
@@ -62,9 +64,23 @@ impl<S: Read + Write> Session<S> {
             &mut self.stream,
             &Message::AppLaunch { application_id: application_id.into(), arguments, working_directory: None, environment: Default::default() },
         )?;
-        match next(&mut self.stream)? {
+        match self.next_msg()? {
             Message::AppLaunched { pid, .. } => Ok(pid),
             m => Err(unexpected(m)),
+        }
+    }
+
+    /// The next control message; the agent's direct-path offer is taken on the way.
+    fn next_msg(&mut self) -> Result<Message, ClientError> {
+        loop {
+            match next(&mut self.stream)? {
+                Message::P2pOffer { secret, candidates } => {
+                    if let Some((u, _)) = &self.udp {
+                        u.peer_offer(&secret, &candidates);
+                    }
+                }
+                m => return Ok(m),
+            }
         }
     }
 
@@ -76,10 +92,20 @@ impl<S: Read + Write> Session<S> {
     /// TCP stream so UDP frames are not held up behind it.
     pub fn attach_udp(&mut self, relay: &str, session: &str, token: &str) -> std::io::Result<()> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let u = udp::start(relay, session, token, move |o| {
-            let _ = tx.send(o);
-        })?;
+        let (otx, orx) = std::sync::mpsc::channel();
+        let u = udp::start(
+            relay,
+            session,
+            token,
+            move |o| {
+                let _ = tx.send(o);
+            },
+            move |secret, candidates| {
+                let _ = otx.send(Message::P2pOffer { secret, candidates });
+            },
+        )?;
         self.udp = Some((u, rx));
+        self.offer = Some(orx);
         Ok(())
     }
 
@@ -96,12 +122,19 @@ impl<S: Read + Write> Session<S> {
                 rm_protocol::udp::Out::Lost(id) => write_message(&mut self.stream, &Message::RequestKeyframe { window_id: id })?,
             }
         }
-        read_frame(&mut self.stream)
+        if let Some(m) = self.offer.as_ref().and_then(|o| o.try_recv().ok()) {
+            write_message(&mut self.stream, &m)?;
+        }
+        let f = read_frame(&mut self.stream)?;
+        if let (Some(Frame::Msg(Message::P2pOffer { secret, candidates })), Some((u, _))) = (&f, &self.udp) {
+            u.peer_offer(secret, candidates);
+        }
+        Ok(f)
     }
 
     pub fn terminate(&mut self, application_id: &str) -> Result<(), ClientError> {
         write_message(&mut self.stream, &Message::AppTerminate { application_id: application_id.into() })?;
-        match next(&mut self.stream)? {
+        match self.next_msg()? {
             Message::AppExited { .. } => Ok(()),
             m => Err(unexpected(m)),
         }

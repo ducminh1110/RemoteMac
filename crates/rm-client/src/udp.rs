@@ -2,10 +2,15 @@
 //! rebuilds frames from FEC-protected shards, reports what arrived every 200 ms (the agent
 //! sends video over UDP only while these reports come in, so a blocked UDP path falls back to
 //! TCP by itself) and measures the round trip and the agent's clock offset with pings.
+//!
+//! Like Moonlight, the picture should not take a detour: once both sides have swapped their
+//! addresses (`Message::P2pOffer`) they punch through to each other and, if that works, video,
+//! reports, pings and input go straight between the PC and the Mac (same LAN, or across NATs).
+//! The relay stays the meeting point and the fallback.
 
-use rm_protocol::udp::{self, Out, Reassembler};
+use rm_protocol::udp::{self, InputQueue, Out, Reassembler};
 use rm_relay::Role;
-use std::net::{ToSocketAddrs, UdpSocket};
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -28,12 +33,31 @@ pub struct LinkStats {
     pub rtt_ms: Option<f64>,
     /// agent clock minus ours, microseconds (frame pts are agent capture times)
     pub offset_us: Option<i64>,
+    /// the Mac's address when UDP goes straight to it (None: through the relay)
+    pub direct: Option<SocketAddr>,
+}
+
+/// Called once with our secret and candidates.
+type OnOffer = Box<dyn FnOnce(String, Vec<String>) + Send>;
+
+/// Direct-path state shared by the socket thread and the session.
+struct P2p {
+    secret: [u8; 16],
+    /// the agent's secret and candidates, from its offer
+    peer: Option<([u8; 16], Vec<SocketAddr>, Instant)>,
+    direct: Option<SocketAddr>,
+    last_direct: Instant,
+    /// every address a valid punch came from (the agent may answer from another than we use)
+    verified: Vec<SocketAddr>,
+    input: InputQueue,
 }
 
 pub struct UdpVideo {
     pub stats: Arc<Mutex<LinkStats>>,
     stop: Arc<AtomicBool>,
     epoch: Instant,
+    p2p: Arc<Mutex<P2p>>,
+    sock: UdpSocket,
 }
 
 impl UdpVideo {
@@ -46,6 +70,26 @@ impl UdpVideo {
     pub fn agent_now_us(&self) -> Option<i64> {
         self.stats.lock().ok()?.offset_us.map(|o| self.now_us() as i64 + o)
     }
+
+    /// The agent's `P2pOffer` arrived: start punching to its candidates.
+    pub fn peer_offer(&self, secret: &str, candidates: &[String]) {
+        let Some(sec) = udp::unhex16(secret) else { return };
+        let ours_v4 = self.sock.local_addr().is_ok_and(|a| a.is_ipv4());
+        let cands: Vec<SocketAddr> = candidates.iter().filter_map(|c| c.parse().ok()).filter(|a: &SocketAddr| a.is_ipv4() == ours_v4).collect();
+        if let Ok(mut p) = self.p2p.lock() {
+            p.peer = Some((sec, cands, Instant::now()));
+        }
+    }
+
+    /// Send an input message straight to the Mac (reliable, in order). False when there is no
+    /// direct path: send it over TCP then.
+    pub fn send_input(&self, json: Vec<u8>, pointer_move: bool) -> bool {
+        let Ok(mut p) = self.p2p.lock() else { return false };
+        let Some(to) = p.direct else { return false };
+        let d = p.input.push(json, pointer_move, Instant::now());
+        let _ = self.sock.send_to(&d, to);
+        true
+    }
 }
 
 impl Drop for UdpVideo {
@@ -57,40 +101,120 @@ impl Drop for UdpVideo {
 /// Start the UDP path for a paired session. `on_out` gets every rebuilt frame and every
 /// unrecoverable loss (ask the agent for a keyframe then). Never fails the session: if UDP is
 /// blocked, the agent just keeps sending video over TCP.
-pub fn start(relay: &str, session: &str, token: &str, on_out: impl FnMut(Out) + Send + 'static) -> std::io::Result<UdpVideo> {
+/// `on_offer(secret, candidates)` is called once our addresses are known: send them to the agent
+/// as `Message::P2pOffer` (RM_NO_P2P=1: never, everything stays on the relay).
+pub fn start(relay: &str, session: &str, token: &str, on_out: impl FnMut(Out) + Send + 'static, on_offer: impl FnOnce(String, Vec<String>) + Send + 'static) -> std::io::Result<UdpVideo> {
     let addr = relay.to_socket_addrs()?.next().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "relay address"))?;
     let bind = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
     let sock = UdpSocket::bind(bind)?;
-    sock.connect(addr)?;
     rm_relay::big_udp_buffers(&sock);
     sock.set_read_timeout(Some(Duration::from_millis(5)))?;
     let stats = Arc::new(Mutex::new(LinkStats::default()));
     let stop = Arc::new(AtomicBool::new(false));
     let epoch = Instant::now();
+    let p2p = Arc::new(Mutex::new(P2p { secret: udp::random_secret(), peer: None, direct: None, last_direct: Instant::now(), verified: vec![], input: InputQueue::default() }));
     let register = rm_relay::udp_register(session, Role::Client, token, rm_relay::env_key().as_deref());
-    let (s2, st2, stop2) = (sock.try_clone()?, stats.clone(), stop.clone());
-    std::thread::Builder::new().name("rm-udp".into()).spawn(move || run(s2, register, st2, stop2, epoch, on_out))?;
-    Ok(UdpVideo { stats, stop, epoch })
+    let (s2, st2, stop2, p2) = (sock.try_clone()?, stats.clone(), stop.clone(), p2p.clone());
+    let offer: Option<OnOffer> = std::env::var_os("RM_NO_P2P").is_none().then(|| Box::new(on_offer) as OnOffer);
+    std::thread::Builder::new().name("rm-udp".into()).spawn(move || run(s2, addr, register, st2, stop2, epoch, p2, on_out, offer))?;
+    Ok(UdpVideo { stats, stop, epoch, p2p, sock })
 }
 
-fn run(sock: UdpSocket, register: Vec<u8>, stats: Arc<Mutex<LinkStats>>, stop: Arc<AtomicBool>, epoch: Instant, mut on_out: impl FnMut(Out)) {
+/// This machine's LAN address toward the internet (no packet is sent: connecting a UDP socket
+/// only picks the route).
+pub fn lan_ip(v4: bool) -> Option<std::net::IpAddr> {
+    let s = UdpSocket::bind(if v4 { "0.0.0.0:0" } else { "[::]:0" }).ok()?;
+    s.connect(if v4 { "8.8.8.8:53" } else { "[2001:4860:4860::8888]:53" }).ok()?;
+    s.local_addr().ok().map(|a| a.ip()).filter(|ip| !ip.is_unspecified() && !ip.is_loopback())
+}
+
+fn stun_servers(v4: bool) -> Vec<SocketAddr> {
+    ["stun.l.google.com:19302", "stun.cloudflare.com:3478"]
+        .iter()
+        .filter_map(|h| h.to_socket_addrs().ok()?.find(|a| a.is_ipv4() == v4))
+        .collect()
+}
+
+/// A private (LAN) address: preferred over a public one when both work.
+fn is_private(a: &SocketAddr) -> bool {
+    match a.ip() {
+        std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_link_local() || ip.is_loopback(),
+        std::net::IpAddr::V6(ip) => (ip.segments()[0] & 0xfe00) == 0xfc00 || ip.is_loopback(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run(sock: UdpSocket, relay: SocketAddr, register: Vec<u8>, stats: Arc<Mutex<LinkStats>>, stop: Arc<AtomicBool>, epoch: Instant, p2p: Arc<Mutex<P2p>>, mut on_out: impl FnMut(Out), mut offer: Option<OnOffer>) {
     let mut r = Reassembler::new();
     let mut buf = vec![0u8; 2048];
     let (mut last_reg, mut last_fb, mut last_ping, mut last_video) = (None::<Instant>, Instant::now(), None::<Instant>, None::<Instant>);
     let mut registered = false;
     let (mut frames, mut bytes) = (0u64, 0u64);
+    // our addresses: the LAN one now, the public one when STUN answers (or not, after a moment)
+    let v4 = relay.is_ipv4();
+    let port = sock.local_addr().map(|a| a.port()).unwrap_or(0);
+    let mut cands: Vec<String> = lan_ip(v4).map(|ip| SocketAddr::new(ip, port).to_string()).into_iter().collect();
+    if relay.ip().is_loopback() {
+        cands.push(SocketAddr::new(relay.ip(), port).to_string()); // tests: everything on one host
+    }
+    let stun = if offer.is_some() { stun_servers(v4) } else { vec![] };
+    let stun_tx: [u8; 12] = udp::random_secret()[..12].try_into().unwrap();
+    let (started, mut stun_sent) = (Instant::now(), 0u32);
+    let mut last_punch = None::<Instant>;
+    let dest = |p: &Mutex<P2p>| p.lock().ok().and_then(|p| p.direct).unwrap_or(relay);
     while !stop.load(Ordering::SeqCst) {
         let now = Instant::now();
+        if offer.is_some() {
+            if stun_sent < 3 && now.duration_since(started) >= Duration::from_millis(300 * stun_sent as u64) {
+                for s in &stun {
+                    let _ = sock.send_to(&udp::stun_request(&stun_tx), s);
+                }
+                stun_sent += 1;
+            }
+            if now.duration_since(started) >= Duration::from_millis(1200) {
+                let secret = p2p.lock().map(|p| udp::hex(&p.secret)).unwrap_or_default();
+                (offer.take().unwrap())(secret, std::mem::take(&mut cands));
+            }
+        }
+        // punch to the agent's candidates until a direct path answers, then keep it open
+        if let Ok(mut p) = p2p.lock() {
+            let every = if p.direct.is_some() { Duration::from_secs(1) } else { Duration::from_millis(100) };
+            if let Some((sec, list, since)) = &p.peer {
+                if last_punch.is_none_or(|t| now.duration_since(t) >= every) {
+                    // after 20 s without an answer, try again only now and then
+                    let trying = p.direct.is_some() || now.duration_since(*since) < Duration::from_secs(20) || now.duration_since(*since).as_secs().is_multiple_of(10);
+                    if trying {
+                        let to: Vec<SocketAddr> = p.direct.map_or_else(|| list.clone(), |d| vec![d]);
+                        for a in to {
+                            let _ = sock.send_to(&udp::punch(sec, false), a);
+                        }
+                    }
+                    last_punch = Some(now);
+                }
+            }
+            if p.direct.is_some() && now.duration_since(p.last_direct) > Duration::from_secs(3) {
+                eprintln!("direct path to the Mac lost; back through the relay");
+                p.direct = None;
+                p.verified.clear();
+                if let Ok(mut s) = stats.lock() {
+                    s.direct = None;
+                }
+            }
+            let to = p.direct.unwrap_or(relay);
+            if let Some(d) = p.input.resend(now, Duration::from_millis(40)) {
+                let _ = sock.send_to(&d, to);
+            }
+        }
         // register until the relay answers, then refresh every 2 s (NAT bindings, relay restarts)
         let every = if registered { Duration::from_secs(2) } else { Duration::from_millis(300) };
         if last_reg.is_none_or(|t| now.duration_since(t) >= every) {
-            let _ = sock.send(&register);
+            let _ = sock.send_to(&register, relay);
             last_reg = Some(now);
         }
         if registered && now.duration_since(last_fb) >= Duration::from_millis(200) {
             let mut fb = r.take_stats();
             fb.rtt_ms = stats.lock().ok().and_then(|s| s.rtt_ms).map_or(0, |r| r.round() as u32);
-            let _ = sock.send(&fb.encode());
+            let _ = sock.send_to(&fb.encode(), dest(&p2p));
             last_fb = now;
             if let Ok(mut s) = stats.lock() {
                 s.recovered += fb.recovered as u64;
@@ -104,14 +228,56 @@ fn run(sock: UdpSocket, register: Vec<u8>, stats: Arc<Mutex<LinkStats>>, stop: A
             }
         }
         if registered && last_ping.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(250)) {
-            let _ = sock.send(&udp::ping(epoch.elapsed().as_micros() as u64));
+            let _ = sock.send_to(&udp::ping(epoch.elapsed().as_micros() as u64), dest(&p2p));
             last_ping = Some(now);
         }
-        match sock.recv(&mut buf) {
-            Ok(n) if n >= 3 && buf[..2] == udp::MAGIC => {
+        match sock.recv_from(&mut buf) {
+            Ok((n, _)) if offer.is_some() && udp::parse_stun(&buf[..n], &stun_tx).is_some() => {
+                let public = udp::parse_stun(&buf[..n], &stun_tx).unwrap().to_string();
+                if !cands.contains(&public) {
+                    cands.push(public);
+                }
+            }
+            Ok((n, from)) if n >= 20 && buf[..2] == udp::MAGIC && buf[2] == udp::T_PUNCH => {
+                let Some((sec, ack)) = udp::parse_punch(&buf[..n]) else { continue };
+                let Ok(mut p) = p2p.lock() else { continue };
+                if sec != p.secret {
+                    continue;
+                }
+                if !ack {
+                    if let Some((peer, ..)) = &p.peer {
+                        let _ = sock.send_to(&udp::punch(peer, true), from);
+                    }
+                }
+                // an ack proves both directions work: the first address that acks, or a LAN one
+                // over a public one, becomes the path
+                if ack && (p.direct.is_none() || (p.direct != Some(from) && is_private(&from) && !p.direct.is_some_and(|d| is_private(&d)))) {
+                    eprintln!("direct path to the Mac: {from}");
+                    p.direct = Some(from);
+                    if let Ok(mut s) = stats.lock() {
+                        s.direct = Some(from);
+                        s.rtt_ms = None; // a new path: measure again
+                    }
+                }
+                if !p.verified.contains(&from) {
+                    p.verified.push(from);
+                }
+                p.last_direct = now;
+            }
+            Ok((n, from)) if n >= 3 && buf[..2] == udp::MAGIC && (from == relay || p2p.lock().is_ok_and(|p| p.verified.contains(&from))) => {
                 let p = &buf[..n];
+                if from != relay {
+                    if let Ok(mut q) = p2p.lock() {
+                        q.last_direct = now;
+                    }
+                }
                 match p[2] {
-                    rm_relay::UDP_STATUS if n >= 4 => {
+                    udp::T_INPUT_ACK => {
+                        if let (Some(seq), Ok(mut q)) = (udp::parse_input_ack(p), p2p.lock()) {
+                            q.input.ack(seq);
+                        }
+                    }
+                    rm_relay::UDP_STATUS if n >= 4 && from == relay => {
                         registered = p[3] != rm_relay::UDP_REFUSED;
                         if let Ok(mut s) = stats.lock() {
                             s.ready = p[3] == rm_relay::UDP_PEER_READY;

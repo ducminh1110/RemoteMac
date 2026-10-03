@@ -151,6 +151,14 @@ if env["RM_NO_UDP"] == nil, let u = UdpLink(hostPort: relayAddr, session: sessio
         streamsLock.lock(); let all = Array(streams.values); streamsLock.unlock()
         for ws in all { ws.requestKeyframe() }
     }
+    // direct path to the client (as Moonlight connects straight to the host)
+    u.onOffer = { secret, cands in send(["type": "p2p_offer", "secret": secret, "candidates": cands]) }
+    u.onPath = { path in
+        log(path.map { "video and input now go straight to the client (\($0))" } ?? "video goes through the relay")
+        sender.pathChanged()
+        streamsLock.lock(); let all = Array(streams.values); streamsLock.unlock()
+        for ws in all { ws.requestKeyframe() }
+    }
     var reports = 0
     u.onReport = { r in
         sender.udpReport(r, wait: u.takeMaxWait())
@@ -381,6 +389,8 @@ func handle(_ m: [String: Any]) {
         log("client decoder: high_profile=\(useHighProfile) hardware=\(m["hardware"] as? Bool ?? false) scale=\(captureScale)")
     case "ping":
         send(["type": "pong", "nonce": m["nonce"] ?? 0])
+    case "p2p_offer":
+        sender.udp?.peerOffer(secret: m["secret"] as? String ?? "", candidates: m["candidates"] as? [String] ?? [])
     case _ where inputTypes.contains(type):
         if let err = injector.handle(m) { send(["type": "error", "code": "input_failed", "message": err]) }
     default:
@@ -388,11 +398,16 @@ func handle(_ m: [String: Any]) {
     }
 }
 
+// input runs on its own queue, in arrival order, whether it came over TCP or straight over UDP
+let inputQueue = DispatchQueue(label: "rm.input", qos: .userInteractive)
+sender.udp?.onInput = { m in inputQueue.async { handle(m) } }
+
 let reader = Thread {
     do {
         while let (ch, payload) = try conn.readFrame() {
             guard ch != .video, let m = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] else { continue }
-            handle(m)
+            // other messages wait for the input before them (typing, then closing the window)
+            if inputTypes.contains(m["type"] as? String ?? "") { inputQueue.async { handle(m) } } else { inputQueue.sync {}; handle(m) }
         }
         log("client disconnected")
     } catch { log("read loop ended: \(error)") }

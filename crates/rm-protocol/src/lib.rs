@@ -318,6 +318,10 @@ pub enum Message {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         screen: Option<String>,
     },
+    /// Either direction: how to reach this side directly (see `udp` "direct path"):
+    /// `candidates` are "ip:port" of its UDP socket (LAN addresses, the public one), `secret` is
+    /// 32 hex digits a punch to this side must carry.
+    P2pOffer { secret: String, candidates: Vec<String> },
 
     /// Either direction: the clipboard now holds this text. `seq` lets each side ignore
     /// the echo of a change it applied itself.
