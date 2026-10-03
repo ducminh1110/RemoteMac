@@ -54,8 +54,46 @@ pub fn parse(p: &[u8]) -> Option<Input> {
     })
 }
 
+/// The packet moonlight-common-c's InputStream.c builds for `i` (Gen 7 magics).
+pub fn encode(i: &Input) -> Vec<u8> {
+    let (magic, body): (u32, Vec<u8>) = match i {
+        Input::Key { vk, down, modifiers } => {
+            let mut b = vec![0u8];
+            b.extend_from_slice(&(*vk | 0x8000).to_le_bytes());
+            b.push(*modifiers);
+            b.extend_from_slice(&[0, 0]);
+            (if *down { KEY_DOWN } else { KEY_UP }, b)
+        }
+        Input::MouseRel { dx, dy } => (MOUSE_MOVE_REL_GEN5, [dx.to_be_bytes(), dy.to_be_bytes()].concat()),
+        Input::MouseAbs { x, y, width, height } => (MOUSE_MOVE_ABS, [x.to_be_bytes(), y.to_be_bytes(), [0, 0], (width - 1).to_be_bytes(), (height - 1).to_be_bytes()].concat()),
+        Input::Button { button, down } => (if *down { MOUSE_BUTTON_DOWN_GEN5 } else { MOUSE_BUTTON_UP_GEN5 }, vec![*button]),
+        Input::Scroll { amount } => (SCROLL_GEN5, [amount.to_be_bytes(), amount.to_be_bytes(), [0, 0]].concat()),
+        Input::HScroll { amount } => (SS_HSCROLL, amount.to_be_bytes().to_vec()),
+        Input::Text(t) => (UTF8_TEXT, t.as_bytes().to_vec()),
+    };
+    let mut v = ((body.len() + 4) as u32).to_be_bytes().to_vec();
+    v.extend_from_slice(&magic.to_le_bytes());
+    v.extend_from_slice(&body);
+    v
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn encode_round_trips() {
+        for i in [
+            Input::Key { vk: 0x41, down: false, modifiers: 2 },
+            Input::MouseRel { dx: -7, dy: 9 },
+            Input::MouseAbs { x: 100, y: 50, width: 1920, height: 1080 },
+            Input::Button { button: 3, down: true },
+            Input::Scroll { amount: 240 },
+            Input::HScroll { amount: -120 },
+            Input::Text("xin chào".into()),
+        ] {
+            assert_eq!(parse(&encode(&i)), Some(i.clone()));
+        }
+    }
+
     use super::*;
 
     fn pkt(magic: u32, body: &[u8]) -> Vec<u8> {

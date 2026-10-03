@@ -29,6 +29,8 @@ pub struct Packetizer {
     pub min_fec_packets: usize,
     /// next RTP sequence number
     pub lowseq: u16,
+    /// RTP SSRC: which stream (RemoteMac: the window) these packets belong to; 0 for GameStream
+    pub ssrc: u32,
 }
 
 /// Concatenate `a` and `b`, leaving `insert` bytes of room before every `slice` bytes
@@ -76,7 +78,7 @@ fn fec_encode(data: &mut Vec<Vec<u8>>, parity: usize, bs: usize) {
 
 impl Packetizer {
     pub fn new(packet_size: usize, fec_percentage: usize, min_fec_packets: usize) -> Self {
-        Self { packet_size, fec_percentage, min_fec_packets, lowseq: 0 }
+        Self { packet_size, fec_percentage, min_fec_packets, lowseq: 0, ssrc: 0 }
     }
 
     /// All packets of one encoded frame (Annex-B), in send order.
@@ -155,6 +157,7 @@ impl Packetizer {
                 s[1] = 0;
                 s[2..4].copy_from_slice(&self.lowseq.wrapping_add(x as u16).to_be_bytes());
                 s[4..8].copy_from_slice(&timestamp.to_be_bytes());
+                s[8..12].copy_from_slice(&self.ssrc.to_be_bytes());
                 s[RTP_HEADER + 11] = multi_fec_blocks;
                 s[RTP_HEADER + 4..RTP_HEADER + 8].copy_from_slice(&frame_index.to_le_bytes());
             }

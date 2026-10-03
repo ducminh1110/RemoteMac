@@ -43,10 +43,13 @@ pub mod host {
         pub fn rm_enet_flush(host: *mut ENetHost);
         pub fn rm_enet_disconnect_now(peer: *mut ENetPeer);
         pub fn rm_enet_destroy(host: *mut ENetHost);
+        pub fn rm_enet_client(ip: *const std::os::raw::c_char, port: c_ushort, channels: usize, connect_data: c_uint, timeout_ms: c_uint, peer: *mut *mut ENetPeer) -> *mut ENetHost;
 
         pub fn reed_solomon_init();
         pub fn reed_solomon_new(data_shards: c_int, parity_shards: c_int) -> *mut ReedSolomon;
         pub fn reed_solomon_release(rs: *mut ReedSolomon);
         pub fn reed_solomon_encode(rs: *mut ReedSolomon, shards: *mut *mut u8, nr_shards: c_int, bs: c_int) -> c_int;
+        /// `marks[i]` = 1 for a missing shard (rebuilt in place)
+        pub fn reed_solomon_decode(rs: *mut ReedSolomon, shards: *mut *mut u8, marks: *mut u8, nr_shards: c_int, bs: c_int) -> c_int;
     }
 }

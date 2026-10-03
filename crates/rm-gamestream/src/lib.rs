@@ -7,6 +7,7 @@
 //! handed to both ends by RemoteMac's own authenticated connection.
 
 pub mod crypto;
+pub mod depacketizer;
 pub mod input;
 pub mod video;
 
