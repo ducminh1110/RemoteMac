@@ -313,6 +313,10 @@ pub enum Message {
         hardware: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scale: Option<f64>,
+        /// The client's screen as "W,H,S" (pixels at Mac scale S): a Mac whose own screen is 1x
+        /// lays out its desktop on a HiDPI virtual display of that size, so apps render at 2x.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        screen: Option<String>,
     },
 
     /// Either direction: the clipboard now holds this text. `seq` lets each side ignore

@@ -51,6 +51,17 @@ pub fn set_display_scale(s: f64) {
     SCALE_X100.store((s.clamp(1.0, 3.0) * 100.0).round() as u32, std::sync::atomic::Ordering::SeqCst);
 }
 
+static SCREEN_FIT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// This PC's screen as "W,H,S" (see `Message::VideoDecoder::screen`), set by the UI.
+pub fn set_screen_fit(s: Option<String>) {
+    *SCREEN_FIT.lock().unwrap() = s;
+}
+
+fn screen_fit() -> Option<String> {
+    SCREEN_FIT.lock().unwrap().clone()
+}
+
 pub fn display_scale() -> f64 {
     SCALE_X100.load(std::sync::atomic::Ordering::SeqCst) as f64 / 100.0
 }
@@ -224,7 +235,7 @@ pub fn connect_with(relay: &str, session: &str, token: &str, app: Option<&str>, 
         eprintln!("warning: host reports it cannot stream apps: {:?}", sess.capabilities);
     }
     let kind = decoder_kind();
-    link.send(&Message::VideoDecoder { high_profile: kind != DecoderKind::Software, hardware: kind == DecoderKind::Hardware, scale: Some(display_scale()) });
+    link.send(&Message::VideoDecoder { high_profile: kind != DecoderKind::Software, hardware: kind == DecoderKind::Hardware, scale: Some(display_scale()), screen: screen_fit() });
     if let Some(app) = app {
         link.send(&Message::AppLaunch { application_id: app.into(), arguments: vec![], working_directory: None, environment: Default::default() });
     }

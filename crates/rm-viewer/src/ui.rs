@@ -277,7 +277,12 @@ pub fn run(opts: Options) -> i32 {
         let use_comp = opts.d3d && comp::available();
         net::set_decoder(choose_decoder(use_comp));
         // sharp like a native window: the Mac renders at this PC's pixel density
-        net::set_display_scale(windows::Win32::UI::HiDpi::GetDpiForSystem().max(96) as f64 / 96.0);
+        let sys_scale = windows::Win32::UI::HiDpi::GetDpiForSystem().max(96) as f64 / 96.0;
+        net::set_display_scale(sys_scale);
+        // and the Mac lays out its screen at this PC's size, Retina, when its own screen is 1x
+        let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+        let (fw, fh, fs) = chrome::display_request(sw, sh, sys_scale);
+        net::set_screen_fit((fw > 0 && sys_scale >= 1.25).then(|| format!("{fw},{fh},{fs}")));
         eprintln!("video decoder: {:?}", net::decoder_kind());
         let mut opts = opts;
         let (link, rx) = if opts.prompt {

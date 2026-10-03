@@ -362,6 +362,22 @@ func handle(_ m: [String: Any]) {
         useHighProfile = m["high_profile"] as? Bool ?? false
         let sc = num(m["scale"])
         if sc >= 1 { captureScale = CGFloat(min(3, sc)) }
+        // a 1x Mac renders windows at 1x: blurry on a HiDPI PC. Like BetterDummy, lay the desktop
+        // out on a HiDPI virtual display of the PC's size (Mac screen mirrored onto it): every
+        // app then renders at 2x and the picture is as sharp as a native window
+        if let screen = m["screen"] as? String, (NSScreen.main?.backingScaleFactor ?? 1) < 2, env["RM_NO_HIDPI"] == nil {
+            let v = screen.split(separator: ",").compactMap { Int($0) }
+            if v.count == 3, v[2] >= 2 {
+                DispatchQueue.global().async {
+                    let st = displays.configure(width: v[0], height: v[1], scale: v[2], forDesktop: true)
+                    if st["available"] as? Bool == true, displays.mirrorDesktop(onto: displays.displayID) {
+                        log("HiDPI desktop: \(v[0] / v[2])x\(v[1] / v[2]) points at 2x (the PC's screen)")
+                    } else {
+                        log("HiDPI desktop unavailable (\(st["reason"] ?? "mirroring refused")); windows stay 1x")
+                    }
+                }
+            }
+        }
         log("client decoder: high_profile=\(useHighProfile) hardware=\(m["hardware"] as? Bool ?? false) scale=\(captureScale)")
     case "ping":
         send(["type": "pong", "nonce": m["nonce"] ?? 0])

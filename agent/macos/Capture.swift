@@ -66,6 +66,55 @@ final class WindowStream: NSObject, SCStreamOutput {
     private var t0: CFAbsoluteTime = 0
     private(set) var sent = 0
     private var loggedEncodeError = false
+    /// the window's width in points (pixels per point = frame width / this)
+    private var pointsWide: CGFloat = 0
+
+    /// Make the picture look like a window of the client's own:
+    ///  - the corners outside a macOS 26 window's (large) rounding are transparent, which
+    ///    becomes black in video: fill them with the window's own colour next to them;
+    ///  - a window whose title bar is part of its content (toolbar windows) carries the Mac's
+    ///    own window buttons and macOS's purple "being captured" pill top-left: the viewer
+    ///    draws its own buttons, so that area takes the colour beside it.
+    private func polish(_ pb: CVPixelBuffer, scale: CGFloat, hideButtons: Bool) {
+        guard CVPixelBufferGetPlaneCount(pb) == 2, CVPixelBufferLockBaseAddress(pb, []) == kCVReturnSuccess else { return }
+        defer { CVPixelBufferUnlockBaseAddress(pb, []) }
+        guard let yb = CVPixelBufferGetBaseAddressOfPlane(pb, 0), let cb = CVPixelBufferGetBaseAddressOfPlane(pb, 1) else { return }
+        let Y = yb.assumingMemoryBound(to: UInt8.self), C = cb.assumingMemoryBound(to: UInt8.self)
+        let w = CVPixelBufferGetWidthOfPlane(pb, 0), h = CVPixelBufferGetHeightOfPlane(pb, 0)
+        let ys = CVPixelBufferGetBytesPerRowOfPlane(pb, 0), cs = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
+        let r = min(Int(28 * scale), w / 4, h / 4)
+        guard r > 2 else { return }
+        func copyPixel(from sx: Int, _ sy: Int, to x: Int, _ y: Int) {
+            Y[y * ys + x] = Y[sy * ys + sx]
+            let co = (sy / 2) * cs + (sx / 2) * 2, ct = (y / 2) * cs + (x / 2) * 2
+            C[ct] = C[co]; C[ct + 1] = C[co + 1]
+        }
+        func isBlack(_ x: Int, _ y: Int) -> Bool {
+            let c = (y / 2) * cs + (x / 2) * 2
+            return Y[y * ys + x] <= 24 && abs(Int(C[c]) - 128) < 12 && abs(Int(C[c + 1]) - 128) < 12
+        }
+        // corners: transparent (black) pixels outside a circle of radius r take the colour of
+        // the pixel diagonally inside the rounding
+        for (left, top) in [(true, true), (false, true), (true, false), (false, false)] {
+            let sx = left ? r : w - 1 - r, sy = top ? r : h - 1 - r
+            for dy in 0..<r {
+                for dx in 0..<r {
+                    let ex = r - dx, ey = r - dy
+                    guard ex * ex + ey * ey > r * r else { continue }
+                    let x = left ? dx : w - 1 - dx, y = top ? dy : h - 1 - dy
+                    if isBlack(x, y) { copyPixel(from: sx, sy, to: x, y) }
+                }
+            }
+        }
+        // the Mac's own buttons (and the capture pill) top-left: each row takes the colour just
+        // to the right of that area
+        if hideButtons {
+            let bw = min(Int(86 * scale), w / 3), bh = min(Int(40 * scale), h / 4)
+            for y in 0..<bh {
+                for x in 0..<bw { copyPixel(from: bw, y, to: x, y) }
+            }
+        }
+    }
     /// next encoded frame is an IDR (client asked, or frames were dropped)
     private var forceKey = true
     private var bitrate = 20_000_000
@@ -112,6 +161,7 @@ final class WindowStream: NSObject, SCStreamOutput {
         if cut > 0 { cfg.sourceRect = CGRect(x: 0, y: cut, width: w.frame.width, height: w.frame.height - cut) }
         // 4:2:0 needs even sizes (an odd one gets no frames at all): round up a pixel
         (cfg.width, cfg.height) = capturePixels(w.frame.width, w.frame.height - cut)
+        pointsWide = w.frame.width
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
         cfg.queueDepth = 6; cfg.showsCursor = false; cfg.scalesToFit = true // fill the output at any capture density (never a corner of it, never cropped)
@@ -177,6 +227,9 @@ final class WindowStream: NSObject, SCStreamOutput {
         let nowUs = agentClockUs()
         let capUs = cap.isFinite && cap > 0 ? UInt64(cap * 1_000_000) : nowUs
         let ptsUs = (capUs <= nowUs && nowUs - capUs < 1_000_000) ? capUs : nowUs
+        if display == nil && pointsWide > 0 {
+            polish(pb, scale: CGFloat(w) / pointsWide, hideButtons: inset == 0)
+        }
         let wid = UInt64(windowID), ew = UInt16(w), eh = UInt16(h)
         VTCompressionSessionEncodeFrame(sess, imageBuffer: pb, presentationTimeStamp: CMSampleBufferGetPresentationTimeStamp(sb),
                                         duration: .invalid,
