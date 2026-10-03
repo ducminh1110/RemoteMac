@@ -22,7 +22,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/remotemac"
           cd "$RUNNER_TEMP/remotemac"
 
-          gh run download 37083967180 \
+          gh run download 37099816167 \
             --repo "${{ github.repository }}" \
             --name remotemac-macos
 
@@ -49,6 +49,7 @@ jobs:
             remotemac/remotemac \
             2>/dev/null || true
 
+          echo ""
           echo "RemoteMac binary:"
           ls -lh remotemac/remotemac
 
@@ -141,7 +142,6 @@ jobs:
             exit 1
           fi
 
-          # Wait for RemoteMac to finish printing its connection info.
           sleep 2
 
           echo ""
@@ -151,7 +151,7 @@ jobs:
           echo ""
 
           #
-          # Expected output:
+          # RemoteMac output:
           #
           # RemoteMac is ready — connect from Windows with:
           #
@@ -174,7 +174,7 @@ jobs:
             echo ""
             echo "ERROR: Could not find RemoteMac session ID."
             echo ""
-            echo "Expected a line like:"
+            echo "Expected:"
             echo "  ID session to connect: 293 430 115"
             echo ""
             echo "Full RemoteMac log:"
@@ -182,14 +182,7 @@ jobs:
             exit 1
           fi
 
-          # Convert:
-          #
-          # 293 430 115
-          #
-          # into:
-          #
-          # 293430115
-          #
+          # 293 430 115 -> 293430115
           DISPLAY_ID="$(echo "$DISPLAY_ID" | tr -d '[:space:]')"
 
           SESSION_ID="rm-$DISPLAY_ID"
@@ -257,13 +250,11 @@ jobs:
           echo "Stopping RemoteMac..."
 
           if [ -f "$RUNNER_TEMP/remotemac.pid" ]; then
-
             PID="$(cat "$RUNNER_TEMP/remotemac.pid")"
 
             if kill -0 "$PID" 2>/dev/null; then
               kill "$PID" 2>/dev/null || true
             fi
-
           fi
 
           echo ""
