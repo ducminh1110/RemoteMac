@@ -129,7 +129,7 @@ final class WindowStream: NSObject, SCStreamOutput {
     private func applyBitrate(_ s: VTCompressionSession, _ b: Int) {
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: b as CFNumber)
         // hard cap per second: rate spikes are what fill the link
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [b / 8 * 3 / 2, 1] as CFArray)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [b / 4, 1] as CFArray)
     }
 
     /// Set for a whole-display stream (Mac Desktop); `windowID` is then the reserved desktop id.
@@ -201,6 +201,9 @@ final class WindowStream: NSObject, SCStreamOutput {
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_TransferFunction, value: kCVImageBufferTransferFunction_ITU_R_709_2)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_YCbCrMatrix, value: kCVImageBufferYCbCrMatrix_ITU_R_709_2)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
+        // a quality floor: text stays crisp even in a keyframe or right after a change (a static
+        // screen then only sends "unchanged", so whatever quality arrives first stays)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxAllowedFrameQP, value: 24 as CFNumber)
         applyBitrate(s, bitrate)
         // keyframes on request (start, client resync, after drops); a long safety interval only
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 10 as CFNumber)
