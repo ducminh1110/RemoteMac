@@ -28,7 +28,6 @@ jobs:
 
           test -f remotemac-macos.tar.gz
 
-          echo "Downloaded:"
           ls -lh remotemac-macos.tar.gz
 
       - name: Extract RemoteMac
@@ -119,12 +118,13 @@ jobs:
 
           echo "$PID" > "$RUNNER_TEMP/remotemac.pid"
 
+          # Give RemoteMac time to initialize.
           sleep 5
 
           echo ""
           echo "========== RemoteMac startup log =========="
           cat "$LOG" || true
-          echo "============================================"
+          echo "==========================================="
           echo ""
 
           if ! kill -0 "$PID" 2>/dev/null; then
@@ -132,7 +132,7 @@ jobs:
             exit 1
           fi
 
-          # Give the agent a little more time to print its ID.
+          # Give it a moment to print the connection information.
           sleep 2
 
           echo ""
@@ -141,44 +141,55 @@ jobs:
           echo "===================================="
           echo ""
 
-          # Accept common forms:
-          # ID: xxx
-          # Id: xxx
-          # id: xxx
-          # Session: xxx
-          ID="$(
-            grep -Eim1 '^[[:space:]]*(ID|Id|id|Session)[[:space:]]*:' "$LOG" \
-            | sed -E 's/^[[:space:]]*(ID|Id|id|Session)[[:space:]]*:[[:space:]]*//'
+          #
+          # RemoteMac prints:
+          #
+          # RemoteMac is ready — connect from Windows with:
+          #
+          #   ID session to connect: 293 430 115
+          #
+          #   Password: xxxxxxxxx
+          #
+          # and internally joins:
+          #
+          #   session=rm-293430115
+          #
+
+          DISPLAY_ID="$(
+            grep -Eim1 \
+              'ID session to connect:[[:space:]]*[0-9][0-9 ]*' \
+              "$LOG" \
+              | sed -E \
+                's/.*ID session to connect:[[:space:]]*([0-9 ]+).*/\1/'
           )"
 
-          # Fallback: try an "ID =" form.
-          if [ -z "${ID:-}" ]; then
-            ID="$(
-              grep -Eim1 '^[[:space:]]*(ID|Id|id|Session)[[:space:]]*=' "$LOG" \
-              | sed -E 's/^[[:space:]]*(ID|Id|id|Session)[[:space:]]*=[[:space:]]*//'
-            )"
-          fi
-
-          if [ -z "${ID:-}" ]; then
+          if [ -z "${DISPLAY_ID:-}" ]; then
             echo ""
-            echo "ERROR: Could not find the RemoteMac ID in the agent output."
+            echo "ERROR: Could not find RemoteMac session ID."
+            echo ""
+            echo "Expected:"
+            echo "  ID session to connect: 293 430 115"
             echo ""
             echo "Full log:"
             cat "$LOG"
-            echo ""
-            echo "The agent is running, but its ID format was not recognized."
             exit 1
           fi
 
-          ID="$(echo "$ID" | tr -d '\r' | xargs)"
+          # Remove spaces:
+          # 293 430 115 -> 293430115
+          DISPLAY_ID="$(echo "$DISPLAY_ID" | tr -d '[:space:]')"
 
-          echo "RM_MACHINE_ID=$ID" >> "$GITHUB_ENV"
+          SESSION_ID="rm-$DISPLAY_ID"
+
+          echo "RM_DISPLAY_ID=$DISPLAY_ID" >> "$GITHUB_ENV"
+          echo "RM_SESSION_ID=$SESSION_ID" >> "$GITHUB_ENV"
 
           echo ""
           echo "========================================"
           echo " RemoteMac READY"
           echo "========================================"
-          echo "ID:       $ID"
+          echo "ID:       $DISPLAY_ID"
+          echo "Session:  $SESSION_ID"
           echo "Password: $RM_PASSWORD"
           echo "Relay:    remotemac.mooo.com:7470"
           echo "PID:      $PID"
@@ -196,13 +207,15 @@ jobs:
           echo "========================================"
           echo " RemoteMac session is active"
           echo "========================================"
-          echo "ID:       $RM_MACHINE_ID"
+          echo "ID:       $RM_DISPLAY_ID"
+          echo "Session:  $RM_SESSION_ID"
           echo "Password: $RM_PASSWORD"
           echo "Relay:    remotemac.mooo.com:7470"
           echo "========================================"
           echo ""
 
           while true; do
+
             if ! kill -0 "$PID" 2>/dev/null; then
               echo ""
               echo "RemoteMac stopped unexpectedly."
@@ -215,7 +228,9 @@ jobs:
             sleep $((5 + RANDOM % 6))
 
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] RemoteMac alive"
-            echo "ID=$RM_MACHINE_ID"
+            echo "ID=$RM_DISPLAY_ID"
+            echo "Session=$RM_SESSION_ID"
+
           done
 
       - name: Stop RemoteMac
@@ -225,11 +240,13 @@ jobs:
           echo "Stopping RemoteMac..."
 
           if [ -f "$RUNNER_TEMP/remotemac.pid" ]; then
+
             PID="$(cat "$RUNNER_TEMP/remotemac.pid")"
 
             if kill -0 "$PID" 2>/dev/null; then
               kill "$PID" 2>/dev/null || true
             fi
+
           fi
 
           echo ""
