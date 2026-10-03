@@ -226,6 +226,7 @@ clipboard.onLocalChange = { seq, text in send(["type": "clipboard_set", "seq": I
 clipboard.start()
 
 let uploads = UploadStore(send: send)
+uploads.cleanup() // leftovers of a session that ended without cleaning (crash, power loss)
 let displays = DisplayManager()
 
 func keyTo(_ pid: pid_t, _ code: CGKeyCode, _ flags: CGEventFlags = []) {
@@ -561,6 +562,7 @@ let reader = Thread {
     } catch { log("read loop ended: \(error)") }
     apps.terminateAll()
     displays.unmirrorDesktop()
+    uploads.cleanup()   // the session's uploaded files go with it
     // ready for the next connection (same ID and password)
     if sessionArg == nil { restartForNextClient() }
     exit(0)
