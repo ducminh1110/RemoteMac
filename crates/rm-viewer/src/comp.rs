@@ -41,6 +41,8 @@ pub struct Comp {
     /// picture area (x, y, w, h) inside the window, pixels
     area: (i32, i32, i32, i32),
     pub kind: &'static str,
+    /// the step where showing a GPU picture last failed
+    pub last_error: &'static str,
 }
 
 struct VideoProc {
@@ -116,7 +118,7 @@ impl Comp {
             root.AddVisual(&overlay, true, &chrome).ok()?;
             target.SetRoot(&root).ok()?;
             device.Commit().ok()?;
-            Some(Self { device, _target: target, root, clip, bg_scale, video, video_scale, chrome, chrome_surface: None, overlay, overlay_surface: None, d3d, ctx, swap: None, swap_size: (0, 0), vp: None, area: (0, 0, 1, 1), kind })
+            Some(Self { device, _target: target, root, clip, bg_scale, video, video_scale, chrome, chrome_surface: None, overlay, overlay_surface: None, d3d, ctx, swap: None, swap_size: (0, 0), vp: None, area: (0, 0, 1, 1), kind, last_error: "" })
         }
     }
 
@@ -260,11 +262,22 @@ impl Comp {
     }
 
     /// Show a hardware-decoded picture: the GPU video processor converts NV12 into the swap
-    /// chain directly (the picture never comes back to system memory).
+    /// chain directly (the picture never comes back to system memory). On failure
+    /// `last_error` names the step.
     pub fn present_gpu(&mut self, p: &crate::gpu::GpuPic) -> bool {
+        match self.present_gpu_inner(p) {
+            Ok(()) => true,
+            Err(e) => {
+                self.last_error = e;
+                false
+            }
+        }
+    }
+
+    fn present_gpu_inner(&mut self, p: &crate::gpu::GpuPic) -> Result<(), &'static str> {
         let (w, h) = (p.width, p.height);
         if !self.ensure_swap(w, h) {
-            return false;
+            return Err("swap chain");
         }
         unsafe {
             let mut td = D3D11_TEXTURE2D_DESC::default();
@@ -272,8 +285,8 @@ impl Comp {
             let sizes = ((td.Width, td.Height), (w, h));
             if self.vp.as_ref().map(|v| v.sizes) != Some(sizes) {
                 self.vp = None;
-                let Ok(dev) = self.d3d.cast::<ID3D11VideoDevice>() else { return false };
-                let Ok(vctx) = self.ctx.cast::<ID3D11VideoContext>() else { return false };
+                let dev = self.d3d.cast::<ID3D11VideoDevice>().map_err(|_| "no video device")?;
+                let vctx = self.ctx.cast::<ID3D11VideoContext>().map_err(|_| "no video context")?;
                 let rate = DXGI_RATIONAL { Numerator: 60, Denominator: 1 };
                 let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
                     InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
@@ -285,8 +298,8 @@ impl Comp {
                     OutputHeight: h,
                     Usage: D3D11_VIDEO_USAGE_OPTIMAL_SPEED,
                 };
-                let Ok(en) = dev.CreateVideoProcessorEnumerator(&desc) else { return false };
-                let Ok(vp) = dev.CreateVideoProcessor(&en, 0) else { return false };
+                let en = dev.CreateVideoProcessorEnumerator(&desc).map_err(|_| "video processor enumerator")?;
+                let vp = dev.CreateVideoProcessor(&en, 0).map_err(|_| "video processor")?;
                 // BT.709 limited-range YCbCr in, full-range RGB out
                 let cs_in = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0x14 };
                 let cs_out = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 };
@@ -300,24 +313,23 @@ impl Comp {
                 vctx.VideoProcessorSetOutputTargetRect(&vp, true, Some(&r));
                 self.vp = Some(VideoProc { dev, ctx: vctx, en, vp, sizes });
             }
-            let Some(v) = self.vp.as_ref() else { return false };
-            let Some(sc) = self.swap.as_ref() else { return false };
-            let Ok(back) = sc.GetBuffer::<ID3D11Texture2D>(0) else { return false };
+            let v = self.vp.as_ref().ok_or("video processor")?;
+            let sc = self.swap.as_ref().ok_or("swap chain")?;
+            let back = sc.GetBuffer::<ID3D11Texture2D>(0).map_err(|_| "back buffer")?;
             let od = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC { ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D, Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 } } };
             let mut ov = None;
-            if v.dev.CreateVideoProcessorOutputView(&back, &v.en, &od, Some(&mut ov)).is_err() {
-                return false;
-            }
+            v.dev.CreateVideoProcessorOutputView(&back, &v.en, &od, Some(&mut ov)).map_err(|_| "output view")?;
             let id = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC { FourCC: 0, ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D, Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 } } };
             let mut iv = None;
-            if v.dev.CreateVideoProcessorInputView(&p.tex, &v.en, &id, Some(&mut iv)).is_err() {
-                return false;
-            }
-            let (Some(ov), Some(iv)) = (ov, iv) else { return false };
+            v.dev.CreateVideoProcessorInputView(&p.tex, &v.en, &id, Some(&mut iv)).map_err(|_| "input view (NV12 texture)")?;
+            let (Some(ov), Some(iv)) = (ov, iv) else { return Err("views") };
             let mut stream = D3D11_VIDEO_PROCESSOR_STREAM { Enable: true.into(), pInputSurface: std::mem::ManuallyDrop::new(Some(iv)), ..Default::default() };
             let ok = v.ctx.VideoProcessorBlt(&v.vp, &ov, 0, std::slice::from_ref(&stream)).is_ok();
             std::mem::ManuallyDrop::drop(&mut stream.pInputSurface);
-            ok && sc.Present(0, DXGI_PRESENT(0)).is_ok()
+            if !ok {
+                return Err("video processor blit");
+            }
+            sc.Present(0, DXGI_PRESENT(0)).ok().map_err(|_| "present")
         }
     }
 }

@@ -151,6 +151,9 @@ final class Sender {
     private let conn: Conn
     private let cond = NSCondition()
     private var control: [Data] = []
+    /// big, unhurried replies (app icons): after control, taking turns with video
+    private var bulk: [Data] = []
+    private var bulkTurn = false
     private var video: [(data: Data, window: UInt64, key: Bool, queued: CFAbsoluteTime)] = []
     private var waitingForKey: Set<UInt64> = []
     private var maxDelay: Double = 0
@@ -174,6 +177,13 @@ final class Sender {
         let json = try JSONSerialization.data(withJSONObject: msg)
         let d = conn.frame(channel(forType: msg["type"] as? String ?? ""), json)
         cond.lock(); control.append(d); cond.signal(); cond.unlock()
+    }
+
+    /// Low priority: never ahead of input replies, window events or a new window's video.
+    func sendBulk(_ msg: [String: Any]) throws {
+        let json = try JSONSerialization.data(withJSONObject: msg)
+        let d = conn.frame(channel(forType: msg["type"] as? String ?? ""), json)
+        cond.lock(); bulk.append(d); cond.signal(); cond.unlock()
     }
 
     /// UDP video path; used while it is alive, TCP otherwise.
@@ -208,9 +218,11 @@ final class Sender {
     private func run() {
         while true {
             cond.lock()
-            while control.isEmpty && video.isEmpty { cond.wait() }
+            while control.isEmpty && video.isEmpty && bulk.isEmpty { cond.wait() }
             let item: (Data, CFAbsoluteTime?)
-            if !control.isEmpty { item = (control.removeFirst(), nil) } else { let v = video.removeFirst(); item = (v.data, v.queued) }
+            if !control.isEmpty { item = (control.removeFirst(), nil) }
+            else if !bulk.isEmpty && (video.isEmpty || bulkTurn) { item = (bulk.removeFirst(), nil); bulkTurn = false }
+            else { let v = video.removeFirst(); item = (v.data, v.queued); bulkTurn = true }
             cond.unlock()
             do { try conn.writeAll(item.0) } catch { log("send failed: \(error)"); return }
             if let q = item.1 { note(delay: CFAbsoluteTimeGetCurrent() - q) }

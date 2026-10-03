@@ -709,7 +709,13 @@ fn present_frame(id: u64, picture: net::Pic, meta: net::FrameMeta) {
         r.frames += 1;
         let size = picture.size();
         let gpu_ok = match (&picture, r.comp.as_mut(), r.presenter.as_mut()) {
-            (net::Pic::Gpu(g), Some(c), _) => c.present_gpu(g),
+            (net::Pic::Gpu(g), Some(c), _) => {
+                let ok = c.present_gpu(g);
+                if !ok {
+                    net::hardware_failed(&format!("showing a GPU picture failed ({})", c.last_error));
+                }
+                ok
+            }
             (net::Pic::Cpu(p), Some(c), _) => c.present(p),
             (net::Pic::Cpu(p), None, Some(d)) => d.present(p),
             _ => false,

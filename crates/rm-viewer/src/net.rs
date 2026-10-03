@@ -34,24 +34,41 @@ impl Pic {
 
 /// Which decoder new windows get.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum DecoderKind {
     /// openh264 (portable; Main profile at most)
-    Software,
+    Software = 0,
     /// Media Foundation, system memory (multithreaded; High profile)
-    Platform,
+    Platform = 1,
     /// Media Foundation on the GPU (DXVA), pictures stay in video memory
-    Hardware,
+    Hardware = 2,
 }
 
-static DECODER: std::sync::OnceLock<DecoderKind> = std::sync::OnceLock::new();
+/// Current decoder (0 software, 1 platform, 2 hardware) and a generation bumped on fallback.
+static DECODER: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static DECODER_GEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// Choose the decoder once, before connecting (the UI knows whether it can show GPU pictures).
+/// Choose the decoder before connecting (the UI knows whether it can show GPU pictures).
 pub fn set_decoder(k: DecoderKind) {
-    let _ = DECODER.set(k);
+    DECODER.store(k as u8, std::sync::atomic::Ordering::SeqCst);
 }
 
 pub fn decoder_kind() -> DecoderKind {
-    *DECODER.get().unwrap_or(&DecoderKind::Software)
+    match DECODER.load(std::sync::atomic::Ordering::SeqCst) {
+        2 => DecoderKind::Hardware,
+        1 => DecoderKind::Platform,
+        _ => DecoderKind::Software,
+    }
+}
+
+/// The GPU path does not work on this PC (decoding or showing its pictures failed): every
+/// window's decoder is rebuilt on Windows' software decoder (still H.264 High), from a fresh
+/// keyframe. Never below that: the stream may be High profile, which openh264 cannot take.
+pub fn hardware_failed(why: &str) {
+    if DECODER.compare_exchange(DecoderKind::Hardware as u8, DecoderKind::Platform as u8, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok() {
+        eprintln!("hardware video decoding off: {why}; using Windows' software decoder");
+        DECODER_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 enum Dec {
@@ -269,12 +286,34 @@ fn spawn_decoder(id: u64, link: Link, tx: Sender<UiEvent>, wake: Arc<dyn Fn() + 
     std::thread::Builder::new()
         .name(format!("rm-decode-{id}"))
         .spawn(move || {
+            use std::sync::atomic::Ordering;
+            let mut gen = DECODER_GEN.load(Ordering::SeqCst);
             let Some(mut d) = Dec::new() else { return };
             let mut last_ask = std::time::Instant::now() - std::time::Duration::from_secs(1);
+            // watchdog: frames fed / pictures out / errors in a row since this decoder was made
+            let (mut fed, mut produced, mut errors, mut waiting_key) = (0u32, 0u32, 0u32, false);
             for (v, mut meta) in frx {
+                let now_gen = DECODER_GEN.load(Ordering::SeqCst);
+                if now_gen != gen {
+                    // fell back from the GPU: a new decoder, starting at a keyframe
+                    gen = now_gen;
+                    match Dec::new() {
+                        Some(n) => d = n,
+                        None => return,
+                    }
+                    (fed, produced, errors, waiting_key) = (0, 0, 0, true);
+                    link.send(&Message::RequestKeyframe { window_id: id });
+                }
+                if waiting_key && !v.keyframe {
+                    continue;
+                }
+                waiting_key = false;
+                fed += 1;
                 let t = std::time::Instant::now();
                 match d.decode(&v) {
                     Ok(Some(picture)) => {
+                        produced += 1;
+                        errors = 0;
                         meta.decode_us = t.elapsed().as_micros() as u32;
                         if tx.send(UiEvent::Frame { id, picture, meta }).is_err() {
                             return;
@@ -282,13 +321,20 @@ fn spawn_decoder(id: u64, link: Link, tx: Sender<UiEvent>, wake: Arc<dyn Fn() + 
                         wake();
                     }
                     Ok(None) => {}
-                    Err(_) => {
+                    Err(e) => {
+                        errors += 1;
+                        if errors <= 3 {
+                            eprintln!("window {id}: decode error ({:?}): {e}", decoder_kind());
+                        }
                         // a broken reference chain: ask for a keyframe (at most a few per second)
                         if last_ask.elapsed().as_millis() > 300 {
                             link.send(&Message::RequestKeyframe { window_id: id });
                             last_ask = std::time::Instant::now();
                         }
                     }
+                }
+                if decoder_kind() == DecoderKind::Hardware && produced == 0 && (fed >= 30 || errors >= 8) {
+                    hardware_failed(&format!("window {id}: {fed} frames in, no picture out"));
                 }
             }
         })

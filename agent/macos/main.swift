@@ -162,6 +162,7 @@ if env["RM_NO_UDP"] == nil, let u = UdpLink(hostPort: relayAddr, session: sessio
 }
 
 let menuQueue = DispatchQueue(label: "rm.menus")
+let iconQueue = DispatchQueue(label: "rm.icons", qos: .utility)
 /// Read (off the main path: big apps take a moment) and send an app's menu bar.
 func sendMenuBar(_ id: String) {
     menuQueue.async {
@@ -258,8 +259,10 @@ func handle(_ m: [String: Any]) {
     case "get_menu_bar" where (m["application_id"] as? String) == desktopAppID:
         send(["type": "menu_bar", "application_id": desktopAppID, "menus": [Any]()]) // the Mac's own menu bar is in the picture
     case "get_app_icon" where (m["application_id"] as? String) == desktopAppID:
-        if let rgba = appIconRGBA(path: "/System/Library/CoreServices/Finder.app", size: 64) {
-            send(["type": "app_icon", "application_id": desktopAppID, "size": 64, "rgba_base64": rgba.base64EncodedString()])
+        iconQueue.async {
+            if let rgba = appIconRGBA(path: "/System/Library/CoreServices/Finder.app", size: 64) {
+                try? sender.sendBulk(["type": "app_icon", "application_id": desktopAppID, "size": 64, "rgba_base64": rgba.base64EncodedString()])
+            }
         }
     case "app_launch":
         let id = m["application_id"] as? String ?? ""
@@ -289,13 +292,17 @@ func handle(_ m: [String: Any]) {
             if let aw = axWindowFor(pid: w.pid, id: wid, rect: w.rect) { AXUIElementPerformAction(aw, kAXRaiseAction as CFString) }
         }
     case "get_app_icon":
+        // drawn off the reader thread and sent at low priority: a viewer asks for all the
+        // icons at once, and a launch must not wait behind them
         let id = m["application_id"] as? String ?? ""
         guard let d = apps.descriptor(id) else { send(["type": "error", "code": "unknown_app", "message": id]); break }
-        // the bundle (…/Foo.app) carries the real icon; a bare executable gets the generic one
-        let bundle = d.executable.components(separatedBy: "/Contents/MacOS/").first ?? d.executable
-        if let rgba = appIconRGBA(path: bundle, size: 64) {
-            send(["type": "app_icon", "application_id": id, "size": 64, "rgba_base64": rgba.base64EncodedString()])
-        } else { send(["type": "error", "code": "icon_unavailable", "message": id]) }
+        iconQueue.async {
+            // the bundle (…/Foo.app) carries the real icon; a bare executable gets the generic one
+            let bundle = d.executable.components(separatedBy: "/Contents/MacOS/").first ?? d.executable
+            if let rgba = appIconRGBA(path: bundle, size: 64) {
+                try? sender.sendBulk(["type": "app_icon", "application_id": id, "size": 64, "rgba_base64": rgba.base64EncodedString()])
+            }
+        }
     case "file_upload_begin", "file_upload_chunk", "file_upload_end":
         uploads.handle(m)
     case "panel_choose_file":
