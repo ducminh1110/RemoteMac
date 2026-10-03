@@ -22,12 +22,14 @@ jobs:
           mkdir -p "$RUNNER_TEMP/remotemac"
           cd "$RUNNER_TEMP/remotemac"
 
-          gh run download 37036138637 \
+          gh run download 37083967180 \
             --repo "${{ github.repository }}" \
             --name remotemac-macos
 
           test -f remotemac-macos.tar.gz
 
+          echo ""
+          echo "Downloaded RemoteMac:"
           ls -lh remotemac-macos.tar.gz
 
       - name: Extract RemoteMac
@@ -46,6 +48,9 @@ jobs:
           xattr -d com.apple.quarantine \
             remotemac/remotemac \
             2>/dev/null || true
+
+          echo "RemoteMac binary:"
+          ls -lh remotemac/remotemac
 
       - name: Generate password
         shell: bash
@@ -118,7 +123,6 @@ jobs:
 
           echo "$PID" > "$RUNNER_TEMP/remotemac.pid"
 
-          # Give RemoteMac time to initialize.
           sleep 5
 
           echo ""
@@ -129,10 +133,15 @@ jobs:
 
           if ! kill -0 "$PID" 2>/dev/null; then
             echo "RemoteMac exited during startup."
+
+            echo ""
+            echo "Full log:"
+            cat "$LOG" || true
+
             exit 1
           fi
 
-          # Give it a moment to print the connection information.
+          # Wait for RemoteMac to finish printing its connection info.
           sleep 2
 
           echo ""
@@ -142,7 +151,7 @@ jobs:
           echo ""
 
           #
-          # RemoteMac prints:
+          # Expected output:
           #
           # RemoteMac is ready — connect from Windows with:
           #
@@ -150,9 +159,7 @@ jobs:
           #
           #   Password: xxxxxxxxx
           #
-          # and internally joins:
-          #
-          #   session=rm-293430115
+          # [agent] relay joined, session=rm-293430115
           #
 
           DISPLAY_ID="$(
@@ -167,16 +174,22 @@ jobs:
             echo ""
             echo "ERROR: Could not find RemoteMac session ID."
             echo ""
-            echo "Expected:"
+            echo "Expected a line like:"
             echo "  ID session to connect: 293 430 115"
             echo ""
-            echo "Full log:"
-            cat "$LOG"
+            echo "Full RemoteMac log:"
+            cat "$LOG" || true
             exit 1
           fi
 
-          # Remove spaces:
-          # 293 430 115 -> 293430115
+          # Convert:
+          #
+          # 293 430 115
+          #
+          # into:
+          #
+          # 293430115
+          #
           DISPLAY_ID="$(echo "$DISPLAY_ID" | tr -d '[:space:]')"
 
           SESSION_ID="rm-$DISPLAY_ID"
@@ -220,13 +233,17 @@ jobs:
               echo ""
               echo "RemoteMac stopped unexpectedly."
               echo ""
+
               echo "========== RemoteMac log =========="
               cat "$RUNNER_TEMP/remotemac.log" || true
+              echo "==================================="
+
               exit 1
             fi
 
             sleep $((5 + RANDOM % 6))
 
+            echo ""
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] RemoteMac alive"
             echo "ID=$RM_DISPLAY_ID"
             echo "Session=$RM_SESSION_ID"
@@ -252,3 +269,4 @@ jobs:
           echo ""
           echo "========== Final RemoteMac log =========="
           cat "$RUNNER_TEMP/remotemac.log" 2>/dev/null || true
+          echo "========================================="
