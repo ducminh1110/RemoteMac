@@ -1834,9 +1834,23 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
 }
 
 /// The picture of a remote window: input goes to the Mac, frames are drawn here.
+/// Show this PC's pointer over the picture too (Ctrl+Alt+Shift+C, as Moonlight; RM_LOCAL_CURSOR=1
+/// starts with it on). Off by default: the Mac's own pointer is in the video, where it really
+/// is and with its real shape, as Sunshine streams it and Moonlight shows it.
+static LOCAL_CURSOR: std::sync::OnceLock<std::sync::atomic::AtomicBool> = std::sync::OnceLock::new();
+
+fn local_cursor() -> &'static std::sync::atomic::AtomicBool {
+    LOCAL_CURSOR.get_or_init(|| std::sync::atomic::AtomicBool::new(std::env::var_os("RM_LOCAL_CURSOR").is_some()))
+}
+
 unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let frame = GetParent(hwnd).unwrap_or_default();
     match msg {
+        // over the picture the Mac's pointer (in the video) is the pointer
+        WM_SETCURSOR if (lp.0 & 0xffff) as u32 == HTCLIENT && !local_cursor().load(std::sync::atomic::Ordering::Relaxed) => {
+            SetCursor(None);
+            LRESULT(1)
+        }
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
@@ -1919,6 +1933,15 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 return LRESULT(0);
             }
             let mods = current_mods();
+            // Ctrl+Alt+Shift+C: this PC's pointer over the picture on/off, as in Moonlight
+            if vk == 'C' as u32 && mods.ctrl && mods.alt && mods.shift {
+                if down {
+                    let on = !local_cursor().fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
+                    let _ = SetCursor(if on { LoadCursorW(None, IDC_ARROW).ok() } else { None });
+                    eprintln!("local pointer over the picture: {}", if on { "shown" } else { "hidden (the Mac's pointer is in the video)" });
+                }
+                return LRESULT(0);
+            }
             // Ctrl+Alt+Shift+S: the stats overlay, as in Moonlight
             if vk == 'S' as u32 && mods.ctrl && mods.alt && mods.shift {
                 if down {

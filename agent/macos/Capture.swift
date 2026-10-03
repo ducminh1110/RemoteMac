@@ -54,6 +54,12 @@ func capturePixels(_ w: CGFloat, _ h: CGFloat) -> (Int, Int) {
 /// The client said its decoder takes H.264 High (set before windows start streaming).
 var useHighProfile = false
 
+/// The Mac's own pointer is drawn into the video, as Sunshine captures it (AVCaptureScreenInput
+/// with capturesCursor): what the viewer shows is where the pointer really is and what shape it
+/// has (I-beam, hand, resize arrows). The viewer hides its own pointer over the picture, as
+/// Moonlight does. RM_NO_CURSOR=1: leave it out (the viewer then shows its own).
+let showRemoteCursor = ProcessInfo.processInfo.environment["RM_NO_CURSOR"] == nil
+
 final class WindowStream: NSObject, SCStreamOutput {
     let windowID: CGWindowID
     /// Points cut off the top (the Mac title bar).
@@ -180,7 +186,7 @@ final class WindowStream: NSObject, SCStreamOutput {
             (cfg.width, cfg.height) = capturePixels(CGFloat(d.width), CGFloat(d.height))
             cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
-            cfg.queueDepth = 6; cfg.showsCursor = false; cfg.scalesToFit = true // client draws the pointer; content fills the output at any density
+            cfg.queueDepth = 6; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true // the Mac's pointer is in the picture (as Sunshine); content fills the output at any density
             let s = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: cfg, delegate: nil)
             try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
             t0 = CFAbsoluteTimeGetCurrent()
@@ -197,7 +203,7 @@ final class WindowStream: NSObject, SCStreamOutput {
         pointsWide = w.frame.width
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
-        cfg.queueDepth = 6; cfg.showsCursor = false; cfg.scalesToFit = true // fill the output at any capture density (never a corner of it, never cropped)
+        cfg.queueDepth = 6; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true // fill the output at any capture density (never a corner of it, never cropped)
         let s = SCStream(filter: SCContentFilter(desktopIndependentWindow: w), configuration: cfg, delegate: nil)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
         t0 = CFAbsoluteTimeGetCurrent()
