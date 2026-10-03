@@ -171,6 +171,7 @@ fn run(sock: UdpSocket, relay: SocketAddr, register: Vec<u8>, stats: Arc<Mutex<L
     // numbers for the loss report
     let mut gs: HashMap<u32, (Depacketizer, Option<u16>)> = HashMap::new();
     let (mut gs_expected, mut gs_received, mut gs_recovered, mut gs_lost, mut gs_frames) = (0u32, 0u32, 0u64, 0u32, 0u32);
+    let mut tunnel_hi: Option<u16> = None;
     let mut buf = vec![0u8; 2048];
     let (mut last_reg, mut last_fb, mut last_ping, mut last_video) = (None::<Instant>, Instant::now(), None::<Instant>, None::<Instant>);
     let mut registered = false;
@@ -316,6 +317,25 @@ fn run(sock: UdpSocket, relay: SocketAddr, register: Vec<u8>, stats: Arc<Mutex<L
                         }
                     }
                     udp::T_GS_TUNNEL if n >= 4 => {
+                        // the GameStream desktop's video counts in the loss report too (it drives
+                        // the Mac's bitrate, which Moonlight's protocol itself never adapts)
+                        if p[3] == 0 && n >= 8 {
+                            last_video = Some(now);
+                            let seq = u16::from_be_bytes([p[6], p[7]]);
+                            gs_received += 1;
+                            match tunnel_hi {
+                                None => gs_expected += 1,
+                                Some(hi) => {
+                                    let d = seq.wrapping_sub(hi) as i16;
+                                    if d > 0 {
+                                        gs_expected += d as u32;
+                                    }
+                                }
+                            }
+                            if tunnel_hi.is_none_or(|hi| (seq.wrapping_sub(hi) as i16) > 0) {
+                                tunnel_hi = Some(seq);
+                            }
+                        }
                         if let Some(f) = tunnel.lock().unwrap().as_ref() {
                             f(p[3], &p[4..]);
                         }
