@@ -16,9 +16,10 @@ final class DesktopSession {
     /// The streamed display, global coordinates (input maps onto it).
     var bounds: CGRect { CGDisplayBounds(displayID) }
 
-    /// Starts on the main display (the Mac's own screen). Returns the window_created message.
-    func start() -> [String: Any] {
-        lock.lock(); active = true; displayID = CGMainDisplayID(); lock.unlock()
+    /// Starts on `display` (the virtual display at the client's size), else the main display (the
+    /// Mac's own screen). Returns the window_created message.
+    func start(display: CGDirectDisplayID? = nil) -> [String: Any] {
+        lock.lock(); active = true; displayID = display ?? CGMainDisplayID(); lock.unlock()
         let b = bounds
         log("desktop session: display \(displayID) \(Int(b.width))x\(Int(b.height))")
         return ["type": "window_created", "window_id": Int(desktopWindowID), "application_id": desktopAppID, "title": "Mac Desktop",

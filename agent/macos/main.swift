@@ -239,7 +239,23 @@ func handle(_ m: [String: Any]) {
         // Mac Desktop: the main display as one window
         guard !desktop.isActive else { break }
         send(["type": "app_launched", "application_id": desktopAppID, "pid": 0])
-        send(desktop.start())
+        // "fit=W,H,S": the client's screen (pixels, Mac scale). Like BetterDummy: a virtual display
+        // of exactly that size, the Mac's screen mirrored onto it, and that display streamed
+        var fitted: CGDirectDisplayID?
+        if let fit = (m["arguments"] as? [String])?.first(where: { $0.hasPrefix("fit=") }) {
+            let v = fit.dropFirst(4).split(separator: ",").compactMap { Int($0) }
+            if v.count == 3 {
+                let st = displays.configure(width: v[0], height: v[1], scale: v[2], forDesktop: true)
+                if st["available"] as? Bool == true, displays.mirrorDesktop(onto: displays.displayID) {
+                    usleep(500_000) // the window server settles the new layout
+                    fitted = displays.displayID
+                } else {
+                    log("desktop: no fitted display (\(st["reason"] ?? "mirroring refused")); streaming the Mac's own screen")
+                    displays.unmirrorDesktop()
+                }
+            }
+        }
+        send(desktop.start(display: fitted))
         let ws = WindowStream(windowID: desktopWindowID, display: desktop.displayID) { pkt in sender.sendVideo(pkt) }
         ws.setBitrate(sender.bitrate)
         streamsLock.lock(); streams[desktopWindowID] = ws; streamsLock.unlock()
@@ -249,6 +265,7 @@ func handle(_ m: [String: Any]) {
          "window_close" where CGWindowID(int(m["window_id"])) == desktopWindowID:
         guard desktop.isActive else { break }
         desktop.stop()
+        displays.unmirrorDesktop()
         stopStream(desktopWindowID)
         send(["type": "window_destroyed", "window_id": Int(desktopWindowID)])
         send(["type": "app_exited", "application_id": desktopAppID, "code": NSNull()])
@@ -364,6 +381,7 @@ let reader = Thread {
         log("client disconnected")
     } catch { log("read loop ended: \(error)") }
     apps.terminateAll()
+    displays.unmirrorDesktop()
     // ready for the next connection (same ID and password)
     if sessionArg == nil { restartForNextClient() }
     exit(0)

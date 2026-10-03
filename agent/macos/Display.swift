@@ -14,11 +14,13 @@ final class DisplayManager {
     private var saved: [CGWindowID: CGRect] = [:]
     private let lock = NSLock()
 
-    func configure(width: Int, height: Int, scale: Int) -> [String: Any] {
+    /// `forDesktop`: exactly the client's screen (the Mac Desktop is mirrored onto it); otherwise
+    /// with room above for a fullscreen window's menu and title bars.
+    func configure(width: Int, height: Int, scale: Int, forDesktop: Bool = false) -> [String: Any] {
         let hidpi = scale >= 2
         let w = UInt32(max(320, hidpi ? width / 2 : width)), h = UInt32(max(240, hidpi ? height / 2 : height))
         var err = [CChar](repeating: 0, count: 256)
-        let id = rm_virtual_display_create(w, h + headroom, hidpi ? 1 : 0, &err, Int32(err.count))
+        let id = rm_virtual_display_create(w, h + (forDesktop ? 0 : headroom), hidpi ? 1 : 0, &err, Int32(err.count))
         guard id != 0 else {
             return ["type": "display_status", "available": false, "display_id": 0, "width": 0, "height": 0, "reason": String(cString: err)]
         }
@@ -33,6 +35,35 @@ final class DisplayManager {
         let b = CGDisplayBounds(id)
         log("virtual display \(id): \(Int(b.width))x\(Int(b.height)) at \(Int(b.minX)),\(Int(b.minY)) hidpi=\(hidpi)")
         return ["type": "display_status", "available": true, "display_id": Int(id), "width": Int(w), "height": Int(h), "reason": NSNull()]
+    }
+
+    /// The Mac's own screen(s) mirror the virtual display (what BetterDummy does): the whole
+    /// desktop is laid out at the client's resolution, and streaming that display shows it 1:1.
+    private var mirrored: [CGDirectDisplayID] = []
+
+    func mirrorDesktop(onto id: CGDirectDisplayID) -> Bool {
+        var ids = [CGDirectDisplayID](repeating: 0, count: 16), n: UInt32 = 0
+        CGGetOnlineDisplayList(16, &ids, &n)
+        let others = ids.prefix(Int(n)).filter { $0 != id && CGDisplayMirrorsDisplay($0) == kCGNullDirectDisplay }
+        guard !others.isEmpty else { return false }
+        var cfg: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&cfg) == .success else { return false }
+        for d in others { CGConfigureDisplayMirrorOfDisplay(cfg, d, id) }
+        guard CGCompleteDisplayConfiguration(cfg, .forSession) == .success else { CGCancelDisplayConfiguration(cfg); return false }
+        lock.lock(); mirrored = others; lock.unlock()
+        log("desktop: displays \(others) now mirror virtual display \(id)")
+        return true
+    }
+
+    /// Back to the Mac's own layout.
+    func unmirrorDesktop() {
+        lock.lock(); let ds = mirrored; mirrored = []; lock.unlock()
+        guard !ds.isEmpty else { return }
+        var cfg: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&cfg) == .success else { return }
+        for d in ds { CGConfigureDisplayMirrorOfDisplay(cfg, d, kCGNullDirectDisplay) }
+        _ = CGCompleteDisplayConfiguration(cfg, .forSession)
+        log("desktop: mirroring undone")
     }
 
     /// Usable area of a display (global, top-left origin): below its menu bar.

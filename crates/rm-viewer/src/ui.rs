@@ -506,6 +506,47 @@ unsafe extern "system" fn launcher_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
     }
 }
 
+/// "fit=W,H,S" for the Mac Desktop: the monitor the launcher is on, as a Mac display request.
+fn desktop_fit() -> Option<String> {
+    let anchor = with_app(|a| a.launcher.as_ref().map(|l| l.hwnd.0 as isize)).flatten().unwrap_or(0);
+    let hwnd = hwnd_of(anchor);
+    let mon = monitor_rect(hwnd);
+    let scale = if anchor != 0 { native::dpi_scale(hwnd) } else { unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem().max(96) as f64 / 96.0 } };
+    let (w, h, s) = chrome::display_request(mon.right - mon.left, mon.bottom - mon.top, scale);
+    (w > 0 && h > 0).then(|| format!("fit={w},{h},{s}"))
+}
+
+/// A Mac window bigger than this monitor's work area is fitted into it, and the Mac app is
+/// resized to match (the picture is never cut off or larger than the laptop's screen).
+fn fit_to_work_area(hwnd: HWND) {
+    unsafe {
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let _ = GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info);
+        let work = info.rcWork;
+        let mut wr = RECT::default();
+        let _ = GetWindowRect(hwnd, &mut wr);
+        let (ww, wh) = (wr.right - wr.left, wr.bottom - wr.top);
+        let (aw, ah) = (work.right - work.left, work.bottom - work.top);
+        if ww <= aw && wh <= ah {
+            if wr.left < work.left || wr.top < work.top || wr.right > work.right || wr.bottom > work.bottom {
+                // fits, but hangs off the screen: bring it in
+                let x = wr.left.clamp(work.left, work.right - ww);
+                let y = wr.top.clamp(work.top, work.bottom - wh);
+                let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            return;
+        }
+        let (cw, ch) = content_of(hwnd).map(client_size).unwrap_or_else(|| client_size(hwnd));
+        let (nw, nh) = (cw - (ww - aw).max(0), ch - (wh - ah).max(0));
+        resize_content(hwnd, nw.max(200), nh.max(150));
+        let mut nr = RECT::default();
+        let _ = GetWindowRect(hwnd, &mut nr);
+        let _ = SetWindowPos(hwnd, None, work.left + (aw - (nr.right - nr.left)).max(0) / 2, work.top + (ah - (nr.bottom - nr.top)).max(0) / 2, 0, 0, SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE);
+        eprintln!("window larger than the screen: fitted to {}x{} px, Mac app resized to match", nw, nh);
+        request_remote_resize(hwnd);
+    }
+}
+
 /// Launch an app, or bring its existing main window to the front (like clicking a running app).
 fn launch_app(app: &str) {
     let existing = with_app(|a| a.remotes.iter().find(|(_, r)| r.app == app && r.parent.is_none()).map(|(k, _)| *k)).flatten();
@@ -515,7 +556,10 @@ fn launch_app(app: &str) {
             let _ = SetForegroundWindow(hwnd_of(h));
         },
         None => {
-            with_app(|a| a.link.send(&Message::AppLaunch { application_id: app.into(), arguments: vec![], working_directory: None, environment: Default::default() }));
+            // Mac Desktop: the Mac lays out its screen at this PC's resolution (virtual display,
+            // as BetterDummy), so it fills the monitor 1:1
+            let arguments = if app == DESKTOP_APP { desktop_fit().into_iter().collect() } else { vec![] };
+            with_app(|a| a.link.send(&Message::AppLaunch { application_id: app.into(), arguments, working_directory: None, environment: Default::default() }));
         }
     }
 }
@@ -1007,6 +1051,9 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
             native::set_window_icon(hwnd, HICON(icon as *mut c_void));
         }
         resize_content(hwnd, (w as f64 * scale).round() as i32, (h as f64 * scale).round() as i32);
+        if !owned && app != DESKTOP_APP {
+            fit_to_work_area(hwnd);
+        }
         if let (true, Some(o), Some((px, py))) = (owned, owner, parent_origin) {
             // keep the dialog where the Mac put it relative to its parent
             let mut orc = RECT::default();
