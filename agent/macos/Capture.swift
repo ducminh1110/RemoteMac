@@ -98,7 +98,7 @@ final class WindowStream: NSObject, SCStreamOutput {
             (cfg.width, cfg.height) = capturePixels(CGFloat(d.width), CGFloat(d.height))
             cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
-            cfg.queueDepth = 6; cfg.showsCursor = false // the client draws its own pointer, as remote desktops do
+            cfg.queueDepth = 6; cfg.showsCursor = false; cfg.scalesToFit = true // client draws the pointer; content fills the output at any density
             let s = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: cfg, delegate: nil)
             try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "rm.capture.display.\(did)"))
             t0 = CFAbsoluteTimeGetCurrent()
@@ -114,7 +114,7 @@ final class WindowStream: NSObject, SCStreamOutput {
         (cfg.width, cfg.height) = capturePixels(w.frame.width, w.frame.height - cut)
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
-        cfg.queueDepth = 6; cfg.showsCursor = false
+        cfg.queueDepth = 6; cfg.showsCursor = false; cfg.scalesToFit = true // fill the output at any capture density (never a corner of it, never cropped)
         let s = SCStream(filter: SCContentFilter(desktopIndependentWindow: w), configuration: cfg, delegate: nil)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "rm.capture.\(windowID)"))
         t0 = CFAbsoluteTimeGetCurrent()
