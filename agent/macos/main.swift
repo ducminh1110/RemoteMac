@@ -343,7 +343,9 @@ func handle(_ m: [String: Any]) {
     case "video_decoder":
         // the client decodes with Windows' own decoder: High profile (better quality per bit)
         useHighProfile = m["high_profile"] as? Bool ?? false
-        log("client decoder: high_profile=\(useHighProfile) hardware=\(m["hardware"] as? Bool ?? false)")
+        let sc = num(m["scale"])
+        if sc >= 1 { captureScale = CGFloat(min(3, sc)) }
+        log("client decoder: high_profile=\(useHighProfile) hardware=\(m["hardware"] as? Bool ?? false) scale=\(captureScale)")
     case "ping":
         send(["type": "pong", "nonce": m["nonce"] ?? 0])
     case _ where inputTypes.contains(type):

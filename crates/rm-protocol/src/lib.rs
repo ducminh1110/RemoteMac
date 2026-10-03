@@ -306,7 +306,14 @@ pub enum Message {
     RequestKeyframe { window_id: u64 },
     /// Client -> agent, after the handshake: what the client's decoder takes. `high_profile`:
     /// H.264 High (Windows' own decoder) instead of Main (the portable fallback).
-    VideoDecoder { high_profile: bool, hardware: bool },
+    /// `scale`: the client's display scale (1.5 = 150 %): the agent captures at that many
+    /// pixels per point, so the picture is shown 1:1 (as sharp as a native window).
+    VideoDecoder {
+        high_profile: bool,
+        hardware: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scale: Option<f64>,
+    },
 
     /// Either direction: the clipboard now holds this text. `seq` lets each side ignore
     /// the echo of a change it applied itself.

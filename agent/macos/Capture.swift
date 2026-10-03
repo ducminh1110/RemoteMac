@@ -41,6 +41,16 @@ func annexB(_ sb: CMSampleBuffer, keyframe: Bool) -> Data? {
 /// 4:2:0 pictures (capture and encoder) must have even sizes.
 func even(_ v: Int) -> Int { max(2, v + (v & 1)) }
 
+/// Pixels per point the client shows (its display scale, 1...3): windows are captured at that
+/// density so the client draws them 1:1, as sharp as its own windows. Capped near 4K.
+var captureScale: CGFloat = 1
+func capturePixels(_ w: CGFloat, _ h: CGFloat) -> (Int, Int) {
+    var s = max(1, min(3, captureScale))
+    let maxPixels: CGFloat = 3840 * 2400
+    if w * h * s * s > maxPixels { s = max(1, (maxPixels / max(1, w * h)).squareRoot()) }
+    return (even(Int((w * s).rounded())), even(Int((h * s).rounded())))
+}
+
 /// The client said its decoder takes H.264 High (set before windows start streaming).
 var useHighProfile = false
 
@@ -58,7 +68,7 @@ final class WindowStream: NSObject, SCStreamOutput {
     private var loggedEncodeError = false
     /// next encoded frame is an IDR (client asked, or frames were dropped)
     private var forceKey = true
-    private var bitrate = 10_000_000
+    private var bitrate = 20_000_000
 
     func requestKeyframe() { lock.lock(); forceKey = true; lock.unlock() }
 
@@ -85,7 +95,7 @@ final class WindowStream: NSObject, SCStreamOutput {
         if let did = display {
             guard let d = content.displays.first(where: { $0.displayID == did }) else { throw WireError(description: "display \(did) not shareable") }
             let cfg = SCStreamConfiguration()
-            cfg.width = even(d.width); cfg.height = even(d.height)
+            (cfg.width, cfg.height) = capturePixels(CGFloat(d.width), CGFloat(d.height))
             cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
             cfg.queueDepth = 6; cfg.showsCursor = false // the client draws its own pointer, as remote desktops do
@@ -101,7 +111,7 @@ final class WindowStream: NSObject, SCStreamOutput {
         let cut = min(inset, max(0, w.frame.height - 2))
         if cut > 0 { cfg.sourceRect = CGRect(x: 0, y: cut, width: w.frame.width, height: w.frame.height - cut) }
         // 4:2:0 needs even sizes (an odd one gets no frames at all): round up a pixel
-        cfg.width = even(Int(w.frame.width)); cfg.height = even(Int(w.frame.height - cut))
+        (cfg.width, cfg.height) = capturePixels(w.frame.width, w.frame.height - cut)
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
         cfg.queueDepth = 6; cfg.showsCursor = false

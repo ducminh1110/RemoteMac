@@ -161,12 +161,12 @@ final class Sender {
     private var lastAdjust = CFAbsoluteTimeGetCurrent(), lastDecrease = CFAbsoluteTimeGetCurrent()
     private(set) var dropped = 0
     private(set) var bitrate: Int
-    let minBitrate = 1_000_000, maxBitrate = 40_000_000
+    let minBitrate = 1_000_000, maxBitrate = 80_000_000
     /// Ask a window's encoder for an IDR frame.
     var requestKeyframe: ((UInt64) -> Void)?
     var onBitrate: ((Int) -> Void)?
 
-    init(conn: Conn, bitrate: Int = 10_000_000) {
+    init(conn: Conn, bitrate: Int = 20_000_000) {
         self.conn = conn; self.bitrate = bitrate
         let t = Thread { [weak self] in self?.run() }
         t.name = "rm.sender"; t.qualityOfService = .userInteractive

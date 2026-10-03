@@ -44,6 +44,17 @@ pub enum DecoderKind {
     Hardware = 2,
 }
 
+static SCALE_X100: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
+
+/// This PC's display scale (set by the UI): the Mac sends pictures at that many pixels per point.
+pub fn set_display_scale(s: f64) {
+    SCALE_X100.store((s.clamp(1.0, 3.0) * 100.0).round() as u32, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn display_scale() -> f64 {
+    SCALE_X100.load(std::sync::atomic::Ordering::SeqCst) as f64 / 100.0
+}
+
 /// Current decoder (0 software, 1 platform, 2 hardware) and a generation bumped on fallback.
 static DECODER: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 static DECODER_GEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -213,7 +224,7 @@ pub fn connect_with(relay: &str, session: &str, token: &str, app: Option<&str>, 
         eprintln!("warning: host reports it cannot stream apps: {:?}", sess.capabilities);
     }
     let kind = decoder_kind();
-    link.send(&Message::VideoDecoder { high_profile: kind != DecoderKind::Software, hardware: kind == DecoderKind::Hardware });
+    link.send(&Message::VideoDecoder { high_profile: kind != DecoderKind::Software, hardware: kind == DecoderKind::Hardware, scale: Some(display_scale()) });
     if let Some(app) = app {
         link.send(&Message::AppLaunch { application_id: app.into(), arguments: vec![], working_directory: None, environment: Default::default() });
     }

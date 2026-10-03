@@ -21,6 +21,8 @@ pub struct MfDecoder {
     mft: IMFTransform,
     gpu: Option<(&'static Gpu, IMFDXGIDeviceManager)>,
     ring: Ring,
+    /// CPU-readable copy of the decoded picture (GPU decode, shown through the BGRA path)
+    staging: Option<(ID3D11Texture2D, u32, u32)>,
     provides_samples: bool,
     out_size: u32,
     /// decoded (coded) size and row pitch of the output
@@ -73,7 +75,7 @@ impl MfDecoder {
             t.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264).map_err(|e| e.to_string())?;
             t.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32).map_err(|e| e.to_string())?;
             mft.SetInputType(0, &t, 0).map_err(|e| format!("input type: {e}"))?;
-            let mut d = Self { mft, gpu, ring: Ring::new(), provides_samples: false, out_size: 0, size: (0, 0), stride: 0, time: 0 };
+            let mut d = Self { mft, gpu, ring: Ring::new(), staging: None, provides_samples: false, out_size: 0, size: (0, 0), stride: 0, time: 0 };
             d.choose_output().map_err(|e| format!("output type: {e}"))?;
             let _ = d.mft.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
             let _ = d.mft.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
@@ -187,9 +189,41 @@ impl MfDecoder {
                 let index = dx.GetSubresourceIndex().unwrap_or(0);
                 let mut desc = D3D11_TEXTURE2D_DESC::default();
                 src.GetDesc(&mut desc);
-                let tex = self.ring.next(g, desc.Width, desc.Height).ok_or("texture")?;
-                g.ctx.CopySubresourceRegion(&tex, 0, 0, 0, 0, &src, index, None);
-                return Ok(Decoded::Gpu(GpuPic { tex, width: w.min(desc.Width), height: h.min(desc.Height) }));
+                if std::env::var("RM_GPU_PRESENT").ok().as_deref() == Some("1") {
+                    // zero-copy: the window's GPU video processor draws the NV12 texture
+                    let tex = self.ring.next(g, desc.Width, desc.Height).ok_or("texture")?;
+                    g.ctx.CopySubresourceRegion(&tex, 0, 0, 0, 0, &src, index, None);
+                    return Ok(Decoded::Gpu(GpuPic { tex, width: w.min(desc.Width), height: h.min(desc.Height) }));
+                }
+                // decoded on the GPU, shown through the BGRA path (drawing GPU pictures directly
+                // stayed blank on some cards): copy to a CPU-readable texture and convert
+                if self.staging.as_ref().map(|s| (s.1, s.2)) != Some((desc.Width, desc.Height)) {
+                    let sd = D3D11_TEXTURE2D_DESC {
+                        Width: desc.Width,
+                        Height: desc.Height,
+                        MipLevels: 1,
+                        ArraySize: 1,
+                        Format: desc.Format,
+                        SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                        Usage: D3D11_USAGE_STAGING,
+                        CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                        ..Default::default()
+                    };
+                    let mut t = None;
+                    g.device.CreateTexture2D(&sd, None, Some(&mut t)).map_err(|e| format!("staging texture: {e}"))?;
+                    self.staging = Some((t.ok_or("staging texture")?, desc.Width, desc.Height));
+                }
+                let st = &self.staging.as_ref().unwrap().0;
+                g.ctx.CopySubresourceRegion(st, 0, 0, 0, 0, &src, index, None);
+                let mut m = D3D11_MAPPED_SUBRESOURCE::default();
+                g.ctx.Map(st, 0, D3D11_MAP_READ, 0, Some(&mut m)).map_err(|e| format!("map: {e}"))?;
+                let pitch = m.RowPitch as usize;
+                let rows = desc.Height as usize;
+                let src_px = std::slice::from_raw_parts(m.pData as *const u8, pitch * rows * 3 / 2);
+                let (vw, vh) = (w.min(desc.Width) as usize, h.min(desc.Height) as usize);
+                let bgra = nv12_to_bgra(src_px, pitch, rows, vw, vh);
+                g.ctx.Unmap(st, 0);
+                return Ok(Decoded::Cpu(Picture { width: vw, height: vh, bgra }));
             }
             // system memory NV12 -> BGRA
             let (mut p, mut pitch) = (std::ptr::null_mut::<u8>(), 0i32);
@@ -218,23 +252,38 @@ impl MfDecoder {
 pub fn nv12_to_bgra(src: &[u8], pitch: usize, rows: usize, w: usize, h: usize) -> Vec<u8> {
     let mut out = vec![0u8; w * h * 4];
     let uv = &src[pitch * rows..];
-    for yy in 0..h {
-        let yrow = &src[yy * pitch..yy * pitch + w];
-        let uvrow = &uv[(yy / 2) * pitch..];
-        let o = &mut out[yy * w * 4..(yy + 1) * w * 4];
-        for x in 0..w {
-            let yv = (yrow[x] as i32 - 16) * 298;
-            let u = uvrow[x & !1] as i32 - 128;
-            let v = uvrow[(x & !1) + 1] as i32 - 128;
-            let r = (yv + 459 * v + 128) >> 8;
-            let g = (yv - 55 * u - 136 * v + 128) >> 8;
-            let b = (yv + 541 * u + 128) >> 8;
-            o[x * 4] = b.clamp(0, 255) as u8;
-            o[x * 4 + 1] = g.clamp(0, 255) as u8;
-            o[x * 4 + 2] = r.clamp(0, 255) as u8;
-            o[x * 4 + 3] = 255;
+    let convert = |y0: usize, band: &mut [u8]| {
+        for (i, o) in band.chunks_exact_mut(w * 4).enumerate() {
+            let yy = y0 + i;
+            let yrow = &src[yy * pitch..yy * pitch + w];
+            let uvrow = &uv[(yy / 2) * pitch..];
+            for x in 0..w {
+                let yv = (yrow[x] as i32 - 16) * 298;
+                let u = uvrow[x & !1] as i32 - 128;
+                let v = uvrow[(x & !1) + 1] as i32 - 128;
+                let r = (yv + 459 * v + 128) >> 8;
+                let g = (yv - 55 * u - 136 * v + 128) >> 8;
+                let b = (yv + 541 * u + 128) >> 8;
+                o[x * 4] = b.clamp(0, 255) as u8;
+                o[x * 4 + 1] = g.clamp(0, 255) as u8;
+                o[x * 4 + 2] = r.clamp(0, 255) as u8;
+                o[x * 4 + 3] = 255;
+            }
         }
-    }
+    };
+    // big pictures: a few bands in parallel (sharp, full-resolution video is several MPixels)
+    let bands = if w * h >= 1_000_000 { 4 } else { 1 };
+    let rows_per = h.div_ceil(bands).max(1);
+    std::thread::scope(|sc| {
+        for (b, band) in out.chunks_mut(rows_per * w * 4).enumerate() {
+            let convert = &convert;
+            if bands == 1 {
+                convert(0, band);
+            } else {
+                sc.spawn(move || convert(b * rows_per, band));
+            }
+        }
+    });
     out
 }
 

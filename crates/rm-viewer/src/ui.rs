@@ -276,6 +276,8 @@ pub fn run(opts: Options) -> i32 {
         // decided before any window exists: composition windows, and with them GPU pictures
         let use_comp = opts.d3d && comp::available();
         net::set_decoder(choose_decoder(use_comp));
+        // sharp like a native window: the Mac renders at this PC's pixel density
+        net::set_display_scale(windows::Win32::UI::HiDpi::GetDpiForSystem().max(96) as f64 / 96.0);
         eprintln!("video decoder: {:?}", net::decoder_kind());
         let mut opts = opts;
         let (link, rx) = if opts.prompt {
