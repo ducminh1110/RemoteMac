@@ -551,10 +551,21 @@ fn start_gamestream<W: Write + Send + 'static>(writer: &Writer<W>, st: &Arc<Mute
     *udp.tunnel.lock().unwrap() = Some(Box::new(move |flow, data| t2.udp_in(flow, data)));
     st.lock().unwrap().gs = Some(t.clone());
     let st2 = st.clone();
+    let mut at = (0.0f64, 0.0f64);
     std::thread::spawn(move || loop {
         let e = t.events.lock().unwrap().recv_timeout(Duration::from_millis(500));
         let desktop = st2.lock().unwrap().desktop;
         match e {
+            // the pointer, from Moonlight's reference space to desktop points
+            Ok(rm_gamestream::Event::Input(rm_gamestream::Input::MouseAbs { x, y, width, height })) if width > 0 && height > 0 => {
+                at = (x as f64 * DESKTOP.0 as f64 / width as f64, y as f64 * DESKTOP.1 as f64 / height as f64);
+            }
+            Ok(rm_gamestream::Event::Input(rm_gamestream::Input::Button { button, down })) => {
+                if let Some(d) = desktop {
+                    let button = match button { 3 => MouseButton::Right, 2 => MouseButton::Middle, _ => MouseButton::Left };
+                    let _ = input.send(Ok(Some(Message::MouseButton { window_id: d, button, down, x: at.0, y: at.1 })));
+                }
+            }
             Ok(rm_gamestream::Event::RequestIdr) => {
                 if let Some(d) = desktop {
                     st2.lock().unwrap().key_requests.insert(d);
