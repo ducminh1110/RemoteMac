@@ -262,6 +262,7 @@ pub fn run(opts: Options) -> i32 {
                 return 1;
             }
         }
+        crate::splash::register(hinst);
         let controller = match CreateWindowExW(WINDOW_EX_STYLE(0), w!("RmController"), w!("rm-controller"), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(hinst), None) {
             Ok(h) => h,
             Err(e) => {
@@ -569,7 +570,17 @@ fn launch_app(app: &str) {
             // Mac Desktop: the Mac lays out its screen at this PC's resolution (virtual display,
             // as BetterDummy), so it fills the monitor 1:1
             let arguments = if app == DESKTOP_APP { desktop_fit().into_iter().collect() } else { vec![] };
+            // the "opening" card: icon, name, what is happening and how far along
+            if let Some((hinst, name, icon, smoke)) = with_app(|a| {
+                let name = a.app_names.iter().find(|(id, _)| id == app).map(|(_, n)| n.clone()).unwrap_or_else(|| if app == DESKTOP_APP { "Mac Desktop".into() } else { app.to_string() });
+                (a.hinst, name, a.icons.get(app).map(|i| HICON(*i as *mut c_void)), a.smoke.is_some())
+            }) {
+                if !smoke {
+                    crate::splash::show(HINSTANCE(hinst as *mut c_void), app, &name, icon);
+                }
+            }
             with_app(|a| a.link.send(&Message::AppLaunch { application_id: app.into(), arguments, working_directory: None, environment: Default::default() }));
+            crate::splash::step(app, 2);
         }
     }
 }
@@ -825,6 +836,22 @@ fn latest_frames_only(events: Vec<UiEvent>) -> Vec<UiEvent> {
     events.into_iter().enumerate().filter(|(i, e)| !matches!(e, UiEvent::Frame { id, .. } if last.get(id) != Some(i))).map(|(_, e)| e).collect()
 }
 
+/// Show a decoded picture now, or at the next vblank when pacing is on.
+fn frame_arrived(id: u64, picture: net::Pic, meta: net::FrameMeta) {
+    match with_app(|a| a.vsync.clone()).flatten() {
+        // paced: wait for the next vblank (a newer picture replaces a waiting one)
+        Some(flag) => {
+            with_app(|a| {
+                if a.pending.insert(id, (picture, meta)).is_some() {
+                    a.stats.skipped += 1;
+                }
+            });
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+        None => present_frame(id, picture, meta),
+    }
+}
+
 fn handle_event(ev: UiEvent) {
     match ev {
         UiEvent::WindowCreated { id, app, title, x, y, w, h, parent, role } => {
@@ -837,7 +864,13 @@ fn handle_event(ev: UiEvent) {
                 .unwrap_or(0);
                 unsafe { let _ = PostMessageW(Some(hwnd_of(ctl)), WM_PICK_FILE, WPARAM(id as usize), LPARAM(0)); }
             } else {
+                if parent.is_none() {
+                    crate::splash::step(&app, 3);
+                }
                 create_remote_window(id, &app, &title, (x, y, w, h), parent, role);
+                if parent.is_none() {
+                    crate::splash::step(&app, 4); // the window is there: waiting for its first picture
+                }
             }
         }
         UiEvent::Apps(apps) => {
@@ -947,18 +980,15 @@ fn handle_event(ev: UiEvent) {
                 }
             }
         }
-        UiEvent::Frame { id, picture, meta } => match with_app(|a| a.vsync.clone()).flatten() {
-            // paced: wait for the next vblank (a newer picture replaces a waiting one)
-            Some(flag) => {
-                with_app(|a| {
-                    if a.pending.insert(id, (picture, meta)).is_some() {
-                        a.stats.skipped += 1;
-                    }
-                });
-                flag.store(true, std::sync::atomic::Ordering::Release);
+        UiEvent::Frame { id, picture, meta } => {
+            // the app's first picture is on screen: its launch card is done
+            if let Some(app) = with_app(|a| a.by_id.get(&id).and_then(|k| a.remotes.get(k)).map(|r| r.app.clone())).flatten() {
+                if crate::splash::showing(&app) {
+                    crate::splash::done(&app);
+                }
             }
-            None => present_frame(id, picture, meta),
-        },
+            frame_arrived(id, picture, meta)
+        }
         UiEvent::Destroyed { id } => {
             if let Some(h) = with_app(|a| a.by_id.remove(&id)).flatten() {
                 with_app(|a| a.remotes.remove(&h));
@@ -973,7 +1003,17 @@ fn handle_event(ev: UiEvent) {
             }
         }
         UiEvent::AppExited(app) => eprintln!("remote app exited: {app}"),
-        UiEvent::Notice(n) => eprintln!("notice: {n}"),
+        UiEvent::Launched(app) => crate::splash::step(&app, 3),
+        UiEvent::Notice(n) => {
+            eprintln!("notice: {n}");
+            // a launch the Mac refused: the card says why
+            if n.starts_with("launch") || n.starts_with("unknown_app") || n.starts_with("not_running") {
+                let apps = with_app(|a| a.app_names.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>()).unwrap_or_default();
+                for app in apps.iter().filter(|id| n.contains(id.as_str())) {
+                    crate::splash::fail(app, n.split_once(": ").map_or(n.as_str(), |x| x.1));
+                }
+            }
+        }
         UiEvent::Disconnected(why) => {
             eprintln!("disconnected: {why}");
             let interactive = with_app(|a| a.smoke.is_none() && a.showcase.is_none()).unwrap_or(false);

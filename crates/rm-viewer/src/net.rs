@@ -162,6 +162,8 @@ pub enum UiEvent {
     Destroyed { id: u64 },
     Frame { id: u64, picture: Pic, meta: FrameMeta },
     AppExited(String),
+    /// The Mac started the app (the launch card moves on).
+    Launched(String),
     Notice(String),
     Disconnected(String),
 }
@@ -413,6 +415,7 @@ fn recv_loop(mut sess: Session<TcpStream>, _link: Link, video: Arc<Video>, tx: S
                     emit(UiEvent::Destroyed { id: window_id });
                 }
                 Message::AppExited { application_id, .. } => emit(UiEvent::AppExited(application_id)),
+                Message::AppLaunched { application_id, .. } => emit(UiEvent::Launched(application_id)),
                 Message::Error { code, message } => emit(UiEvent::Notice(format!("{code}: {message}"))),
                 Message::CapabilityUnavailable { capability, reason } => emit(UiEvent::Notice(format!("{capability} unavailable: {reason}"))),
                 Message::P2pOffer { secret, candidates } => {

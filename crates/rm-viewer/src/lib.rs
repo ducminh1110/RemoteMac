@@ -24,6 +24,8 @@ pub mod native;
 #[cfg(windows)]
 pub mod shortcuts;
 #[cfg(windows)]
+pub mod splash;
+#[cfg(windows)]
 pub mod ui;
 
 /// The viewer's log: %APPDATA%\\RemoteMac\\viewer.log (release builds have no console).
