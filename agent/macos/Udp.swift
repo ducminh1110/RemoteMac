@@ -173,13 +173,18 @@ final class UdpLink {
         let stun = p2p ? ["stun.l.google.com:19302", "stun.cloudflare.com:3478"].compactMap { sockAddr($0, family: AF_INET, resolve: true) } : []
         let started = CFAbsoluteTimeGetCurrent()
         var stunSent = 0, offered = !p2p, publicAddr: String?
+        // our UDP port (the socket gets one with its first datagram)
+        func localPort() -> Int {
+            var ss = sockaddr_storage(); var sl = socklen_t(MemoryLayout<sockaddr_storage>.size)
+            let r = withUnsafeMutablePointer(to: &ss) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &sl) } }
+            guard r == 0, let k = addrKey(ss) else { return 0 }
+            return Int(k.split(separator: ":").last ?? "") ?? 0
+        }
         var port = 0
-        do { var ss = sockaddr_storage(); var sl = socklen_t(MemoryLayout<sockaddr_storage>.size)
-             if withUnsafeMutablePointer(to: &ss, { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &sl) } }) == 0,
-                let k = addrKey(ss), let p = Int(k.split(separator: ":").last ?? "") { port = p } }
         while true {
             let now = CFAbsoluteTimeGetCurrent()
             if now - lastRegister >= (registered ? 2 : 0.3) { sendTo(register, relay); lastRegister = now }
+            if port == 0 { port = localPort() }
             let alive = self.alive
             if alive != wasAlive { wasAlive = alive; onAlive?(alive) }
             if !offered {

@@ -158,7 +158,11 @@ final class WindowStream: NSObject, SCStreamOutput {
     private func applyBitrate(_ s: VTCompressionSession, _ b: Int) {
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: b as CFNumber)
         // hard cap per second: rate spikes are what fill the link
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [b / 8 * 3 / 2, 1] as CFArray)
+        // Sunshine sizes the rate buffer to one frame (rc_buffer_size = bitrate / fps) so no frame
+        // is much bigger than the link carries in a frame time: a scroll does not turn into a
+        // burst that queues for a quarter second. Here: at most 1.5x the bitrate over any 100 ms
+        // (one keyframe still fits), and over a second
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [NSNumber(value: b / 8 * 3 / 20), NSNumber(value: 0.1), NSNumber(value: b / 8 * 3 / 2), NSNumber(value: 1)] as CFArray)
     }
 
     /// Set for a whole-display stream (Mac Desktop); `windowID` is then the reserved desktop id.
@@ -230,6 +234,10 @@ final class WindowStream: NSObject, SCStreamOutput {
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_TransferFunction, value: kCVImageBufferTransferFunction_ITU_R_709_2)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_YCbCrMatrix, value: kCVImageBufferYCbCrMatrix_ITU_R_709_2)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
+        // Sunshine's VideoToolbox settings (video.cpp: realtime, prio_speed): speed over quality
+        if #available(macOS 13.0, *) {
+            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
+        }
 
         applyBitrate(s, bitrate)
         // keyframes on request (start, client resync, after drops); a long safety interval only

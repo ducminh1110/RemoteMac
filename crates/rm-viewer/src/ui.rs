@@ -370,6 +370,10 @@ fn choose_decoder(use_comp: bool) -> net::DecoderKind {
     // probe on a thread of its own (Media Foundation wants a multithreaded COM apartment)
     std::thread::spawn(move || {
         let gpu = crate::gpu::shared().filter(|g| g.hardware);
+        if gpu.is_some() {
+            // checked once: are GPU pictures drawn with the right colours (zero-copy) or copied?
+            eprintln!("GPU colour conversion: {}", if crate::nv12::shared().is_some() { "shader (zero-copy, as Moonlight)" } else { "unavailable, pictures are copied" });
+        }
         if use_comp && gpu.is_some() && crate::mfdec::MfDecoder::new(gpu).is_ok() {
             Hardware
         } else if crate::mfdec::MfDecoder::new(None).is_ok() {

@@ -189,8 +189,9 @@ impl MfDecoder {
                 let index = dx.GetSubresourceIndex().unwrap_or(0);
                 let mut desc = D3D11_TEXTURE2D_DESC::default();
                 src.GetDesc(&mut desc);
-                if std::env::var("RM_GPU_PRESENT").ok().as_deref() == Some("1") {
-                    // zero-copy: the window's GPU video processor draws the NV12 texture
+                // zero-copy (as Moonlight): the window draws the NV12 texture with a shader, when
+                // that was checked to give the right colours on this GPU (RM_GPU_PRESENT=0: never)
+                if std::env::var("RM_GPU_PRESENT").ok().as_deref() != Some("0") && crate::nv12::shared().is_some() {
                     let tex = self.ring.next(g, desc.Width, desc.Height).ok_or("texture")?;
                     g.ctx.CopySubresourceRegion(&tex, 0, 0, 0, 0, &src, index, None);
                     return Ok(Decoded::Gpu(GpuPic { tex, width: w.min(desc.Width), height: h.min(desc.Height) }));

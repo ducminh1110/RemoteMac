@@ -36,22 +36,11 @@ pub struct Comp {
     ctx: ID3D11DeviceContext,
     swap: Option<IDXGISwapChain1>,
     swap_size: (u32, u32),
-    /// GPU colour conversion (NV12 -> the swap chain), for hardware-decoded pictures
-    vp: Option<VideoProc>,
     /// picture area (x, y, w, h) inside the window, pixels
     area: (i32, i32, i32, i32),
     pub kind: &'static str,
     /// the step where showing a GPU picture last failed
     pub last_error: &'static str,
-}
-
-struct VideoProc {
-    dev: ID3D11VideoDevice,
-    ctx: ID3D11VideoContext,
-    en: ID3D11VideoProcessorEnumerator,
-    vp: ID3D11VideoProcessor,
-    /// (input texture size, output size)
-    sizes: ((u32, u32), (u32, u32)),
 }
 
 fn create_device() -> Option<(ID3D11Device, ID3D11DeviceContext, &'static str)> {
@@ -118,7 +107,7 @@ impl Comp {
             root.AddVisual(&overlay, true, &chrome).ok()?;
             target.SetRoot(&root).ok()?;
             device.Commit().ok()?;
-            Some(Self { device, _target: target, root, clip, bg_scale, video, video_scale, chrome, chrome_surface: None, overlay, overlay_surface: None, d3d, ctx, swap: None, swap_size: (0, 0), vp: None, area: (0, 0, 1, 1), kind, last_error: "" })
+            Some(Self { device, _target: target, root, clip, bg_scale, video, video_scale, chrome, chrome_surface: None, overlay, overlay_surface: None, d3d, ctx, swap: None, swap_size: (0, 0), area: (0, 0, 1, 1), kind, last_error: "" })
         }
     }
 
@@ -266,8 +255,8 @@ impl Comp {
         }
     }
 
-    /// Show a hardware-decoded picture: the GPU video processor converts NV12 into the swap
-    /// chain directly (the picture never comes back to system memory). On failure
+    /// Show a hardware-decoded picture: a pixel shader converts the NV12 texture into the swap
+    /// chain (Moonlight's renderer; the picture never comes back to system memory). On failure
     /// `last_error` names the step.
     pub fn present_gpu(&mut self, p: &crate::gpu::GpuPic) -> bool {
         match self.present_gpu_inner(p) {
@@ -281,59 +270,14 @@ impl Comp {
 
     fn present_gpu_inner(&mut self, p: &crate::gpu::GpuPic) -> Result<(), &'static str> {
         let (w, h) = (p.width, p.height);
+        let r = crate::nv12::shared().ok_or("no GPU colour conversion")?;
         if !self.ensure_swap(w, h) {
             return Err("swap chain");
         }
         unsafe {
-            let mut td = D3D11_TEXTURE2D_DESC::default();
-            p.tex.GetDesc(&mut td);
-            let sizes = ((td.Width, td.Height), (w, h));
-            if self.vp.as_ref().map(|v| v.sizes) != Some(sizes) {
-                self.vp = None;
-                let dev = self.d3d.cast::<ID3D11VideoDevice>().map_err(|_| "no video device")?;
-                let vctx = self.ctx.cast::<ID3D11VideoContext>().map_err(|_| "no video context")?;
-                let rate = DXGI_RATIONAL { Numerator: 60, Denominator: 1 };
-                let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
-                    InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-                    InputFrameRate: rate,
-                    InputWidth: td.Width,
-                    InputHeight: td.Height,
-                    OutputFrameRate: rate,
-                    OutputWidth: w,
-                    OutputHeight: h,
-                    Usage: D3D11_VIDEO_USAGE_OPTIMAL_SPEED,
-                };
-                let en = dev.CreateVideoProcessorEnumerator(&desc).map_err(|_| "video processor enumerator")?;
-                let vp = dev.CreateVideoProcessor(&en, 0).map_err(|_| "video processor")?;
-                // BT.709 limited-range YCbCr in, full-range RGB out
-                let cs_in = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0x14 };
-                let cs_out = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 };
-                vctx.VideoProcessorSetStreamColorSpace(&vp, 0, &cs_in);
-                vctx.VideoProcessorSetOutputColorSpace(&vp, &cs_out);
-                vctx.VideoProcessorSetStreamFrameFormat(&vp, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
-                vctx.VideoProcessorSetStreamAutoProcessingMode(&vp, 0, false);
-                let r = windows::Win32::Foundation::RECT { left: 0, top: 0, right: w as i32, bottom: h as i32 };
-                vctx.VideoProcessorSetStreamSourceRect(&vp, 0, true, Some(&r));
-                vctx.VideoProcessorSetStreamDestRect(&vp, 0, true, Some(&r));
-                vctx.VideoProcessorSetOutputTargetRect(&vp, true, Some(&r));
-                self.vp = Some(VideoProc { dev, ctx: vctx, en, vp, sizes });
-            }
-            let v = self.vp.as_ref().ok_or("video processor")?;
             let sc = self.swap.as_ref().ok_or("swap chain")?;
             let back = sc.GetBuffer::<ID3D11Texture2D>(0).map_err(|_| "back buffer")?;
-            let od = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC { ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D, Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 } } };
-            let mut ov = None;
-            v.dev.CreateVideoProcessorOutputView(&back, &v.en, &od, Some(&mut ov)).map_err(|_| "output view")?;
-            let id = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC { FourCC: 0, ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D, Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 } } };
-            let mut iv = None;
-            v.dev.CreateVideoProcessorInputView(&p.tex, &v.en, &id, Some(&mut iv)).map_err(|_| "input view (NV12 texture)")?;
-            let (Some(ov), Some(iv)) = (ov, iv) else { return Err("views") };
-            let mut stream = D3D11_VIDEO_PROCESSOR_STREAM { Enable: true.into(), pInputSurface: std::mem::ManuallyDrop::new(Some(iv)), ..Default::default() };
-            let ok = v.ctx.VideoProcessorBlt(&v.vp, &ov, 0, std::slice::from_ref(&stream)).is_ok();
-            std::mem::ManuallyDrop::drop(&mut stream.pInputSurface);
-            if !ok {
-                return Err("video processor blit");
-            }
+            r.draw(&self.d3d, &self.ctx, &p.tex, (w, h), &back, (w, h))?;
             sc.Present(0, DXGI_PRESENT(0)).ok().map_err(|_| "present")
         }
     }
