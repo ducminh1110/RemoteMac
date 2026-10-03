@@ -129,7 +129,6 @@ impl Comp {
             let _ = self.bg_scale.SetScaleX2(w as f32);
             let _ = self.bg_scale.SetScaleY2(h as f32);
             let _ = self.chrome.SetOffsetY2(0.0);
-            let _ = self.video.SetOffsetY2(bar as f32);
             self.area = (0, bar, w.max(1), (h - bar).max(1));
             self.scale_video();
             let _ = self.root.SetOffsetX2(0.0);
@@ -142,11 +141,16 @@ impl Comp {
         if sw == 0 || sh == 0 {
             return;
         }
-        // within a couple of pixels of the window: draw 1:1 with no filtering (any resampling,
-        // even by 0.1 %, softens every glyph); otherwise scale smoothly
-        let exact = (self.area.2 - sw as i32).abs() <= 2 && (self.area.3 - sh as i32).abs() <= 2;
-        let (sx, sy) = if exact { (1.0, 1.0) } else { (self.area.2 as f32 / sw as f32, self.area.3 as f32 / sh as f32) };
+        // the picture keeps its shape (letterboxed when the window's shape differs, e.g. a 16:10
+        // Mac screen on a 16:9 monitor), as Moonlight draws it; never stretched one way only
+        let (ox, oy, w, h) = crate::keymap::fit_rect((self.area.2, self.area.3), (sw, sh));
+        // the same size as the window (within rounding): 1:1 with no filtering (any resampling,
+        // even by 0.1 %, softens every glyph)
+        let exact = (w - sw as i32).abs() <= 2 && (h - sh as i32).abs() <= 2;
+        let (sx, sy) = if exact { (1.0, 1.0) } else { (w as f32 / sw as f32, h as f32 / sh as f32) };
         unsafe {
+            let _ = self.video.SetOffsetX2((self.area.0 + ox) as f32);
+            let _ = self.video.SetOffsetY2((self.area.1 + oy) as f32);
             let _ = self.video_scale.SetScaleX2(sx);
             let _ = self.video_scale.SetScaleY2(sy);
             let _ = self.video.SetBitmapInterpolationMode(if exact { DCOMPOSITION_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR } else { DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR });
