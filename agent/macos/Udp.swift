@@ -8,7 +8,7 @@ import Foundation
 /// The agent clock (microseconds): frame pts and pong answers. Same base as capture timestamps.
 func agentClockUs() -> UInt64 { DispatchTime.now().uptimeNanoseconds / 1000 }
 
-struct UdpReport { var loss: Double; var lost: Int; var recovered: Int; var frames: Int }
+struct UdpReport { var loss: Double; var lost: Int; var recovered: Int; var frames: Int; var rttMs: Int = 0 }
 
 final class UdpLink {
     static let shard = 1200, maxBlock = 64, header = 38
@@ -80,7 +80,8 @@ final class UdpLink {
                 let loss = expected == 0 ? 0 : 1 - Double(min(received, expected)) / Double(expected)
                 // more parity on a lossy link (Moonlight-style adaptive FEC), 10..50 %
                 if expected > 0 { fecPct = Int(max(10, min(50, 10 + loss * 300))) }
-                onReport?(UdpReport(loss: loss, lost: Int(lost), recovered: Int(recovered), frames: Int(frames)))
+                let rtt = n >= 28 ? Int(be32(24)) : 0
+                onReport?(UdpReport(loss: loss, lost: Int(lost), recovered: Int(recovered), frames: Int(frames), rttMs: rtt))
             case 18 where n >= 12:                     // ping -> pong with our clock
                 var d = Data([0x52, 0x4D, 19, 0])
                 var t = be64(4).bigEndian, nowUs = agentClockUs().bigEndian

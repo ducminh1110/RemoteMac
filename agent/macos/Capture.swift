@@ -66,6 +66,9 @@ final class WindowStream: NSObject, SCStreamOutput {
     private var t0: CFAbsoluteTime = 0
     private(set) var sent = 0
     private var loggedEncodeError = false
+    /// capture and encoding run here (also the refinement re-encode)
+    private let q = DispatchQueue(label: "rm.capture", qos: .userInteractive)
+    private var lastPB: CVPixelBuffer?
     /// the window's width in points (pixels per point = frame width / this)
     private var pointsWide: CGFloat = 0
 
@@ -121,6 +124,32 @@ final class WindowStream: NSObject, SCStreamOutput {
 
     func requestKeyframe() { lock.lock(); forceKey = true; lock.unlock() }
 
+    /// Sharp when still (what remote desktops call refinement): while the picture moves the
+    /// bitrate keeps it fluid; once it has been still for a moment one keyframe with the whole
+    /// budget re-draws it crisp. Small frames are "nothing changed".
+    private var lastChange: CFAbsoluteTime = 0, refined = true
+    private func noteFrameSize(_ bytes: Int, keyframe: Bool) {
+        let now = CFAbsoluteTimeGetCurrent()
+        lock.lock()
+        if keyframe { refined = true; lock.unlock(); return }
+        let moving = bytes > 2_000
+        if moving { lastChange = now; refined = false }
+        lock.unlock()
+        // macOS sends no frames while nothing changes: re-encode the last picture as a keyframe
+        // once the window has been still for a moment
+        if moving {
+            q.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+                guard let self = self else { return }
+                self.lock.lock()
+                let still = !self.refined && CFAbsoluteTimeGetCurrent() - self.lastChange >= 0.44
+                if still { self.refined = true }
+                let pb = self.lastPB
+                self.lock.unlock()
+                if still, let pb = pb { self.encode(pb, pts: CMClockGetTime(CMClockGetHostTimeClock()), ptsUs: agentClockUs(), key: true) }
+            }
+        }
+    }
+
     func setBitrate(_ b: Int) {
         lock.lock(); bitrate = b; let s = session; lock.unlock()
         if let s = s { applyBitrate(s, b) }
@@ -129,7 +158,7 @@ final class WindowStream: NSObject, SCStreamOutput {
     private func applyBitrate(_ s: VTCompressionSession, _ b: Int) {
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: b as CFNumber)
         // hard cap per second: rate spikes are what fill the link
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [b / 4, 1] as CFArray)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [b / 8 * 3 / 2, 1] as CFArray)
     }
 
     /// Set for a whole-display stream (Mac Desktop); `windowID` is then the reserved desktop id.
@@ -149,7 +178,7 @@ final class WindowStream: NSObject, SCStreamOutput {
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
             cfg.queueDepth = 6; cfg.showsCursor = false; cfg.scalesToFit = true // client draws the pointer; content fills the output at any density
             let s = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: cfg, delegate: nil)
-            try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "rm.capture.display.\(did)"))
+            try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
             t0 = CFAbsoluteTimeGetCurrent()
             try await s.startCapture()
             scStream = s
@@ -166,7 +195,7 @@ final class WindowStream: NSObject, SCStreamOutput {
         cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
         cfg.queueDepth = 6; cfg.showsCursor = false; cfg.scalesToFit = true // fill the output at any capture density (never a corner of it, never cropped)
         let s = SCStream(filter: SCContentFilter(desktopIndependentWindow: w), configuration: cfg, delegate: nil)
-        try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "rm.capture.\(windowID)"))
+        try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
         t0 = CFAbsoluteTimeGetCurrent()
         try await s.startCapture()
         scStream = s
@@ -175,7 +204,7 @@ final class WindowStream: NSObject, SCStreamOutput {
     func stop() async {
         if let s = scStream { try? await s.stopCapture() }
         scStream = nil
-        lock.lock(); let sess = session; session = nil; lock.unlock()
+        lock.lock(); let sess = session; session = nil; lastPB = nil; lock.unlock()
         if let s = sess { VTCompressionSessionCompleteFrames(s, untilPresentationTimeStamp: .invalid); VTCompressionSessionInvalidate(s) }
     }
 
@@ -201,9 +230,7 @@ final class WindowStream: NSObject, SCStreamOutput {
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_TransferFunction, value: kCVImageBufferTransferFunction_ITU_R_709_2)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_YCbCrMatrix, value: kCVImageBufferYCbCrMatrix_ITU_R_709_2)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
-        // a quality floor: text stays crisp even in a keyframe or right after a change (a static
-        // screen then only sends "unchanged", so whatever quality arrives first stays)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxAllowedFrameQP, value: 24 as CFNumber)
+
         applyBitrate(s, bitrate)
         // keyframes on request (start, client resync, after drops); a long safety interval only
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 10 as CFNumber)
@@ -223,7 +250,7 @@ final class WindowStream: NSObject, SCStreamOutput {
         let s = session; let ok = (w == encW && h == encH)
         let key = forceKey; forceKey = false
         lock.unlock()
-        guard let sess = s, ok else { return }   // size changed: the owner restarts the stream
+        guard s != nil, ok else { return }   // size changed: the owner restarts the stream
         // capture time on the agent clock (host time, as pongs report it): the viewer turns it
         // into end-to-end latency
         let cap = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sb))
@@ -233,8 +260,16 @@ final class WindowStream: NSObject, SCStreamOutput {
         if display == nil && pointsWide > 0 {
             polish(pb, scale: CGFloat(w) / pointsWide, hideButtons: inset == 0)
         }
+        lock.lock(); lastPB = pb; lock.unlock()
+        encode(pb, pts: CMSampleBufferGetPresentationTimeStamp(sb), ptsUs: ptsUs, key: key)
+    }
+
+    private func encode(_ pb: CVPixelBuffer, pts: CMTime, ptsUs: UInt64, key: Bool) {
+        lock.lock(); let s = session; lock.unlock()
+        guard let sess = s else { return }
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
         let wid = UInt64(windowID), ew = UInt16(w), eh = UInt16(h)
-        VTCompressionSessionEncodeFrame(sess, imageBuffer: pb, presentationTimeStamp: CMSampleBufferGetPresentationTimeStamp(sb),
+        VTCompressionSessionEncodeFrame(sess, imageBuffer: pb, presentationTimeStamp: pts,
                                         duration: .invalid,
                                         frameProperties: key ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary : nil,
                                         infoFlagsOut: nil) { [weak self] status, _, out in
@@ -246,8 +281,9 @@ final class WindowStream: NSObject, SCStreamOutput {
             let a = CMSampleBufferGetSampleAttachmentsArray(out, createIfNecessary: false) as? [[CFString: Any]]
             let key = (a?.first?[kCMSampleAttachmentKey_NotSync] as? Bool) != true
             guard let data = annexB(out, keyframe: key) else { return }
+            self.noteFrameSize(data.count, keyframe: key)
             self.sent += 1
             self.onPacket(VideoPacket(windowID: wid, ptsMicros: ptsUs, keyframe: key, width: ew, height: eh, data: data))
         }
     }
-}
+}}

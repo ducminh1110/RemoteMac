@@ -88,7 +88,8 @@ fn run(sock: UdpSocket, register: Vec<u8>, stats: Arc<Mutex<LinkStats>>, stop: A
             last_reg = Some(now);
         }
         if registered && now.duration_since(last_fb) >= Duration::from_millis(200) {
-            let fb = r.take_stats();
+            let mut fb = r.take_stats();
+            fb.rtt_ms = stats.lock().ok().and_then(|s| s.rtt_ms).map_or(0, |r| r.round() as u32);
             let _ = sock.send(&fb.encode());
             last_fb = now;
             if let Ok(mut s) = stats.lock() {
@@ -102,7 +103,7 @@ fn run(sock: UdpSocket, register: Vec<u8>, stats: Arc<Mutex<LinkStats>>, stop: A
                 s.active = last_video.is_some_and(|t| now.duration_since(t) < Duration::from_secs(1));
             }
         }
-        if registered && last_ping.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(500)) {
+        if registered && last_ping.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(250)) {
             let _ = sock.send(&udp::ping(epoch.elapsed().as_micros() as u64));
             last_ping = Some(now);
         }
@@ -130,7 +131,7 @@ fn run(sock: UdpSocket, register: Vec<u8>, stats: Arc<Mutex<LinkStats>>, stop: A
                             let rtt = ours.saturating_sub(t);
                             if let Ok(mut s) = stats.lock() {
                                 let ms = rtt as f64 / 1000.0;
-                                s.rtt_ms = Some(s.rtt_ms.map_or(ms, |r| r * 0.8 + ms * 0.2));
+                                s.rtt_ms = Some(s.rtt_ms.map_or(ms, |r| r * 0.5 + ms * 0.5));
                                 // the agent stamped its clock about half a round trip ago
                                 let off = agent as i64 - (t as i64 + rtt as i64 / 2);
                                 // keep the estimate from the fastest round trips (least queueing)

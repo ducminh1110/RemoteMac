@@ -102,18 +102,28 @@ pub struct Feedback {
     pub recovered: u32,
     pub lost: u32,
     pub frames: u32,
+    /// the client's current round trip to the agent (ms, 0 = unknown): rising above its floor
+    /// means queues are filling somewhere on the path, before any packet is lost
+    pub rtt_ms: u32,
 }
 
 impl Feedback {
     pub fn encode(&self) -> Vec<u8> {
         let mut d = vec![MAGIC[0], MAGIC[1], T_FEEDBACK, 0];
-        for v in [self.expected, self.received, self.recovered, self.lost, self.frames] {
+        for v in [self.expected, self.received, self.recovered, self.lost, self.frames, self.rtt_ms] {
             d.extend_from_slice(&v.to_be_bytes());
         }
         d
     }
     pub fn decode(p: &[u8]) -> Option<Self> {
-        (p.len() >= 24 && p[..2] == MAGIC && p[2] == T_FEEDBACK).then(|| Self { expected: be32(p, 4), received: be32(p, 8), recovered: be32(p, 12), lost: be32(p, 16), frames: be32(p, 20) })
+        (p.len() >= 24 && p[..2] == MAGIC && p[2] == T_FEEDBACK).then(|| Self {
+            expected: be32(p, 4),
+            received: be32(p, 8),
+            recovered: be32(p, 12),
+            lost: be32(p, 16),
+            frames: be32(p, 20),
+            rtt_ms: if p.len() >= 28 { be32(p, 24) } else { 0 },
+        })
     }
     /// Share of packets the link dropped.
     pub fn loss(&self) -> f64 {
@@ -441,7 +451,7 @@ mod tests {
 
     #[test]
     fn feedback_and_ping_round_trip() {
-        let f = Feedback { expected: 100, received: 93, recovered: 2, lost: 1, frames: 30 };
+        let f = Feedback { expected: 100, received: 93, recovered: 2, lost: 1, frames: 30, rtt_ms: 85 };
         assert_eq!(Feedback::decode(&f.encode()), Some(f));
         assert!((f.loss() - 0.07).abs() < 1e-9);
         assert_eq!(parse_ping(&ping(77)), Some(77));

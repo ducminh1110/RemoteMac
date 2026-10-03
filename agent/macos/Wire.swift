@@ -161,6 +161,9 @@ final class Sender {
     private var lastAdjust = CFAbsoluteTimeGetCurrent(), lastDecrease = CFAbsoluteTimeGetCurrent()
     private(set) var dropped = 0
     private(set) var bitrate: Int
+    /// lowest recent round trip (ms): the path without queues
+    private var rttFloor: Double = 0
+    private var rttFloorAt: CFAbsoluteTime = 0
     let minBitrate = 1_000_000, maxBitrate = 80_000_000
     /// Ask a window's encoder for an IDR frame.
     var requestKeyframe: ((UInt64) -> Void)?
@@ -235,12 +238,22 @@ final class Sender {
         var change: Int?
         cond.lock()
         let now = CFAbsoluteTimeGetCurrent()
-        // random loss is FEC's job (its share rises with the loss); only real congestion -
-        // frames lost despite FEC, a growing send queue, or a very lossy link - costs bitrate
-        if r.lost > 0 || r.loss > 0.15 || wait > 0.08 {
-            if now - lastDecrease > 0.4 { bitrate = max(minBitrate, Int(Double(bitrate) * 0.7)); lastDecrease = now; change = bitrate }
-        } else if r.loss < 0.05 && wait < 0.02 && now - lastDecrease > 3 && now - lastAdjust > 0.5 && bitrate < maxBitrate {
-            bitrate = min(maxBitrate, Int(Double(bitrate) * 1.08)); lastAdjust = now; change = bitrate
+        // delay-based (as Google's congestion control): the round trip's floor is the path
+        // itself; anything above it is queues filling (router, relay, Wi-Fi). React to that
+        // before packets are lost, so video never runs seconds behind the hand
+        var queued = false
+        if r.rttMs > 0 {
+            let rtt = Double(r.rttMs)
+            if rttFloor == 0 || rtt < rttFloor { rttFloor = rtt; rttFloorAt = now }
+            else if now - rttFloorAt > 10 { rttFloor = rttFloor * 0.9 + rtt * 0.1; rttFloorAt = now } // the path may have changed
+            queued = rtt > rttFloor + max(40, rttFloor * 0.25)
+        }
+        // random loss is FEC's job (its share rises with the loss); real congestion - frames
+        // lost despite FEC, a growing queue on the path or here, a very lossy link - costs bitrate
+        if r.lost > 0 || r.loss > 0.15 || wait > 0.05 || queued {
+            if now - lastDecrease > 0.3 { bitrate = max(minBitrate, Int(Double(bitrate) * 0.75)); lastDecrease = now; change = bitrate }
+        } else if r.loss < 0.05 && wait < 0.02 && now - lastDecrease > 2 && now - lastAdjust > 0.4 && bitrate < maxBitrate {
+            bitrate = min(maxBitrate, Int(Double(bitrate) * 1.06)); lastAdjust = now; change = bitrate
         }
         cond.unlock()
         if let b = change {
