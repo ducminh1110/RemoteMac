@@ -286,4 +286,4 @@ final class WindowStream: NSObject, SCStreamOutput {
             self.onPacket(VideoPacket(windowID: wid, ptsMicros: ptsUs, keyframe: key, width: ew, height: eh, data: data))
         }
     }
-}}
+}
