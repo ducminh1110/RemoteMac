@@ -22,7 +22,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/remotemac"
           cd "$RUNNER_TEMP/remotemac"
 
-          gh run download 37100589149 \
+          gh run download 37101469873 \
             --repo "${{ github.repository }}" \
             --name remotemac-macos
 
@@ -170,6 +170,11 @@ jobs:
             exit 1
           fi
 
+          # Convert:
+          # 293 430 115
+          # into:
+          # 293430115
+
           DISPLAY_ID="$(echo "$DISPLAY_ID" | tr -d '[:space:]')"
 
           SESSION_ID="rm-$DISPLAY_ID"
@@ -212,6 +217,7 @@ jobs:
               echo ""
               echo "RemoteMac stopped unexpectedly."
               echo ""
+
               echo "========== RemoteMac log =========="
               cat "$RUNNER_TEMP/remotemac.log" || true
               echo "==================================="
