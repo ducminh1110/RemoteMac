@@ -33,6 +33,8 @@ fn main() {
     for f in ["nanors/rs.c", "nanors/deps/obl/oblas_common.c", "nanors/deps/obl/oblas_lite.c"] {
         b.file(root.join(f));
     }
+    b.file(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("shim/enet_shim.c"));
+    println!("cargo:rerun-if-changed=shim/enet_shim.c");
     b.compile("moonlight-common-c");
     if windows {
         for l in ["ws2_32", "winmm"] {

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/moonlight-sys", "crates/rm-decode", "crates/rm-fakeagent", "crates/rm-viewer", "crates/rm-protocol", "crates/rm-core", "crates/rm-relay", "crates/rm-agent", "crates/rm-client"]
+members = ["crates/moonlight-sys", "crates/rm-gamestream", "crates/rm-decode", "crates/rm-fakeagent", "crates/rm-viewer", "crates/rm-protocol", "crates/rm-core", "crates/rm-relay", "crates/rm-agent", "crates/rm-client"]
 
 [workspace.package]
 version = "0.1.0"
