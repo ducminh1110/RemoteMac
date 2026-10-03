@@ -123,5 +123,11 @@ final class AppManager {
         return out
     }
 
+    /// Started by us (not an app that was already open on the Mac).
+    func launchedByUs(_ id: String) -> Bool { lock.lock(); defer { lock.unlock() }; return running[id] != nil }
+
+    /// The app is gone: forget it.
+    func forget(_ id: String) { lock.lock(); running.removeValue(forKey: id); adopted.removeValue(forKey: id); lock.unlock() }
+
     func terminateAll() { for id in Array(running.keys) { _ = terminate(id: id) } }
 }

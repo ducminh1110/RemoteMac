@@ -127,6 +127,8 @@ final class WindowTracker {
     init(apps: AppManager) { self.apps = apps }
 
     func current(_ id: CGWindowID) -> WinInfo? { queue.sync { known[id] } }
+    /// Whether the app shows a dialog or panel (a "save changes?" sheet, for one).
+    func hasDialog(pid: pid_t) -> Bool { queue.sync { known.values.contains { $0.pid == pid && $0.role != .window } } }
 
     func start() {
         let t = DispatchSource.makeTimerSource(queue: queue)

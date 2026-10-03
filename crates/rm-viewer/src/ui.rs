@@ -1813,8 +1813,23 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             LRESULT(0)
         }
         WM_CLOSE => {
-            // Closing the local window asks the remote window to close; we disappear when it does.
-            send_for(hwnd, |r, _| Some(Message::WindowClose { window_id: r.id }));
+            // The close button quits the app when this is its last main window (as Windows apps
+            // do), instead of leaving it running in the Mac's Dock; with other windows of the app
+            // still open, only this one closes. Either way we disappear when the Mac says so.
+            let quit = with_app(|a| {
+                let r = a.remotes.get(&(hwnd.0 as isize))?;
+                let last = r.role == WindowRole::Window
+                    && r.parent.is_none()
+                    && r.app != DESKTOP_APP
+                    && r.app != "finder"
+                    && !a.remotes.iter().any(|(k, o)| *k != hwnd.0 as isize && o.app == r.app && o.role == WindowRole::Window && o.parent.is_none());
+                last.then(|| r.app.clone())
+            })
+            .flatten();
+            match quit {
+                Some(app) => with_app(|a| a.link.send(&Message::AppTerminate { application_id: app })).unwrap_or(()),
+                None => send_for(hwnd, |r, _| Some(Message::WindowClose { window_id: r.id })),
+            }
             LRESULT(0)
         }
         WM_DESTROY => {

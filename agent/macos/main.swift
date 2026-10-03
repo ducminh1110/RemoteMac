@@ -394,9 +394,31 @@ func handle(_ m: [String: Any]) {
         if let pid = r.pid { log("launched \(id) pid=\(pid)"); send(["type": "app_launched", "application_id": id, "pid": Int(pid)]) }
         else if let e = r.err { send(["type": "error", "code": e.0, "message": e.1]) }
     case "app_terminate":
+        // quit as Cmd+Q does (the app may ask to save; its sheet shows in the viewer), also apps
+        // that were already open on the Mac; a process we started that ignores it and has no
+        // window left is stopped
         let id = m["application_id"] as? String ?? ""
-        if apps.terminate(id: id) { send(["type": "app_exited", "application_id": id, "code": NSNull()]) }
-        else { send(["type": "error", "code": "not_running", "message": id]) }
+        guard let pid = apps.pidFor(id) else { send(["type": "error", "code": "not_running", "message": id]); break }
+        if id == "finder" { apps.forget(id); send(["type": "app_exited", "application_id": id, "code": NSNull()]); break } // Finder never quits
+        DispatchQueue.global().async {
+            let app = NSRunningApplication(processIdentifier: pid)
+            if let a = app { a.terminate() } else { _ = apps.terminate(id: id) }
+            var gone = false
+            for _ in 0..<30 {
+                gone = app?.isTerminated ?? (kill(pid, 0) != 0)
+                if gone { break }
+                usleep(100_000)
+            }
+            // still running: unless it is asking something (a dialog is up), stop a process we started
+            if !gone && !tracker.hasDialog(pid: pid) && apps.launchedByUs(id) { _ = apps.terminate(id: id); gone = true }
+            if gone {
+                apps.forget(id)
+                log("quit \(id)")
+                send(["type": "app_exited", "application_id": id, "code": NSNull()])
+            } else {
+                log("\(id) did not quit (it is asking something, or was open before)")
+            }
+        }
     case "window_close", "window_resize_request":
         let wid = CGWindowID(int(m["window_id"]))
         guard let w = tracker.current(wid), let aw = axWindowFor(pid: w.pid, id: wid, rect: w.rect) else {
