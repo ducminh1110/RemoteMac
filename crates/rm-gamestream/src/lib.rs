@@ -9,7 +9,10 @@
 pub mod crypto;
 pub mod depacketizer;
 pub mod ffi;
+pub mod sps;
+pub mod tunnel;
 pub mod input;
+pub mod moonlight;
 pub mod video;
 
 use moonlight_sys::host as enet;

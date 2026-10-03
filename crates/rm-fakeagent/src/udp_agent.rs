@@ -27,6 +27,9 @@ struct Direct {
     verified: Vec<SocketAddr>,
 }
 
+/// Where GameStream tunnel datagrams go (flow, bytes).
+pub type TunnelFn = Box<dyn Fn(u8, &[u8]) + Send>;
+
 pub struct AgentUdp {
     sock: UdpSocket,
     relay: SocketAddr,
@@ -37,6 +40,8 @@ pub struct AgentUdp {
     seq: Mutex<HashMap<u64, (rm_gamestream::video::Packetizer, u32)>>,
     /// input that came over UDP goes to the session's message loop
     pub inputs: Mutex<Option<Sender<Message>>>,
+    /// GameStream tunnel datagrams (Mac Desktop in full GameStream mode)
+    pub tunnel: Mutex<Option<TunnelFn>>,
     /// false: never take a direct path (tests of the relay path)
     pub p2p: std::sync::atomic::AtomicBool,
     pub fec_pct: AtomicU64,
@@ -58,6 +63,7 @@ impl AgentUdp {
             last_report: Mutex::new(None),
             seq: Mutex::new(HashMap::new()),
             inputs: Mutex::new(None),
+            tunnel: Mutex::new(None),
             p2p: std::sync::atomic::AtomicBool::new(true),
             fec_pct: AtomicU64::new(20),
             sent_frames: AtomicU64::new(0),
@@ -165,6 +171,11 @@ impl AgentUdp {
                         let _ = self.sock.send_to(&udp::pong(t, clock_us()), from);
                     }
                 }
+                udp::T_GS_TUNNEL if n >= 4 => {
+                    if let Some(f) = self.tunnel.lock().unwrap().as_ref() {
+                        f(p[3], &p[4..]);
+                    }
+                }
                 udp::T_INPUT => {
                     let (msgs, ack) = order.take(p);
                     for j in msgs {
@@ -185,6 +196,13 @@ impl AgentUdp {
     /// The client's reports are arriving: video can go this way.
     pub fn alive(&self) -> bool {
         self.last_report.lock().unwrap().is_some_and(|t| t.elapsed() < Duration::from_millis(1500))
+    }
+
+    /// A GameStream tunnel datagram to the client.
+    pub fn send_tunnel(&self, flow: u8, data: &[u8]) {
+        let mut d = vec![udp::MAGIC[0], udp::MAGIC[1], udp::T_GS_TUNNEL, flow];
+        d.extend_from_slice(data);
+        let _ = self.sock.send_to(&d, self.dest());
     }
 
     pub fn send(&self, v: &VideoFrame) {

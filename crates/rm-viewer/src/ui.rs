@@ -122,6 +122,8 @@ struct App {
     showcase: Option<Showcase>,
     exit: Option<i32>,
     hinst: isize,
+    /// the Mac Desktop launched in full GameStream mode: its session key
+    gs_key: Option<[u8; 16]>,
     controller: isize,
     /// HICON per remote application id, shared by all its windows.
     icons: HashMap<String, isize>,
@@ -331,7 +333,7 @@ pub fn run(opts: Options) -> i32 {
         eprintln!("window surfaces: {}", if use_comp { "DirectComposition (rounded corners)" } else if opts.d3d { "Direct3D 11" } else { "GDI" });
         let showcase = opts.showcase.map(Showcase::new);
         APP.with(|a| {
-            *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, smoke, showcase, exit: None, hinst: hinst.0 as isize, controller: ctl,
+            *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, smoke, showcase, exit: None, hinst: hinst.0 as isize, gs_key: None, controller: ctl,
                 icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_seq: 0, d3d: opts.d3d, comp: use_comp,
                 launcher, panels: HashMap::new(), uploads: HashMap::new(), next_transfer: 1, redirect_panels: opts.windows_file_picker,
                 shortcut_dir, app_names: vec![], icon_rgba: HashMap::new(), menus: HashMap::new(), display_req: None, display: None, stats: Stats::default(),
@@ -569,7 +571,14 @@ fn launch_app(app: &str) {
         None => {
             // Mac Desktop: the Mac lays out its screen at this PC's resolution (virtual display,
             // as BetterDummy), so it fills the monitor 1:1
-            let arguments = if app == DESKTOP_APP { desktop_fit().into_iter().collect() } else { vec![] };
+            let mut arguments: Vec<String> = if app == DESKTOP_APP { desktop_fit().into_iter().collect() } else { vec![] };
+            // the Mac Desktop streams over full GameStream (Moonlight's client core) unless
+            // RM_GAMESTREAM=0: the Mac starts a host session with this key
+            if app == DESKTOP_APP && crate::gsdesktop::enabled() {
+                let (key, hex) = crate::gsdesktop::new_key();
+                arguments.push(format!("gamestream={hex}"));
+                with_app(|a| a.gs_key = Some(key));
+            }
             // the "opening" card: icon, name, what is happening and how far along
             if let Some((hinst, name, icon, smoke)) = with_app(|a| {
                 let name = a.app_names.iter().find(|(id, _)| id == app).map(|(_, n)| n.clone()).unwrap_or_else(|| if app == DESKTOP_APP { "Mac Desktop".into() } else { app.to_string() });
@@ -868,6 +877,13 @@ fn handle_event(ev: UiEvent) {
                     crate::splash::step(&app, 3);
                 }
                 create_remote_window(id, &app, &title, (x, y, w, h), parent, role);
+                if app == DESKTOP_APP && parent.is_none() {
+                    if let Some((link, key)) = with_app(|a| a.gs_key.take().map(|k| (a.link.clone(), k))).flatten() {
+                        if let Err(e) = net::start_gamestream_desktop(&link, id, key, (w, h), (w.min(65535) as u16, h.min(65535) as u16)) {
+                            eprintln!("Mac Desktop GameStream not started: {e}");
+                        }
+                    }
+                }
                 if parent.is_none() {
                     crate::splash::step(&app, 4); // the window is there: waiting for its first picture
                 }
@@ -990,6 +1006,9 @@ fn handle_event(ev: UiEvent) {
             frame_arrived(id, picture, meta)
         }
         UiEvent::Destroyed { id } => {
+            if crate::gsdesktop::active_window() == Some(id) {
+                crate::gsdesktop::stop();
+            }
             if let Some(h) = with_app(|a| a.by_id.remove(&id)).flatten() {
                 with_app(|a| a.remotes.remove(&h));
                 unsafe { let _ = DestroyWindow(hwnd_of(h)); }

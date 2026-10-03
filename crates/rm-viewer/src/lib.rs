@@ -4,6 +4,7 @@ pub mod chrome;
 pub mod ico;
 pub mod keymap;
 pub mod menu;
+pub mod gsdesktop;
 pub mod net;
 #[cfg(windows)]
 pub mod d3d;

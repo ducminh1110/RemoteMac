@@ -15,7 +15,7 @@ pub struct Session<S: Read + Write> {
     pub negotiated: Negotiated,
     pub capabilities: CapabilityReport,
     /// UDP video (frames rebuilt from FEC shards) when attached
-    udp: Option<(udp::UdpVideo, std::sync::mpsc::Receiver<rm_protocol::udp::Out>)>,
+    udp: Option<(std::sync::Arc<udp::UdpVideo>, std::sync::mpsc::Receiver<rm_protocol::udp::Out>)>,
     /// our direct-path offer, once the UDP thread knows our addresses (sent by `recv`)
     offer: Option<std::sync::mpsc::Receiver<Message>>,
 }
@@ -104,9 +104,14 @@ impl<S: Read + Write> Session<S> {
                 let _ = otx.send(Message::P2pOffer { secret, candidates });
             },
         )?;
-        self.udp = Some((u, rx));
+        self.udp = Some((std::sync::Arc::new(u), rx));
         self.offer = Some(orx);
         Ok(())
+    }
+
+    /// The UDP path (GameStream tunnel datagrams ride it too).
+    pub fn udp(&self) -> Option<std::sync::Arc<udp::UdpVideo>> {
+        self.udp.as_ref().map(|(u, _)| u.clone())
     }
 
     pub fn udp_stats(&self) -> Option<udp::LinkStats> {

@@ -322,6 +322,15 @@ pub enum Message {
     /// `candidates` are "ip:port" of its UDP socket (LAN addresses, the public one), `secret` is
     /// 32 hex digits a punch to this side must carry.
     P2pOffer { secret: String, candidates: Vec<String> },
+    /// Either direction: one step of a GameStream RTSP connection carried for the Mac Desktop
+    /// in full GameStream mode (crates/rm-gamestream tunnel.rs). `op`: "open" (PC -> Mac),
+    /// "data", "close".
+    GsTunnel {
+        id: u32,
+        op: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        data_base64: String,
+    },
 
     /// Either direction: the clipboard now holds this text. `seq` lets each side ignore
     /// the echo of a change it applied itself.

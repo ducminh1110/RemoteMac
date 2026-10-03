@@ -54,12 +54,17 @@ struct P2p {
     input: InputQueue,
 }
 
+/// Where GameStream tunnel datagrams from the Mac go (flow, bytes).
+pub type TunnelIn = Arc<Mutex<Option<Box<dyn Fn(u8, &[u8]) + Send>>>>;
+
 pub struct UdpVideo {
     pub stats: Arc<Mutex<LinkStats>>,
+    tunnel: TunnelIn,
     stop: Arc<AtomicBool>,
     epoch: Instant,
     p2p: Arc<Mutex<P2p>>,
     sock: UdpSocket,
+    relay: SocketAddr,
 }
 
 impl UdpVideo {
@@ -71,6 +76,19 @@ impl UdpVideo {
     /// The agent's clock now, if the offset is known (to turn a frame's pts into its age).
     pub fn agent_now_us(&self) -> Option<i64> {
         self.stats.lock().ok()?.offset_us.map(|o| self.now_us() as i64 + o)
+    }
+
+    /// GameStream tunnel datagrams from the Mac go to `f` (flow, bytes).
+    pub fn set_tunnel_handler(&self, f: impl Fn(u8, &[u8]) + Send + 'static) {
+        *self.tunnel.lock().unwrap() = Some(Box::new(f));
+    }
+
+    /// A GameStream tunnel datagram to the Mac (direct path when there is one).
+    pub fn send_tunnel(&self, flow: u8, data: &[u8]) {
+        let to = self.p2p.lock().ok().and_then(|p| p.direct).unwrap_or(self.relay);
+        let mut d = vec![udp::MAGIC[0], udp::MAGIC[1], udp::T_GS_TUNNEL, flow];
+        d.extend_from_slice(data);
+        let _ = self.sock.send_to(&d, to);
     }
 
     /// The agent's `P2pOffer` arrived: start punching to its candidates.
@@ -116,10 +134,11 @@ pub fn start(relay: &str, session: &str, token: &str, on_out: impl FnMut(Out) + 
     let epoch = Instant::now();
     let p2p = Arc::new(Mutex::new(P2p { secret: udp::random_secret(), peer: None, direct: None, last_direct: Instant::now(), verified: vec![], input: InputQueue::default() }));
     let register = rm_relay::udp_register(session, Role::Client, token, rm_relay::env_key().as_deref());
-    let (s2, st2, stop2, p2) = (sock.try_clone()?, stats.clone(), stop.clone(), p2p.clone());
+    let tunnel: TunnelIn = Arc::new(Mutex::new(None));
+    let (s2, st2, stop2, p2, tn2) = (sock.try_clone()?, stats.clone(), stop.clone(), p2p.clone(), tunnel.clone());
     let offer: Option<OnOffer> = std::env::var_os("RM_NO_P2P").is_none().then(|| Box::new(on_offer) as OnOffer);
-    std::thread::Builder::new().name("rm-udp".into()).spawn(move || run(s2, addr, register, st2, stop2, epoch, p2, on_out, offer))?;
-    Ok(UdpVideo { stats, stop, epoch, p2p, sock })
+    std::thread::Builder::new().name("rm-udp".into()).spawn(move || run(s2, addr, register, st2, stop2, epoch, p2, on_out, offer, tn2))?;
+    Ok(UdpVideo { stats, tunnel, stop, epoch, p2p, sock, relay: addr })
 }
 
 /// This machine's LAN address toward the internet (no packet is sent: connecting a UDP socket
@@ -146,7 +165,7 @@ fn is_private(a: &SocketAddr) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run(sock: UdpSocket, relay: SocketAddr, register: Vec<u8>, stats: Arc<Mutex<LinkStats>>, stop: Arc<AtomicBool>, epoch: Instant, p2p: Arc<Mutex<P2p>>, mut on_out: impl FnMut(Out), mut offer: Option<OnOffer>) {
+fn run(sock: UdpSocket, relay: SocketAddr, register: Vec<u8>, stats: Arc<Mutex<LinkStats>>, stop: Arc<AtomicBool>, epoch: Instant, p2p: Arc<Mutex<P2p>>, mut on_out: impl FnMut(Out), mut offer: Option<OnOffer>, tunnel: TunnelIn) {
     let mut r = Reassembler::new();
     // GameStream (Sunshine-format) streams, one per window (RTP SSRC), and their sequence
     // numbers for the loss report
@@ -294,6 +313,11 @@ fn run(sock: UdpSocket, relay: SocketAddr, register: Vec<u8>, stats: Arc<Mutex<L
                         registered = p[3] != rm_relay::UDP_REFUSED;
                         if let Ok(mut s) = stats.lock() {
                             s.ready = p[3] == rm_relay::UDP_PEER_READY;
+                        }
+                    }
+                    udp::T_GS_TUNNEL if n >= 4 => {
+                        if let Some(f) = tunnel.lock().unwrap().as_ref() {
+                            f(p[3], &p[4..]);
                         }
                     }
                     udp::T_GS_VIDEO if n > udp::GS_TAG => {

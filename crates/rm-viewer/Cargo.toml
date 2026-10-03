@@ -15,6 +15,8 @@ rm-protocol = { path = "../rm-protocol" }
 rm-client = { path = "../rm-client" }
 rm-relay = { path = "../rm-relay" }
 rm-decode = { path = "../rm-decode" }
+moonlight-sys = { path = "../moonlight-sys" }
+rm-gamestream = { path = "../rm-gamestream" }
 serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies.windows]

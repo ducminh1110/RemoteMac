@@ -85,6 +85,8 @@ struct State {
     udp: Option<Arc<udp_agent::AgentUdp>>,
     /// windows whose next frame must be a keyframe (the client lost one)
     key_requests: std::collections::HashSet<u64>,
+    /// the Mac Desktop in full GameStream mode: its host session behind the tunnel
+    gs: Option<Arc<rm_gamestream::tunnel::HostTunnel>>,
 }
 
 type Writer<W> = Arc<Mutex<W>>;
@@ -150,6 +152,9 @@ fn close_window<W: Write>(writer: &Writer<W>, st: &Arc<Mutex<State>>, id: u64) -
         s.rects.remove(&id);
         if s.desktop == Some(id) {
             s.desktop = None;
+            if let Some(g) = s.gs.take() {
+                g.session.stop();
+            }
         }
         if s.front == Some(id) {
             s.front = None;
@@ -234,6 +239,7 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
             }
         });
     }
+    let gs_tx = tx.clone();
     std::thread::spawn(move || loop {
         let r = read_message(&mut reader);
         let end = !matches!(r, Ok(Some(_)));
@@ -279,8 +285,13 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
                 let apps = APPS.iter().map(|(id, name)| AppInfo { id: (*id).into(), name: (*name).into(), available: true, version: None }).collect();
                 send(&writer, &Message::Apps { apps })?;
             }
-            Message::AppLaunch { application_id, .. } => match APPS.iter().find(|(id, _)| *id == application_id) {
+            Message::AppLaunch { application_id, arguments, .. } => match APPS.iter().find(|(id, _)| *id == application_id) {
                 Some((id, name)) => {
+                    if *id == "desktop" {
+                        if let Some(hex) = arguments.iter().find_map(|a| a.strip_prefix("gamestream=")) {
+                            start_gamestream(&writer, &st, hex, gs_tx.clone());
+                        }
+                    }
                     send(&writer, &Message::AppLaunched { application_id: (*id).into(), pid: 4000 + APPS.iter().position(|a| a.0 == *id).unwrap() as u32 })?;
                     open_window(&writer, &st, id, name, WindowRole::Window, None)?;
                 }
@@ -293,6 +304,15 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
                 retitle(&writer, &st, window_id)?;
             }
             Message::ClipboardSet { text, .. } => st.lock().unwrap().clipboard = text,
+            Message::GsTunnel { id, op, data_base64 } => {
+                if let Some(t) = st.lock().unwrap().gs.clone() {
+                    match op.as_str() {
+                        "open" => t.tcp_open(id),
+                        "data" => t.tcp_data(id, &rm_protocol::base64_decode(&data_base64).unwrap_or_default()),
+                        _ => t.tcp_close(id),
+                    }
+                }
+            }
             Message::P2pOffer { secret, candidates } => {
                 if let Some(u) = st.lock().unwrap().udp.clone() {
                     u.peer_offer(&secret, &candidates);
@@ -489,7 +509,13 @@ fn video_loop<W: Write>(w: Writer<W>, st: Arc<Mutex<State>>, id: u64, width: usi
         let Ok(bs) = enc.encode(&yuv) else { continue };
         let data = bs.to_vec();
         let keyframe = data.windows(5).any(|x| x[..4] == [0, 0, 0, 1] && x[4] & 0x1f == 5);
-        if !data.is_empty() {
+        let gs = {
+            let s = st.lock().unwrap();
+            s.gs.clone().filter(|_| s.desktop == Some(id))
+        };
+        if let (Some(g), false) = (gs, data.is_empty()) {
+            g.session.send_frame(&data, keyframe, std::time::Instant::now());
+        } else if !data.is_empty() {
             let f = VideoFrame { window_id: id, pts_us: udp_agent::clock_us(), keyframe, codec: CODEC_H264, width: width as u16, height: height as u16, data };
             if let Some(u) = &udp {
                 u.send(&f);
@@ -503,6 +529,52 @@ fn video_loop<W: Write>(w: Writer<W>, st: Arc<Mutex<State>>, id: u64, width: usi
         t += 1;
         std::thread::sleep(Duration::from_millis(33));
     }
+}
+
+/// Mac Desktop in full GameStream mode: a host session (rm-gamestream) behind the tunnel, as
+/// the Swift agent runs one. Its input becomes the desktop's own input messages.
+fn start_gamestream<W: Write + Send + 'static>(writer: &Writer<W>, st: &Arc<Mutex<State>>, hex: &str, input: std::sync::mpsc::Sender<Result<Option<Message>, ProtocolError>>) {
+    use rm_gamestream::tunnel::{HostTunnel, Outbound};
+    let (Some(key), Some(udp)) = (rm_protocol::udp::unhex16(hex), st.lock().unwrap().udp.clone()) else { return };
+    let (w, u) = (writer.clone(), udp.clone());
+    let out = Arc::new(move |o: Outbound| match o {
+        Outbound::Udp { kind, data } => u.send_tunnel(kind, data),
+        Outbound::TcpData { id, data } => {
+            let _ = send(&w, &Message::GsTunnel { id, op: "data".into(), data_base64: base64_encode(data) });
+        }
+        Outbound::TcpClose { id } => {
+            let _ = send(&w, &Message::GsTunnel { id, op: "close".into(), data_base64: String::new() });
+        }
+    });
+    let Ok(t) = HostTunnel::start(key, 20, out) else { return };
+    let t2 = t.clone();
+    *udp.tunnel.lock().unwrap() = Some(Box::new(move |flow, data| t2.udp_in(flow, data)));
+    st.lock().unwrap().gs = Some(t.clone());
+    let st2 = st.clone();
+    std::thread::spawn(move || loop {
+        let e = t.events.lock().unwrap().recv_timeout(Duration::from_millis(500));
+        let desktop = st2.lock().unwrap().desktop;
+        match e {
+            Ok(rm_gamestream::Event::RequestIdr) => {
+                if let Some(d) = desktop {
+                    st2.lock().unwrap().key_requests.insert(d);
+                }
+            }
+            Ok(rm_gamestream::Event::Input(rm_gamestream::Input::Text(text))) => {
+                if let Some(d) = desktop {
+                    let _ = input.send(Ok(Some(Message::TextInput { window_id: d, text })));
+                }
+            }
+            Ok(rm_gamestream::Event::Ended) => return,
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if st2.lock().unwrap().gs.is_none() {
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+    });
 }
 
 /// Bind to a relay as the agent and serve one client.

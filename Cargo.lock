@@ -392,10 +392,12 @@ dependencies = [
 name = "rm-viewer"
 version = "0.1.0"
 dependencies = [
+ "moonlight-sys",
  "openh264",
  "rm-client",
  "rm-decode",
  "rm-fakeagent",
+ "rm-gamestream",
  "rm-protocol",
  "rm-relay",
  "serde_json",

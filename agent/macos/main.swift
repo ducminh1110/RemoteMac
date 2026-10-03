@@ -171,6 +171,7 @@ if env["RM_NO_UDP"] == nil, let u = UdpLink(hostPort: relayAddr, session: sessio
 
 let menuQueue = DispatchQueue(label: "rm.menus")
 let iconQueue = DispatchQueue(label: "rm.icons", qos: .utility)
+let inputQueue = DispatchQueue(label: "rm.input", qos: .userInteractive)
 /// Read (off the main path: big apps take a moment) and send an app's menu bar.
 func sendMenuBar(_ id: String) {
     menuQueue.async {
@@ -236,6 +237,91 @@ func keyTo(_ pid: pid_t, _ code: CGKeyCode, _ flags: CGEventFlags = []) {
     }
 }
 
+// ---- Mac Desktop over full GameStream (crates/rm-gamestream: a Sunshine-style host session) ----
+// The client's Moonlight core reaches it through the tunnel: RTSP as "gs_tunnel" messages on
+// this connection, the UDP flows as "RM" 25 datagrams on the UDP path.
+var gsTunnel: OpaquePointer?
+var gsPoint = CGPoint.zero
+let gsOut: rm_gs_out = { _, kind, id, data, len in
+    let bytes = data.map { Data(bytes: $0, count: len) } ?? Data()
+    if kind < 10 {
+        sender.udp?.sendTunnel(UInt8(kind), bytes)
+    } else if kind == 10 {
+        send(["type": "gs_tunnel", "id": Int(id), "op": "data", "data_base64": bytes.base64EncodedString()])
+    } else {
+        send(["type": "gs_tunnel", "id": Int(id), "op": "close"])
+    }
+}
+
+func gsStart(keyHex: String) -> Bool {
+    guard let key = unhex(keyHex), key.count == 16 else { return false }
+    var ports = [UInt16](repeating: 0, count: 4)
+    guard let t = rm_gs_desktop_start(key, 20, gsOut, nil, &ports) else { return false }
+    gsTunnel = t
+    log("Mac Desktop: GameStream host session (rtsp \(ports[0]), video \(ports[1]), audio \(ports[2]), control \(ports[3])) behind the tunnel")
+    sender.udp?.onTunnel = { flow, d in
+        guard let t = gsTunnel else { return }
+        d.withUnsafeBytes { rm_gs_desktop_udp_in(t, flow, $0.baseAddress?.assumingMemoryBound(to: UInt8.self), d.count) }
+    }
+    // events: input from Moonlight's input stream, IDR requests
+    Thread {
+        var ev = RmGsEvent()
+        while let t = gsTunnel {
+            var any = false
+            while rm_gs_desktop_poll(t, &ev) { any = true; gsEvent(ev) }
+            if !any { usleep(1000) }
+        }
+    }.start()
+    return true
+}
+
+func gsStop() {
+    guard let t = gsTunnel else { return }
+    gsTunnel = nil
+    sender.udp?.onTunnel = nil
+    rm_gs_desktop_stop(t)
+}
+
+/// One GameStream event, as the agent's own input messages for the desktop window.
+func gsEvent(_ e: RmGsEvent) {
+    let b = desktop.bounds
+    var m: [String: Any] = ["window_id": Int(desktopWindowID)]
+    switch e.kind {
+    case 1: log("Mac Desktop GameStream: client asks \(e.a)x\(e.b) at \(e.c) fps, \(e.d) kbit/s"); return
+    case 2:
+        streamsLock.lock(); let ws = streams[desktopWindowID]; streamsLock.unlock()
+        ws?.requestKeyframe(); return
+    case 3: log("Mac Desktop GameStream: client left"); return
+    case 10:
+        if [0x10, 0x11, 0x12, 0x14, 0x5B, 0x5C].contains(e.a) || (0xA0...0xA5).contains(e.a) { return } // modifiers ride on keys
+        guard let n = rm_gs_vk_name(UInt16(e.a)) else { return }
+        var mods: [String] = []
+        if e.c & 0x01 != 0 { mods.append("shift") }
+        if e.c & 0x02 != 0 { mods.append("control") }
+        if e.c & 0x04 != 0 { mods.append("option") }
+        if e.c & 0x08 != 0 { mods.append("command") }
+        m["type"] = "key"; m["physical_key"] = String(cString: n); m["modifiers"] = mods; m["down"] = e.b != 0
+    case 11:
+        gsPoint = CGPoint(x: max(0, min(b.width, gsPoint.x + CGFloat(e.a))), y: max(0, min(b.height, gsPoint.y + CGFloat(e.b))))
+        m["type"] = "mouse_move"; m["x"] = Double(gsPoint.x); m["y"] = Double(gsPoint.y)
+    case 12:
+        guard e.c > 0, e.d > 0 else { return }
+        gsPoint = CGPoint(x: CGFloat(e.a) * b.width / CGFloat(e.c), y: CGFloat(e.b) * b.height / CGFloat(e.d))
+        m["type"] = "mouse_move"; m["x"] = Double(gsPoint.x); m["y"] = Double(gsPoint.y)
+    case 13:
+        m["type"] = "mouse_button"; m["button"] = e.a == 3 ? "right" : e.a == 2 ? "middle" : "left"; m["down"] = e.b != 0
+        m["x"] = Double(gsPoint.x); m["y"] = Double(gsPoint.y)
+    case 14: m["type"] = "scroll"; m["dx"] = 0.0; m["dy"] = Double(e.a) * 40 / 120
+    case 15: m["type"] = "scroll"; m["dx"] = Double(e.a) * 40 / 120; m["dy"] = 0.0
+    case 16:
+        var t = e.text
+        let s = withUnsafeBytes(of: &t) { String(cString: $0.bindMemory(to: CChar.self).baseAddress!) }
+        m["type"] = "text_input"; m["text"] = s
+    default: return
+    }
+    inputQueue.async { handle(m) }
+}
+
 /// Make a file panel open `path`: "Go to folder" (Cmd+Shift+G), type the full path, confirm twice.
 let inputTypes: Set<String> = ["mouse_move", "mouse_button", "scroll", "key", "text_input"]
 
@@ -265,7 +351,18 @@ func handle(_ m: [String: Any]) {
             }
         }
         send(desktop.start(display: fitted))
-        let ws = WindowStream(windowID: desktopWindowID, display: desktop.displayID) { pkt in sender.sendVideo(pkt) }
+        // full GameStream mode: the client's Moonlight core gets the desktop through a host session
+        if let gs = (m["arguments"] as? [String])?.first(where: { $0.hasPrefix("gamestream=") }) {
+            if !gsStart(keyHex: String(gs.dropFirst(11))) { log("Mac Desktop: GameStream host session failed; streaming the usual way") }
+        }
+        let ws = WindowStream(windowID: desktopWindowID, display: desktop.displayID) { pkt in
+            if let t = gsTunnel {
+                let age = agentClockUs() > pkt.ptsMicros ? agentClockUs() - pkt.ptsMicros : 0
+                _ = pkt.data.withUnsafeBytes { rm_gs_desktop_frame(t, $0.baseAddress?.assumingMemoryBound(to: UInt8.self), pkt.data.count, pkt.keyframe, age) }
+            } else {
+                sender.sendVideo(pkt)
+            }
+        }
         ws.setBitrate(sender.bitrate)
         streamsLock.lock(); streams[desktopWindowID] = ws; streamsLock.unlock()
         Task { do { try await ws.start(); log("desktop stream started") } catch { log("desktop stream failed: \(error)")
@@ -274,6 +371,7 @@ func handle(_ m: [String: Any]) {
          "window_close" where CGWindowID(int(m["window_id"])) == desktopWindowID:
         guard desktop.isActive else { break }
         desktop.stop()
+        gsStop()
         displays.unmirrorDesktop()
         stopStream(desktopWindowID)
         send(["type": "window_destroyed", "window_id": Int(desktopWindowID)])
@@ -390,6 +488,16 @@ func handle(_ m: [String: Any]) {
         log("client decoder: high_profile=\(useHighProfile) hardware=\(m["hardware"] as? Bool ?? false) scale=\(captureScale)")
     case "ping":
         send(["type": "pong", "nonce": m["nonce"] ?? 0])
+    case "gs_tunnel":
+        guard let t = gsTunnel else { break }
+        let id = UInt32(int(m["id"]))
+        switch m["op"] as? String ?? "" {
+        case "open": rm_gs_desktop_tcp_open(t, id)
+        case "data":
+            let d = Data(base64Encoded: m["data_base64"] as? String ?? "") ?? Data()
+            d.withUnsafeBytes { rm_gs_desktop_tcp_data(t, id, $0.baseAddress?.assumingMemoryBound(to: UInt8.self), d.count) }
+        default: rm_gs_desktop_tcp_close(t, id)
+        }
     case "p2p_offer":
         sender.udp?.peerOffer(secret: m["secret"] as? String ?? "", candidates: m["candidates"] as? [String] ?? [])
     case _ where inputTypes.contains(type):
@@ -399,8 +507,7 @@ func handle(_ m: [String: Any]) {
     }
 }
 
-// input runs on its own queue, in arrival order, whether it came over TCP or straight over UDP
-let inputQueue = DispatchQueue(label: "rm.input", qos: .userInteractive)
+// input runs on its own queue (inputQueue), in arrival order, whether it came over TCP or straight over UDP
 sender.udp?.onInput = { m in inputQueue.async { handle(m) } }
 
 let reader = Thread {

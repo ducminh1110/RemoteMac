@@ -166,6 +166,9 @@ pub fn parse_pong(p: &[u8]) -> Option<(u64, u64)> {
 /// `"RM" 24 0 width u16 height u16` (BE); the RTP SSRC is the window
 pub const T_GS_VIDEO: u8 = 24;
 pub const GS_TAG: usize = 8;
+/// either way: a GameStream datagram of the Mac Desktop's full GameStream session behind
+/// `"RM" 25 flow` (flow 0 video, 1 audio, 2 ENet control)
+pub const T_GS_TUNNEL: u8 = 25;
 /// GameStream packet size RemoteMac uses (packets are this + 16 bytes; + the tag < 1280)
 pub const GS_PACKET_SIZE: usize = 1200;
 pub const GS_MIN_FEC: usize = 2;

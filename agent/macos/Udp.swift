@@ -94,6 +94,15 @@ final class UdpLink {
     var onOffer: ((String, [String]) -> Void)?
     /// the path changed (direct address, or nil: through the relay)
     var onPath: ((String?) -> Void)?
+    /// a datagram of the Mac Desktop's full GameStream session (flow, bytes)
+    var onTunnel: ((UInt8, Data) -> Void)?
+
+    /// A GameStream datagram to the client's tunnel (`"RM" 25 flow`).
+    func sendTunnel(_ flow: UInt8, _ data: Data) {
+        var d = Data([0x52, 0x4D, 25, flow])
+        d.append(data)
+        raw(d)
+    }
     private let cond = NSCondition()
     private var queue: [(window: UInt64, key: Bool, packets: [Data], queued: CFAbsoluteTime)] = []
     private var seq: [UInt64: UInt32] = [:]
@@ -258,6 +267,8 @@ final class UdpLink {
                 withUnsafeBytes(of: &t) { d.append(contentsOf: $0) }
                 withUnsafeBytes(of: &nowUs) { d.append(contentsOf: $0) }
                 sendTo(d, ss)
+            case 25 where n >= 4:                      // GameStream tunnel (Mac Desktop)
+                onTunnel?(buf[3], Data(buf[4..<n]))
             case 22:                                   // input from the client (reliable, in order)
                 var o = 4, msgs: [[String: Any]] = []
                 cond.lock()

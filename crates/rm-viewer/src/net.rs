@@ -177,6 +177,10 @@ pub struct Link {
 
 impl Link {
     pub fn send(&self, m: &Message) {
+        // the Mac Desktop in full GameStream mode takes its input through Moonlight's stream
+        if crate::gsdesktop::intercept(m) {
+            return;
+        }
         // input goes straight to the Mac when there is a direct path (reliable UDP, no detour
         // through the relay, no TCP head-of-line wait)
         let pointer = matches!(m, Message::MouseMove { .. });
@@ -241,6 +245,7 @@ pub fn connect_with(relay: &str, session: &str, token: &str, app: Option<&str>, 
         };
         match rm_client::udp::start(relay, session, token, move |o| v.on_udp(o), offer) {
             Ok(u) => {
+                u.set_tunnel_handler(crate::gsdesktop::from_host_udp);
                 let u = Arc::new(u);
                 *video.udp.lock().unwrap() = Some(u.clone());
                 link.udp = Some(u);
@@ -257,9 +262,33 @@ pub fn connect_with(relay: &str, session: &str, token: &str, app: Option<&str>, 
     if let Some(app) = app {
         link.send(&Message::AppLaunch { application_id: app.into(), arguments: vec![], working_directory: None, environment: Default::default() });
     }
+    *GS_VIDEO.lock().unwrap() = Some(video.clone());
     let l2 = link.clone();
     std::thread::spawn(move || recv_loop(sess, l2, video, tx, wake));
     Ok((link, rx))
+}
+
+static GS_VIDEO: Mutex<Option<Arc<Video>>> = Mutex::new(None);
+
+/// Start the Mac Desktop in full GameStream mode for window `id` (see gsdesktop.rs): the tunnel
+/// rides this connection, decoded pictures take the usual path.
+pub fn start_gamestream_desktop(link: &Link, id: u64, key: [u8; 16], points: (u32, u32), pixels: (u16, u16)) -> Result<(), String> {
+    let video = GS_VIDEO.lock().unwrap().clone().ok_or("not connected")?;
+    let (l, u) = (link.clone(), link.udp.clone());
+    let to_host = move |m: rm_gamestream::tunnel::ToHost| {
+        use rm_gamestream::tunnel::ToHost;
+        match m {
+            ToHost::Udp { kind, data } => {
+                if let Some(u) = &u {
+                    u.send_tunnel(kind, data);
+                }
+            }
+            ToHost::TcpOpen { id } => l.send(&Message::GsTunnel { id, op: "open".into(), data_base64: String::new() }),
+            ToHost::TcpData { id, data } => l.send(&Message::GsTunnel { id, op: "data".into(), data_base64: rm_protocol::base64_encode(data) }),
+            ToHost::TcpClose { id } => l.send(&Message::GsTunnel { id, op: "close".into(), data_base64: String::new() }),
+        }
+    };
+    crate::gsdesktop::start(id, key, points, pixels, to_host, move |f| video.push(f, true))
 }
 
 /// One window's decoder on its own thread: the socket keeps being read (input echoes, menus,
@@ -422,6 +451,10 @@ fn recv_loop(mut sess: Session<TcpStream>, _link: Link, video: Arc<Video>, tx: S
                     if let Some(u) = video.udp.lock().unwrap().as_ref() {
                         u.peer_offer(&secret, &candidates);
                     }
+                }
+                Message::GsTunnel { id, op, data_base64 } => {
+                    let data = rm_protocol::base64_decode(&data_base64).unwrap_or_default();
+                    crate::gsdesktop::from_host_tcp(id, &op, &data);
                 }
                 _ => {}
             },
