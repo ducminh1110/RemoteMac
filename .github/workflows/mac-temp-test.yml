@@ -1,3 +1,5 @@
+name: Temporary RemoteMac Mac
+
 on:
   workflow_dispatch:
 
@@ -26,17 +28,25 @@ jobs:
 
           test -f remotemac-macos.tar.gz
 
+          echo "Downloaded:"
+          ls -lh remotemac-macos.tar.gz
+
       - name: Extract RemoteMac
+        shell: bash
         run: |
           set -euo pipefail
 
           cd "$RUNNER_TEMP/remotemac"
 
           tar -xzf remotemac-macos.tar.gz
-          cd remotemac
 
-          chmod +x remotemac
-          xattr -d com.apple.quarantine remotemac 2>/dev/null || true
+          test -f remotemac/remotemac
+
+          chmod +x remotemac/remotemac
+
+          xattr -d com.apple.quarantine \
+            remotemac/remotemac \
+            2>/dev/null || true
 
       - name: Generate password
         shell: bash
@@ -57,55 +67,123 @@ jobs:
           echo ""
 
       - name: Show Mac information
+        shell: bash
         run: |
+          set -euo pipefail
+
           echo "Machine:"
           scutil --get ComputerName || hostname
 
+          echo ""
           echo "Hostname:"
           hostname
 
+          echo ""
           echo "macOS:"
           sw_vers -productVersion
 
+          echo ""
           echo "Architecture:"
           uname -m
 
+          echo ""
           echo "Xcode:"
           xcodebuild -version
 
+          echo ""
           echo "Runner:"
           echo "$RUNNER_NAME"
 
+          echo ""
+          echo "Relay:"
+          echo "remotemac.mooo.com:7470"
+
       - name: Start RemoteMac
+        shell: bash
         run: |
           set -euo pipefail
 
           cd "$RUNNER_TEMP/remotemac/remotemac"
 
+          LOG="$RUNNER_TEMP/remotemac.log"
+
+          : > "$LOG"
+
           echo "Starting RemoteMac..."
 
-          ./remotemac --password "$RM_PASSWORD" \
-            > "$RUNNER_TEMP/remotemac.log" 2>&1 &
+          ./remotemac \
+            --password "$RM_PASSWORD" \
+            > "$LOG" 2>&1 &
 
           PID=$!
+
           echo "$PID" > "$RUNNER_TEMP/remotemac.pid"
 
           sleep 5
 
+          echo ""
+          echo "========== RemoteMac startup log =========="
+          cat "$LOG" || true
+          echo "============================================"
+          echo ""
+
           if ! kill -0 "$PID" 2>/dev/null; then
             echo "RemoteMac exited during startup."
-            cat "$RUNNER_TEMP/remotemac.log" || true
             exit 1
           fi
+
+          # Give the agent a little more time to print its ID.
+          sleep 2
+
+          echo ""
+          echo "========== RemoteMac log =========="
+          cat "$LOG" || true
+          echo "===================================="
+          echo ""
+
+          # Accept common forms:
+          # ID: xxx
+          # Id: xxx
+          # id: xxx
+          # Session: xxx
+          ID="$(
+            grep -Eim1 '^[[:space:]]*(ID|Id|id|Session)[[:space:]]*:' "$LOG" \
+            | sed -E 's/^[[:space:]]*(ID|Id|id|Session)[[:space:]]*:[[:space:]]*//'
+          )"
+
+          # Fallback: try an "ID =" form.
+          if [ -z "${ID:-}" ]; then
+            ID="$(
+              grep -Eim1 '^[[:space:]]*(ID|Id|id|Session)[[:space:]]*=' "$LOG" \
+              | sed -E 's/^[[:space:]]*(ID|Id|id|Session)[[:space:]]*=[[:space:]]*//'
+            )"
+          fi
+
+          if [ -z "${ID:-}" ]; then
+            echo ""
+            echo "ERROR: Could not find the RemoteMac ID in the agent output."
+            echo ""
+            echo "Full log:"
+            cat "$LOG"
+            echo ""
+            echo "The agent is running, but its ID format was not recognized."
+            exit 1
+          fi
+
+          ID="$(echo "$ID" | tr -d '\r' | xargs)"
+
+          echo "RM_MACHINE_ID=$ID" >> "$GITHUB_ENV"
 
           echo ""
           echo "========================================"
           echo " RemoteMac READY"
           echo "========================================"
+          echo "ID:       $ID"
           echo "Password: $RM_PASSWORD"
           echo "Relay:    remotemac.mooo.com:7470"
           echo "PID:      $PID"
           echo "========================================"
+          echo ""
 
       - name: Keep Mac online
         shell: bash
@@ -114,9 +192,22 @@ jobs:
 
           PID="$(cat "$RUNNER_TEMP/remotemac.pid")"
 
+          echo ""
+          echo "========================================"
+          echo " RemoteMac session is active"
+          echo "========================================"
+          echo "ID:       $RM_MACHINE_ID"
+          echo "Password: $RM_PASSWORD"
+          echo "Relay:    remotemac.mooo.com:7470"
+          echo "========================================"
+          echo ""
+
           while true; do
             if ! kill -0 "$PID" 2>/dev/null; then
+              echo ""
               echo "RemoteMac stopped unexpectedly."
+              echo ""
+              echo "========== RemoteMac log =========="
               cat "$RUNNER_TEMP/remotemac.log" || true
               exit 1
             fi
@@ -124,15 +215,23 @@ jobs:
             sleep $((5 + RANDOM % 6))
 
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] RemoteMac alive"
+            echo "ID=$RM_MACHINE_ID"
           done
 
       - name: Stop RemoteMac
         if: always()
+        shell: bash
         run: |
+          echo "Stopping RemoteMac..."
+
           if [ -f "$RUNNER_TEMP/remotemac.pid" ]; then
             PID="$(cat "$RUNNER_TEMP/remotemac.pid")"
-            kill "$PID" 2>/dev/null || true
+
+            if kill -0 "$PID" 2>/dev/null; then
+              kill "$PID" 2>/dev/null || true
+            fi
           fi
 
-          echo "========== RemoteMac log =========="
+          echo ""
+          echo "========== Final RemoteMac log =========="
           cat "$RUNNER_TEMP/remotemac.log" 2>/dev/null || true
