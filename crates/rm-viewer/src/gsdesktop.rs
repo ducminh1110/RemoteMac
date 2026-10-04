@@ -139,6 +139,11 @@ pub fn intercept(m: &Message) -> bool {
                 rm_protocol::MouseButton::Right => 3,
             };
             moonlight::send_input(&Input::Button { button, down: *down });
+            // and over RemoteMac's own input path too (resent after 40 ms, not after ENet's
+            // retransmission timeout): a press and release over a lossy link otherwise reach the
+            // Mac far apart and the Dock takes the click for a press-and-hold (Options / Quit).
+            // The Mac acts on whichever copy of each press and release comes first.
+            return false;
         }
         // the viewer counts 40 px per wheel notch; GameStream 120 per notch
         Message::Scroll { window_id, dx, dy } if *window_id == id => {

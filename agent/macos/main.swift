@@ -182,6 +182,7 @@ func sendMenuBar(_ id: String) {
 
 func startStream(_ id: CGWindowID, inset: CGFloat) {
     let ws = WindowStream(windowID: id, inset: inset) { pkt in sender.sendVideo(pkt) }
+    ws.popup = tracker.current(id)?.role == .popup
     ws.setBitrate(sender.bitrate)
     streamsLock.lock(); streams[id] = ws; streamsLock.unlock()
     Task { do { try await ws.start(); log("stream started window=\(id)") } catch { log("stream start failed window=\(id): \(error)")
@@ -343,6 +344,7 @@ func gsEvent(_ e: RmGsEvent) {
         m["type"] = "mouse_move"; m["x"] = Double(gsPoint.x); m["y"] = Double(gsPoint.y)
     case 13:
         m["type"] = "mouse_button"; m["button"] = e.a == 3 ? "right" : e.a == 2 ? "middle" : "left"; m["down"] = e.b != 0
+        m["path"] = "gs" // the viewer sends each press and release over its own input path too
         m["x"] = Double(gsPoint.x); m["y"] = Double(gsPoint.y)
     case 14: m["type"] = "scroll"; m["dx"] = 0.0; m["dy"] = Double(e.a) * 40 / 120
     case 15: m["type"] = "scroll"; m["dx"] = Double(e.a) * 40 / 120; m["dy"] = 0.0
@@ -383,6 +385,7 @@ func handle(_ m: [String: Any]) {
                 }
             }
         }
+        inputQueue.async { injector.resetDesktopClicks() }
         send(desktop.start(display: fitted))
         // full GameStream mode: the client's Moonlight core gets the desktop through a host session
         if let gs = (m["arguments"] as? [String])?.first(where: { $0.hasPrefix("gamestream=") }) {
@@ -553,6 +556,12 @@ func handle(_ m: [String: Any]) {
         let changed = fps != targetFPS || (sc > 0 && CGFloat(sc) != captureScale) || relayout
         targetFPS = fps
         if sc > 0 { captureScale = CGFloat(max(0.5, min(3, sc))) }
+        // the viewer shows its own pointer: the Mac's is left out of the picture (live)
+        if let on = m["mac_cursor"] as? Bool, on != showRemoteCursor {
+            showRemoteCursor = on
+            streamsLock.lock(); let all = Array(streams.values); streamsLock.unlock()
+            for ws in all { ws.setCursor(on) }
+        }
         let kbps = int(m["bitrate_kbps"])
         sender.setCeiling(kbps > 0 ? kbps * 1000 : nil)
         log("settings: \(fps) fps, bitrate \(kbps > 0 ? "\(kbps) kbit/s" : "auto"), \(captureScale) px per point")

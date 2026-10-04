@@ -217,15 +217,15 @@ pub fn friendly_error(e: &str) -> String {
     } else if e.contains("locked") {
         "Too many wrong passwords. Wait a minute and try again."
     } else if e.contains("not admitted") {
-        "The relay refused this viewer (relay key mismatch). Use the current RemoteMac build."
+        "The server refused this app (key mismatch). Use the current MacBridge build."
     } else if e.contains("pair timeout") {
         "The Mac did not answer in time. Try again."
     } else if e.contains("relay busy") {
-        "The relay is busy. Try again shortly."
+        "The server is busy. Try again shortly."
     } else if e.contains("handshake") {
         "Connected, but the Mac did not complete the handshake. Update remotemac on the Mac."
     } else {
-        return format!("Cannot reach the RemoteMac server: {e}");
+        return format!("Cannot reach the MacBridge server: {e}");
     };
     m.to_string()
 }

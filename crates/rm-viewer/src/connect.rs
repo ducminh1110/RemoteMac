@@ -72,7 +72,7 @@ pub fn connect_window<T: Send>(id: Option<&str>, error: Option<&str>, try_connec
         let wc = WNDCLASSW { lpfnWndProc: Some(proc), hInstance: hinst, lpszClassName: CLASS, hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), ..Default::default() };
         RegisterClassW(&wc); // a second call fails harmlessly (already registered)
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
-        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("RemoteMac"), style, CW_USEDEFAULT, CW_USEDEFAULT, W, H, None, None, Some(hinst), None).ok()?;
+        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("MacBridge"), style, CW_USEDEFAULT, CW_USEDEFAULT, W, H, None, None, Some(hinst), None).ok()?;
         let s = GetDpiForWindow(hwnd).max(96) as f64 / 96.0;
         let px = |v: i32| (v as f64 * s).round() as i32;
         // size the client area, centre on the screen
@@ -204,7 +204,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     SelectObject(hdc, st.body.into());
                     SetTextColor(hdc, rgb((110, 110, 115)));
                     let mut t = RECT { left: px(32), top: px(58), right: rc.right - px(32), bottom: px(80) };
-                    let mut h: Vec<u16> = "Run ./remotemac on the Mac, then type its ID and password.".encode_utf16().collect();
+                    let mut h: Vec<u16> = "Open MacBridge on the Mac, then type its ID and password.".encode_utf16().collect();
                     DrawTextW(hdc, &mut h, &mut t, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
                     SelectObject(hdc, old);
                 }

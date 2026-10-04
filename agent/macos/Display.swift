@@ -31,10 +31,29 @@ final class DisplayManager {
             if ids.prefix(Int(n)).contains(id) && CGDisplayBounds(id).width > 0 { break }
             usleep(100_000)
         }
+        if hidpi { selectRetina(id, width: Int(w), height: Int(h + (forDesktop ? 0 : headroom))) }
         lock.lock(); displayID = id; target = CGSize(width: Int(w), height: Int(h)); lock.unlock()
         let b = CGDisplayBounds(id)
-        log("virtual display \(id): \(Int(b.width))x\(Int(b.height)) at \(Int(b.minX)),\(Int(b.minY)) hidpi=\(hidpi)")
+        let px = CGDisplayCopyDisplayMode(id).map { "\($0.pixelWidth)x\($0.pixelHeight) px" } ?? "?"
+        log("virtual display \(id): \(Int(b.width))x\(Int(b.height)) points, \(px), at \(Int(b.minX)),\(Int(b.minY)) hidpi=\(hidpi)")
         return ["type": "display_status", "available": true, "display_id": Int(id), "width": Int(w), "height": Int(h), "reason": NSNull()]
+    }
+
+    /// Make sure the display runs its Retina mode (`width`x`height` points at 2x): macOS may pick
+    /// the 1x mode of the same size, and everything is then drawn at 1x however it is captured.
+    private func selectRetina(_ id: CGDirectDisplayID, width: Int, height: Int) {
+        if let cur = CGDisplayCopyDisplayMode(id), cur.width == width, cur.pixelWidth >= width * 2 { return }
+        let opts = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue] as CFDictionary
+        let modes = CGDisplayCopyAllDisplayModes(id, opts) as? [CGDisplayMode] ?? []
+        guard let m = modes.first(where: { $0.width == width && $0.height == height && $0.pixelWidth >= width * 2 }) else {
+            log("virtual display \(id): no Retina mode of \(width)x\(height) among \(modes.map { "\($0.width)x\($0.height)@\($0.pixelWidth)" })")
+            return
+        }
+        var cfg: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&cfg) == .success else { return }
+        CGConfigureDisplayWithDisplayMode(cfg, id, m, nil)
+        if CGCompleteDisplayConfiguration(cfg, .forSession) != .success { log("virtual display \(id): Retina mode refused") }
+        usleep(200_000)
     }
 
     /// The Mac's own screen(s) mirror the virtual display (what BetterDummy does): the whole

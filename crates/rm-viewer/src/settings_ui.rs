@@ -79,7 +79,7 @@ pub fn show(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: i
     unsafe {
         let s = crate::native::dpi_scale(owner.unwrap_or_default()).max(1.0);
         let px = |v: i32| (v as f64 * s).round() as i32;
-        let Ok(hwnd) = CreateWindowExW(WS_EX_DLGMODALFRAME, CLASS, w!("RemoteMac — Settings"), WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, px(470), px(400), owner, None, Some(hinst), None) else { return };
+        let Ok(hwnd) = CreateWindowExW(WS_EX_DLGMODALFRAME, CLASS, w!("MacBridge — Settings"), WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, px(470), px(400), owner, None, Some(hinst), None) else { return };
         let font = CreateFontW(-px(14), 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, &HSTRING::from(crate::native::ui_face(400)));
         let (lx, cx, cw) = (px(18), px(160), px(290));
         let mut y = px(18);
@@ -107,7 +107,7 @@ pub fn show(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: i
         let pacing = button(hwnd, hinst, lx, y, px(450), "Frame pacing (smoother motion, up to one frame more delay)", 200, BS_AUTOCHECKBOX as u32, font);
         SendMessageW(pacing, BM_SETCHECK, Some(WPARAM(current.pacing as usize)), None);
         y += px(30);
-        let cursor = button(hwnd, hinst, lx, y, px(450), "Show the Windows pointer over the picture (Ctrl+Alt+Shift+C)", 201, BS_AUTOCHECKBOX as u32, font);
+        let cursor = button(hwnd, hinst, lx, y, px(450), "Use the Windows pointer instead of the Mac's (Ctrl+Alt+Shift+C)", 201, BS_AUTOCHECKBOX as u32, font);
         SendMessageW(cursor, BM_SETCHECK, Some(WPARAM(current.local_cursor as usize)), None);
         y += px(34);
         label(hwnd, hinst, lx, y, px(445), px(44), "Decoder, frame pacing and Mac Desktop scale apply to windows opened from now on.", font);

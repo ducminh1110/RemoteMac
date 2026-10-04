@@ -51,10 +51,10 @@ pub fn register(hinst: HINSTANCE) {
 
 fn step_text(step: u32, name: &str) -> String {
     match step {
-        1 => "Sending the launch to the Mac…".into(),
-        2 => format!("Starting {name} on the Mac…"),
-        3 => "Setting up the window…".into(),
-        _ => "Connecting the stream…".into(),
+        1 => format!("Opening {name}…"),
+        2 => format!("Starting {name}…"),
+        3 => "Preparing the window…".into(),
+        _ => "Almost ready…".into(),
     }
 }
 

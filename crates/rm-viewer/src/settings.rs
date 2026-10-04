@@ -32,7 +32,7 @@ impl Default for Settings {
 pub const FPS: [u32; 5] = [30, 60, 90, 120, 144];
 pub const BITRATES: [u32; 8] = [0, 5, 10, 20, 30, 50, 80, 120];
 pub const QUALITY: [&str; 4] = ["Ultra — sharpest (apps drawn at 2x, scaled down here)", "Native (this screen's pixels)", "Balanced (1 pixel per Mac point)", "Fast (lower resolution, least bandwidth)"];
-pub const DESKTOP_SCALES: [&str; 2] = ["1x (one pixel per Mac point, least bandwidth)", "2x (drawn and streamed at 2x, scaled down here)"];
+pub const DESKTOP_SCALES: [&str; 2] = ["1x (lighter on the connection)", "2x (Retina, sharpest)"];
 pub const DECODERS: [&str; 3] = ["Auto (GPU when it works)", "GPU (hardware)", "CPU (software)"];
 
 fn path() -> std::path::PathBuf {
@@ -102,7 +102,7 @@ impl Settings {
 
     /// What the Mac needs to know (`px`: this screen in pixels).
     pub fn message(&self, display_scale: f64, px: (i32, i32)) -> Message {
-        Message::StreamSettings { fps: self.fps, bitrate_kbps: (self.bitrate_mbps > 0).then(|| self.bitrate_mbps * 1000), scale: Some(self.scale(display_scale)), screen: Some(self.app_screen(px, display_scale)) }
+        Message::StreamSettings { fps: self.fps, bitrate_kbps: (self.bitrate_mbps > 0).then(|| self.bitrate_mbps * 1000), scale: Some(self.scale(display_scale)), screen: Some(self.app_screen(px, display_scale)), mac_cursor: Some(!self.local_cursor) }
     }
 }
 
@@ -113,8 +113,8 @@ mod tests {
     #[test]
     fn message_and_scale() {
         let s = Settings { fps: 120, bitrate_mbps: 30, quality: 2, ..Default::default() };
-        assert_eq!(s.message(1.5, (1920, 1080)), Message::StreamSettings { fps: 120, bitrate_kbps: Some(30_000), scale: Some(1.0), screen: Some(String::new()) });
-        assert_eq!(Settings::default().message(2.0, (2560, 1600)), Message::StreamSettings { fps: 60, bitrate_kbps: None, scale: Some(2.0), screen: Some("2560,1600,2".into()) });
+        assert_eq!(s.message(1.5, (1920, 1080)), Message::StreamSettings { fps: 120, bitrate_kbps: Some(30_000), scale: Some(1.0), screen: Some(String::new()), mac_cursor: Some(true) });
+        assert_eq!(Settings::default().message(2.0, (2560, 1600)), Message::StreamSettings { fps: 60, bitrate_kbps: None, scale: Some(2.0), screen: Some("2560,1600,2".into()), mac_cursor: Some(true) });
     }
 
     #[test]

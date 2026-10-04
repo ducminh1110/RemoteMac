@@ -29,7 +29,7 @@ pub fn folder() -> Option<PathBuf> {
         let p = SHGetKnownFolderPath(&FOLDERID_Programs, KNOWN_FOLDER_FLAG(0), None).ok()?;
         let s = p.to_string().ok();
         CoTaskMemFree(Some(p.0 as *const _));
-        s.map(|s| PathBuf::from(s).join("Remote Mac"))
+        s.map(|s| PathBuf::from(s).join("MacBridge"))
     }
 }
 

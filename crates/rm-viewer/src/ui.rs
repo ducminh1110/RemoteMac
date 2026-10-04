@@ -218,7 +218,7 @@ impl Stats {
         match link {
             Some(l) if l.active => v.push(format!(
                 "Network UDP+FEC {}  RTT {}  loss {:.1}%  fixed {}  lost {}",
-                l.direct.map_or("via relay".into(), |d| format!("direct {d}")),
+                l.direct.map_or("via server".into(), |d| format!("direct {d}")),
                 l.rtt_ms.map_or("-".into(), |r| format!("{r:.0} ms")),
                 l.loss * 100.0,
                 l.recovered,
@@ -325,10 +325,7 @@ pub fn run(opts: Options) -> i32 {
             shortcuts::remove_all(d);
         }
         link.send(&Message::ListApps);
-        let mut launcher = Launcher::create(hinst, opts.app.is_none() && !opts.smoke);
-        if let Some(l) = launcher.as_mut() {
-            l.status(&format!("Mac {} · relay {}", opts.session, opts.relay));
-        }
+        let launcher = Launcher::create(hinst, opts.app.is_none() && !opts.smoke);
         if launcher.is_none() {
             eprintln!("warning: launcher window could not be created");
         }
@@ -1072,7 +1069,7 @@ fn handle_event(ev: UiEvent) {
             let interactive = with_app(|a| a.smoke.is_none() && a.showcase.is_none()).unwrap_or(false);
             if interactive {
                 // never vanish without a word
-                native::message_box("RemoteMac", &format!("The connection to the Mac was closed.\n\n{why}\n\nLog: {}", crate::log_path().display()));
+                native::message_box("MacBridge", &format!("The connection to the Mac was closed.\n\n{why}\n\nLog: {}", crate::log_path().display()));
             }
             on_mac_gone();
             quit(if with_app(|a| a.smoke.is_some()).unwrap_or(false) { 1 } else { 0 });
@@ -2037,6 +2034,11 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                     let on = !local_cursor().fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
                     let _ = SetCursor(if on { LoadCursorW(None, IDC_ARROW).ok() } else { None });
                     eprintln!("local pointer over the picture: {}", if on { "shown" } else { "hidden (the Mac's pointer is in the video)" });
+                    // the Mac leaves its own pointer out while this one shows (kept for next time)
+                    let mut st = crate::settings::Settings::load();
+                    st.local_cursor = on;
+                    let _ = st.save();
+                    with_app(|a| a.link.send(&st.message(net::display_scale(), net::screen_px())));
                 }
                 return LRESULT(0);
             }

@@ -41,6 +41,11 @@ final class InputInjector {
     private var lastPoint = CGPoint.zero
     private var activatedPid: pid_t = 0
     private var leftDown = false, rightDown = false
+    /// Mac Desktop: presses and releases received per path and button, and acted on per button
+    private var received: [String: Int] = [:], injected: [String: Int] = [:]
+
+    /// A new Mac Desktop session: its clicks are counted afresh.
+    func resetDesktopClicks() { received = [:]; injected = [:] }
     private let desktop: DesktopSession
     init(tracker: WindowTracker, desktop: DesktopSession) { self.tracker = tracker; self.desktop = desktop }
 
@@ -72,6 +77,15 @@ final class InputInjector {
             let type: CGEventType = leftDown ? .leftMouseDragged : rightDown ? .rightMouseDragged : .mouseMoved
             post(type, p, button: rightDown && !leftDown ? .right : .left, pid: w.pid)
         case "mouse_button":
+            // the Mac Desktop's presses and releases come twice (GameStream's input stream and
+            // the viewer's own input path, both in order): only the first copy of each acts
+            if wid == desktopWindowID {
+                let key = msg["button"] as? String ?? "left", path = msg["path"] as? String ?? "link"
+                let n = (received[path + key] ?? 0) + 1
+                received[path + key] = n
+                if n <= (injected[key] ?? 0) { return nil }
+                injected[key] = n
+            }
             let p = CGPoint(x: w.content.minX + num(msg["x"]), y: w.content.minY + num(msg["y"]))
             lastPoint = p
             let down = (msg["down"] as? Bool) ?? true
@@ -114,6 +128,9 @@ final class InputInjector {
             clicks = (near && now - lastDownAt <= NSEvent.doubleClickInterval && button == lastButton) ? clicks + 1 : 1
             lastDown = p; lastDownAt = now; lastButton = button
         }
+        // no modifiers from the system's state (a Control left down would turn a click into a
+        // Control-click: the Dock's Options / Quit menu)
+        e.flags = []
         e.setIntegerValueField(.mouseEventClickState, value: Int64(type == .mouseMoved ? 0 : clicks))
         e.setIntegerValueField(.mouseEventButtonNumber, value: Int64(button.rawValue))
         e.post(tap: .cghidEventTap)

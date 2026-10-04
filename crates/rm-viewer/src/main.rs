@@ -28,10 +28,10 @@ fn main() {
         rm_viewer::native::log_to_file(&rm_viewer::log_path());
         let quiet = has("--smoke") || has("--showcase");
         std::panic::set_hook(Box::new(move |info| {
-            let msg = format!("RemoteMac stopped because of an internal error:\n\n{info}\n\nLog: {}", rm_viewer::log_path().display());
+            let msg = format!("MacBridge stopped because of an internal error:\n\n{info}\n\nLog: {}", rm_viewer::log_path().display());
             eprintln!("{msg}");
             if !quiet {
-                rm_viewer::native::message_box("RemoteMac", &msg);
+                rm_viewer::native::message_box("MacBridge", &msg);
             }
         }));
         eprintln!("RemoteMac viewer {} starting (relay {relay})", env!("CARGO_PKG_VERSION"));

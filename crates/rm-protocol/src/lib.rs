@@ -336,6 +336,9 @@ pub enum Message {
         scale: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         screen: Option<String>,
+        /// The Mac's pointer drawn into the picture (false: the viewer shows its own instead).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mac_cursor: Option<bool>,
     },
     /// Either direction: one step of a GameStream RTSP connection carried for the Mac Desktop
     /// in full GameStream mode (crates/rm-gamestream tunnel.rs). `op`: "open" (PC -> Mac),
