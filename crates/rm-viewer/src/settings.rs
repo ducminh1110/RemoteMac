@@ -38,7 +38,8 @@ pub const QUALITY: [&str; 4] = ["Ultra — sharpest (apps drawn at 2x, scaled do
 pub const DESKTOP_SCALES: [&str; 2] = ["1x (lighter on the connection)", "2x (Retina, sharpest)"];
 pub const WORKSPACES: usize = 5;
 /// The last Mac screen size: this screen's own pixels at 1x, shown 1:1 (as Sunshine streams a
-/// screen; the sharpest there is, the smallest text). App windows keep the "most space" layout.
+/// screen; the sharpest there is, the smallest text), for the Mac Desktop and app windows alike:
+/// windows are then shown at one pixel per Mac point.
 pub const PIXEL_FOR_PIXEL: u8 = WORKSPACES as u8 - 1;
 pub const DECODERS: [&str; 3] = ["Auto (GPU when it works)", "GPU (hardware)", "CPU (software)"];
 
@@ -78,6 +79,9 @@ impl Settings {
 
     /// Mac pixels per point for this quality, on a screen of `display_scale`.
     pub fn scale(&self, display_scale: f64) -> f64 {
+        if self.pixel_for_pixel() {
+            return 1.0;
+        }
         match self.quality {
             0 => display_scale.max(2.0),
             1 => display_scale.max(1.0),
@@ -94,9 +98,19 @@ impl Settings {
         if px.0 <= 0 || px.1 <= 0 || (self.quality != 0 && display_scale < 1.25) || self.quality >= 2 {
             return String::new();
         }
-        let (w, h) = Self::points_at(px, display_scale, self.workspace.min(PIXEL_FOR_PIXEL - 1));
+        if self.pixel_for_pixel() {
+            // this screen's pixels at 1x; the trailing 1 asks for that layout although it is 1x
+            let (w, h) = self.workspace_points(px, display_scale);
+            return format!("{w},{h},1,1");
+        }
+        let (w, h) = self.workspace_points(px, display_scale);
         let s = if self.quality == 0 || display_scale >= 1.5 { 2 } else { 1 };
         format!("{},{},{s}", w * s, h * s)
+    }
+
+    /// Pixel for pixel: one Mac point is one pixel here, for the desktop and app windows.
+    pub fn pixel_for_pixel(&self) -> bool {
+        self.workspace >= PIXEL_FOR_PIXEL
     }
 
     /// The Mac's screen in points for a screen of `px` pixels at `display_scale`, at workspace
@@ -164,6 +178,7 @@ mod tests {
         // pixel for pixel: the laptop's own pixels at 1x (apps keep the most-space layout)
         let pfp = Settings { workspace: PIXEL_FOR_PIXEL, ..Default::default() };
         assert_eq!(pfp.desktop_screen((1920, 1200), 1.5), "1920,1200,1");
-        assert_eq!(pfp.app_screen((1920, 1200), 1.5), Settings { workspace: 3, ..Default::default() }.app_screen((1920, 1200), 1.5));
+        assert_eq!(pfp.app_screen((1920, 1200), 1.5), "1920,1200,1,1");
+        assert_eq!(pfp.scale(1.5), 1.0);
     }
 }

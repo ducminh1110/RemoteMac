@@ -10,6 +10,7 @@ func channel(forType t: String) -> Chan {
     case "mouse_move", "mouse_button", "scroll", "key", "text_input": return .input
     case "window_created", "window_destroyed", "window_moved", "window_title_changed": return .windowMetadata
     case "ping", "pong": return .telemetry
+    case "clipboard_set", "clipboard_image": return .clipboard // pictures are larger than a control frame may be
     default: return .control
     }
 }

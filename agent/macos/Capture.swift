@@ -196,7 +196,7 @@ final class WindowStream: NSObject, SCStreamOutput {
     /// nil: the usual pixels per point.
     var pixels: (Int, Int)?
     /// A pop-up menu or popover: ScreenCaptureKit does not capture those as a window of their own
-    /// (it gave the whole display), so it is cut out of its display instead.
+    /// (it gave the whole display), so its rectangle of the display is captured instead.
     var popup = false
     private var config: SCStreamConfiguration?
 
@@ -245,14 +245,16 @@ final class WindowStream: NSObject, SCStreamOutput {
         guard let w = content.windows.first(where: { $0.windowID == windowID }) else { throw WireError(description: "window \(windowID) not shareable") }
         if popup, let d = content.displays.first(where: { $0.frame.intersects(w.frame) && $0.frame.contains(CGPoint(x: w.frame.midX, y: w.frame.midY)) }) ?? content.displays.first(where: { $0.frame.intersects(w.frame) }) {
             let cfg = SCStreamConfiguration()
-            // the popup's rectangle on its display, only its own window drawn (nothing behind it)
+            // the popup's rectangle of its display, as it is seen: menus and popovers are
+            // translucent (their material blurs what is behind them); drawn alone they lost their
+            // background and their items
             cfg.sourceRect = CGRect(x: w.frame.minX - d.frame.minX, y: w.frame.minY - d.frame.minY, width: w.frame.width, height: w.frame.height)
             (cfg.width, cfg.height) = capturePixels(w.frame.width, w.frame.height, backing: backingScale(of: w.frame))
             pointsWide = w.frame.width
             cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2
             cfg.queueDepth = 6; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true
-            let s = SCStream(filter: SCContentFilter(display: d, including: [w]), configuration: cfg, delegate: nil)
+            let s = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: cfg, delegate: nil)
             try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
             t0 = CFAbsoluteTimeGetCurrent()
             config = cfg

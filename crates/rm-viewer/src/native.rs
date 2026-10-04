@@ -97,10 +97,26 @@ pub fn window_has_icon(hwnd: HWND) -> bool {
     unsafe { SendMessageW(hwnd, WM_GETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(0))).0 != 0 }
 }
 
+const CF_DIB: u32 = 8;
+
+/// Open the clipboard, waiting a little while another program still holds it (the program that
+/// just copied often does, right when it tells everyone the clipboard changed).
+unsafe fn open_clipboard(owner: HWND) -> bool {
+    for _ in 0..20 {
+        if OpenClipboard(Some(owner)).is_ok() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    false
+}
+
 /// Windows clipboard as UTF-16 text.
 pub fn clipboard_text(owner: HWND) -> Option<String> {
     unsafe {
-        OpenClipboard(Some(owner)).ok()?;
+        if !open_clipboard(owner) {
+            return None;
+        }
         let out = (|| {
             let h = GetClipboardData(CF_UNICODETEXT).ok()?;
             let g = HGLOBAL(h.0);
@@ -121,7 +137,7 @@ pub fn clipboard_text(owner: HWND) -> Option<String> {
 pub fn set_clipboard_text(owner: HWND, text: &str) -> bool {
     unsafe {
         let utf16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-        if OpenClipboard(Some(owner)).is_err() {
+        if !open_clipboard(owner) {
             return false;
         }
         let ok = (|| {
@@ -134,6 +150,77 @@ pub fn set_clipboard_text(owner: HWND, text: &str) -> bool {
             std::ptr::copy_nonoverlapping(utf16.as_ptr(), p, utf16.len());
             let _ = GlobalUnlock(g);
             SetClipboardData(CF_UNICODETEXT, Some(HANDLE(g.0))).ok()?; // the system owns `g` now
+            Some(())
+        })()
+        .is_some();
+        let _ = CloseClipboard();
+        ok
+    }
+}
+
+/// A picture on the Windows clipboard, as a .bmp file (CF_DIB behind a file header), when
+/// there is no text.
+pub fn clipboard_bmp(owner: HWND) -> Option<Vec<u8>> {
+    unsafe {
+        if IsClipboardFormatAvailable(CF_DIB).is_err() || !open_clipboard(owner) {
+            return None;
+        }
+        let out = (|| {
+            let h = GetClipboardData(CF_DIB).ok()?;
+            let g = HGLOBAL(h.0);
+            let n = GlobalSize(g);
+            let p = GlobalLock(g) as *const u8;
+            if p.is_null() || n < 40 {
+                return None;
+            }
+            let dib = std::slice::from_raw_parts(p, n).to_vec();
+            let _ = GlobalUnlock(g);
+            Some(dib)
+        })();
+        let _ = CloseClipboard();
+        out.map(|dib| bmp_from_dib(&dib))
+    }
+}
+
+/// A .bmp file around a packed DIB: where the pixels start is after the header, the colour
+/// masks (BI_BITFIELDS with a 40-byte header) and the palette.
+pub fn bmp_from_dib(dib: &[u8]) -> Vec<u8> {
+    let u32_at = |o: usize| dib.get(o..o + 4).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let header = u32_at(0) as usize;
+    let bits = dib.get(14..16).map_or(0, |b| u16::from_le_bytes([b[0], b[1]]));
+    let compression = u32_at(16);
+    let masks = if header == 40 && compression == 3 { 12 } else { 0 };
+    let colors = if bits <= 8 { match u32_at(32) { 0 => 1u32 << bits, n => n } } else { u32_at(32) };
+    let offset = 14 + header + masks + colors as usize * 4;
+    let mut out = Vec::with_capacity(14 + dib.len());
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&((14 + dib.len()) as u32).to_le_bytes());
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    out.extend_from_slice(&(offset as u32).to_le_bytes());
+    out.extend_from_slice(dib);
+    out
+}
+
+/// Put a .bmp file's picture on the Windows clipboard (CF_DIB).
+pub fn set_clipboard_bmp(owner: HWND, bmp: &[u8]) -> bool {
+    if bmp.len() < 14 + 40 || &bmp[..2] != b"BM" {
+        return false;
+    }
+    let dib = &bmp[14..];
+    unsafe {
+        if !open_clipboard(owner) {
+            return false;
+        }
+        let ok = (|| {
+            EmptyClipboard().ok()?;
+            let g = GlobalAlloc(GMEM_MOVEABLE, dib.len()).ok()?;
+            let p = GlobalLock(g) as *mut u8;
+            if p.is_null() {
+                return None;
+            }
+            std::ptr::copy_nonoverlapping(dib.as_ptr(), p, dib.len());
+            let _ = GlobalUnlock(g);
+            SetClipboardData(CF_DIB, Some(HANDLE(g.0))).ok()?;
             Some(())
         })()
         .is_some();

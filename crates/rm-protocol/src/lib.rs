@@ -353,6 +353,8 @@ pub enum Message {
     /// Either direction: the clipboard now holds this text. `seq` lets each side ignore
     /// the echo of a change it applied itself.
     ClipboardSet { seq: u64, text: String },
+    /// Either direction: a picture was copied (a .bmp file, 32-bit or what Windows had).
+    ClipboardImage { seq: u64, bmp_base64: String },
 
     /// Client -> agent: start uploading a local file the user picked (Files channel).
     FileUploadBegin { transfer_id: u64, name: String, size: u64 },
@@ -389,7 +391,7 @@ impl Message {
                 Channel::WindowMetadata
             }
             Ping { .. } | Pong { .. } => Channel::Telemetry,
-            ClipboardSet { .. } => Channel::Clipboard,
+            ClipboardSet { .. } | ClipboardImage { .. } => Channel::Clipboard,
             FileUploadBegin { .. } | FileUploadChunk { .. } | FileUploadEnd { .. } => Channel::Files,
             _ => Channel::Control,
         }

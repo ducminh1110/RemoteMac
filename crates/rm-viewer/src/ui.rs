@@ -131,6 +131,8 @@ struct App {
     clipboard: bool,
     /// Text we just put on the Windows clipboard ourselves (its change notification is not echoed).
     clip_applied: Option<String>,
+    /// digest of the picture the Mac last put here (not sent back)
+    clip_applied_image: Option<u64>,
     clip_seq: u64,
     d3d: bool,
     /// Windows are composition windows (rounded, anti-aliased): decided once at start.
@@ -288,6 +290,7 @@ pub fn run(opts: Options) -> i32 {
         // (Ultra sharpness: always at 2x, the pictures scaled down here)
         let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
         net::set_screen_px((sw, sh));
+        PIXEL_FOR_PIXEL.store(crate::settings::Settings::load().pixel_for_pixel(), std::sync::atomic::Ordering::Relaxed);
         let fit = crate::settings::Settings::load().app_screen((sw, sh), sys_scale);
         net::set_screen_fit((!fit.is_empty()).then_some(fit));
         eprintln!("video decoder: {:?}", net::decoder_kind());
@@ -334,7 +337,7 @@ pub fn run(opts: Options) -> i32 {
         let showcase = opts.showcase.map(Showcase::new);
         APP.with(|a| {
             *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, smoke, showcase, exit: None, hinst: hinst.0 as isize, gs_key: None, controller: ctl,
-                icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_seq: 0, d3d: opts.d3d, comp: use_comp,
+                icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_applied_image: None, clip_seq: 0, d3d: opts.d3d, comp: use_comp,
                 launcher, panels: HashMap::new(), uploads: HashMap::new(), next_transfer: 1, redirect_panels: opts.windows_file_picker,
                 shortcut_dir, app_names: vec![], icon_rgba: HashMap::new(), menus: HashMap::new(), display_req: None, display: None, stats: Stats::default(),
                 pending: HashMap::new(), vsync: None, overlay: std::env::var_os("RM_STATS").is_some(), overlay_lines: vec![], stats_logged: Instant::now() - Duration::from_secs(4) })
@@ -529,6 +532,14 @@ unsafe extern "system" fn launcher_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
     }
 }
 
+/// Pixel for pixel (Settings): Mac points are shown one pixel each, not one DIP each.
+static PIXEL_FOR_PIXEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Screen pixels per Mac point for a remote window's picture.
+fn pic_scale(dpi_scale: f64) -> f64 {
+    if PIXEL_FOR_PIXEL.load(std::sync::atomic::Ordering::Relaxed) { 1.0 } else { dpi_scale }
+}
+
 /// The Settings window; saving applies what can be applied now (frame rate, bitrate,
 /// sharpness on the Mac; the pointer here) and keeps the rest for windows opened later.
 fn open_settings(owner: Option<HWND>) {
@@ -538,6 +549,7 @@ fn open_settings(owner: Option<HWND>) {
             eprintln!("settings not saved: {e}");
         }
         local_cursor().store(s.local_cursor, std::sync::atomic::Ordering::Relaxed);
+        PIXEL_FOR_PIXEL.store(s.pixel_for_pixel(), std::sync::atomic::Ordering::Relaxed);
         with_app(|a| a.link.send(&s.message(net::display_scale(), net::screen_px())));
         eprintln!("settings: {s:?}");
     });
@@ -657,16 +669,37 @@ fn pick_file_for_panel(panel: u64) {
     });
 }
 
+/// Digest of a .bmp file's picture (its DIB: the file header is rebuilt on each side).
+fn dib_digest(bmp: &[u8]) -> u64 {
+    bmp.iter().skip(14).fold(0xcbf29ce484222325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x100000001b3))
+}
+
 /// Windows clipboard changed: forward it unless we caused the change ourselves.
 fn on_local_clipboard(owner: HWND) {
-    let Some(text) = native::clipboard_text(owner) else { return };
-    with_app(|a| {
-        if !a.clipboard || a.clip_applied.as_deref() == Some(text.as_str()) {
-            return;
-        }
-        a.clip_seq += 1;
-        a.link.send(&Message::ClipboardSet { seq: a.clip_seq, text });
-    });
+    if !with_app(|a| a.clipboard).unwrap_or(false) {
+        return;
+    }
+    if let Some(text) = native::clipboard_text(owner) {
+        with_app(|a| {
+            if a.clip_applied.take().as_deref() == Some(text.as_str()) {
+                return; // the Mac's own text coming back
+            }
+            a.clip_seq += 1;
+            eprintln!("clipboard -> Mac: {} characters", text.chars().count());
+            a.link.send(&Message::ClipboardSet { seq: a.clip_seq, text });
+        });
+    } else if let Some(bmp) = native::clipboard_bmp(owner) {
+        // a picture (a screenshot, an image copied in a browser); the Mac gets it as an image
+        let digest = dib_digest(&bmp);
+        with_app(|a| {
+            if a.clip_applied_image.take() == Some(digest) || bmp.len() > 11 << 20 {
+                return;
+            }
+            a.clip_seq += 1;
+            eprintln!("clipboard -> Mac: picture, {} bytes", bmp.len());
+            a.link.send(&Message::ClipboardImage { seq: a.clip_seq, bmp_base64: rm_protocol::base64_encode(&bmp) });
+        });
+    }
 }
 
 fn stats_tick() {
@@ -1001,6 +1034,19 @@ fn handle_event(ev: UiEvent) {
                 }
             }
         }
+        UiEvent::ClipboardImage(bmp) => {
+            let digest = dib_digest(&bmp);
+            let owner = with_app(|a| a.clipboard.then(|| {
+                a.clip_applied_image = Some(digest);
+                a.controller
+            }))
+            .flatten();
+            if let Some(owner) = owner {
+                if !native::set_clipboard_bmp(hwnd_of(owner), &bmp) {
+                    eprintln!("warning: could not put the Mac's picture on the Windows clipboard");
+                }
+            }
+        }
         UiEvent::Title { id, title } => {
             if let Some(h) = with_app(|a| a.by_id.get(&id).copied()).flatten() {
                 unsafe { let _ = SetWindowTextW(hwnd_of(h), &HSTRING::from(title)); }
@@ -1016,7 +1062,7 @@ fn handle_event(ev: UiEvent) {
                     r.rx = x;
                     r.ry = y;
                 }
-                Some((key, r.scale, r.maximized || r.fullscreen, r.role == WindowRole::Popup))
+                Some((key, pic_scale(r.scale), r.maximized || r.fullscreen, r.role == WindowRole::Popup))
             })
             .flatten();
             if let Some((key, scale, maximized, popup)) = target {
@@ -1157,7 +1203,8 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         if let Some(icon) = cached {
             native::set_window_icon(hwnd, HICON(icon as *mut c_void));
         }
-        resize_content(hwnd, (w as f64 * scale).round() as i32, (h as f64 * scale).round() as i32);
+        let pt = pic_scale(scale);
+        resize_content(hwnd, (w as f64 * pt).round() as i32, (h as f64 * pt).round() as i32);
         if !owned && !popup && app != DESKTOP_APP {
             fit_to_work_area(hwnd);
         }
@@ -1167,8 +1214,8 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
             // keep the dialog where the Mac put it relative to its parent
             let mut orc = RECT::default();
             let _ = GetWindowRect(hwnd_of(o), &mut orc);
-            let nx = orc.left + ((x - px) as f64 * scale).round() as i32;
-            let ny = orc.top + ((y - py) as f64 * scale).round() as i32;
+            let nx = orc.left + ((x - px) as f64 * pt).round() as i32;
+            let ny = orc.top + ((y - py) as f64 * pt).round() as i32;
             let _ = SetWindowPos(hwnd, None, nx, ny, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
         }
         layout(hwnd);
@@ -1226,7 +1273,7 @@ fn is_popup(frame: HWND) -> bool {
 /// Put a popup exactly where the Mac shows it over its parent's picture, at the parent's
 /// picture scale (so a list lines up with the button it came from).
 fn place_popup(frame: HWND) {
-    let Some((parent, x, y, w, h, scale)) = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| (r.parent, r.rx, r.ry, r.rw, r.rh, r.scale))).flatten() else { return };
+    let Some((parent, x, y, w, h, scale)) = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| (r.parent, r.rx, r.ry, r.rw, r.rh, pic_scale(r.scale)))).flatten() else { return };
     let host = parent.and_then(|p| with_app(|a| {
         let k = *a.by_id.get(&p)?;
         a.remotes.get(&k).map(|r| (r.content, r.rx, r.ry, r.rw, r.rh))
@@ -1357,7 +1404,7 @@ fn layout(frame: HWND) {
 /// Current picture size of the window expressed in Mac points.
 fn client_points(frame: HWND) -> (u32, u32, f64) {
     let (cw, ch) = content_of(frame).map(client_size).unwrap_or_else(|| client_size(frame));
-    let scale = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.scale)).flatten().unwrap_or(1.0);
+    let scale = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| pic_scale(r.scale))).flatten().unwrap_or(1.0);
     ((cw as f64 / scale).round().max(1.0) as u32, (ch as f64 / scale).round().max(1.0) as u32, scale)
 }
 

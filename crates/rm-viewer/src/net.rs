@@ -168,6 +168,7 @@ pub enum UiEvent {
     Icon { app: String, size: u32, rgba: Vec<u8> },
     /// The remote clipboard now holds this text.
     Clipboard(String),
+    ClipboardImage(Vec<u8>),
     Resized { id: u64, x: i32, y: i32, w: u32, h: u32 },
     Title { id: u64, title: String },
     Destroyed { id: u64 },
@@ -450,6 +451,11 @@ fn recv_loop(mut sess: Session<TcpStream>, _link: Link, video: Arc<Video>, tx: S
                     }
                 }
                 Message::ClipboardSet { text, .. } => emit(UiEvent::Clipboard(text)),
+                Message::ClipboardImage { bmp_base64, .. } => {
+                    if let Ok(b) = rm_protocol::base64_decode(&bmp_base64) {
+                        emit(UiEvent::ClipboardImage(b));
+                    }
+                }
                 Message::WindowMoved { window_id, bounds } => emit(UiEvent::Resized { id: window_id, x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h }),
                 Message::WindowTitleChanged { window_id, title } => emit(UiEvent::Title { id: window_id, title }),
                 Message::WindowDestroyed { window_id } => {

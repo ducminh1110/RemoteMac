@@ -226,6 +226,7 @@ tracker.start()
 
 let clipboard = ClipboardSync()
 clipboard.onLocalChange = { seq, text in send(["type": "clipboard_set", "seq": Int(seq), "text": text]) }
+clipboard.onLocalImage = { seq, bmp in send(["type": "clipboard_image", "seq": Int(seq), "bmp_base64": bmp.base64EncodedString()]) }
 clipboard.start()
 
 let uploads = UploadStore(send: send)
@@ -245,7 +246,9 @@ var appScreenArg: String?
 /// density (supersampling), sharper than drawing at the laptop's own scale. nil: none.
 func applyAppScreen(_ screen: String?) {
     let v = screen.map { $0.split(separator: ",").compactMap { Int($0) } }
-    guard let v = v, v.count == 3, v[2] >= 2, (NSScreen.main?.backingScaleFactor ?? 1) < 2, env["RM_NO_HIDPI"] == nil else {
+    // "W,H,1,1": pixel for pixel, the client's own pixels at 1x (as Sunshine streams a screen)
+    let exact = v.map { $0.count >= 4 && $0[3] == 1 } ?? false
+    guard let v = v, v.count >= 3, v[2] >= 2 || exact, (NSScreen.main?.backingScaleFactor ?? 1) < 2 || exact, env["RM_NO_HIDPI"] == nil else {
         appScreen = nil
         if keepMirror && !desktop.isActive { keepMirror = false; DispatchQueue.global().async { displays.unmirrorDesktop() } }
         return
@@ -256,7 +259,7 @@ func applyAppScreen(_ screen: String?) {
     guard !desktop.isActive else { return }
     DispatchQueue.global().async {
         if displays.ensureMirrored(width: v[0], height: v[1], scale: v[2]) != nil {
-            log("HiDPI desktop for apps: \(v[0] / v[2])x\(v[1] / v[2]) points at \(v[2])x (the client scales down)")
+            log("desktop for apps: \(v[0] / v[2])x\(v[1] / v[2]) points at \(v[2])x")
         } else {
             keepMirror = false
             log("HiDPI desktop unavailable (mirroring refused); windows stay 1x")
@@ -532,7 +535,11 @@ func handle(_ m: [String: Any]) {
         // menus often change after a command (enabled items, window list)
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.8) { sendMenuBar(id) }
     case "clipboard_set":
-        clipboard.apply(m["text"] as? String ?? "")
+        let t = m["text"] as? String ?? ""
+        log("clipboard <- Windows: \(t.count) characters")
+        clipboard.apply(t)
+    case "clipboard_image":
+        if let d = Data(base64Encoded: m["bmp_base64"] as? String ?? "") { clipboard.applyImage(d) }
     case "request_keyframe":
         let wid = CGWindowID(int(m["window_id"]))
         streamsLock.lock(); let ws = streams[wid]; streamsLock.unlock()
