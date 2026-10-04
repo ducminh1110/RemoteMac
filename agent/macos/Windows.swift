@@ -125,6 +125,8 @@ final class WindowTracker {
     private var known: [CGWindowID: WinInfo] = [:]
     /// Windows seen but not yet reported: dialogs need a moment before their AX tree is complete.
     private var pending: [CGWindowID: Int] = [:]
+    /// Popups not over any window shown on Windows: left alone while they are on screen.
+    private var ignored: Set<CGWindowID> = []
     /// Windows that already existed when the agent started (the user's desktop): never streamed.
     private var preexisting: Set<CGWindowID> = []
     private var started = false
@@ -198,7 +200,8 @@ final class WindowTracker {
         if !started { preexisting = Set(windows.map { $0.0 }); started = true }
 
         var seen = Set<CGWindowID>()
-        for (id, pid, title, rect, layer) in windows where !preexisting.contains(id) {
+        ignored.formIntersection(windows.map { $0.0 })
+        for (id, pid, title, rect, layer) in windows where !preexisting.contains(id) && !ignored.contains(id) {
             let fromService = servicePids.contains(pid)
             guard launched.contains(pid) || fromService || companions[pid] != nil else { continue }
             seen.insert(id)
@@ -217,11 +220,18 @@ final class WindowTracker {
             let first = !known.values.contains { $0.appID == appID && $0.role == .window }
             // a menu, popover or completion list over a window the app already shows is a popup
             let overMain = known.values.contains { $0.appID == appID && $0.role == .window && $0.rect.intersects(rect.insetBy(dx: -40, dy: -40)) }
-            let popup = companions[pid] == nil && !fromService && overMain && layer != modalPanelLayer
-                && (layer == popUpMenuLayer || (layer != 0 || !first) && isPopup(pid: pid, rect: rect))
-            let role = companions[pid] != nil ? Role.window : popup ? Role.popup : classify(pid: pid, rect: rect, fromPanelService: fromService, isFirstWindow: first)
+            // (a pop-up menu always is, a companion's too: Finder's menu on the desktop)
+            let popup = layer == popUpMenuLayer || (companions[pid] == nil && !fromService && overMain && layer != modalPanelLayer
+                && (layer != 0 || !first) && isPopup(pid: pid, rect: rect))
+            let role = popup ? Role.popup : companions[pid] != nil ? Role.window : classify(pid: pid, rect: rect, fromPanelService: fromService, isFirstWindow: first)
             var w = WinInfo(id: id, pid: pid, title: title, rect: rect, appID: appID, role: role)
-            if role != .window { w.parent = parentFor(appID: appID, rect: rect) }
+            if role == .popup {
+                // only over one of the app's windows shown on Windows; elsewhere (the Mac's desktop,
+                // shown in the Mac Desktop picture anyway) it is not a window of its own
+                let mains = known.values.filter { $0.appID == appID && $0.role == .window }
+                guard let p = mains.first(where: { $0.rect.intersects(rect.insetBy(dx: -40, dy: -40)) }) else { ignored.insert(id); continue }
+                w.parent = p.id
+            } else if role != .window { w.parent = parentFor(appID: appID, rect: rect) }
             if role == .window { w.inset = titleBarInset(pid: pid, rect: rect) }
             known[id] = w
             onCreated?(w)
