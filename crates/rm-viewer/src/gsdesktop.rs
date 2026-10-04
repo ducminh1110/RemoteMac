@@ -9,7 +9,7 @@
 use rm_gamestream::moonlight;
 use rm_gamestream::tunnel::{ClientTunnel, ToHost};
 use rm_gamestream::Input;
-use rm_protocol::{Message, Modifier};
+use rm_protocol::Message;
 use std::sync::{Arc, Mutex};
 
 struct State {
@@ -105,21 +105,6 @@ pub fn stop() {
     }
 }
 
-fn vk_for(name: &str) -> Option<u16> {
-    (0u16..256).find(|v| rm_gamestream::tunnel::vk_name(*v) == Some(name))
-}
-
-/// GameStream modifier bits (shift 1, ctrl 2, alt 4, meta 8): Command travels as meta.
-fn mods(m: &[Modifier]) -> u8 {
-    m.iter().map(|x| match x {
-        Modifier::Shift => 1,
-        Modifier::Control => 2,
-        Modifier::Option => 4,
-        Modifier::Command => 8,
-        _ => 0,
-    }).fold(0, |a, b| a | b)
-}
-
 /// Input for the GameStream desktop goes through Moonlight's input stream (ENet). True when
 /// `m` was taken.
 pub fn intercept(m: &Message) -> bool {
@@ -154,12 +139,9 @@ pub fn intercept(m: &Message) -> bool {
                 moonlight::send_input(&Input::HScroll { amount: (dx * 3.0).round().clamp(-32768.0, 32767.0) as i16 });
             }
         }
-        Message::Key { window_id, physical_key, modifiers, down } if *window_id == id => {
-            if let Some(vk) = vk_for(physical_key) {
-                moonlight::send_input(&Input::Key { vk, down: *down, modifiers: mods(modifiers) });
-            }
-        }
-        Message::TextInput { window_id, text } if *window_id == id => moonlight::send_input(&Input::Text(text.clone())),
+        // keys and text go over RemoteMac's own input path, as for app windows: every key there
+        // (GameStream's key codes leave some out), resent after 40 ms, typed by the Mac as is
+        Message::Key { window_id, .. } | Message::TextInput { window_id, .. } if *window_id == id => return false,
         Message::RequestKeyframe { window_id } if *window_id == id => moonlight::request_idr(),
         _ => return false,
     }
