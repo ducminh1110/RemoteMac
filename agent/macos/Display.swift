@@ -13,10 +13,25 @@ final class DisplayManager {
     private(set) var target = CGSize.zero
     private var saved: [CGWindowID: CGRect] = [:]
     private let lock = NSLock()
+    /// One display change at a time: two at once (new settings and the Mac Desktop opening)
+    /// each made a display, the second destroying the first, and neither came online
+    private let op = NSRecursiveLock()
 
     /// `forDesktop`: exactly the client's screen (the Mac Desktop is mirrored onto it); otherwise
     /// with room above for a fullscreen window's menu and title bars.
     func configure(width: Int, height: Int, scale: Int, forDesktop: Bool = false) -> [String: Any] {
+        op.lock(); defer { op.unlock() }
+        var st = makeDisplay(width: width, height: height, scale: scale, forDesktop: forDesktop)
+        if st["available"] as? Bool == true, (st["width"] as? Int ?? 0) == 0 || CGDisplayBounds(displayID).width == 0 {
+            // made but never came online (too soon after the one it replaced): once more
+            log("virtual display did not come online; making it again")
+            usleep(800_000)
+            st = makeDisplay(width: width, height: height, scale: scale, forDesktop: forDesktop)
+        }
+        return st
+    }
+
+    private func makeDisplay(width: Int, height: Int, scale: Int, forDesktop: Bool) -> [String: Any] {
         let hidpi = scale >= 2
         let w = UInt32(max(320, hidpi ? width / 2 : width)), h = UInt32(max(240, hidpi ? height / 2 : height))
         var err = [CChar](repeating: 0, count: 256)
@@ -72,6 +87,7 @@ final class DisplayManager {
     /// already there when it fits, else a new one (the old mirroring undone first, or the Mac's
     /// screen would be left mirroring a display that no longer exists). nil if it cannot be done.
     func ensureMirrored(width: Int, height: Int, scale: Int) -> CGDirectDisplayID? {
+        op.lock(); defer { op.unlock() }
         lock.lock(); let same = mirrorSpec.map { $0 == (width, height, scale) } ?? false; let id0 = displayID; lock.unlock()
         if same && id0 != 0 && (isMirroredOnto(id0) || CGMainDisplayID() == id0) { return id0 }
         unmirrorDesktop()
@@ -156,6 +172,7 @@ final class DisplayManager {
 
     /// Back to the Mac's own layout.
     func unmirrorDesktop() {
+        op.lock(); defer { op.unlock() }
         lock.lock(); let ds = mirrored; mirrored = []; mirrorSpec = nil; lock.unlock()
         guard !ds.isEmpty else { return }
         var cfg: CGDisplayConfigRef?
