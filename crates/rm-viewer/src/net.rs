@@ -58,6 +58,17 @@ pub fn set_screen_fit(s: Option<String>) {
     *SCREEN_FIT.lock().unwrap() = s;
 }
 
+static SCREEN_PX: std::sync::Mutex<(i32, i32)> = std::sync::Mutex::new((0, 0));
+
+/// This PC's screen in pixels (set by the UI).
+pub fn set_screen_px(px: (i32, i32)) {
+    *SCREEN_PX.lock().unwrap() = px;
+}
+
+pub fn screen_px() -> (i32, i32) {
+    *SCREEN_PX.lock().unwrap()
+}
+
 fn screen_fit() -> Option<String> {
     SCREEN_FIT.lock().unwrap().clone()
 }
@@ -260,7 +271,7 @@ pub fn connect_with(relay: &str, session: &str, token: &str, app: Option<&str>, 
     let kind = decoder_kind();
     link.send(&Message::VideoDecoder { high_profile: kind != DecoderKind::Software, hardware: kind == DecoderKind::Hardware, scale: Some(display_scale()), screen: screen_fit() });
     // the user's settings (frame rate, bitrate, sharpness)
-    link.send(&crate::settings::Settings::load().message(display_scale()));
+    link.send(&crate::settings::Settings::load().message(display_scale(), screen_px()));
     if let Some(app) = app {
         link.send(&Message::AppLaunch { application_id: app.into(), arguments: vec![], working_directory: None, environment: Default::default() });
     }

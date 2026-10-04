@@ -230,6 +230,36 @@ uploads.cleanup() // leftovers of a session that ended without cleaning (crash, 
 let displays = DisplayManager()
 /// the Mac's screens mirror our HiDPI display for the whole session (not only the Mac Desktop)
 var keepMirror = false
+/// the layout the app windows get ("W,H,S" from the client): the Mac Desktop may lay out its
+/// own (the laptop's exact scale) while it is open; this one comes back when it closes
+var appScreen: [Int]?
+/// what the client last asked for (its "screen")
+var appScreenArg: String?
+
+/// App windows on a HiDPI virtual display (Mac screen mirrored onto it), from the client's
+/// "W,H,S". The client asks for its screen's size in points at 2x ("Ultra" sharpness): every
+/// app renders twice the pixels per point and the client scales the picture down to its own
+/// density (supersampling), sharper than drawing at the laptop's own scale. nil: none.
+func applyAppScreen(_ screen: String?) {
+    let v = screen.map { $0.split(separator: ",").compactMap { Int($0) } }
+    guard let v = v, v.count == 3, v[2] >= 2, (NSScreen.main?.backingScaleFactor ?? 1) < 2, env["RM_NO_HIDPI"] == nil else {
+        appScreen = nil
+        if keepMirror && !desktop.isActive { keepMirror = false; DispatchQueue.global().async { displays.unmirrorDesktop() } }
+        return
+    }
+    appScreen = v
+    keepMirror = true
+    // the Mac Desktop keeps its own layout while open; this one is made when it closes
+    guard !desktop.isActive else { return }
+    DispatchQueue.global().async {
+        if displays.ensureMirrored(width: v[0], height: v[1], scale: v[2]) != nil {
+            log("HiDPI desktop for apps: \(v[0] / v[2])x\(v[1] / v[2]) points at \(v[2])x (the client scales down)")
+        } else {
+            keepMirror = false
+            log("HiDPI desktop unavailable (mirroring refused); windows stay 1x")
+        }
+    }
+}
 
 func keyTo(_ pid: pid_t, _ code: CGKeyCode, _ flags: CGEventFlags = []) {
     for down in [true, false] {
@@ -374,8 +404,15 @@ func handle(_ m: [String: Any]) {
         guard desktop.isActive else { break }
         desktop.stop()
         gsStop()
-        // the HiDPI layout made at connect stays for the app windows
-        if !keepMirror { displays.unmirrorDesktop() }
+        // the app windows get their own layout back (HiDPI, Ultra sharpness), or the Mac's own
+        if keepMirror, let v = appScreen {
+            DispatchQueue.global().async {
+                if displays.ensureMirrored(width: v[0], height: v[1], scale: v[2]) == nil { keepMirror = false; log("HiDPI desktop for apps not restored") }
+            }
+        } else {
+            keepMirror = false
+            displays.unmirrorDesktop()
+        }
         stopStream(desktopWindowID)
         send(["type": "window_destroyed", "window_id": Int(desktopWindowID)])
         send(["type": "app_exited", "application_id": desktopAppID, "code": NSNull()])
@@ -499,28 +536,19 @@ func handle(_ m: [String: Any]) {
         let sc = num(m["scale"])
         if sc >= 1 { captureScale = CGFloat(min(3, sc)) }
         // a 1x Mac renders windows at 1x: blurry on a HiDPI PC. Like BetterDummy, lay the desktop
-        // out on a HiDPI virtual display of the PC's size (Mac screen mirrored onto it): every
-        // app then renders at 2x and the picture is as sharp as a native window
-        if let screen = m["screen"] as? String, (NSScreen.main?.backingScaleFactor ?? 1) < 2, env["RM_NO_HIDPI"] == nil {
-            let v = screen.split(separator: ",").compactMap { Int($0) }
-            if v.count == 3, v[2] >= 2 {
-                keepMirror = true
-                DispatchQueue.global().async {
-                    if displays.ensureMirrored(width: v[0], height: v[1], scale: v[2]) != nil {
-                        log("HiDPI desktop: \(v[0] / v[2])x\(v[1] / v[2]) points at 2x (the PC's screen)")
-                    } else {
-                        keepMirror = false
-                        log("HiDPI desktop unavailable (mirroring refused); windows stay 1x")
-                    }
-                }
-            }
-        }
+        // out on a HiDPI virtual display (Mac screen mirrored onto it): every app renders at 2x
+        appScreenArg = m["screen"] as? String ?? ""
+        applyAppScreen(appScreenArg)
         log("client decoder: high_profile=\(useHighProfile) hardware=\(m["hardware"] as? Bool ?? false) scale=\(captureScale)")
     case "stream_settings":
         // the viewer's settings (as Moonlight's): frame rate, bitrate (nil: Auto), sharpness
         let fps = Int32(max(10, min(144, int(m["fps"]))))
         let sc = num(m["scale"])
-        let changed = fps != targetFPS || (sc > 0 && CGFloat(sc) != captureScale)
+        // the app windows' layout ("" none): Ultra sharpness lays them out at 2x
+        let screen = m["screen"] as? String
+        let relayout = screen != nil && screen != appScreenArg
+        if relayout { appScreenArg = screen; applyAppScreen(screen) }
+        let changed = fps != targetFPS || (sc > 0 && CGFloat(sc) != captureScale) || relayout
         targetFPS = fps
         if sc > 0 { captureScale = CGFloat(max(0.5, min(3, sc))) }
         let kbps = int(m["bitrate_kbps"])
@@ -528,10 +556,13 @@ func handle(_ m: [String: Any]) {
         log("settings: \(fps) fps, bitrate \(kbps > 0 ? "\(kbps) kbit/s" : "auto"), \(captureScale) px per point")
         if changed {
             // capture size and rate are fixed per stream: restart the windows' streams
-            streamsLock.lock(); let ids = streams.keys.filter { $0 != desktopWindowID }; streamsLock.unlock()
-            for id in ids {
-                guard let w = tracker.current(id) else { continue }
-                stopStream(id); startStream(id, inset: w.inset)
+            // (after a new layout, once the apps have redrawn at their new density)
+            DispatchQueue.global().asyncAfter(deadline: .now() + (relayout ? 2 : 0)) {
+                streamsLock.lock(); let ids = streams.keys.filter { $0 != desktopWindowID }; streamsLock.unlock()
+                for id in ids {
+                    guard let w = tracker.current(id) else { continue }
+                    stopStream(id); startStream(id, inset: w.inset)
+                }
             }
         }
     case "ping":

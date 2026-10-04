@@ -119,7 +119,7 @@ fn read(u: &Ui) -> Settings {
         Settings {
             fps: FPS[sel(u.fps).min(FPS.len() - 1)],
             bitrate_mbps: BITRATES[sel(u.bitrate).min(BITRATES.len() - 1)],
-            quality: sel(u.quality).min(2) as u8,
+            quality: sel(u.quality).min(QUALITY.len() - 1) as u8,
             decoder: sel(u.decoder).min(2) as u8,
             pacing: checked(u.pacing),
             local_cursor: checked(u.cursor),

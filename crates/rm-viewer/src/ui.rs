@@ -285,9 +285,11 @@ pub fn run(opts: Options) -> i32 {
         let sys_scale = windows::Win32::UI::HiDpi::GetDpiForSystem().max(96) as f64 / 96.0;
         net::set_display_scale(sys_scale);
         // and the Mac lays out its screen at this PC's size, Retina, when its own screen is 1x
+        // (Ultra sharpness: always at 2x, the pictures scaled down here)
         let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
-        let (fw, fh, fs) = chrome::display_request(sw, sh, sys_scale);
-        net::set_screen_fit((fw > 0 && sys_scale >= 1.25).then(|| format!("{fw},{fh},{fs}")));
+        net::set_screen_px((sw, sh));
+        let fit = crate::settings::Settings::load().app_screen((sw, sh), sys_scale);
+        net::set_screen_fit((!fit.is_empty()).then_some(fit));
         eprintln!("video decoder: {:?}", net::decoder_kind());
         let mut opts = opts;
         let (link, rx) = if opts.prompt {
@@ -539,7 +541,7 @@ fn open_settings(owner: Option<HWND>) {
             eprintln!("settings not saved: {e}");
         }
         local_cursor().store(s.local_cursor, std::sync::atomic::Ordering::Relaxed);
-        with_app(|a| a.link.send(&s.message(net::display_scale())));
+        with_app(|a| a.link.send(&s.message(net::display_scale(), net::screen_px())));
         eprintln!("settings: {s:?}");
     });
 }

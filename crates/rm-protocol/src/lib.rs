@@ -323,13 +323,16 @@ pub enum Message {
     /// 32 hex digits a punch to this side must carry.
     P2pOffer { secret: String, candidates: Vec<String> },
     /// Client -> agent: the user's stream settings (as Moonlight's): frames per second, a fixed
-    /// bitrate (None: Auto, the agent adapts), pixels per Mac point (None: keep).
+    /// bitrate (None: Auto, the agent adapts), pixels per Mac point (None: keep), the layout
+    /// for app windows as `VideoDecoder::screen` ("": the Mac's own; None: keep).
     StreamSettings {
         fps: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bitrate_kbps: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        screen: Option<String>,
     },
     /// Either direction: one step of a GameStream RTSP connection carried for the Mac Desktop
     /// in full GameStream mode (crates/rm-gamestream tunnel.rs). `op`: "open" (PC -> Mac),
