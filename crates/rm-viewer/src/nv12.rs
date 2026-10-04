@@ -32,10 +32,19 @@ V vs_main(uint id : SV_VertexID) {
     return o;
 }
 
+// The chroma texel centre for i.tex, kept inside the picture: the decoder's surface is larger
+// than the picture (rounded up to whole macroblocks) and its padding holds no colour (0, which
+// is green), so bilinear sampling at the right and bottom edges drew a green line.
+float2 chromaAt(float2 t) {
+    float2 hv = max(visible * 0.5, 1.0);
+    float2 lo = 0.5 / (texSize * 0.5), hi = (hv - 0.5) / (texSize * 0.5);
+    return clamp(t, lo, hi);
+}
+
 // BT.709, limited range (16-235 / 16-240), as the Mac encodes
 float4 ps_main(V i) : SV_TARGET {
     float y = (lumaPlane.Sample(samp, i.tex) - 16.0 / 255.0) * (255.0 / 219.0);
-    float2 c = (chromaPlane.Sample(samp, i.tex) - 128.0 / 255.0) * (255.0 / 224.0);
+    float2 c = (chromaPlane.Sample(samp, chromaAt(i.tex)) - 128.0 / 255.0) * (255.0 / 224.0);
     float3 rgb = float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x);
     return float4(saturate(rgb), 1.0);
 }
@@ -68,7 +77,7 @@ float4 ps_scaled(V i) : SV_TARGET {
         }
     }
     y = (y / max(wsum, 1e-4) - 16.0 / 255.0) * (255.0 / 219.0);
-    float2 ch = (chromaPlane.Sample(samp, i.tex) - 128.0 / 255.0) * (255.0 / 224.0);
+    float2 ch = (chromaPlane.Sample(samp, chromaAt(i.tex)) - 128.0 / 255.0) * (255.0 / 224.0);
     float3 rgb = float3(y + 1.5748 * ch.y, y - 0.1873 * ch.x - 0.4681 * ch.y, y + 1.8556 * ch.x);
     return float4(saturate(rgb), 1.0);
 }

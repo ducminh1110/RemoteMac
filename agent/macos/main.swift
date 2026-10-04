@@ -201,6 +201,14 @@ tracker.onCreated = { w in
     send(["type": "window_created", "window_id": Int(w.id), "application_id": w.appID, "title": w.title, "bounds": rectJSON(w.content),
           "parent_id": w.parent.map { Int($0) as Any } ?? NSNull(), "role": w.role.rawValue])
     startStream(w.id, inset: w.inset, popup: w.role == .popup)
+    if w.role == .popup {
+        // a menu is still being drawn (its items, the highlight) when it is first captured, and the
+        // capture only sends a new picture when something changes: capture it afresh once it is up
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.35) {
+            streamsLock.lock(); let open = streams[w.id] != nil; streamsLock.unlock()
+            if open { stopStream(w.id); startStream(w.id, inset: 0, popup: true) }
+        }
+    }
     if w.role == .window { DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { sendMenuBar(w.appID) } }
 }
 tracker.onDestroyed = { id in
