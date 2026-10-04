@@ -9,7 +9,7 @@ permissions:
 jobs:
   mac:
     name: Temporary macOS RemoteMac
-    runs-on: macos-26-xlarge
+    runs-on: macos-26
     timeout-minutes: 360
 
     steps:
