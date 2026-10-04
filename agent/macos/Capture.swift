@@ -339,7 +339,8 @@ final class WindowStream: NSObject, SCStreamOutput {
         let nowUs = agentClockUs()
         let capUs = cap.isFinite && cap > 0 ? UInt64(cap * 1_000_000) : nowUs
         let ptsUs = (capUs <= nowUs && nowUs - capUs < 1_000_000) ? capUs : nowUs
-        if display == nil && pointsWide > 0 {
+        // (not a popup: its first row is not window buttons, filling it hid the item there)
+        if display == nil && !popup && pointsWide > 0 {
             polish(pb, scale: CGFloat(w) / pointsWide, hideButtons: inset == 0)
         }
         lock.lock(); lastPB = pb; lock.unlock()

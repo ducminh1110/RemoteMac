@@ -195,17 +195,30 @@ final class DisplayManager {
     /// Fullscreen on the virtual display (content = the client's monitor size), or back.
     func fullscreen(_ w: WinInfo, on: Bool) -> Bool {
         guard let aw = axWindowFor(pid: w.pid, id: w.id, rect: w.rect) else { return false }
-        // The Mac's screen is our display (mirrored, the client's size, no room kept above):
-        // macOS's own full screen fills it exactly, as the window is shown fullscreen on Windows
-        lock.lock(); let mirroredLayout = mirrorSpec != nil; lock.unlock()
-        let attr = "AXFullScreen" as CFString
-        var settable: DarwinBoolean = false
-        if mirroredLayout, AXUIElementIsAttributeSettable(aw, attr, &settable) == .success, settable.boolValue {
+        // The Mac's screen is our display (mirrored, the client's size, no room kept above): the
+        // window takes the whole display where it is (macOS's own full screen moves it to a new
+        // Space, with its animation), the menu bar and Dock hidden while it is there
+        lock.lock(); let mirroredLayout = mirrorSpec != nil && displayID != 0; let mid = displayID; lock.unlock()
+        if mirroredLayout {
+            let frame: CGRect
+            if on {
+                lock.lock(); if saved[w.id] == nil { saved[w.id] = w.rect }; lock.unlock()
+                setChromeHidden(true)
+                frame = CGDisplayBounds(mid)
+            } else {
+                lock.lock(); let back = saved.removeValue(forKey: w.id); let others = !saved.isEmpty; lock.unlock()
+                if !others { setChromeHidden(false) }
+                guard let r = back else { return false }
+                frame = r
+            }
             NSRunningApplication(processIdentifier: w.pid)?.activate(options: [.activateIgnoringOtherApps])
-            let value: CFBoolean = on ? kCFBooleanTrue : kCFBooleanFalse
-            let r = AXUIElementSetAttributeValue(aw, attr, value)
-            log("window \(w.id) macOS full screen=\(on) (\(r == .success ? "done" : "refused \(r.rawValue)"))")
-            if r == .success { return true }
+            for _ in 0..<6 {
+                setFrame(aw, frame)
+                usleep(200_000)
+                if let r = axFrame(aw), abs(r.minY - frame.minY) < 4, abs(r.height - frame.height) < 4 { break }
+            }
+            log("window \(w.id) fullscreen=\(on) -> \(Int(frame.width))x\(Int(frame.height)) at \(Int(frame.minX)),\(Int(frame.minY)) (whole display)")
+            return true
         }
         lock.lock(); let id = displayID, size = target; let back = on ? nil : saved.removeValue(forKey: w.id)
         if on && saved[w.id] == nil { saved[w.id] = w.rect }
@@ -245,6 +258,41 @@ final class DisplayManager {
         log("window \(w.id) fullscreen=\(on) -> \(Int(frame.width))x\(Int(frame.height)) at \(Int(frame.minX)),\(Int(frame.minY))")
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.7) { logWindowState(w.id, display: id) }
         return true
+    }
+
+    private func axFrame(_ aw: AXUIElement) -> CGRect? {
+        var p = CGPoint.zero, sz = CGSize.zero
+        guard let pv = axAttr(aw, kAXPositionAttribute as String), let sv = axAttr(aw, kAXSizeAttribute as String),
+              AXValueGetValue(pv as! AXValue, .cgPoint, &p), AXValueGetValue(sv as! AXValue, .cgSize, &sz) else { return nil }
+        return CGRect(origin: p, size: sz)
+    }
+
+    /// The Mac's menu bar and Dock hidden automatically (shown when the pointer reaches them) while
+    /// a window fills the display, as the user had them otherwise.
+    private var chromeSaved: (menu: Bool, dock: Bool)?
+    func setChromeHidden(_ hide: Bool) {
+        let menuKey = "_HIHideMenuBar" as CFString, dockKey = "autohide" as CFString, dock = "com.apple.dock" as CFString
+        if hide {
+            guard chromeSaved == nil else { return }
+            chromeSaved = ((CFPreferencesCopyAppValue(menuKey, kCFPreferencesAnyApplication) as? Bool) ?? false,
+                           (CFPreferencesCopyAppValue(dockKey, dock) as? Bool) ?? false)
+            applyChrome(menu: true, dock: true)
+        } else if let s = chromeSaved {
+            chromeSaved = nil
+            applyChrome(menu: s.menu, dock: s.dock)
+        }
+    }
+
+    private func applyChrome(menu: Bool, dock: Bool) {
+        CFPreferencesSetAppValue("_HIHideMenuBar" as CFString, menu as CFBoolean, kCFPreferencesAnyApplication)
+        CFPreferencesAppSynchronize(kCFPreferencesAnyApplication)
+        CFPreferencesSetAppValue("autohide" as CFString, dock as CFBoolean, "com.apple.dock" as CFString)
+        CFPreferencesAppSynchronize("com.apple.dock" as CFString)
+        let dnc = DistributedNotificationCenter.default()
+        dnc.postNotificationName(NSNotification.Name("AppleInterfaceMenuBarHidingChangedNotification"), object: nil, userInfo: nil, deliverImmediately: true)
+        dnc.postNotificationName(NSNotification.Name("com.apple.dock.prefchanged"), object: nil, userInfo: nil, deliverImmediately: true)
+        usleep(400_000) // the menu bar slides away before the window takes its place
+        log("menu bar \(menu ? "hidden" : "shown"), Dock \(dock ? "hidden" : "shown")")
     }
 
     private func setFrame(_ aw: AXUIElement, _ f: CGRect) {

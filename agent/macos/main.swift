@@ -627,6 +627,7 @@ let reader = Thread {
         log("client disconnected")
     } catch { log("read loop ended: \(error)") }
     apps.terminateAll()
+    displays.setChromeHidden(false) // the menu bar and Dock as the user had them
     displays.unmirrorDesktop()
     uploads.cleanup()   // the session's uploaded files go with it
     // ready for the next connection (same ID and password)
