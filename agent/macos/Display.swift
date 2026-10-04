@@ -314,16 +314,33 @@ final class DisplayManager {
     /// The Mac's menu bar and Dock hidden automatically (shown when the pointer reaches them) while
     /// a window fills the display, as the user had them otherwise.
     private var chromeSaved: (menu: Bool, dock: Bool)?
+    /// The Mac Desktop is open: its menu bar and Dock are part of it, shown whatever a
+    /// fullscreen app window wants
+    private var desktopOpen = false
+
+    /// The Mac Desktop opened: the menu bar and Dock as the user has them, at once.
+    func desktopOpened() {
+        desktopOpen = true
+        if let s = chromeSaved { applyChrome(menu: s.menu, dock: s.dock) }
+    }
+
+    /// The Mac Desktop closed: hidden again at once while an app window is still fullscreen.
+    func desktopClosed() {
+        desktopOpen = false
+        lock.lock(); let any = !saved.isEmpty; lock.unlock()
+        if any && chromeSaved != nil { applyChrome(menu: true, dock: true) }
+    }
+
     func setChromeHidden(_ hide: Bool) {
         let menuKey = "_HIHideMenuBar" as CFString, dockKey = "autohide" as CFString, dock = "com.apple.dock" as CFString
         if hide {
             guard chromeSaved == nil else { return }
             chromeSaved = ((CFPreferencesCopyAppValue(menuKey, kCFPreferencesAnyApplication) as? Bool) ?? false,
                            (CFPreferencesCopyAppValue(dockKey, dock) as? Bool) ?? false)
-            applyChrome(menu: true, dock: true)
+            if !desktopOpen { applyChrome(menu: true, dock: true) }
         } else if let s = chromeSaved {
             chromeSaved = nil
-            applyChrome(menu: s.menu, dock: s.dock)
+            if !desktopOpen { applyChrome(menu: s.menu, dock: s.dock) }
         }
     }
 

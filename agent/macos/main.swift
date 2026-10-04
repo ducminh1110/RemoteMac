@@ -383,6 +383,7 @@ func handle(_ m: [String: Any]) {
         // Mac Desktop: the main display as one window
         guard !desktop.isActive else { break }
         send(["type": "app_launched", "application_id": desktopAppID, "pid": 0])
+        displays.desktopOpened() // its menu bar and Dock, even while an app window is fullscreen
         // "fit=W,H,S": the client's screen (pixels, Mac scale). Like BetterDummy: a virtual display
         // of exactly that size, the Mac's screen mirrored onto it, and that display streamed
         var fitted: CGDirectDisplayID?, fittedPixels: (Int, Int)?
@@ -422,6 +423,7 @@ func handle(_ m: [String: Any]) {
          "window_close" where CGWindowID(int(m["window_id"])) == desktopWindowID:
         guard desktop.isActive else { break }
         desktop.stop()
+        displays.desktopClosed() // a fullscreen app window gets the whole display again
         gsStop()
         // the app windows get their own layout back (HiDPI, Ultra sharpness), or the Mac's own
         if keepMirror, let v = appScreen {
