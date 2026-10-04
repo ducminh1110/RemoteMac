@@ -209,6 +209,9 @@ pub enum WindowRole {
     OpenPanel,
     /// A file *save* panel.
     SavePanel,
+    /// A popover, pop-up menu or completion list over `parent_id` (Xcode's search options, a
+    /// pop-up button's list): shown where the Mac shows it, borderless, never taking focus.
+    Popup,
 }
 
 /// One entry of an application's menu bar, as read from the Mac (Accessibility).

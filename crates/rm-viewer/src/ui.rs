@@ -547,11 +547,20 @@ fn open_settings(owner: Option<HWND>) {
 }
 
 /// "fit=W,H,S" for the Mac Desktop: the monitor the launcher is on, as a Mac display request.
+/// Ultra sharpness: the same size in points (the laptop's scale), laid out at 2x and scaled
+/// down here, as the app windows are.
 fn desktop_fit() -> Option<String> {
     let anchor = with_app(|a| a.launcher.as_ref().map(|l| l.hwnd.0 as isize)).flatten().unwrap_or(0);
     let hwnd = hwnd_of(anchor);
     let mon = monitor_rect(hwnd);
     let scale = if anchor != 0 { native::dpi_scale(hwnd) } else { unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem().max(96) as f64 / 96.0 } };
+    let st = crate::settings::Settings::load();
+    if st.quality == 0 {
+        let ultra = st.app_screen((mon.right - mon.left, mon.bottom - mon.top), scale);
+        if !ultra.is_empty() {
+            return Some(format!("fit={ultra}"));
+        }
+    }
     let (w, h, s) = chrome::display_request(mon.right - mon.left, mon.bottom - mon.top, scale);
     (w > 0 && h > 0).then(|| format!("fit={w},{h},{s}"))
 }
@@ -1008,17 +1017,23 @@ fn handle_event(ev: UiEvent) {
                 unsafe { let _ = SetWindowTextW(hwnd_of(h), &HSTRING::from(title)); }
             }
         }
-        UiEvent::Resized { id, w, h } => {
+        UiEvent::Resized { id, x, y, w, h } => {
             let target = with_app(|a| {
                 let key = *a.by_id.get(&id)?;
                 let r = a.remotes.get_mut(&key)?;
                 r.rw = w;
                 r.rh = h;
-                Some((key, r.scale, r.maximized || r.fullscreen))
+                if r.role == WindowRole::Popup {
+                    r.rx = x;
+                    r.ry = y;
+                }
+                Some((key, r.scale, r.maximized || r.fullscreen, r.role == WindowRole::Popup))
             })
             .flatten();
-            if let Some((key, scale, maximized)) = target {
-                if !maximized {
+            if let Some((key, scale, maximized, popup)) = target {
+                if popup {
+                    place_popup(hwnd_of(key));
+                } else if !maximized {
                     resize_content(hwnd_of(key), (w as f64 * scale).round() as i32, (h as f64 * scale).round() as i32);
                 }
             }
@@ -1079,15 +1094,21 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         // Dialogs, sheets and panels become *owned* windows: they stay above their parent,
         // minimise with it and do not get their own taskbar button, as on the Mac.
         let owned = owner.is_some() && role != WindowRole::Window;
+        // A popover / pop-up list is part of its parent's picture on the Mac: no frame, no title
+        // bar, no taskbar button, and clicking it leaves the parent active (as a menu does).
+        let popup = role == WindowRole::Popup;
         // No Windows caption: the viewer draws a Mac title bar (traffic lights) itself; the thick
         // frame keeps resizing, snapping and the shadow.
-        let mut style = WS_POPUP.0 | WS_THICKFRAME.0 | WS_SYSMENU.0 | WS_CLIPCHILDREN.0;
-        if !owned {
+        let mut style = if popup { WS_POPUP.0 | WS_CLIPCHILDREN.0 } else { WS_POPUP.0 | WS_THICKFRAME.0 | WS_SYSMENU.0 | WS_CLIPCHILDREN.0 };
+        if !owned && !popup {
             style |= WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0;
         }
         let hinst = HINSTANCE(hinst as *mut c_void);
         let use_comp = with_app(|a| a.comp).unwrap_or(false);
-        let ex = if use_comp { WS_EX_NOREDIRECTIONBITMAP } else { WINDOW_EX_STYLE(0) };
+        let mut ex = if use_comp { WS_EX_NOREDIRECTIONBITMAP } else { WINDOW_EX_STYLE(0) };
+        if popup {
+            ex |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+        }
         let hwnd = CreateWindowExW(ex, w!("RmRemoteWindow"), &HSTRING::from(title), WINDOW_STYLE(style), 40 + x.max(0), 40 + y.max(0),
             w as i32, h as i32, if owned { owner.map(hwnd_of) } else { None }, None, Some(hinst), None);
         let Ok(hwnd) = hwnd else {
@@ -1113,7 +1134,7 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
             native::round_corners(hwnd);
         }
         let aumid = format!("RemoteMac.{}", app.replace(|c: char| !c.is_ascii_alphanumeric(), "_"));
-        if !owned && !native::set_app_user_model_id(hwnd, &aumid) {
+        if !owned && !popup && !native::set_app_user_model_id(hwnd, &aumid) {
             // Taskbar identity before the window is shown: own group + icon per remote application.
             eprintln!("warning: could not set AppUserModelID {aumid}");
         }
@@ -1130,7 +1151,7 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
             (cached, parent_origin)
         })
         .unwrap_or((None, None));
-        if !owned {
+        if !owned && !popup {
             // The Mac app's menu bar comes down into its window, like on the Mac but per window.
             let menus = with_app(|a| {
                 let m = a.menus.get(app).cloned();
@@ -1148,10 +1169,12 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
             native::set_window_icon(hwnd, HICON(icon as *mut c_void));
         }
         resize_content(hwnd, (w as f64 * scale).round() as i32, (h as f64 * scale).round() as i32);
-        if !owned && app != DESKTOP_APP {
+        if !owned && !popup && app != DESKTOP_APP {
             fit_to_work_area(hwnd);
         }
-        if let (true, Some(o), Some((px, py))) = (owned, owner, parent_origin) {
+        if popup {
+            place_popup(hwnd);
+        } else if let (true, Some(o), Some((px, py))) = (owned, owner, parent_origin) {
             // keep the dialog where the Mac put it relative to its parent
             let mut orc = RECT::default();
             let _ = GetWindowRect(hwnd_of(o), &mut orc);
@@ -1160,8 +1183,10 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
             let _ = SetWindowPos(hwnd, None, nx, ny, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
         }
         layout(hwnd);
-        keep_on_screen(hwnd);
-        let _ = ShowWindow(hwnd, SW_SHOW);
+        if !popup {
+            keep_on_screen(hwnd);
+        }
+        let _ = ShowWindow(hwnd, if popup { SW_SHOWNOACTIVATE } else { SW_SHOW });
         let compositor = if use_comp { comp::Comp::new(hwnd) } else { None };
         let presenter = if compositor.is_none() && with_app(|a| a.d3d).unwrap_or(false) { d3d::Presenter::new(content, w, h) } else { None };
         let renderer = compositor.as_ref().map(|c| c.kind).or(presenter.as_ref().map(|p| p.kind)).unwrap_or("gdi");
@@ -1202,7 +1227,36 @@ fn content_of(frame: HWND) -> Option<HWND> {
 
 /// Height of the chrome (title bar, plus the menu strip when the app has a menu bar).
 fn bar_px(frame: HWND) -> i32 {
-    with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| if r.fullscreen && !r.reveal { 0 } else { chrome::bar_height(r.scale, r.menu != 0) })).flatten().unwrap_or(0)
+    with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| if (r.fullscreen && !r.reveal) || r.role == WindowRole::Popup { 0 } else { chrome::bar_height(r.scale, r.menu != 0) })).flatten().unwrap_or(0)
+}
+
+fn is_popup(frame: HWND) -> bool {
+    with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.role == WindowRole::Popup)).flatten().unwrap_or(false)
+}
+
+/// Put a popup exactly where the Mac shows it over its parent's picture, at the parent's
+/// picture scale (so a list lines up with the button it came from).
+fn place_popup(frame: HWND) {
+    let Some((parent, x, y, w, h, scale)) = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| (r.parent, r.rx, r.ry, r.rw, r.rh, r.scale))).flatten() else { return };
+    let host = parent.and_then(|p| with_app(|a| {
+        let k = *a.by_id.get(&p)?;
+        a.remotes.get(&k).map(|r| (r.content, r.rx, r.ry, r.rw, r.rh))
+    }).flatten());
+    unsafe {
+        let Some((content, px, py, pw, ph)) = host else {
+            // no parent window here: where the Mac has it, at this screen's scale
+            let _ = SetWindowPos(frame, None, 40 + x.max(0), 40 + y.max(0), (w as f64 * scale).round() as i32, (h as f64 * scale).round() as i32, SWP_NOZORDER | SWP_NOACTIVATE);
+            layout(frame);
+            return;
+        };
+        let content = hwnd_of(content);
+        let (ox, oy, fw, fh) = fit_rect(client_size(content), (pw, ph));
+        let (kx, ky) = (fw as f64 / pw.max(1) as f64, fh as f64 / ph.max(1) as f64);
+        let mut pt = POINT { x: ox + ((x - px) as f64 * kx).round() as i32, y: oy + ((y - py) as f64 * ky).round() as i32 };
+        let _ = ClientToScreen(content, &mut pt);
+        let _ = SetWindowPos(frame, None, pt.x, pt.y, ((w as f64 * kx).round() as i32).max(1), ((h as f64 * ky).round() as i32).max(1), SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    layout(frame);
 }
 
 fn is_fullscreen(frame: HWND) -> bool {
@@ -1687,6 +1741,9 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             }
             LRESULT(0)
         }
+        WM_NCHITTEST if is_popup(hwnd) => LRESULT(HTCLIENT as isize),
+        // clicking a popup (a Mac menu or popover) leaves its parent window active
+        WM_MOUSEACTIVATE if is_popup(hwnd) => LRESULT(MA_NOACTIVATE as isize),
         WM_NCHITTEST => {
             let r = DefWindowProcW(hwnd, msg, wp, lp);
             if r.0 as u32 != HTCLIENT {

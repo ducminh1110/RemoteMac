@@ -10,7 +10,7 @@ pub struct Settings {
     pub fps: u32,
     /// fixed bitrate in Mbit/s (the Mac never goes above it); 0: Auto (adapts to the link)
     pub bitrate_mbps: u32,
-    /// 0 Ultra (apps drawn at 2x on the Mac, scaled down here), 1 Native (pixels as this
+    /// 0 Ultra (apps and the Mac Desktop drawn at 2x on the Mac, scaled down here), 1 Native (pixels as this
     /// screen's), 2 Balanced (1 px per Mac point), 3 Fast
     pub quality: u8,
     /// 0 Auto, 1 GPU, 2 CPU (Windows' software decoder)
@@ -29,7 +29,7 @@ impl Default for Settings {
 
 pub const FPS: [u32; 5] = [30, 60, 90, 120, 144];
 pub const BITRATES: [u32; 8] = [0, 5, 10, 20, 30, 50, 80, 120];
-pub const QUALITY: [&str; 4] = ["Ultra — sharpest (apps drawn at 2x, scaled down here)", "Native (this screen's pixels)", "Balanced (1 pixel per Mac point)", "Fast (lower resolution, least bandwidth)"];
+pub const QUALITY: [&str; 4] = ["Ultra — sharpest (Mac drawn at 2x, scaled down here)", "Native (this screen's pixels)", "Balanced (1 pixel per Mac point)", "Fast (lower resolution, least bandwidth)"];
 pub const DECODERS: [&str; 3] = ["Auto (GPU when it works)", "GPU (hardware)", "CPU (software)"];
 
 fn path() -> std::path::PathBuf {

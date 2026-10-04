@@ -8,7 +8,12 @@ import CoreGraphics
 import AppKit
 import ApplicationServices
 
-enum Role: String { case window, dialog, open_panel, save_panel }
+enum Role: String { case window, dialog, open_panel, save_panel, popup }
+
+/// Pop-up menus (a pop-up button's list, a context menu) are at this window level.
+private let popUpMenuLayer = 101
+/// Modal panels (an alert run modally): dialogs, not popups.
+private let modalPanelLayer = 8
 
 struct WinInfo: Equatable {
     var id: CGWindowID, pid: pid_t, title: String, rect: CGRect
@@ -77,6 +82,17 @@ func classify(pid: pid_t, rect: CGRect, fromPanelService: Bool, isFirstWindow: B
     return standard && !fromPanelService ? .window : .dialog
 }
 
+/// A popover, pop-up list or completion window over the app's window (Xcode's search options,
+/// its code completion): not an Accessibility window of the app at all, or one with neither a
+/// title bar nor a dialog/sheet role. Shown by the client over its parent, not as a window.
+func isPopup(pid: pid_t, rect: CGRect) -> Bool {
+    guard let w = axWindowMatching(pid: pid, rect: rect) else { return true }
+    let role = wAXString(w, kAXRoleAttribute as String) ?? "", sub = wAXString(w, kAXSubroleAttribute as String) ?? ""
+    if role == "AXPopover" || role == (kAXMenuRole as String) { return true }
+    if role == (kAXSheetRole as String) || [kAXStandardWindowSubrole, kAXDialogSubrole, kAXSystemDialogSubrole].map({ $0 as String }).contains(sub) { return false }
+    return wAX(w, kAXCloseButtonAttribute as String) == nil
+}
+
 /// Height of a plain title bar (traffic lights + title, nothing else in it), else 0. Windows whose
 /// toolbar shares the title bar (Xcode, Finder) or whose content runs under it keep it.
 func titleBarInset(pid: pid_t, rect: CGRect) -> CGFloat {
@@ -128,7 +144,7 @@ final class WindowTracker {
 
     func current(_ id: CGWindowID) -> WinInfo? { queue.sync { known[id] } }
     /// Whether the app shows a dialog or panel (a "save changes?" sheet, for one).
-    func hasDialog(pid: pid_t) -> Bool { queue.sync { known.values.contains { $0.pid == pid && $0.role != .window } } }
+    func hasDialog(pid: pid_t) -> Bool { queue.sync { known.values.contains { $0.pid == pid && $0.role != .window && $0.role != .popup } } }
 
     func start() {
         let t = DispatchSource.makeTimerSource(queue: queue)
@@ -153,14 +169,17 @@ final class WindowTracker {
         return apps.pids.compactMap { apps.appID(forPid: $0) }.first
     }
 
-    private func onscreen() -> [(CGWindowID, pid_t, String, CGRect)] {
+    /// Windows on screen: (id, pid, title, bounds, layer). Normal windows, modal panels, floating
+    /// panels, and pop-up menus (which are smaller: a one-item list).
+    private func onscreen() -> [(CGWindowID, pid_t, String, CGRect, Int)] {
         let all = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
         return all.compactMap { w in
-            guard let pid = w[kCGWindowOwnerPID as String] as? Int32, (w[kCGWindowLayer as String] as? Int) == 0,
+            guard let pid = w[kCGWindowOwnerPID as String] as? Int32, let layer = w[kCGWindowLayer as String] as? Int, (0...popUpMenuLayer).contains(layer),
                   let n = w[kCGWindowNumber as String] as? UInt32,
-                  let d = w[kCGWindowBounds as String] as? NSDictionary, let r = CGRect(dictionaryRepresentation: d as CFDictionary),
-                  r.width >= 64, r.height >= 64 else { return nil }
-            return (CGWindowID(n), pid, w[kCGWindowName as String] as? String ?? "", r)
+                  let d = w[kCGWindowBounds as String] as? NSDictionary, let r = CGRect(dictionaryRepresentation: d as CFDictionary) else { return nil }
+            let least: CGFloat = layer == 0 ? 64 : 20
+            guard r.width >= least, r.height >= least else { return nil }
+            return (CGWindowID(n), pid, w[kCGWindowName as String] as? String ?? "", r, layer)
         }
     }
 
@@ -179,7 +198,7 @@ final class WindowTracker {
         if !started { preexisting = Set(windows.map { $0.0 }); started = true }
 
         var seen = Set<CGWindowID>()
-        for (id, pid, title, rect) in windows where !preexisting.contains(id) {
+        for (id, pid, title, rect, layer) in windows where !preexisting.contains(id) {
             let fromService = servicePids.contains(pid)
             guard launched.contains(pid) || fromService || companions[pid] != nil else { continue }
             seen.insert(id)
@@ -191,11 +210,16 @@ final class WindowTracker {
             // give new windows ~300 ms so their AX tree (buttons, subrole) is in place
             let age = (pending[id] ?? 0) + 1
             pending[id] = age
-            if age < 3 { continue }
+            // (a pop-up menu is drawn at once: shown without the wait)
+            if age < (layer == popUpMenuLayer ? 1 : 3) { continue }
             pending.removeValue(forKey: id)
             guard let appID = apps.appID(forPid: pid) ?? companions[pid] ?? (fromService ? frontLaunchedApp() : nil) else { continue }
             let first = !known.values.contains { $0.appID == appID && $0.role == .window }
-            let role = companions[pid] != nil ? Role.window : classify(pid: pid, rect: rect, fromPanelService: fromService, isFirstWindow: first)
+            // a menu, popover or completion list over a window the app already shows is a popup
+            let overMain = known.values.contains { $0.appID == appID && $0.role == .window && $0.rect.intersects(rect.insetBy(dx: -40, dy: -40)) }
+            let popup = companions[pid] == nil && !fromService && overMain && layer != modalPanelLayer
+                && (layer == popUpMenuLayer || (layer != 0 || !first) && isPopup(pid: pid, rect: rect))
+            let role = companions[pid] != nil ? Role.window : popup ? Role.popup : classify(pid: pid, rect: rect, fromPanelService: fromService, isFirstWindow: first)
             var w = WinInfo(id: id, pid: pid, title: title, rect: rect, appID: appID, role: role)
             if role != .window { w.parent = parentFor(appID: appID, rect: rect) }
             if role == .window { w.inset = titleBarInset(pid: pid, rect: rect) }
@@ -205,7 +229,8 @@ final class WindowTracker {
         for id in Array(pending.keys) where !seen.contains(id) { pending.removeValue(forKey: id) }
         // a window that left the on-screen list but still exists (another display, another Space)
         // is not gone; it is only reported destroyed once the window server forgets it
-        for id in known.keys where !seen.contains(id) {
+        // (a popup that left the screen is closed: menus keep their window for the next time)
+        for id in known.keys where !seen.contains(id) && known[id]?.role != .popup {
             if (CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]])?.isEmpty == false { seen.insert(id) }
         }
         // children are reported gone before their parents
