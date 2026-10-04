@@ -195,6 +195,18 @@ final class DisplayManager {
     /// Fullscreen on the virtual display (content = the client's monitor size), or back.
     func fullscreen(_ w: WinInfo, on: Bool) -> Bool {
         guard let aw = axWindowFor(pid: w.pid, id: w.id, rect: w.rect) else { return false }
+        // The Mac's screen is our display (mirrored, the client's size, no room kept above):
+        // macOS's own full screen fills it exactly, as the window is shown fullscreen on Windows
+        lock.lock(); let mirroredLayout = mirrorSpec != nil; lock.unlock()
+        let attr = "AXFullScreen" as CFString
+        var settable: DarwinBoolean = false
+        if mirroredLayout, AXUIElementIsAttributeSettable(aw, attr, &settable) == .success, settable.boolValue {
+            NSRunningApplication(processIdentifier: w.pid)?.activate(options: [.activateIgnoringOtherApps])
+            let value: CFBoolean = on ? kCFBooleanTrue : kCFBooleanFalse
+            let r = AXUIElementSetAttributeValue(aw, attr, value)
+            log("window \(w.id) macOS full screen=\(on) (\(r == .success ? "done" : "refused \(r.rawValue)"))")
+            if r == .success { return true }
+        }
         lock.lock(); let id = displayID, size = target; let back = on ? nil : saved.removeValue(forKey: w.id)
         if on && saved[w.id] == nil { saved[w.id] = w.rect }
         lock.unlock()

@@ -20,6 +20,8 @@ struct WinInfo: Equatable {
     var appID: String = "unknown", role: Role = .window, parent: CGWindowID? = nil
     /// Height of the Mac title bar cut off the stream (the viewer draws its own title bar).
     var inset: CGFloat = 0
+    /// In macOS full screen (the window is a whole display).
+    var fullScreen = false
     /// What is streamed: the window without its title bar.
     var content: CGRect { CGRect(x: rect.minX, y: rect.minY + inset, width: rect.width, height: max(2, rect.height - inset)) }
 }
@@ -107,6 +109,13 @@ func isSheet(pid: pid_t, rect: CGRect) -> Bool {
         }
     }
     return false
+}
+
+/// `rect` is exactly one online display (a window in macOS full screen).
+func isWholeDisplay(_ rect: CGRect) -> Bool {
+    var ids = [CGDirectDisplayID](repeating: 0, count: 16), n: UInt32 = 0
+    CGGetOnlineDisplayList(16, &ids, &n)
+    return ids.prefix(Int(n)).contains { let b = CGDisplayBounds($0); return abs(b.minX - rect.minX) < 2 && abs(b.minY - rect.minY) < 2 && abs(b.width - rect.width) < 2 && abs(b.height - rect.height) < 2 }
 }
 
 /// Height of a plain title bar (traffic lights + title, nothing else in it), else 0. Windows whose
@@ -245,7 +254,17 @@ final class WindowTracker {
             guard launched.contains(pid) || fromService || companions[pid] != nil else { continue }
             seen.insert(id)
             if var old = known[id] {
-                if old.rect != rect { old.rect = rect; known[id] = old; onMoved?(old) }
+                if old.rect != rect {
+                    old.rect = rect
+                    // macOS full screen fills a display and has no title bar to cut; back from it,
+                    // the window's own title bar is measured again
+                    let full = old.role == .window && isWholeDisplay(rect)
+                    if full != old.fullScreen {
+                        old.fullScreen = full
+                        old.inset = full ? 0 : titleBarInset(pid: pid, rect: rect)
+                    }
+                    known[id] = old; onMoved?(old)
+                }
                 if old.title != title { old.title = title; known[id] = old; onTitle?(old) }
                 continue
             }
