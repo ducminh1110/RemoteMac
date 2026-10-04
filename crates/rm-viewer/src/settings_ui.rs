@@ -55,8 +55,9 @@ unsafe fn combo(parent: HWND, hinst: HINSTANCE, x: i32, y: i32, w: i32, items: &
     h
 }
 
-unsafe fn label(parent: HWND, hinst: HINSTANCE, x: i32, y: i32, w: i32, text: &str, font: HFONT) {
-    let h = CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), &HSTRING::from(text), WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0), x, y, w, 20, Some(parent), None, Some(hinst), None).unwrap_or_default();
+#[allow(clippy::too_many_arguments)]
+unsafe fn label(parent: HWND, hinst: HINSTANCE, x: i32, y: i32, w: i32, h: i32, text: &str, font: HFONT) {
+    let h = CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), &HSTRING::from(text), WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0), x, y, w, h, Some(parent), None, Some(hinst), None).unwrap_or_default();
     SendMessageW(h, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
 }
 
@@ -80,39 +81,43 @@ pub fn show(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: i
         let px = |v: i32| (v as f64 * s).round() as i32;
         let Ok(hwnd) = CreateWindowExW(WS_EX_DLGMODALFRAME, CLASS, w!("RemoteMac — Settings"), WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, px(470), px(400), owner, None, Some(hinst), None) else { return };
         let font = CreateFontW(-px(14), 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, &HSTRING::from(crate::native::ui_face(400)));
-        let (lx, cx, cw) = (px(18), px(150), px(280));
+        let (lx, cx, cw) = (px(18), px(160), px(290));
         let mut y = px(18);
         let row = px(38);
-        label(hwnd, hinst, lx, y + px(3), px(130), "Frame rate", font);
+        label(hwnd, hinst, lx, y + px(3), px(140), px(22), "Frame rate", font);
         let fps_items: Vec<String> = FPS.iter().map(|f| format!("{f} FPS")).collect();
         let fps = combo(hwnd, hinst, cx, y, cw, &fps_items, FPS.iter().position(|f| *f == current.fps).unwrap_or(1), font);
         y += row;
-        label(hwnd, hinst, lx, y + px(3), px(130), "Bitrate", font);
+        label(hwnd, hinst, lx, y + px(3), px(140), px(22), "Bitrate", font);
         let br_items: Vec<String> = BITRATES.iter().map(|b| if *b == 0 { "Auto (adapts to the link)".into() } else { format!("{b} Mbit/s") }).collect();
         let bitrate = combo(hwnd, hinst, cx, y, cw, &br_items, BITRATES.iter().position(|b| *b == current.bitrate_mbps).unwrap_or(0), font);
         y += row;
-        label(hwnd, hinst, lx, y + px(3), px(130), "Sharpness", font);
+        label(hwnd, hinst, lx, y + px(3), px(140), px(22), "Sharpness", font);
         let q_items: Vec<String> = QUALITY.iter().map(|x| x.to_string()).collect();
         let quality = combo(hwnd, hinst, cx, y, cw, &q_items, current.quality as usize, font);
         y += row;
-        label(hwnd, hinst, lx, y + px(3), px(130), "Mac Desktop scale", font);
+        label(hwnd, hinst, lx, y + px(3), px(140), px(22), "Mac Desktop scale", font);
         let ds_items: Vec<String> = DESKTOP_SCALES.iter().map(|x| x.to_string()).collect();
         let desktop = combo(hwnd, hinst, cx, y, cw, &ds_items, current.desktop_2x as usize, font);
         y += row;
-        label(hwnd, hinst, lx, y + px(3), px(130), "Video decoder", font);
+        label(hwnd, hinst, lx, y + px(3), px(140), px(22), "Video decoder", font);
         let d_items: Vec<String> = DECODERS.iter().map(|x| x.to_string()).collect();
         let decoder = combo(hwnd, hinst, cx, y, cw, &d_items, current.decoder as usize, font);
         y += row;
-        let pacing = button(hwnd, hinst, lx, y, px(420), "Frame pacing (smoother motion, up to one frame more delay)", 200, BS_AUTOCHECKBOX as u32, font);
+        let pacing = button(hwnd, hinst, lx, y, px(450), "Frame pacing (smoother motion, up to one frame more delay)", 200, BS_AUTOCHECKBOX as u32, font);
         SendMessageW(pacing, BM_SETCHECK, Some(WPARAM(current.pacing as usize)), None);
         y += px(30);
-        let cursor = button(hwnd, hinst, lx, y, px(420), "Show the Windows pointer over the picture (Ctrl+Alt+Shift+C)", 201, BS_AUTOCHECKBOX as u32, font);
+        let cursor = button(hwnd, hinst, lx, y, px(450), "Show the Windows pointer over the picture (Ctrl+Alt+Shift+C)", 201, BS_AUTOCHECKBOX as u32, font);
         SendMessageW(cursor, BM_SETCHECK, Some(WPARAM(current.local_cursor as usize)), None);
         y += px(34);
-        label(hwnd, hinst, lx, y, px(430), "Decoder, pacing and Mac Desktop scale apply to windows opened from now on.", font);
-        y += px(30);
-        button(hwnd, hinst, px(250), y, px(90), "Save", ID_SAVE, BS_DEFPUSHBUTTON as u32, font);
-        button(hwnd, hinst, px(350), y, px(90), "Cancel", ID_CANCEL, 0, font);
+        label(hwnd, hinst, lx, y, px(445), px(44), "Decoder, frame pacing and Mac Desktop scale apply to windows opened from now on.", font);
+        y += px(52);
+        button(hwnd, hinst, px(270), y, px(90), "Save", ID_SAVE, BS_DEFPUSHBUTTON as u32, font);
+        button(hwnd, hinst, px(370), y, px(90), "Cancel", ID_CANCEL, 0, font);
+        // the window as tall as what it holds (nothing cut off at any display scale)
+        let mut r = RECT { left: 0, top: 0, right: px(480), bottom: y + px(26) + px(18) };
+        let _ = AdjustWindowRectEx(&mut r, WS_POPUP | WS_CAPTION | WS_SYSMENU, false, WS_EX_DLGMODALFRAME);
+        let _ = SetWindowPos(hwnd, None, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
         UI.with(|u| *u.borrow_mut() = Some(Ui { hwnd, fps, bitrate, quality, desktop, decoder, pacing, cursor, font, on_save: Box::new(on_save) }));
     }
 }
