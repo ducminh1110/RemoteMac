@@ -180,9 +180,11 @@ func sendMenuBar(_ id: String) {
     }
 }
 
-func startStream(_ id: CGWindowID, inset: CGFloat) {
+/// `popup`: a pop-up menu or popover (cut out of its display). Callers pass what they know of
+/// the window: the tracker's callbacks run on its queue, where asking it again would deadlock.
+func startStream(_ id: CGWindowID, inset: CGFloat, popup: Bool = false) {
     let ws = WindowStream(windowID: id, inset: inset) { pkt in sender.sendVideo(pkt) }
-    ws.popup = tracker.current(id)?.role == .popup
+    ws.popup = popup
     ws.setBitrate(sender.bitrate)
     streamsLock.lock(); streams[id] = ws; streamsLock.unlock()
     Task { do { try await ws.start(); log("stream started window=\(id)") } catch { log("stream start failed window=\(id): \(error)")
@@ -198,7 +200,7 @@ tracker.onCreated = { w in
     lastSize[w.id] = w.rect.size
     send(["type": "window_created", "window_id": Int(w.id), "application_id": w.appID, "title": w.title, "bounds": rectJSON(w.content),
           "parent_id": w.parent.map { Int($0) as Any } ?? NSNull(), "role": w.role.rawValue])
-    startStream(w.id, inset: w.inset)
+    startStream(w.id, inset: w.inset, popup: w.role == .popup)
     if w.role == .window { DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { sendMenuBar(w.appID) } }
 }
 tracker.onDestroyed = { id in
@@ -212,7 +214,7 @@ tracker.onMoved = { w in
     send(["type": "window_moved", "window_id": Int(w.id), "bounds": rectJSON(w.content)])
     if lastSize[w.id] != w.rect.size {            // size changed: the encoder is bound to a size, so restart the stream
         lastSize[w.id] = w.rect.size
-        stopStream(w.id); startStream(w.id, inset: w.inset)
+        stopStream(w.id); startStream(w.id, inset: w.inset, popup: w.role == .popup)
     }
 }
 tracker.onTitle = { w in send(["type": "window_title_changed", "window_id": Int(w.id), "title": w.title]) }
@@ -572,7 +574,7 @@ func handle(_ m: [String: Any]) {
                 streamsLock.lock(); let ids = streams.keys.filter { $0 != desktopWindowID }; streamsLock.unlock()
                 for id in ids {
                     guard let w = tracker.current(id) else { continue }
-                    stopStream(id); startStream(id, inset: w.inset)
+                    stopStream(id); startStream(id, inset: w.inset, popup: w.role == .popup)
                 }
             }
         }
