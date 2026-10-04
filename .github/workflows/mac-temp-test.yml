@@ -22,7 +22,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/remotemac"
           cd "$RUNNER_TEMP/remotemac"
 
-          gh run download 37181082112 \
+          gh run download 37191026551 \
             --repo "${{ github.repository }}" \
             --name remotemac-macos
 
