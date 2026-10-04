@@ -278,6 +278,15 @@ final class WindowTracker {
             let first = !known.values.contains { $0.appID == appID && $0.role == .window }
             // a menu, popover or completion list over a window the app already shows is a popup
             let overMain = known.values.contains { $0.appID == appID && $0.role == .window && $0.rect.intersects(rect.insetBy(dx: -40, dy: -40)) }
+            // a sheet (Notes' Welcome, "Save changes?") is drawn in its window's own picture;
+            // a file panel slid out as a sheet stays a panel (Windows' own picker may replace it)
+            if layer == 0 && !fromService && !first && isSheet(pid: pid, rect: rect) {
+                let r = classify(pid: pid, rect: rect, fromPanelService: false, isFirstWindow: false)
+                if r != .open_panel && r != .save_panel {
+                    log("sheet \(id) of \(appID): shown in its window")
+                    ignored.insert(id); sheets[id] = pid; continue
+                }
+            }
             // (a pop-up menu always is, a companion's too: Finder's menu on the desktop)
             let popup = layer == popUpMenuLayer || (companions[pid] == nil && !fromService && overMain && layer != modalPanelLayer
                 && (layer != 0 || !first) && isPopup(pid: pid, rect: rect))

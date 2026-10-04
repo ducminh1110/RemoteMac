@@ -245,12 +245,13 @@ final class DisplayManager {
                 // the menu bar stayed (the window is kept below it): the display grows by that much
                 // (and by the title bar cut off the picture), so what is shown is exactly the
                 // client's screen; back to its size when the window leaves fullscreen
-                let missing = max(0, r.minY - frame.minY), extra = missing + w.inset
+                // short at the top (menu bar) and/or at the bottom (Dock)
+                let missing = max(0, r.minY - frame.minY), extra = max(0, frame.height - r.height) + w.inset
                 lock.lock(); if fsBase == nil { fsBase = spec }; lock.unlock()
                 if let nid = ensureMirrored(width: spec.0, height: spec.1 + Int((extra * CGFloat(spec.2)).rounded()), scale: spec.2) {
                     usleep(300_000)
                     let b = CGDisplayBounds(nid)
-                    let f2 = CGRect(x: b.minX, y: b.minY + missing, width: b.width, height: b.height - missing)
+                    let f2 = CGRect(x: b.minX, y: b.minY + missing, width: b.width, height: frame.height + w.inset)
                     NSRunningApplication(processIdentifier: w.pid)?.activate(options: [.activateIgnoringOtherApps])
                     for _ in 0..<8 {
                         setFrame(aw, f2)
@@ -258,7 +259,7 @@ final class DisplayManager {
                         if let r2 = axFrame(aw), abs(r2.minY - f2.minY) < 4, abs(r2.height - f2.height) < 4 { break }
                     }
                     let got2 = axFrame(aw).map { "\(Int($0.width))x\(Int($0.height)) at \(Int($0.minX)),\(Int($0.minY))" } ?? "?"
-                    log("window \(w.id) fullscreen: display grown by \(Int(extra)) points (menu bar \(Int(missing))), window has \(got2)")
+                    log("window \(w.id) fullscreen: display grown by \(Int(extra)) points (top \(Int(missing))), window has \(got2)")
                 }
             }
             return true
@@ -334,6 +335,12 @@ final class DisplayManager {
             typealias SetFn = @convention(c) (Int32, Bool) -> Int32
             let r = unsafeBitCast(set, to: SetFn.self)(unsafeBitCast(conn, to: ConnFn.self)(), menu)
             log("menu bar autohide \(menu) via the window server (\(r))")
+        }
+        // the Dock's own switch, live (its preference alone waits for the Dock to restart)
+        if let f = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CoreDockSetAutoHideEnabled") {
+            typealias DockFn = @convention(c) (DarwinBoolean) -> Void
+            unsafeBitCast(f, to: DockFn.self)(DarwinBoolean(dock))
+            log("Dock autohide \(dock) via the Dock")
         }
         CFPreferencesSetAppValue("_HIHideMenuBar" as CFString, menu as CFBoolean, kCFPreferencesAnyApplication)
         CFPreferencesAppSynchronize(kCFPreferencesAnyApplication)
