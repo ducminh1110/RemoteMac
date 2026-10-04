@@ -46,8 +46,25 @@ func even(_ v: Int) -> Int { max(2, v + (v & 1)) }
 var captureScale: CGFloat = 1
 /// frames per second (the viewer's settings; Moonlight's FPS choice)
 var targetFPS: Int32 = 60
-func capturePixels(_ w: CGFloat, _ h: CGFloat) -> (Int, Int) {
+/// Pixels per point the display showing `rect` draws at (1 or 2: the window's real pixels).
+func backingScale(of rect: CGRect) -> CGFloat {
+    var ids = [CGDirectDisplayID](repeating: 0, count: 8), n: UInt32 = 0
+    CGGetDisplaysWithRect(rect, 8, &ids, &n)
+    var best: CGFloat = 0
+    for d in ids.prefix(Int(n)) {
+        if let m = CGDisplayCopyDisplayMode(d), m.width > 0 { best = max(best, CGFloat(m.pixelWidth) / CGFloat(m.width)) }
+    }
+    return best > 0 ? max(1, best.rounded()) : 1
+}
+
+/// `backing`: the window's real pixels per point. When more than 1 pixel per point is asked for
+/// (Native, Ultra) the window is captured at exactly its real pixels, never resampled here to a
+/// fraction like 1.25 (ScreenCaptureKit
+/// scales bilinearly, which softens every glyph): the client resamples it once, sharply, to its
+/// own density, or shows it 1:1 (Sunshine captures at the display's own pixels too).
+func capturePixels(_ w: CGFloat, _ h: CGFloat, backing: CGFloat? = nil) -> (Int, Int) {
     var s = max(1, min(3, captureScale))
+    if let b = backing, captureScale > 1 { s = b }
     let maxPixels: CGFloat = 3840 * 2400
     if w * h * s * s > maxPixels { s = max(1, (maxPixels / max(1, w * h)).squareRoot()) }
     return (even(Int((w * s).rounded())), even(Int((h * s).rounded())))
@@ -211,7 +228,7 @@ final class WindowStream: NSObject, SCStreamOutput {
         let cut = min(inset, max(0, w.frame.height - 2))
         if cut > 0 { cfg.sourceRect = CGRect(x: 0, y: cut, width: w.frame.width, height: w.frame.height - cut) }
         // 4:2:0 needs even sizes (an odd one gets no frames at all): round up a pixel
-        (cfg.width, cfg.height) = capturePixels(w.frame.width, w.frame.height - cut)
+        (cfg.width, cfg.height) = capturePixels(w.frame.width, w.frame.height - cut, backing: backingScale(of: w.frame))
         pointsWide = w.frame.width
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
         cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects

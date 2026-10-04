@@ -18,7 +18,9 @@ const HLSL: &str = r#"
 Texture2D<float> lumaPlane : register(t0);
 Texture2D<float2> chromaPlane : register(t1);
 SamplerState samp : register(s0);
-cbuffer Frame : register(b0) { float2 texScale; float2 pad; };
+// texScale: visible part of the texture (0..1); texSize: the texture in pixels; ratio: target
+// pixels per picture pixel; visible: the picture in pixels
+cbuffer Frame : register(b0) { float2 texScale; float2 texSize; float2 ratio; float2 visible; };
 struct V { float4 pos : SV_POSITION; float2 tex : TEXCOORD0; };
 
 // one triangle covering the target; texcoords reach texScale at the far edges of the picture
@@ -37,11 +39,45 @@ float4 ps_main(V i) : SV_TARGET {
     float3 rgb = float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x);
     return float4(saturate(rgb), 1.0);
 }
+
+// Catmull-Rom (cubic, B=0 C=0.5): keeps edges and glyphs sharp where bilinear blurs them
+float cubic(float x) {
+    x = abs(x);
+    if (x < 1.0) return (1.5 * x - 2.5) * x * x + 1.0;
+    if (x < 2.0) return ((-0.5 * x + 2.5) * x - 4.0) * x + 2.0;
+    return 0.0;
+}
+
+// The picture at another size than its own (Ultra: drawn at 2x on the Mac, shown at this
+// screen's density): luma through a Catmull-Rom kernel widened by the downscale factor, so
+// every source pixel counts (no aliasing, no bilinear softness); chroma (half size) bilinear.
+float4 ps_scaled(V i) : SV_TARGET {
+    float2 p = i.tex * texSize - 0.5;
+    float2 k = clamp(1.0 / ratio, 1.0, 3.0);
+    int2 r = int2(ceil(2.0 * k));
+    int2 c = int2(floor(p));
+    int2 last = int2(visible) - 1;
+    float y = 0.0, wsum = 0.0;
+    [loop] for (int dy = 1 - r.y; dy <= r.y; dy++) {
+        float wy = cubic((c.y + dy - p.y) / k.y);
+        [loop] for (int dx = 1 - r.x; dx <= r.x; dx++) {
+            float w = cubic((c.x + dx - p.x) / k.x) * wy;
+            int2 q = clamp(c + int2(dx, dy), int2(0, 0), last);
+            y += lumaPlane.Load(int3(q, 0)) * w;
+            wsum += w;
+        }
+    }
+    y = (y / max(wsum, 1e-4) - 16.0 / 255.0) * (255.0 / 219.0);
+    float2 ch = (chromaPlane.Sample(samp, i.tex) - 128.0 / 255.0) * (255.0 / 224.0);
+    float3 rgb = float3(y + 1.5748 * ch.y, y - 0.1873 * ch.x - 0.4681 * ch.y, y + 1.8556 * ch.x);
+    return float4(saturate(rgb), 1.0);
+}
 "#;
 
 pub struct Nv12Renderer {
     vs: ID3D11VertexShader,
     ps: ID3D11PixelShader,
+    ps_scaled: ID3D11PixelShader,
     sampler: ID3D11SamplerState,
     cbuf: ID3D11Buffer,
 }
@@ -70,10 +106,12 @@ impl Nv12Renderer {
     pub fn new(device: &ID3D11Device) -> Result<Self, String> {
         let vsb = compile(s!("vs_main"), s!("vs_4_0"))?;
         let psb = compile(s!("ps_main"), s!("ps_4_0"))?;
+        let pssb = compile(s!("ps_scaled"), s!("ps_4_0"))?;
         unsafe {
-            let (mut vs, mut ps, mut sampler, mut cbuf) = (None, None, None, None);
+            let (mut vs, mut ps, mut ps_scaled, mut sampler, mut cbuf) = (None, None, None, None, None);
             device.CreateVertexShader(bytes(&vsb), None, Some(&mut vs)).map_err(|e| format!("vertex shader: {e}"))?;
             device.CreatePixelShader(bytes(&psb), None, Some(&mut ps)).map_err(|e| format!("pixel shader: {e}"))?;
+            device.CreatePixelShader(bytes(&pssb), None, Some(&mut ps_scaled)).map_err(|e| format!("scaling pixel shader: {e}"))?;
             let sd = D3D11_SAMPLER_DESC {
                 Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
                 AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
@@ -84,14 +122,14 @@ impl Nv12Renderer {
                 ..Default::default()
             };
             device.CreateSamplerState(&sd, Some(&mut sampler)).map_err(|e| format!("sampler: {e}"))?;
-            let bd = D3D11_BUFFER_DESC { ByteWidth: 16, Usage: D3D11_USAGE_DEFAULT, BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32, ..Default::default() };
+            let bd = D3D11_BUFFER_DESC { ByteWidth: 32, Usage: D3D11_USAGE_DEFAULT, BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32, ..Default::default() };
             device.CreateBuffer(&bd, None, Some(&mut cbuf)).map_err(|e| format!("constant buffer: {e}"))?;
-            Ok(Self { vs: vs.ok_or("vertex shader")?, ps: ps.ok_or("pixel shader")?, sampler: sampler.ok_or("sampler")?, cbuf: cbuf.ok_or("constant buffer")? })
+            Ok(Self { vs: vs.ok_or("vertex shader")?, ps: ps.ok_or("pixel shader")?, ps_scaled: ps_scaled.ok_or("scaling pixel shader")?, sampler: sampler.ok_or("sampler")?, cbuf: cbuf.ok_or("constant buffer")? })
         }
     }
 
     /// Draw the visible `w`x`h` of NV12 texture `src` over the whole of `target` (a BGRA or
-    /// RGBA render target `out_w`x`out_h`).
+    /// RGBA render target `out_w`x`out_h`): 1:1, or resampled with a sharp cubic filter.
     pub fn draw(&self, device: &ID3D11Device, ctx: &ID3D11DeviceContext, src: &ID3D11Texture2D, (w, h): (u32, u32), target: &ID3D11Texture2D, (out_w, out_h): (u32, u32)) -> Result<(), &'static str> {
         unsafe {
             let mut td = D3D11_TEXTURE2D_DESC::default();
@@ -110,7 +148,9 @@ impl Nv12Renderer {
             let mut rtv = None;
             device.CreateRenderTargetView(target, None, Some(&mut rtv)).map_err(|_| "render target")?;
             let rtv = rtv.ok_or("render target")?;
-            let scale = [w as f32 / td.Width.max(1) as f32, h as f32 / td.Height.max(1) as f32, 0.0, 0.0];
+            let (tw, th) = (td.Width.max(1) as f32, td.Height.max(1) as f32);
+            let scale = [w as f32 / tw, h as f32 / th, tw, th, out_w as f32 / w.max(1) as f32, out_h as f32 / h.max(1) as f32, w as f32, h as f32];
+            let resampled = (out_w, out_h) != (w, h);
             ctx.UpdateSubresource(&self.cbuf, 0, None, scale.as_ptr() as *const _, 0, 0);
             ctx.OMSetRenderTargets(Some(&[Some(rtv)]), None);
             let vp = D3D11_VIEWPORT { TopLeftX: 0.0, TopLeftY: 0.0, Width: out_w as f32, Height: out_h as f32, MinDepth: 0.0, MaxDepth: 1.0 };
@@ -119,7 +159,8 @@ impl Nv12Renderer {
             ctx.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             ctx.VSSetShader(&self.vs, None);
             ctx.VSSetConstantBuffers(0, Some(&[Some(self.cbuf.clone())]));
-            ctx.PSSetShader(&self.ps, None);
+            ctx.PSSetShader(if resampled { &self.ps_scaled } else { &self.ps }, None);
+            ctx.PSSetConstantBuffers(0, Some(&[Some(self.cbuf.clone())]));
             ctx.PSSetShaderResources(0, Some(&[Some(luma), Some(chroma)]));
             ctx.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
             ctx.Draw(3, 0);
@@ -150,6 +191,11 @@ pub fn shared() -> Option<&'static Nv12Renderer> {
 /// Draw a 16x16 NV12 picture (left half red, right half blue, in BT.709 limited range) and
 /// check the colours that come out.
 pub fn self_test(device: &ID3D11Device, ctx: &ID3D11DeviceContext, r: &Nv12Renderer) -> Result<(), String> {
+    check(device, ctx, r, 16)
+}
+
+/// The 16x16 test picture drawn into an `out`x`out` target (16: 1:1, else resampled).
+fn check(device: &ID3D11Device, ctx: &ID3D11DeviceContext, r: &Nv12Renderer, out: u32) -> Result<(), String> {
     const N: u32 = 16;
     // red (255,0,0) and blue (0,0,255) in BT.709 limited range: Y, Cb, Cr
     let (red, blue) = ([63u8, 102, 240], [32u8, 240, 118]);
@@ -169,9 +215,10 @@ pub fn self_test(device: &ID3D11Device, ctx: &ID3D11DeviceContext, r: &Nv12Rende
     }
     unsafe {
         let mk = |fmt: DXGI_FORMAT, bind: u32, usage: D3D11_USAGE, cpu: u32, init: Option<&D3D11_SUBRESOURCE_DATA>| -> Result<ID3D11Texture2D, String> {
+            let n = if fmt == DXGI_FORMAT_NV12 { N } else { out };
             let d = D3D11_TEXTURE2D_DESC {
-                Width: N,
-                Height: N,
+                Width: n,
+                Height: n,
                 MipLevels: 1,
                 ArraySize: 1,
                 Format: fmt,
@@ -189,7 +236,7 @@ pub fn self_test(device: &ID3D11Device, ctx: &ID3D11DeviceContext, r: &Nv12Rende
         let src = mk(DXGI_FORMAT_NV12, D3D11_BIND_SHADER_RESOURCE.0 as u32, D3D11_USAGE_DEFAULT, 0, Some(&init))?;
         let target = mk(DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_RENDER_TARGET.0 as u32, D3D11_USAGE_DEFAULT, 0, None)?;
         let staging = mk(DXGI_FORMAT_B8G8R8A8_UNORM, 0, D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ.0 as u32, None)?;
-        r.draw(device, ctx, &src, (N, N), &target, (N, N)).map_err(|e| e.to_string())?;
+        r.draw(device, ctx, &src, (N, N), &target, (out, out)).map_err(|e| e.to_string())?;
         ctx.CopyResource(&staging, &target);
         let mut m = D3D11_MAPPED_SUBRESOURCE::default();
         ctx.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut m)).map_err(|e| format!("read back: {e}"))?;
@@ -197,7 +244,7 @@ pub fn self_test(device: &ID3D11Device, ctx: &ID3D11DeviceContext, r: &Nv12Rende
             let p = (m.pData as *const u8).add((y * m.RowPitch + x * 4) as usize);
             [*p.add(2), *p.add(1), *p] // BGRA -> RGB
         };
-        let (l, rt) = (px(2, 8), px(13, 8));
+        let (l, rt) = (px(out / 8, out / 2), px(out - 1 - out / 8, out / 2));
         ctx.Unmap(&staging, 0);
         let near = |a: [u8; 3], b: [u8; 3]| a.iter().zip(b).all(|(x, y)| (*x as i32 - y as i32).abs() <= 24);
         if near(l, [255, 0, 0]) && near(rt, [0, 0, 255]) {
@@ -216,5 +263,14 @@ mod tests {
         let g = crate::gpu::shared().expect("a D3D11 device");
         let r = super::Nv12Renderer::new(&g.device).unwrap();
         super::self_test(&g.device, &g.ctx, &r).unwrap();
+    }
+
+    #[test]
+    fn resampled_colours_come_out_right() {
+        // the cubic resampling shader, shrinking (Ultra pictures) and enlarging
+        let g = crate::gpu::shared().expect("a D3D11 device");
+        let r = super::Nv12Renderer::new(&g.device).unwrap();
+        super::check(&g.device, &g.ctx, &r, 10).unwrap();
+        super::check(&g.device, &g.ctx, &r, 24).unwrap();
     }
 }

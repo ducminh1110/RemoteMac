@@ -275,13 +275,17 @@ impl Comp {
     fn present_gpu_inner(&mut self, p: &crate::gpu::GpuPic) -> Result<(), &'static str> {
         let (w, h) = (p.width, p.height);
         let r = crate::nv12::shared().ok_or("no GPU colour conversion")?;
-        if !self.ensure_swap(w, h) {
+        // the picture at the size it is shown, resampled here with a sharp cubic filter (the
+        // compositor's bilinear scaling softens every glyph); 1:1 when it already fits
+        let (_, _, fw, fh) = crate::keymap::fit_rect((self.area.2, self.area.3), (w, h));
+        let out = if (fw - w as i32).abs() <= 2 && (fh - h as i32).abs() <= 2 { (w, h) } else { (fw.max(1) as u32, fh.max(1) as u32) };
+        if !self.ensure_swap(out.0, out.1) {
             return Err("swap chain");
         }
         unsafe {
             let sc = self.swap.as_ref().ok_or("swap chain")?;
             let back = sc.GetBuffer::<ID3D11Texture2D>(0).map_err(|_| "back buffer")?;
-            r.draw(&self.d3d, &self.ctx, &p.tex, (w, h), &back, (w, h))?;
+            r.draw(&self.d3d, &self.ctx, &p.tex, (w, h), &back, out)?;
             sc.Present(0, DXGI_PRESENT(0)).ok().map_err(|_| "present")
         }
     }
