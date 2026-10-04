@@ -1,7 +1,7 @@
 //! The Settings window (launcher button, or Ctrl+Alt+Shift+P in any remote window): frame
 //! rate, bitrate, sharpness, decoder, frame pacing, pointer — as Moonlight's settings page.
 
-use crate::settings::{Settings, BITRATES, DECODERS, DESKTOP_SCALES, FPS, QUALITY};
+use crate::settings::{Settings, BITRATES, DECODERS, DESKTOP_SCALES, FPS, QUALITY, WORKSPACES};
 use std::cell::RefCell;
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::*;
@@ -18,6 +18,7 @@ struct Ui {
     bitrate: HWND,
     quality: HWND,
     desktop: HWND,
+    workspace: HWND,
     decoder: HWND,
     pacing: HWND,
     cursor: HWND,
@@ -96,6 +97,17 @@ pub fn show(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: i
         let q_items: Vec<String> = QUALITY.iter().map(|x| x.to_string()).collect();
         let quality = combo(hwnd, hinst, cx, y, cw, &q_items, current.quality as usize, font);
         y += row;
+        label(hwnd, hinst, lx, y + px(3), px(140), px(22), "Mac screen size", font);
+        let (spx, sds) = (crate::net::screen_px(), crate::net::display_scale());
+        let ws_items: Vec<String> = (0..WORKSPACES as u8)
+            .map(|k| {
+                let (w, h) = Settings::points_at(if spx.0 > 0 { spx } else { (1920, 1080) }, sds, k);
+                let what = ["as large as this screen", "more space", "even more space", "most space"][k as usize];
+                format!("{w} × {h} ({what})")
+            })
+            .collect();
+        let workspace = combo(hwnd, hinst, cx, y, cw, &ws_items, current.workspace as usize, font);
+        y += row;
         label(hwnd, hinst, lx, y + px(3), px(140), px(22), "Mac Desktop scale", font);
         let ds_items: Vec<String> = DESKTOP_SCALES.iter().map(|x| x.to_string()).collect();
         let desktop = combo(hwnd, hinst, cx, y, cw, &ds_items, current.desktop_2x as usize, font);
@@ -118,7 +130,7 @@ pub fn show(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: i
         let mut r = RECT { left: 0, top: 0, right: px(480), bottom: y + px(26) + px(18) };
         let _ = AdjustWindowRectEx(&mut r, WS_POPUP | WS_CAPTION | WS_SYSMENU, false, WS_EX_DLGMODALFRAME);
         let _ = SetWindowPos(hwnd, None, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
-        UI.with(|u| *u.borrow_mut() = Some(Ui { hwnd, fps, bitrate, quality, desktop, decoder, pacing, cursor, font, on_save: Box::new(on_save) }));
+        UI.with(|u| *u.borrow_mut() = Some(Ui { hwnd, fps, bitrate, quality, desktop, workspace, decoder, pacing, cursor, font, on_save: Box::new(on_save) }));
     }
 }
 
@@ -132,6 +144,7 @@ fn read(u: &Ui) -> Settings {
             quality: sel(u.quality).min(QUALITY.len() - 1) as u8,
             decoder: sel(u.decoder).min(2) as u8,
             desktop_2x: sel(u.desktop) == 1,
+            workspace: sel(u.workspace).min(WORKSPACES - 1) as u8,
             pacing: checked(u.pacing),
             local_cursor: checked(u.cursor),
         }

@@ -233,6 +233,8 @@ final class WindowStream: NSObject, SCStreamOutput {
             config = cfg
             try await s.startCapture()
             scStream = s
+            let mode = CGDisplayCopyDisplayMode(did).map { "\($0.pixelWidth)x\($0.pixelHeight) px" } ?? "?"
+            log("display \(did) captured at \(cfg.width)x\(cfg.height) (display draws \(d.width)x\(d.height) points, \(mode))")
             return
         }
         guard let w = content.windows.first(where: { $0.windowID == windowID }) else { throw WireError(description: "window \(windowID) not shareable") }

@@ -42,9 +42,15 @@ final class DisplayManager {
     /// Make sure the display runs its Retina mode (`width`x`height` points at 2x): macOS may pick
     /// the 1x mode of the same size, and everything is then drawn at 1x however it is captured.
     private func selectRetina(_ id: CGDirectDisplayID, width: Int, height: Int) {
-        if let cur = CGDisplayCopyDisplayMode(id), cur.width == width, cur.pixelWidth >= width * 2 { return }
+        // a new display lists its modes only after a moment
         let opts = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue] as CFDictionary
-        let modes = CGDisplayCopyAllDisplayModes(id, opts) as? [CGDisplayMode] ?? []
+        var modes: [CGDisplayMode] = []
+        for _ in 0..<25 {
+            if let cur = CGDisplayCopyDisplayMode(id), cur.width == width, cur.pixelWidth >= width * 2 { return }
+            modes = CGDisplayCopyAllDisplayModes(id, opts) as? [CGDisplayMode] ?? []
+            if modes.contains(where: { $0.width == width && $0.pixelWidth >= width * 2 }) { break }
+            usleep(200_000)
+        }
         guard let m = modes.first(where: { $0.width == width && $0.height == height && $0.pixelWidth >= width * 2 }) else {
             log("virtual display \(id): no Retina mode of \(width)x\(height) among \(modes.map { "\($0.width)x\($0.height)@\($0.pixelWidth)" })")
             return
@@ -75,6 +81,8 @@ final class DisplayManager {
         for attempt in 0..<3 {
             if mirrorDesktop(onto: id) && isMirroredOnto(id) {
                 lock.lock(); mirrorSpec = (width, height, scale); lock.unlock()
+                let mode = CGDisplayCopyDisplayMode(id).map { "\($0.width)x\($0.height) points, \($0.pixelWidth)x\($0.pixelHeight) px" } ?? "mode unknown"
+                log("virtual display \(id) mirrored: \(mode)")
                 return id
             }
             log("desktop: mirroring onto \(id) not in place yet (try \(attempt + 1))")
