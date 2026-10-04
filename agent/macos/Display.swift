@@ -82,6 +82,8 @@ final class DisplayManager {
     private var mirrored: [CGDirectDisplayID] = []
     /// what the current mirrored display was made for (width, height, scale)
     private var mirrorSpec: (Int, Int, Int)?
+    /// the layout before a fullscreen window made the display taller
+    private var fsBase: (Int, Int, Int)?
 
     /// A virtual display of the client's screen with every other display mirroring it: the one
     /// already there when it fits, else a new one (the old mirroring undone first, or the Mac's
@@ -151,6 +153,21 @@ final class DisplayManager {
         return true
     }
 
+    /// A window closed while fullscreen: the menu bar, Dock and display size come back when it was
+    /// the last one.
+    func windowGone(_ id: CGWindowID) {
+        lock.lock()
+        guard saved.removeValue(forKey: id) != nil else { lock.unlock(); return }
+        let last = saved.isEmpty, base = last ? fsBase : nil
+        if last { fsBase = nil }
+        lock.unlock()
+        guard last else { return }
+        DispatchQueue.global().async { [self] in
+            setChromeHidden(false)
+            if let b = base { _ = ensureMirrored(width: b.0, height: b.1, scale: b.2) }
+        }
+    }
+
     /// Our display at the origin of the global space: the main display (menu bar and Dock).
     private func makeMain(_ id: CGDirectDisplayID) -> Bool {
         if CGMainDisplayID() == id { return true }
@@ -206,8 +223,12 @@ final class DisplayManager {
                 setChromeHidden(true)
                 frame = CGDisplayBounds(mid)
             } else {
-                lock.lock(); let back = saved.removeValue(forKey: w.id); let others = !saved.isEmpty; lock.unlock()
+                lock.lock(); let back = saved.removeValue(forKey: w.id); let others = !saved.isEmpty; let base = others ? nil : fsBase
+                if !others { fsBase = nil }
+                lock.unlock()
                 if !others { setChromeHidden(false) }
+                // the display back to the client's size
+                if let b = base { _ = ensureMirrored(width: b.0, height: b.1, scale: b.2); usleep(300_000) }
                 guard let r = back else { return false }
                 frame = r
             }
@@ -219,6 +240,27 @@ final class DisplayManager {
             }
             let got = axFrame(aw).map { "\(Int($0.width))x\(Int($0.height)) at \(Int($0.minX)),\(Int($0.minY))" } ?? "?"
             log("window \(w.id) fullscreen=\(on) -> asked \(Int(frame.width))x\(Int(frame.height)) at \(Int(frame.minX)),\(Int(frame.minY)), has \(got)")
+            lock.lock(); let spec = mirrorSpec; lock.unlock()
+            if on, let r = axFrame(aw), let spec = spec, r.minY > frame.minY + 4 || r.height < frame.height - 4 {
+                // the menu bar stayed (the window is kept below it): the display grows by that much
+                // (and by the title bar cut off the picture), so what is shown is exactly the
+                // client's screen; back to its size when the window leaves fullscreen
+                let missing = max(0, r.minY - frame.minY), extra = missing + w.inset
+                lock.lock(); if fsBase == nil { fsBase = spec }; lock.unlock()
+                if let nid = ensureMirrored(width: spec.0, height: spec.1 + Int((extra * CGFloat(spec.2)).rounded()), scale: spec.2) {
+                    usleep(300_000)
+                    let b = CGDisplayBounds(nid)
+                    let f2 = CGRect(x: b.minX, y: b.minY + missing, width: b.width, height: b.height - missing)
+                    NSRunningApplication(processIdentifier: w.pid)?.activate(options: [.activateIgnoringOtherApps])
+                    for _ in 0..<8 {
+                        setFrame(aw, f2)
+                        usleep(250_000)
+                        if let r2 = axFrame(aw), abs(r2.minY - f2.minY) < 4, abs(r2.height - f2.height) < 4 { break }
+                    }
+                    let got2 = axFrame(aw).map { "\(Int($0.width))x\(Int($0.height)) at \(Int($0.minX)),\(Int($0.minY))" } ?? "?"
+                    log("window \(w.id) fullscreen: display grown by \(Int(extra)) points (menu bar \(Int(missing))), window has \(got2)")
+                }
+            }
             return true
         }
         lock.lock(); let id = displayID, size = target; let back = on ? nil : saved.removeValue(forKey: w.id)

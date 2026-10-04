@@ -213,6 +213,7 @@ tracker.onCreated = { w in
 }
 tracker.onDestroyed = { id in
     log("window destroyed id=\(id)")
+    displays.windowGone(id)
     lastSize.removeValue(forKey: id)
     stopStream(id)
     sender.udp?.forgetWindow(UInt64(id))
