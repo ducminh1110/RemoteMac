@@ -93,6 +93,22 @@ func isPopup(pid: pid_t, rect: CGRect) -> Bool {
     return wAX(w, kAXCloseButtonAttribute as String) == nil
 }
 
+/// A sheet (a "Welcome", "Save changes?" panel slid out of a window): a child of one of the
+/// app's windows in Accessibility. The window's own picture already shows it, and on its own it
+/// cannot be captured (it came out as the whole display, shrunk).
+func isSheet(pid: pid_t, rect: CGRect) -> Bool {
+    let wins = wAX(AXUIElementCreateApplication(pid), kAXWindowsAttribute as String) as? [AXUIElement] ?? []
+    for w in wins {
+        for c in wAX(w, kAXChildrenAttribute as String) as? [AXUIElement] ?? [] where wAXString(c, kAXRoleAttribute as String) == (kAXSheetRole as String) {
+            var p = CGPoint.zero, s = CGSize.zero
+            if let pv = wAX(c, kAXPositionAttribute as String), let sv = wAX(c, kAXSizeAttribute as String),
+               AXValueGetValue(pv as! AXValue, .cgPoint, &p), AXValueGetValue(sv as! AXValue, .cgSize, &s),
+               abs(p.x - rect.minX) < 4, abs(p.y - rect.minY) < 4, abs(s.width - rect.width) < 4, abs(s.height - rect.height) < 4 { return true }
+        }
+    }
+    return false
+}
+
 /// Height of a plain title bar (traffic lights + title, nothing else in it), else 0. Windows whose
 /// toolbar shares the title bar (Xcode, Finder) or whose content runs under it keep it.
 func titleBarInset(pid: pid_t, rect: CGRect) -> CGFloat {
@@ -118,7 +134,26 @@ func titleBarInset(pid: pid_t, rect: CGRect) -> CGFloat {
     guard let pv = wAX(cb as! AXUIElement, kAXPositionAttribute as String), let sv = wAX(cb as! AXUIElement, kAXSizeAttribute as String),
           AXValueGetValue(pv as! AXValue, .cgPoint, &p), AXValueGetValue(sv as! AXValue, .cgSize, &s) else { return 0 }
     let bar = ((p.y - rect.minY) * 2 + s.height).rounded()
-    return (20...40).contains(bar) && bar < rect.height / 2 ? bar : 0
+    guard (20...40).contains(bar) && bar < rect.height / 2 else { return 0 }
+    // a control in that band (Notes, Catalyst and SwiftUI apps put their toolbar there without
+    // an AXToolbar): the band is not a plain title bar, cutting it cut the toolbar
+    let lights: Set<String> = [kAXCloseButtonSubrole as String, kAXMinimizeButtonSubrole as String, kAXZoomButtonSubrole as String, kAXFullScreenButtonSubrole as String]
+    var stack = kids.map { ($0, 0) }, visited = 0
+    while let (el, depth) = stack.popLast(), visited < 300 {
+        visited += 1
+        let role = wAXString(el, kAXRoleAttribute as String) ?? ""
+        if role != (kAXStaticTextRole as String), role != (kAXGroupRole as String), role != (kAXScrollAreaRole as String), role != (kAXSplitGroupRole as String),
+           !lights.contains(wAXString(el, kAXSubroleAttribute as String) ?? ""),
+           let y = top(el), let sz = wAX(el, kAXSizeAttribute as String) {
+            var size = CGSize.zero
+            if AXValueGetValue(sz as! AXValue, .cgSize, &size), size.height > 0, size.height < bar * 2, y < bar - 2, y + size.height > 2 {
+                log("title bar kept (\(role) in it) pid=\(pid)")
+                return 0
+            }
+        }
+        if depth < 4, let more = wAX(el, kAXChildrenAttribute as String) as? [AXUIElement] { for k in more { stack.append((k, depth + 1)) } }
+    }
+    return bar
 }
 
 final class WindowTracker {
@@ -127,6 +162,8 @@ final class WindowTracker {
     private var pending: [CGWindowID: Int] = [:]
     /// Popups not over any window shown on Windows: left alone while they are on screen.
     private var ignored: Set<CGWindowID> = []
+    /// Sheets on screen (shown in their window's picture), with their app.
+    private var sheets: [CGWindowID: pid_t] = [:]
     /// Windows that already existed when the agent started (the user's desktop): never streamed.
     private var preexisting: Set<CGWindowID> = []
     private var started = false
@@ -146,7 +183,7 @@ final class WindowTracker {
 
     func current(_ id: CGWindowID) -> WinInfo? { queue.sync { known[id] } }
     /// Whether the app shows a dialog or panel (a "save changes?" sheet, for one).
-    func hasDialog(pid: pid_t) -> Bool { queue.sync { known.values.contains { $0.pid == pid && $0.role != .window && $0.role != .popup } } }
+    func hasDialog(pid: pid_t) -> Bool { queue.sync { known.values.contains { $0.pid == pid && $0.role != .window && $0.role != .popup } || sheets.values.contains(pid) } }
 
     func start() {
         let t = DispatchSource.makeTimerSource(queue: queue)
@@ -201,6 +238,8 @@ final class WindowTracker {
 
         var seen = Set<CGWindowID>()
         ignored.formIntersection(windows.map { $0.0 })
+        let onScreen = Set(windows.map { $0.0 })
+        sheets = sheets.filter { onScreen.contains($0.key) }
         for (id, pid, title, rect, layer) in windows where !preexisting.contains(id) && !ignored.contains(id) {
             let fromService = servicePids.contains(pid)
             guard launched.contains(pid) || fromService || companions[pid] != nil else { continue }
@@ -224,6 +263,12 @@ final class WindowTracker {
             let popup = layer == popUpMenuLayer || (companions[pid] == nil && !fromService && overMain && layer != modalPanelLayer
                 && (layer != 0 || !first) && isPopup(pid: pid, rect: rect))
             let role = popup ? Role.popup : companions[pid] != nil ? Role.window : classify(pid: pid, rect: rect, fromPanelService: fromService, isFirstWindow: first)
+            // a sheet (not a file panel, which Windows' own picker may replace) is drawn in its
+            // window's own picture; it still counts as the app asking something
+            if (role == .window || role == .dialog) && !fromService && layer == 0 && isSheet(pid: pid, rect: rect) {
+                log("sheet \(id) of \(appID): shown in its window")
+                ignored.insert(id); sheets[id] = pid; continue
+            }
             var w = WinInfo(id: id, pid: pid, title: title, rect: rect, appID: appID, role: role)
             if role == .popup {
                 // only over one of the app's windows shown on Windows; elsewhere (the Mac's desktop,
