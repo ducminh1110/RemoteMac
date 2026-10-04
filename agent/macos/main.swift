@@ -228,6 +228,8 @@ clipboard.start()
 let uploads = UploadStore(send: send)
 uploads.cleanup() // leftovers of a session that ended without cleaning (crash, power loss)
 let displays = DisplayManager()
+/// the Mac's screens mirror our HiDPI display for the whole session (not only the Mac Desktop)
+var keepMirror = false
 
 func keyTo(_ pid: pid_t, _ code: CGKeyCode, _ flags: CGEventFlags = []) {
     for down in [true, false] {
@@ -341,13 +343,12 @@ func handle(_ m: [String: Any]) {
         if let fit = (m["arguments"] as? [String])?.first(where: { $0.hasPrefix("fit=") }) {
             let v = fit.dropFirst(4).split(separator: ",").compactMap { Int($0) }
             if v.count == 3 {
-                let st = displays.configure(width: v[0], height: v[1], scale: v[2], forDesktop: true)
-                if st["available"] as? Bool == true, displays.mirrorDesktop(onto: displays.displayID) {
-                    usleep(500_000) // the window server settles the new layout
-                    fitted = displays.displayID
+                // the HiDPI display made at connect is reused when it is this size
+                if let id = displays.ensureMirrored(width: v[0], height: v[1], scale: v[2]) {
+                    usleep(300_000) // the window server settles the new layout
+                    fitted = id
                 } else {
-                    log("desktop: no fitted display (\(st["reason"] ?? "mirroring refused")); streaming the Mac's own screen")
-                    displays.unmirrorDesktop()
+                    log("desktop: no fitted display (mirroring refused); streaming the Mac's own screen")
                 }
             }
         }
@@ -373,7 +374,8 @@ func handle(_ m: [String: Any]) {
         guard desktop.isActive else { break }
         desktop.stop()
         gsStop()
-        displays.unmirrorDesktop()
+        // the HiDPI layout made at connect stays for the app windows
+        if !keepMirror { displays.unmirrorDesktop() }
         stopStream(desktopWindowID)
         send(["type": "window_destroyed", "window_id": Int(desktopWindowID)])
         send(["type": "app_exited", "application_id": desktopAppID, "code": NSNull()])
@@ -463,7 +465,11 @@ func handle(_ m: [String: Any]) {
         if let w = tracker.current(CGWindowID(int(m["window_id"]))), w.role == .open_panel || w.role == .save_panel { keyTo(w.pid, 53) }
     case "display_configure":
         let (w, h, sc) = (int(m["width"]), int(m["height"]), max(1, int(m["scale"])))
-        DispatchQueue.global().async { send(displays.configure(width: w, height: h, scale: sc)) }
+        DispatchQueue.global().async {
+            // the session's HiDPI display (the Mac's screen mirrored onto it) is that display:
+            // replacing it would leave the Mac's screen mirroring nothing
+            if keepMirror, let st = displays.status() { send(st) } else { send(displays.configure(width: w, height: h, scale: sc)) }
+        }
     case "window_fullscreen":
         let wid = CGWindowID(int(m["window_id"]))
         guard let w = tracker.current(wid) else { send(["type": "error", "code": "no_such_window", "message": "\(wid)"]); break }
@@ -498,12 +504,13 @@ func handle(_ m: [String: Any]) {
         if let screen = m["screen"] as? String, (NSScreen.main?.backingScaleFactor ?? 1) < 2, env["RM_NO_HIDPI"] == nil {
             let v = screen.split(separator: ",").compactMap { Int($0) }
             if v.count == 3, v[2] >= 2 {
+                keepMirror = true
                 DispatchQueue.global().async {
-                    let st = displays.configure(width: v[0], height: v[1], scale: v[2], forDesktop: true)
-                    if st["available"] as? Bool == true, displays.mirrorDesktop(onto: displays.displayID) {
+                    if displays.ensureMirrored(width: v[0], height: v[1], scale: v[2]) != nil {
                         log("HiDPI desktop: \(v[0] / v[2])x\(v[1] / v[2]) points at 2x (the PC's screen)")
                     } else {
-                        log("HiDPI desktop unavailable (\(st["reason"] ?? "mirroring refused")); windows stay 1x")
+                        keepMirror = false
+                        log("HiDPI desktop unavailable (mirroring refused); windows stay 1x")
                     }
                 }
             }

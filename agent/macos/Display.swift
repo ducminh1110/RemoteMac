@@ -40,24 +40,66 @@ final class DisplayManager {
     /// The Mac's own screen(s) mirror the virtual display (what BetterDummy does): the whole
     /// desktop is laid out at the client's resolution, and streaming that display shows it 1:1.
     private var mirrored: [CGDirectDisplayID] = []
+    /// what the current mirrored display was made for (width, height, scale)
+    private var mirrorSpec: (Int, Int, Int)?
+
+    /// A virtual display of the client's screen with every other display mirroring it: the one
+    /// already there when it fits, else a new one (the old mirroring undone first, or the Mac's
+    /// screen would be left mirroring a display that no longer exists). nil if it cannot be done.
+    func ensureMirrored(width: Int, height: Int, scale: Int) -> CGDirectDisplayID? {
+        lock.lock(); let same = mirrorSpec.map { $0 == (width, height, scale) } ?? false; let id0 = displayID; lock.unlock()
+        if same && id0 != 0 && isMirroredOnto(id0) { return id0 }
+        unmirrorDesktop()
+        let st = configure(width: width, height: height, scale: scale, forDesktop: true)
+        guard st["available"] as? Bool == true else { log("virtual display unavailable: \(st["reason"] ?? "?")"); return nil }
+        let id = displayID
+        for attempt in 0..<3 {
+            if mirrorDesktop(onto: id) && isMirroredOnto(id) {
+                lock.lock(); mirrorSpec = (width, height, scale); lock.unlock()
+                return id
+            }
+            log("desktop: mirroring onto \(id) not in place yet (try \(attempt + 1))")
+            usleep(400_000)
+        }
+        unmirrorDesktop()
+        return nil
+    }
+
+    /// The current virtual display, as a display_status message (nil: none).
+    func status() -> [String: Any]? {
+        lock.lock(); let id = displayID, t = target; lock.unlock()
+        guard id != 0 else { return nil }
+        return ["type": "display_status", "available": true, "display_id": Int(id), "width": Int(t.width), "height": Int(t.height), "reason": NSNull()]
+    }
+
+    /// Every other online display mirrors `id` (so streaming `id` shows the Mac's desktop).
+    private func isMirroredOnto(_ id: CGDirectDisplayID) -> Bool {
+        var ids = [CGDirectDisplayID](repeating: 0, count: 16), n: UInt32 = 0
+        CGGetOnlineDisplayList(16, &ids, &n)
+        let others = ids.prefix(Int(n)).filter { $0 != id }
+        return !others.isEmpty && others.allSatisfy { CGDisplayMirrorsDisplay($0) == id }
+    }
 
     func mirrorDesktop(onto id: CGDirectDisplayID) -> Bool {
         var ids = [CGDirectDisplayID](repeating: 0, count: 16), n: UInt32 = 0
         CGGetOnlineDisplayList(16, &ids, &n)
-        let others = ids.prefix(Int(n)).filter { $0 != id && CGDisplayMirrorsDisplay($0) == kCGNullDirectDisplay }
+        // every other display (the Mac's screen, or a VM's "Apple Virtual" display), also one
+        // that still names an older mirror target
+        let others = ids.prefix(Int(n)).filter { $0 != id }
         guard !others.isEmpty else { return false }
         var cfg: CGDisplayConfigRef?
         guard CGBeginDisplayConfiguration(&cfg) == .success else { return false }
         for d in others { CGConfigureDisplayMirrorOfDisplay(cfg, d, id) }
         guard CGCompleteDisplayConfiguration(cfg, .forSession) == .success else { CGCancelDisplayConfiguration(cfg); return false }
+        usleep(300_000) // the window server applies it
         lock.lock(); mirrored = others; lock.unlock()
-        log("desktop: displays \(others) now mirror virtual display \(id)")
+        log("desktop: displays \(others) now mirror virtual display \(id) (main display is \(CGMainDisplayID()))")
         return true
     }
 
     /// Back to the Mac's own layout.
     func unmirrorDesktop() {
-        lock.lock(); let ds = mirrored; mirrored = []; lock.unlock()
+        lock.lock(); let ds = mirrored; mirrored = []; mirrorSpec = nil; lock.unlock()
         guard !ds.isEmpty else { return }
         var cfg: CGDisplayConfigRef?
         guard CGBeginDisplayConfiguration(&cfg) == .success else { return }
