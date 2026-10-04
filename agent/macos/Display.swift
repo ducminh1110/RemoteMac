@@ -212,12 +212,13 @@ final class DisplayManager {
                 frame = r
             }
             NSRunningApplication(processIdentifier: w.pid)?.activate(options: [.activateIgnoringOtherApps])
-            for _ in 0..<6 {
+            for _ in 0..<8 {
                 setFrame(aw, frame)
-                usleep(200_000)
+                usleep(250_000)
                 if let r = axFrame(aw), abs(r.minY - frame.minY) < 4, abs(r.height - frame.height) < 4 { break }
             }
-            log("window \(w.id) fullscreen=\(on) -> \(Int(frame.width))x\(Int(frame.height)) at \(Int(frame.minX)),\(Int(frame.minY)) (whole display)")
+            let got = axFrame(aw).map { "\(Int($0.width))x\(Int($0.height)) at \(Int($0.minX)),\(Int($0.minY))" } ?? "?"
+            log("window \(w.id) fullscreen=\(on) -> asked \(Int(frame.width))x\(Int(frame.height)) at \(Int(frame.minX)),\(Int(frame.minY)), has \(got)")
             return true
         }
         lock.lock(); let id = displayID, size = target; let back = on ? nil : saved.removeValue(forKey: w.id)
@@ -284,6 +285,14 @@ final class DisplayManager {
     }
 
     private func applyChrome(menu: Bool, dock: Bool) {
+        // the window server's own switch (what System Settings flips), live; the preference too
+        if let sky = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY),
+           let conn = dlsym(sky, "SLSMainConnectionID"), let set = dlsym(sky, "SLSSetMenuBarAutohideEnabled") {
+            typealias ConnFn = @convention(c) () -> Int32
+            typealias SetFn = @convention(c) (Int32, Bool) -> Int32
+            let r = unsafeBitCast(set, to: SetFn.self)(unsafeBitCast(conn, to: ConnFn.self)(), menu)
+            log("menu bar autohide \(menu) via the window server (\(r))")
+        }
         CFPreferencesSetAppValue("_HIHideMenuBar" as CFString, menu as CFBoolean, kCFPreferencesAnyApplication)
         CFPreferencesAppSynchronize(kCFPreferencesAnyApplication)
         CFPreferencesSetAppValue("autohide" as CFString, dock as CFBoolean, "com.apple.dock" as CFString)
