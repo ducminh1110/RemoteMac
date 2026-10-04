@@ -182,7 +182,12 @@ pub enum UiEvent {
 
 #[derive(Clone)]
 pub struct Link {
-    writer: Arc<Mutex<TcpStream>>,
+    /// messages for the Mac, written by their own thread: a Mac that is slow to read (busy, or
+    /// the link stalling) must never hold up the window that sends (Windows then marks the
+    /// viewer "Not Responding")
+    writer: Sender<Message>,
+    /// messages queued and not written yet (pointer moves are dropped while many are)
+    pending: Arc<std::sync::atomic::AtomicUsize>,
     /// UDP video path (FEC); None when it could not be started
     pub udp: Option<Arc<rm_client::udp::UdpVideo>>,
 }
@@ -203,9 +208,31 @@ impl Link {
                 }
             }
         }
-        if let Ok(mut w) = self.writer.lock() {
-            let _ = write_message(&mut *w, m);
+        use std::sync::atomic::Ordering::Relaxed;
+        if pointer && self.pending.load(Relaxed) > 32 {
+            return; // stale pointer positions behind a stalled link: the next one says where it is
         }
+        self.pending.fetch_add(1, Relaxed);
+        if self.writer.send(m.clone()).is_err() {
+            self.pending.fetch_sub(1, Relaxed);
+        }
+    }
+
+    /// The writer thread for `stream`.
+    fn start(stream: TcpStream) -> Link {
+        let (tx, rx) = channel::<Message>();
+        let pending = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let p = pending.clone();
+        let _ = std::thread::Builder::new().name("rm-link-writer".into()).spawn(move || {
+            let mut w = stream;
+            for m in rx {
+                p.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                if write_message(&mut w, &m).is_err() {
+                    break;
+                }
+            }
+        });
+        Link { writer: tx, pending, udp: None }
     }
 }
 
@@ -240,21 +267,17 @@ pub fn connect(relay: &str, session: &str, token: &str, app: Option<&str>, wake:
 /// [`connect`]; `wait: false` fails at once when the Mac is not waiting at the relay.
 pub fn connect_with(relay: &str, session: &str, token: &str, app: Option<&str>, wait: bool, wake: impl Fn() + Send + Sync + 'static) -> Result<(Link, Receiver<UiEvent>), String> {
     let stream = rm_relay::join_with(relay, session, rm_relay::Role::Client, token, wait).map_err(|e| format!("relay: {e}"))?;
-    let writer = Arc::new(Mutex::new(stream.try_clone().map_err(|e| e.to_string())?));
+    let writer = stream.try_clone().map_err(|e| e.to_string())?;
     let sess = Session::handshake(stream).map_err(|e| format!("handshake: {e}"))?;
     let (tx, rx) = channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
-    let mut link = Link { writer, udp: None };
+    let mut link = Link::start(writer);
     let video = Arc::new(Video { decoders: Mutex::new(HashMap::new()), link: Mutex::new(link.clone()), tx: tx.clone(), wake: wake.clone(), udp: Mutex::new(None) });
     // UDP video beside the TCP connection (RM_NO_UDP=1 keeps everything on TCP)
     if std::env::var_os("RM_NO_UDP").is_none() {
         let v = video.clone();
-        let w = link.writer.clone();
-        let offer = move |secret, candidates| {
-            if let Ok(mut w) = w.lock() {
-                let _ = write_message(&mut *w, &Message::P2pOffer { secret, candidates });
-            }
-        };
+        let l = link.clone();
+        let offer = move |secret, candidates| l.send(&Message::P2pOffer { secret, candidates });
         match rm_client::udp::start(relay, session, token, move |o| v.on_udp(o), offer) {
             Ok(u) => {
                 u.set_tunnel_handler(crate::gsdesktop::from_host_udp);

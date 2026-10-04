@@ -148,7 +148,7 @@ func titleBarInset(pid: pid_t, rect: CGRect) -> CGFloat {
     // an AXToolbar): the band is not a plain title bar, cutting it cut the toolbar
     let lights: Set<String> = [kAXCloseButtonSubrole as String, kAXMinimizeButtonSubrole as String, kAXZoomButtonSubrole as String, kAXFullScreenButtonSubrole as String]
     var stack = kids.map { ($0, 0) }, visited = 0
-    while let (el, depth) = stack.popLast(), visited < 300 {
+    while let (el, depth) = stack.popLast(), visited < 80 {
         visited += 1
         let role = wAXString(el, kAXRoleAttribute as String) ?? ""
         if role != (kAXStaticTextRole as String), role != (kAXGroupRole as String), role != (kAXScrollAreaRole as String), role != (kAXSplitGroupRole as String),
@@ -160,7 +160,8 @@ func titleBarInset(pid: pid_t, rect: CGRect) -> CGFloat {
                 return 0
             }
         }
-        if depth < 4, let more = wAX(el, kAXChildrenAttribute as String) as? [AXUIElement] { for k in more { stack.append((k, depth + 1)) } }
+        // only what reaches into the band can be in it: no walking into the window's content
+        if depth < 3, let y = top(el), y < bar, let more = wAX(el, kAXChildrenAttribute as String) as? [AXUIElement] { for k in more { stack.append((k, depth + 1)) } }
     }
     return bar
 }
@@ -188,7 +189,12 @@ final class WindowTracker {
     var onTitle: ((WinInfo) -> Void)?
     var onAppExited: ((String, Int32) -> Void)?
 
-    init(apps: AppManager) { self.apps = apps }
+    init(apps: AppManager) {
+        self.apps = apps
+        // a busy app (Finder walking a folder) answers Accessibility slowly: at most half a second
+        // per question, so the window tracker (and whoever asks it) is never held for long
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)
+    }
 
     func current(_ id: CGWindowID) -> WinInfo? { queue.sync { known[id] } }
     /// Whether the app shows a dialog or panel (a "save changes?" sheet, for one).
