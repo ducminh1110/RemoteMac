@@ -102,7 +102,7 @@ pub fn show(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: i
         let ws_items: Vec<String> = (0..WORKSPACES as u8)
             .map(|k| {
                 let (w, h) = Settings::points_at(if spx.0 > 0 { spx } else { (1920, 1080) }, sds, k);
-                let what = ["as large as this screen", "more space", "even more space", "most space"][k as usize];
+                let what = ["as large as this screen", "more space", "even more space", "most space", "pixel for pixel: sharpest, smallest text"][k as usize];
                 format!("{w} × {h} ({what})")
             })
             .collect();

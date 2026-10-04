@@ -227,7 +227,12 @@ final class WindowStream: NSObject, SCStreamOutput {
             cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
             cfg.queueDepth = 6; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true // the Mac's pointer is in the picture (as Sunshine); content fills the output at any density
-            let s = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: cfg, delegate: nil)
+            let filter = SCContentFilter(display: d, excludingWindows: [])
+            // what the display really draws per point (a display left at 1x enlarged to 2x is blurry)
+            var drawn = "?"
+            if #available(macOS 14.0, *) { drawn = "\(filter.pointPixelScale)x" }
+            log("display \(did) draws at \(drawn) (ScreenCaptureKit)")
+            let s = SCStream(filter: filter, configuration: cfg, delegate: nil)
             try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
             t0 = CFAbsoluteTimeGetCurrent()
             config = cfg

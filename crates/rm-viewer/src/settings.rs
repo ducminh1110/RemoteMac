@@ -36,7 +36,10 @@ pub const FPS: [u32; 5] = [30, 60, 90, 120, 144];
 pub const BITRATES: [u32; 8] = [0, 5, 10, 20, 30, 50, 80, 120];
 pub const QUALITY: [&str; 4] = ["Ultra — sharpest (apps drawn at 2x, scaled down here)", "Native (this screen's pixels)", "Balanced (1 pixel per Mac point)", "Fast (lower resolution, least bandwidth)"];
 pub const DESKTOP_SCALES: [&str; 2] = ["1x (lighter on the connection)", "2x (Retina, sharpest)"];
-pub const WORKSPACES: usize = 4;
+pub const WORKSPACES: usize = 5;
+/// The last Mac screen size: this screen's own pixels at 1x, shown 1:1 (as Sunshine streams a
+/// screen; the sharpest there is, the smallest text). App windows keep the "most space" layout.
+pub const PIXEL_FOR_PIXEL: u8 = WORKSPACES as u8 - 1;
 pub const DECODERS: [&str; 3] = ["Auto (GPU when it works)", "GPU (hardware)", "CPU (software)"];
 
 fn path() -> std::path::PathBuf {
@@ -91,7 +94,7 @@ impl Settings {
         if px.0 <= 0 || px.1 <= 0 || (self.quality != 0 && display_scale < 1.25) || self.quality >= 2 {
             return String::new();
         }
-        let (w, h) = self.workspace_points(px, display_scale);
+        let (w, h) = Self::points_at(px, display_scale, self.workspace.min(PIXEL_FOR_PIXEL - 1));
         let s = if self.quality == 0 || display_scale >= 1.5 { 2 } else { 1 };
         format!("{},{},{s}", w * s, h * s)
     }
@@ -103,7 +106,10 @@ impl Settings {
     }
 
     pub fn points_at(px: (i32, i32), display_scale: f64, step: u8) -> (u32, u32) {
-        let s = display_scale.max(1.0) / (1.0 + step.min(WORKSPACES as u8 - 1) as f64 / 8.0);
+        if step >= PIXEL_FOR_PIXEL {
+            return ((px.0.max(2) as u32) & !1, (px.1.max(2) as u32) & !1);
+        }
+        let s = display_scale.max(1.0) / (1.0 + step as f64 / 8.0);
         let pts = |v: i32| (((v.max(1) as f64 / s) / 2.0).round() as u32 * 2).max(2);
         (pts(px.0), pts(px.1))
     }
@@ -113,7 +119,8 @@ impl Settings {
     /// the Mac streams it at exactly that many pixels.
     pub fn desktop_screen(&self, px: (i32, i32), display_scale: f64) -> String {
         let (w, h) = self.workspace_points(px, display_scale);
-        let s = if self.desktop_2x { 2 } else { 1 };
+        // pixel for pixel: this screen's pixels at 1x, nothing scaled anywhere
+        let s = if self.desktop_2x && self.workspace < PIXEL_FOR_PIXEL { 2 } else { 1 };
         format!("{},{},{s}", w * s, h * s)
     }
 
@@ -154,5 +161,9 @@ mod tests {
         assert_eq!(Settings::default().desktop_screen((1920, 1200), 1.5), "2880,1800,2");
         assert_eq!(Settings::default().app_screen((1920, 1200), 1.5), "2880,1800,2");
         assert_eq!(Settings::points_at((1920, 1200), 1.5, 2), (1600, 1000));
+        // pixel for pixel: the laptop's own pixels at 1x (apps keep the most-space layout)
+        let pfp = Settings { workspace: PIXEL_FOR_PIXEL, ..Default::default() };
+        assert_eq!(pfp.desktop_screen((1920, 1200), 1.5), "1920,1200,1");
+        assert_eq!(pfp.app_screen((1920, 1200), 1.5), Settings { workspace: 3, ..Default::default() }.app_screen((1920, 1200), 1.5));
     }
 }
