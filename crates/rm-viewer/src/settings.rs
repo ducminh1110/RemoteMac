@@ -10,7 +10,7 @@ pub struct Settings {
     pub fps: u32,
     /// fixed bitrate in Mbit/s (the Mac never goes above it); 0: Auto (adapts to the link)
     pub bitrate_mbps: u32,
-    /// 0 Ultra (apps and the Mac Desktop drawn at 2x on the Mac, scaled down here), 1 Native (pixels as this
+    /// 0 Ultra (app windows drawn at 2x on the Mac, scaled down here), 1 Native (pixels as this
     /// screen's), 2 Balanced (1 px per Mac point), 3 Fast
     pub quality: u8,
     /// 0 Auto, 1 GPU, 2 CPU (Windows' software decoder)
@@ -19,17 +19,20 @@ pub struct Settings {
     pub pacing: bool,
     /// this PC's pointer over the picture too (the Mac's is in the video)
     pub local_cursor: bool,
+    /// Mac Desktop drawn at 2 pixels per point and streamed so (scaled down here), else 1
+    pub desktop_2x: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { fps: 60, bitrate_mbps: 0, quality: 0, decoder: 0, pacing: false, local_cursor: false }
+        Self { fps: 60, bitrate_mbps: 0, quality: 0, decoder: 0, pacing: false, local_cursor: false, desktop_2x: true }
     }
 }
 
 pub const FPS: [u32; 5] = [30, 60, 90, 120, 144];
 pub const BITRATES: [u32; 8] = [0, 5, 10, 20, 30, 50, 80, 120];
-pub const QUALITY: [&str; 4] = ["Ultra — sharpest (Mac drawn at 2x, scaled down here)", "Native (this screen's pixels)", "Balanced (1 pixel per Mac point)", "Fast (lower resolution, least bandwidth)"];
+pub const QUALITY: [&str; 4] = ["Ultra — sharpest (apps drawn at 2x, scaled down here)", "Native (this screen's pixels)", "Balanced (1 pixel per Mac point)", "Fast (lower resolution, least bandwidth)"];
+pub const DESKTOP_SCALES: [&str; 2] = ["1x (one pixel per Mac point, least bandwidth)", "2x (drawn and streamed at 2x, scaled down here)"];
 pub const DECODERS: [&str; 3] = ["Auto (GPU when it works)", "GPU (hardware)", "CPU (software)"];
 
 fn path() -> std::path::PathBuf {
@@ -49,6 +52,7 @@ impl Settings {
             s.decoder = n("decoder").map_or(s.decoder, |x| x.min(2) as u8);
             s.pacing = b("pacing").unwrap_or(s.pacing);
             s.local_cursor = b("local_cursor").unwrap_or(s.local_cursor);
+            s.desktop_2x = b("desktop_2x").unwrap_or(s.desktop_2x);
         }
         s
     }
@@ -56,7 +60,7 @@ impl Settings {
     pub fn save(&self) -> std::io::Result<()> {
         let v = serde_json::json!({
             "fps": self.fps, "bitrate_mbps": self.bitrate_mbps, "sharpness": self.quality,
-            "decoder": self.decoder, "pacing": self.pacing, "local_cursor": self.local_cursor,
+            "decoder": self.decoder, "pacing": self.pacing, "local_cursor": self.local_cursor, "desktop_2x": self.desktop_2x,
         });
         if let Some(d) = path().parent() {
             std::fs::create_dir_all(d)?;
@@ -87,6 +91,15 @@ impl Settings {
         format!("{w},{h},{s}")
     }
 
+    /// The Mac Desktop's display, "W,H,S" (pixels at Mac scale S), for a screen of `px` pixels at
+    /// `display_scale`: this screen's size in points (the UI as large as on this laptop), at 1x
+    /// or 2x as chosen; the Mac streams it at exactly that many pixels.
+    pub fn desktop_screen(&self, px: (i32, i32), display_scale: f64) -> String {
+        let pts = |v: i32| (v.max(1) as f64 / display_scale.max(1.0)).round() as u32;
+        let s = if self.desktop_2x { 2 } else { 1 };
+        format!("{},{},{s}", pts(px.0) * s, pts(px.1) * s)
+    }
+
     /// What the Mac needs to know (`px`: this screen in pixels).
     pub fn message(&self, display_scale: f64, px: (i32, i32)) -> Message {
         Message::StreamSettings { fps: self.fps, bitrate_kbps: (self.bitrate_mbps > 0).then(|| self.bitrate_mbps * 1000), scale: Some(self.scale(display_scale)), screen: Some(self.app_screen(px, display_scale)) }
@@ -115,5 +128,9 @@ mod tests {
         assert_eq!(native.app_screen((1920, 1080), 1.25), "1536,864,1");
         assert_eq!(native.app_screen((2560, 1600), 2.0), "2560,1600,2");
         assert_eq!(Settings { quality: 3, ..Default::default() }.app_screen((2560, 1600), 2.0), "");
+        // the Mac Desktop: the laptop's size in points, at the scale chosen for it
+        assert_eq!(Settings::default().desktop_screen((1920, 1080), 1.25), "3072,1728,2");
+        assert_eq!(Settings { desktop_2x: false, ..Default::default() }.desktop_screen((1920, 1080), 1.25), "1536,864,1");
+        assert_eq!(Settings { desktop_2x: false, ..Default::default() }.desktop_screen((2560, 1600), 2.0), "1280,800,1");
     }
 }

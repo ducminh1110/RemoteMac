@@ -175,6 +175,9 @@ final class WindowStream: NSObject, SCStreamOutput {
 
     /// Set for a whole-display stream (Mac Desktop); `windowID` is then the reserved desktop id.
     let display: CGDirectDisplayID?
+    /// The display's picture size asked for by the client (its Mac Desktop scale, 1x or 2x);
+    /// nil: the usual pixels per point.
+    var pixels: (Int, Int)?
 
     init(windowID: CGWindowID, inset: CGFloat = 0, display: CGDirectDisplayID? = nil, onPacket: @escaping (VideoPacket) -> Void) {
         self.windowID = windowID; self.inset = inset; self.display = display; self.onPacket = onPacket
@@ -185,7 +188,14 @@ final class WindowStream: NSObject, SCStreamOutput {
         if let did = display {
             guard let d = content.displays.first(where: { $0.displayID == did }) else { throw WireError(description: "display \(did) not shareable") }
             let cfg = SCStreamConfiguration()
-            (cfg.width, cfg.height) = capturePixels(CGFloat(d.width), CGFloat(d.height))
+            if let p = pixels, p.0 > 0, p.1 > 0 {
+                let (pw, ph) = p
+                // exactly the size asked for (capped near 4K, which the encoder takes)
+                let k = min(1, (CGFloat(3840 * 2400) / CGFloat(pw * ph)).squareRoot())
+                (cfg.width, cfg.height) = (even(Int((CGFloat(pw) * k).rounded())), even(Int((CGFloat(ph) * k).rounded())))
+            } else {
+                (cfg.width, cfg.height) = capturePixels(CGFloat(d.width), CGFloat(d.height))
+            }
             cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
             cfg.queueDepth = 6; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true // the Mac's pointer is in the picture (as Sunshine); content fills the output at any density

@@ -546,23 +546,15 @@ fn open_settings(owner: Option<HWND>) {
     });
 }
 
-/// "fit=W,H,S" for the Mac Desktop: the monitor the launcher is on, as a Mac display request.
-/// Ultra sharpness: the same size in points (the laptop's scale), laid out at 2x and scaled
-/// down here, as the app windows are.
+/// "fit=W,H,S" for the Mac Desktop: the monitor the launcher is on, in points as on this PC,
+/// at the Mac Desktop scale chosen in Settings (1x or 2x; streamed at exactly that size).
 fn desktop_fit() -> Option<String> {
     let anchor = with_app(|a| a.launcher.as_ref().map(|l| l.hwnd.0 as isize)).flatten().unwrap_or(0);
     let hwnd = hwnd_of(anchor);
     let mon = monitor_rect(hwnd);
     let scale = if anchor != 0 { native::dpi_scale(hwnd) } else { unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem().max(96) as f64 / 96.0 } };
-    let st = crate::settings::Settings::load();
-    if st.quality == 0 {
-        let ultra = st.app_screen((mon.right - mon.left, mon.bottom - mon.top), scale);
-        if !ultra.is_empty() {
-            return Some(format!("fit={ultra}"));
-        }
-    }
-    let (w, h, s) = chrome::display_request(mon.right - mon.left, mon.bottom - mon.top, scale);
-    (w > 0 && h > 0).then(|| format!("fit={w},{h},{s}"))
+    let (w, h) = (mon.right - mon.left, mon.bottom - mon.top);
+    (w > 0 && h > 0).then(|| format!("fit={}", crate::settings::Settings::load().desktop_screen((w, h), scale)))
 }
 
 /// A Mac window bigger than this monitor's work area is fitted into it, and the Mac app is

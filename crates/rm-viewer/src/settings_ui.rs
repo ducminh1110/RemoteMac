@@ -1,7 +1,7 @@
 //! The Settings window (launcher button, or Ctrl+Alt+Shift+P in any remote window): frame
 //! rate, bitrate, sharpness, decoder, frame pacing, pointer — as Moonlight's settings page.
 
-use crate::settings::{Settings, BITRATES, DECODERS, FPS, QUALITY};
+use crate::settings::{Settings, BITRATES, DECODERS, DESKTOP_SCALES, FPS, QUALITY};
 use std::cell::RefCell;
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::*;
@@ -17,6 +17,7 @@ struct Ui {
     fps: HWND,
     bitrate: HWND,
     quality: HWND,
+    desktop: HWND,
     decoder: HWND,
     pacing: HWND,
     cursor: HWND,
@@ -77,7 +78,7 @@ pub fn show(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: i
     unsafe {
         let s = crate::native::dpi_scale(owner.unwrap_or_default()).max(1.0);
         let px = |v: i32| (v as f64 * s).round() as i32;
-        let Ok(hwnd) = CreateWindowExW(WS_EX_DLGMODALFRAME, CLASS, w!("RemoteMac — Settings"), WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, px(470), px(360), owner, None, Some(hinst), None) else { return };
+        let Ok(hwnd) = CreateWindowExW(WS_EX_DLGMODALFRAME, CLASS, w!("RemoteMac — Settings"), WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, px(470), px(400), owner, None, Some(hinst), None) else { return };
         let font = CreateFontW(-px(14), 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, &HSTRING::from(crate::native::ui_face(400)));
         let (lx, cx, cw) = (px(18), px(150), px(280));
         let mut y = px(18);
@@ -94,6 +95,10 @@ pub fn show(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: i
         let q_items: Vec<String> = QUALITY.iter().map(|x| x.to_string()).collect();
         let quality = combo(hwnd, hinst, cx, y, cw, &q_items, current.quality as usize, font);
         y += row;
+        label(hwnd, hinst, lx, y + px(3), px(130), "Mac Desktop scale", font);
+        let ds_items: Vec<String> = DESKTOP_SCALES.iter().map(|x| x.to_string()).collect();
+        let desktop = combo(hwnd, hinst, cx, y, cw, &ds_items, current.desktop_2x as usize, font);
+        y += row;
         label(hwnd, hinst, lx, y + px(3), px(130), "Video decoder", font);
         let d_items: Vec<String> = DECODERS.iter().map(|x| x.to_string()).collect();
         let decoder = combo(hwnd, hinst, cx, y, cw, &d_items, current.decoder as usize, font);
@@ -104,11 +109,11 @@ pub fn show(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: i
         let cursor = button(hwnd, hinst, lx, y, px(420), "Show the Windows pointer over the picture (Ctrl+Alt+Shift+C)", 201, BS_AUTOCHECKBOX as u32, font);
         SendMessageW(cursor, BM_SETCHECK, Some(WPARAM(current.local_cursor as usize)), None);
         y += px(34);
-        label(hwnd, hinst, lx, y, px(430), "Decoder and frame pacing apply to windows opened from now on.", font);
+        label(hwnd, hinst, lx, y, px(430), "Decoder, pacing and Mac Desktop scale apply to windows opened from now on.", font);
         y += px(30);
         button(hwnd, hinst, px(250), y, px(90), "Save", ID_SAVE, BS_DEFPUSHBUTTON as u32, font);
         button(hwnd, hinst, px(350), y, px(90), "Cancel", ID_CANCEL, 0, font);
-        UI.with(|u| *u.borrow_mut() = Some(Ui { hwnd, fps, bitrate, quality, decoder, pacing, cursor, font, on_save: Box::new(on_save) }));
+        UI.with(|u| *u.borrow_mut() = Some(Ui { hwnd, fps, bitrate, quality, desktop, decoder, pacing, cursor, font, on_save: Box::new(on_save) }));
     }
 }
 
@@ -121,6 +126,7 @@ fn read(u: &Ui) -> Settings {
             bitrate_mbps: BITRATES[sel(u.bitrate).min(BITRATES.len() - 1)],
             quality: sel(u.quality).min(QUALITY.len() - 1) as u8,
             decoder: sel(u.decoder).min(2) as u8,
+            desktop_2x: sel(u.desktop) == 1,
             pacing: checked(u.pacing),
             local_cursor: checked(u.cursor),
         }

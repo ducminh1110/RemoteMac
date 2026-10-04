@@ -369,7 +369,7 @@ func handle(_ m: [String: Any]) {
         send(["type": "app_launched", "application_id": desktopAppID, "pid": 0])
         // "fit=W,H,S": the client's screen (pixels, Mac scale). Like BetterDummy: a virtual display
         // of exactly that size, the Mac's screen mirrored onto it, and that display streamed
-        var fitted: CGDirectDisplayID?
+        var fitted: CGDirectDisplayID?, fittedPixels: (Int, Int)?
         if let fit = (m["arguments"] as? [String])?.first(where: { $0.hasPrefix("fit=") }) {
             let v = fit.dropFirst(4).split(separator: ",").compactMap { Int($0) }
             if v.count == 3 {
@@ -377,6 +377,7 @@ func handle(_ m: [String: Any]) {
                 if let id = displays.ensureMirrored(width: v[0], height: v[1], scale: v[2]) {
                     usleep(300_000) // the window server settles the new layout
                     fitted = id
+                    fittedPixels = (v[0], v[1]) // streamed at the scale the client chose (1x or 2x)
                 } else {
                     log("desktop: no fitted display (mirroring refused); streaming the Mac's own screen")
                 }
@@ -395,6 +396,7 @@ func handle(_ m: [String: Any]) {
                 sender.sendVideo(pkt)
             }
         }
+        ws.pixels = fittedPixels
         ws.setBitrate(sender.bitrate)
         streamsLock.lock(); streams[desktopWindowID] = ws; streamsLock.unlock()
         Task { do { try await ws.start(); log("desktop stream started") } catch { log("desktop stream failed: \(error)")
