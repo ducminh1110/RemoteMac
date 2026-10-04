@@ -73,7 +73,7 @@ final class DisplayManager {
     /// screen would be left mirroring a display that no longer exists). nil if it cannot be done.
     func ensureMirrored(width: Int, height: Int, scale: Int) -> CGDirectDisplayID? {
         lock.lock(); let same = mirrorSpec.map { $0 == (width, height, scale) } ?? false; let id0 = displayID; lock.unlock()
-        if same && id0 != 0 && isMirroredOnto(id0) { return id0 }
+        if same && id0 != 0 && (isMirroredOnto(id0) || CGMainDisplayID() == id0) { return id0 }
         unmirrorDesktop()
         let st = configure(width: width, height: height, scale: scale, forDesktop: true)
         guard st["available"] as? Bool == true else { log("virtual display unavailable: \(st["reason"] ?? "?")"); return nil }
@@ -89,6 +89,13 @@ final class DisplayManager {
             usleep(400_000)
         }
         unmirrorDesktop()
+        // macOS refused the mirroring: the next best is our display as the main one (menu bar,
+        // Dock and new windows on it), the Mac's own screen beside it
+        if makeMain(id) {
+            lock.lock(); mirrorSpec = (width, height, scale); lock.unlock()
+            log("desktop: mirroring refused; virtual display \(id) is the main display instead")
+            return id
+        }
         return nil
     }
 
@@ -116,12 +123,35 @@ final class DisplayManager {
         guard !others.isEmpty else { return false }
         var cfg: CGDisplayConfigRef?
         guard CGBeginDisplayConfiguration(&cfg) == .success else { return false }
-        for d in others { CGConfigureDisplayMirrorOfDisplay(cfg, d, id) }
-        guard CGCompleteDisplayConfiguration(cfg, .forSession) == .success else { CGCancelDisplayConfiguration(cfg); return false }
+        for d in others {
+            let e = CGConfigureDisplayMirrorOfDisplay(cfg, d, id)
+            if e != .success { log("desktop: display \(d) cannot mirror \(id) (\(e.rawValue))") }
+        }
+        let done = CGCompleteDisplayConfiguration(cfg, .forSession)
+        guard done == .success else { log("desktop: mirroring onto \(id) refused (\(done.rawValue))"); CGCancelDisplayConfiguration(cfg); return false }
         usleep(300_000) // the window server applies it
         lock.lock(); mirrored = others; lock.unlock()
         log("desktop: displays \(others) now mirror virtual display \(id) (main display is \(CGMainDisplayID()))")
         return true
+    }
+
+    /// Our display at the origin of the global space: the main display (menu bar and Dock).
+    private func makeMain(_ id: CGDirectDisplayID) -> Bool {
+        if CGMainDisplayID() == id { return true }
+        var cfg: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&cfg) == .success else { return false }
+        // the others to its right, ours at (0, 0)
+        var x = Int32(CGDisplayBounds(id).width)
+        var ids = [CGDirectDisplayID](repeating: 0, count: 16), n: UInt32 = 0
+        CGGetOnlineDisplayList(16, &ids, &n)
+        for d in ids.prefix(Int(n)) where d != id {
+            CGConfigureDisplayOrigin(cfg, d, x, 0); x += Int32(CGDisplayBounds(d).width)
+        }
+        CGConfigureDisplayOrigin(cfg, id, 0, 0)
+        let r = CGCompleteDisplayConfiguration(cfg, .forSession)
+        usleep(300_000)
+        if r != .success { log("desktop: making display \(id) the main one failed (\(r.rawValue))") }
+        return CGMainDisplayID() == id
     }
 
     /// Back to the Mac's own layout.
