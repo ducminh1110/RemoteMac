@@ -452,7 +452,11 @@ func handle(_ m: [String: Any]) {
     case "app_launch":
         let id = m["application_id"] as? String ?? ""
         let r = apps.launch(id: id, args: m["arguments"] as? [String] ?? [])
-        if let pid = r.pid { log("launched \(id) pid=\(pid)"); send(["type": "app_launched", "application_id": id, "pid": Int(pid)]) }
+        if let pid = r.pid {
+            log("launched \(id) pid=\(pid)\(apps.launchedByUs(id) ? "" : " (already open on the Mac)")")
+            if !apps.launchedByUs(id) { tracker.adopt(pid: pid) }
+            send(["type": "app_launched", "application_id": id, "pid": Int(pid)])
+        }
         else if let e = r.err { send(["type": "error", "code": e.0, "message": e.1]) }
     case "app_terminate":
         // quit as Cmd+Q does (the app may ask to save; its sheet shows in the viewer), also apps

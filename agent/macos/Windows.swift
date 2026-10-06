@@ -197,6 +197,20 @@ final class WindowTracker {
     }
 
     func current(_ id: CGWindowID) -> WinInfo? { queue.sync { known[id] } }
+
+    /// An app that was already open on the Mac is now shown on Windows: its windows that existed
+    /// when the agent started (left alone as the user's until now) are reported like new ones.
+    func adopt(pid: pid_t) {
+        queue.async { [self] in
+            let all = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
+            let mine = all.compactMap { w -> CGWindowID? in
+                guard (w[kCGWindowOwnerPID as String] as? Int32) == pid, let n = w[kCGWindowNumber as String] as? UInt32 else { return nil }
+                return CGWindowID(n)
+            }
+            preexisting.subtract(mine)
+            ignored.subtract(mine)
+        }
+    }
     /// Whether the app shows a dialog or panel (a "save changes?" sheet, for one).
     func hasDialog(pid: pid_t) -> Bool { queue.sync { known.values.contains { $0.pid == pid && $0.role != .window && $0.role != .popup } || sheets.values.contains(pid) } }
 

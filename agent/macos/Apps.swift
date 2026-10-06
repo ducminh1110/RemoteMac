@@ -108,7 +108,22 @@ final class AppManager {
         // already open on the Mac (started there, not by us): show that one, never a second copy
         if let bid = d.bundleID, let r = NSRunningApplication.runningApplications(withBundleIdentifier: bid).first(where: { !$0.isTerminated }) {
             adopted[id] = r.processIdentifier
-            r.activate(options: [])
+            // as a click on its Dock icon: shown, its minimized windows back, and an app running
+            // with no window at all asked to open one (the reopen event openApplication sends)
+            r.unhide()
+            let axApp = AXUIElementCreateApplication(r.processIdentifier)
+            var v: CFTypeRef?
+            if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &v) == .success, let wins = v as? [AXUIElement] {
+                for w in wins { AXUIElementSetAttributeValue(w, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
+            }
+            if let bundle = bundlePath(d.executable) {
+                let cfg = NSWorkspace.OpenConfiguration()
+                cfg.activates = true
+                cfg.addsToRecentItems = false
+                NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: bundle), configuration: cfg) { _, _ in }
+            } else {
+                r.activate(options: [.activateIgnoringOtherApps])
+            }
             return (r.processIdentifier, nil)
         }
         // an app bundle opens through LaunchServices, as from the Dock: run as a child of this
