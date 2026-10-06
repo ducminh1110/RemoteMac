@@ -35,9 +35,19 @@ func scanApplications() -> [AppDescriptor] {
     return out.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
 }
 
+/// An app we started: through LaunchServices (as the Dock and Finder open apps), or for a bare
+/// executable (the test app) as a child process.
+enum Launched {
+    case app(NSRunningApplication)
+    case process(Process)
+    var processIdentifier: pid_t { switch self { case .app(let a): return a.processIdentifier; case .process(let p): return p.processIdentifier } }
+    var isRunning: Bool { switch self { case .app(let a): return !a.isTerminated; case .process(let p): return p.isRunning } }
+    var terminationStatus: Int32 { switch self { case .app: return 0; case .process(let p): return p.terminationStatus } }
+}
+
 final class AppManager {
     private var apps: [AppDescriptor]
-    private var running: [String: Process] = [:]
+    private var running: [String: Launched] = [:]
     /// Apps that were already running and that we present rather than spawn (Finder): id -> pid.
     private var adopted: [String: pid_t] = [:]
     private let lock = NSLock()
@@ -101,17 +111,49 @@ final class AppManager {
             r.activate(options: [])
             return (r.processIdentifier, nil)
         }
+        // an app bundle opens through LaunchServices, as from the Dock: run as a child of this
+        // process (its environment, its Terminal as the "responsible" app, no app registration)
+        // sandboxed apps and apps with helper services quit unexpectedly
+        if let bundle = bundlePath(d.executable) {
+            let cfg = NSWorkspace.OpenConfiguration()
+            cfg.arguments = args
+            cfg.activates = true
+            cfg.addsToRecentItems = false
+            cfg.createsNewApplicationInstance = false
+            let done = DispatchSemaphore(value: 0)
+            var launched: NSRunningApplication?, failure: Error?
+            NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: bundle), configuration: cfg) { app, err in
+                launched = app; failure = err; done.signal()
+            }
+            // (the app list stays readable meanwhile: the window tracker asks it many times a second)
+            lock.unlock()
+            let waited = done.wait(timeout: .now() + 20)
+            lock.lock()
+            if waited == .timedOut { return (nil, ("launch_failed", "\(id) did not start in time")) }
+            guard let app = launched else { return (nil, ("launch_failed", "\(failure.map { "\($0)" } ?? "unknown error")")) }
+            running[id] = .app(app)
+            return (app.processIdentifier, nil)
+        }
         let p = Process(); p.executableURL = URL(fileURLWithPath: d.executable); p.arguments = args
         do { try p.run() } catch { return (nil, ("launch_failed", "\(error)")) }
-        running[id] = p
+        running[id] = .process(p)
         return (p.processIdentifier, nil)
     }
 
     func terminate(id: String) -> Bool {
         lock.lock(); let p = running.removeValue(forKey: id); let a = adopted.removeValue(forKey: id); lock.unlock()
         if a != nil { return true }   // never kill an app we did not start
-        guard let proc = p else { return false }
-        proc.terminate(); proc.waitUntilExit()
+        switch p {
+        case .process(let proc)?:
+            proc.terminate(); proc.waitUntilExit()
+        case .app(let app)?:
+            // asked to quit, as Cmd+Q; forced after a while
+            app.terminate()
+            for _ in 0..<30 where !app.isTerminated { usleep(100_000) }
+            if !app.isTerminated { app.forceTerminate() }
+        case nil:
+            return false
+        }
         return true
     }
 
@@ -128,6 +170,12 @@ final class AppManager {
 
     /// The app is gone: forget it.
     func forget(_ id: String) { lock.lock(); running.removeValue(forKey: id); adopted.removeValue(forKey: id); lock.unlock() }
+
+    /// The .app bundle an executable belongs to (…/X.app/Contents/MacOS/X), if any.
+    private func bundlePath(_ exe: String) -> String? {
+        guard let r = exe.range(of: ".app/Contents/MacOS/", options: .backwards) else { return nil }
+        return String(exe[..<r.lowerBound]) + ".app"
+    }
 
     func terminateAll() { for id in Array(running.keys) { _ = terminate(id: id) } }
 }
