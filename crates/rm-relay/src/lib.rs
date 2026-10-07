@@ -328,6 +328,14 @@ fn handle(mut conn: TcpStream, table: Table, failures: Failures, udp: Udp, cfg: 
     }
     let peer = {
         let mut t = table.lock().unwrap();
+        // the same side again with the same token: the earlier one is gone (a Mac that was reached
+        // on its own network meanwhile, or restarted) and this one takes its place
+        if let Some(p) = t.get(&join.session_id) {
+            if p.role == join.role && constant_time_eq(&p.token, &join.token) {
+                let old = t.remove(&join.session_id).unwrap();
+                let _ = reject(old.stream, "replaced");
+            }
+        }
         match t.remove(&join.session_id) {
             Some(p) => {
                 if !constant_time_eq(&p.token, &join.token) || p.role == join.role {
@@ -512,7 +520,8 @@ mod tests {
             let _ = join(&a2, "sess-3", Role::Agent, TOK);
         });
         thread::sleep(Duration::from_millis(100));
-        assert!(join(&addr, "sess-3", Role::Agent, TOK).is_err());
+        // another Mac (another token) cannot take the waiting one's place
+        assert_eq!(join(&addr, "sess-3", Role::Agent, "another-token-0123456789").unwrap_err().to_string(), "ERR session mismatch");
     }
 
     #[test]
@@ -589,6 +598,21 @@ mod tests {
         assert_eq!(agent(Some(&"f".repeat(32))).1, "ERR this ID belongs to another Mac");
         let (_waiting, r) = agent(Some(owner));
         assert_eq!(r, "", "its owner waits for a client");
+    }
+
+    #[test]
+    fn a_returning_mac_takes_its_own_place() {
+        let addr = start(Config::default());
+        let a = addr.clone();
+        let first = thread::spawn(move || join(&a, "again-1", Role::Agent, TOK).map(|_| ()));
+        thread::sleep(Duration::from_millis(100));
+        // the Mac waits again (its first wait is stale): no mismatch, and the old wait ends
+        let a = addr.clone();
+        let second = thread::spawn(move || join(&a, "again-1", Role::Agent, TOK).map(|_| ()));
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(first.join().unwrap().unwrap_err().to_string(), "ERR replaced");
+        assert!(join(&addr, "again-1", Role::Client, TOK).is_ok());
+        assert!(second.join().unwrap().is_ok());
     }
 
     #[test]
