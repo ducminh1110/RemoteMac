@@ -48,16 +48,18 @@ jobs:
             xattr -d com.apple.quarantine macbridge 2>/dev/null; chmod +x macbridge
             ./macbridge --password YOUR-PASSWORD
 
-          It prints:
-            ID session to connect: 123 456 789
-            Password: YOUR-PASSWORD
-          Type both into MacBridge.exe on Windows. The ID stays the same on this Mac.
+          It prints the ID and the password, then keeps running in the background
+          (also after the terminal is closed). Type both into MacBridge.exe on Windows.
+          The ID stays the same on this Mac. Stop it with: ./macbridge --stop
+          Connections are end-to-end encrypted. No log is written unless you add
+          --logs-enabled (log: ~/Library/Logs/MacBridge/macbridge.log).
           On the same network the PC finds this Mac by its ID and connects straight to it;
           from elsewhere it goes through the relay built into this build
           (another one: ./macbridge --relay HOST:PORT --password ...).
           First run: allow Terminal in System Settings > Privacy & Security >
           Screen Recording and Accessibility, then run the command again.
-          Without --password a random password is shown. Ctrl+C stops it.
+          Without --password a random password is shown. --foreground keeps it in the
+          terminal (Ctrl+C stops it). All options: ./macbridge --help
           TXT
           sed -i '' 's/^          //' dist/MacBridge/README.txt
           tar -C dist -czf dist/MacBridge-macos.tar.gz MacBridge
@@ -93,6 +95,7 @@ jobs:
 
           The Mac's apps open as windows here (and in the Start menu while connected);
           "Mac Desktop" shows the whole Mac screen. The last ID is remembered.
+          Connections are end-to-end encrypted. For a log, start MacBridge.exe --logs-enabled.
           "@ -replace '(?m)^          ', '' | Set-Content dist\MacBridge\README.txt
           Compress-Archive -Path dist\MacBridge\* -DestinationPath dist\MacBridge-windows.zip
       - uses: actions/upload-artifact@v4

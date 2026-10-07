@@ -1,10 +1,7 @@
 //! Session rendezvous relay. It pairs one `agent` and one `client` per
 //! session id and then forwards opaque bytes. It never parses application
-//! data, so an end-to-end encrypted layer can sit on top without changes.
-//!
-//! SECURITY STATUS: this transport is plaintext TCP. It is a development
-//! transport only. Before any real use, wrap the relay leg in TLS and put an
-//! end-to-end Noise/QUIC session between client and agent (docs/SPEC.md §7).
+//! data: the two sides encrypt end to end on top (`rm_protocol::secure`), so the
+//! relay only carries ciphertext and never learns the password.
 
 pub mod ids;
 pub mod lan;

@@ -7,7 +7,9 @@ Thanks for helping! Bug reports, fixes and features are all welcome.
 Open an issue with:
 
 - what you did, what you expected, what happened (a screenshot helps a lot);
-- the viewer log, `%APPDATA%\RemoteMac\viewer.log`, and the Mac host's terminal output;
+- logs from both sides: start `MacBridge.exe --logs-enabled` (log in
+  `%APPDATA%\RemoteMac\viewer.log`) and `./macbridge --foreground --logs-enabled ...` on the Mac
+  (log in the terminal);
 - Windows version and GPU, macOS version and Mac model, and whether the connection was on the
   same network or through a relay.
 
@@ -34,9 +36,10 @@ Remove IDs, passwords and relay keys from logs before posting them.
 
 ## Where things are
 
-See *Project layout* in the [README](README.md). The wire protocol lives in
-`crates/rm-protocol`; the Swift host mirrors it in `agent/macos/Wire.swift`, so keep the two in
-step (shared test vectors catch drift).
+See *Project layout* in the [README](README.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The wire protocol and the encryption live in `crates/rm-protocol`; the Swift host mirrors them
+in `agent/macos/Wire.swift` and `agent/macos/Secure.swift`, so keep the two in step (shared test
+vectors, checked by the macOS end-to-end test, catch drift).
 
 ## License
 

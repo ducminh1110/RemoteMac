@@ -27,6 +27,7 @@ Desktop, streamed the way Moonlight streams a game.
 - [Building from source](#building-from-source)
 - [Using MacBridge](#using-macbridge)
 - [Security](#security)
+- [Documentation](#documentation)
 - [Project layout](#project-layout)
 - [Contributing](#contributing)
 - [License and credits](#license-and-credits)
@@ -51,6 +52,10 @@ Desktop, streamed the way Moonlight streams a game.
 - **Clipboard sync** of text and images in both directions, with keyboard translation
   (Ctrl ⇄ ⌘) and Unicode text input.
 - **Launch any app** in `/Applications`. Apps already running are adopted.
+- **End-to-end encrypted.** A password-authenticated key exchange, then ChaCha20-Poly1305 on
+  everything. A relay only carries ciphertext and never learns anything about the password.
+- **Quiet by default.** The Mac app shows its ID and password, then runs in the background.
+  Neither side writes logs unless you ask for them with `--logs-enabled`.
 
 ## How it works
 
@@ -71,9 +76,12 @@ Desktop, streamed the way Moonlight streams a game.
   reports windows, menus and apps.
 - **Viewer (Windows):** one native top-level window per Mac window, drawn with D3D11 or
   DirectComposition. It sends input back and mirrors the clipboard.
-- **Relay:** pairs a viewer with a Mac by session ID and forwards bytes. It never needs to
-  understand the stream. Both sides only connect *out*, so the Mac and the PC open no ports
-  to the internet.
+- **Relay:** pairs a viewer with a Mac by session ID and forwards bytes it cannot read. It
+  also hands out unique Mac IDs. Both sides only connect *out*, so the Mac and the PC open no
+  ports to the internet.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the protocol, the encryption and the
+connection paths in detail.
 
 ## Quick start (release builds)
 
@@ -100,14 +108,25 @@ xattr -d com.apple.quarantine macbridge 2>/dev/null; chmod +x macbridge
   MacBridge is ready — connect from Windows with:
     ID session to connect: 123 456 789
     Password: choose-a-password
+    Reachable on this network directly, and from anywhere through the relay …
+    Connections are end-to-end encrypted.
+
+  Running in the background (pid 4242). Stop it with: ./macbridge --stop
 ```
 
-The first time, allow your terminal in **System Settings → Privacy & Security → Screen
-Recording** and **Accessibility**, then run the command again. The ID stays the same on that
-Mac.
+It returns you to the prompt and keeps running in the background, even after the terminal
+window is closed. Stop it with `./macbridge --stop`. Use `--foreground` to keep it in the
+terminal instead.
+
+The first time, macOS asks to allow your terminal app under **System Settings → Privacy &
+Security → Screen Recording** and **Accessibility**. Allow both, then run the command again.
+The ID stays the same on that Mac.
 
 **2. On Windows:** run `MacBridge.exe`, type the ID and the password, and press **Connect**.
 Pick an app from the launcher, or choose **Mac Desktop**.
+
+The [user guide](docs/USER-GUIDE.md) covers everything else: options, settings, shortcuts,
+logs, troubleshooting and uninstalling.
 
 ## Connecting: same network or through a relay
 
@@ -224,42 +243,62 @@ publishes a GitHub release with all three packages.
 | Copy / paste | Ctrl+C / Ctrl+V. The clipboard syncs both ways, including images |
 | Close an app | close its last window (quits the app on the Mac) |
 
-The viewer writes its log to `%APPDATA%\RemoteMac\viewer.log`. The Mac host logs to stderr.
+**Logs** are off by default. Start either side with `--logs-enabled` to get one:
+
+| Side | Log |
+|---|---|
+| Windows | `MacBridge.exe --logs-enabled` → `%APPDATA%\RemoteMac\viewer.log` |
+| Mac, in the background | `./macbridge --password … --logs-enabled` → `~/Library/Logs/MacBridge/macbridge.log` |
+| Mac, `--foreground` | written to the terminal (stderr) |
 
 ## Security
 
-Please read this before exposing a Mac to the internet.
+Everything between the viewer and the Mac is **end-to-end encrypted**, whether it goes through a
+relay or straight over the local network:
 
-- **Password never leaves the machines.** Both sides derive a session token from the ID and
-  the password (`SHA-256("remotemac/v1:ID:PASSWORD")`). The relay and the Mac only compare
-  tokens. On the LAN, the Mac locks out further attempts for a minute after 5 wrong
-  passwords.
-- **Relay admission key.** A relay with `RM_RELAY_KEY` set refuses clients without the key.
-- **Not yet end-to-end encrypted.** The main session link (control, input, clipboard, app
-  window video) is currently **not encrypted**. The Mac Desktop's GameStream control and
-  input are AES-encrypted, as in Moonlight. Until encryption lands, use MacBridge on networks
-  you trust, or through a relay you run yourself. Use a strong password, and stop the host
-  (Ctrl+C) when you are not using it. Encryption of the session link (Noise/TLS) is the top
-  item on the roadmap.
-- The host can see and control everything the logged-in Mac user can. Treat the password
-  like that account's password.
+- **Password-authenticated key exchange.** After connecting, the two sides run a CPace-style
+  PAKE on P-256. The password is never sent, not even as a hash. A relay, or anyone watching
+  the network, sees nothing it could test passwords against offline. Each wrong guess costs a
+  connection, and the Mac locks out for a minute after five in a row. Keys are fresh for every
+  session (forward secrecy).
+- **Encrypted transport.** The session stream and every UDP datagram of the session (video,
+  input, reports, the Mac Desktop's GameStream tunnel) are protected with ChaCha20-Poly1305.
+  Tampered data is rejected.
+- **What a relay sees:** the session ID, IP addresses, and the size and timing of the traffic.
+  Nothing else. A relay with `RM_RELAY_KEY` set also refuses clients without the key.
+- **Limits.** The protocol has not had an independent audit. The release binaries are not
+  notarized/signed by a developer account. The Mac app can see and control everything the
+  logged-in user can, so choose a strong password and stop it (`--stop`) when you do not need
+  it.
 
-Found a vulnerability? See [SECURITY.md](SECURITY.md).
+Details are in [SECURITY.md](SECURITY.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Found a vulnerability? Please report it privately as described in SECURITY.md.
+
+## Documentation
+
+| Guide | For |
+|---|---|
+| [User guide](docs/USER-GUIDE.md) | installing, connecting, options, shortcuts, logs, troubleshooting |
+| [Relay setup](deploy/RELAY-SETUP.md) | running your own relay server |
+| [Architecture](docs/ARCHITECTURE.md) | how it works: connection paths, protocol, encryption |
+| [Security policy](SECURITY.md) | the security model and reporting vulnerabilities |
+| [Contributing](CONTRIBUTING.md) | building, testing and sending changes |
 
 ## Project layout
 
 | Path | Contents |
 |---|---|
-| `agent/macos/` | the Mac host (Swift): capture, encode, input, windows, apps, LAN listener, virtual displays |
+| `agent/macos/` | the Mac host (Swift): capture, encode, input, windows, apps, LAN listener, encryption, background mode |
 | `crates/rm-viewer/` | the Windows viewer (Rust, Win32, D3D11, DirectComposition, Media Foundation) |
 | `crates/rm-relay/` | the relay server, and LAN discovery (`lan.rs`) |
-| `crates/rm-protocol/` | wire protocol, framing, sessions, UDP/FEC |
+| `crates/rm-protocol/` | wire protocol, framing, sessions, UDP/FEC, end-to-end encryption (`secure.rs`) |
 | `crates/rm-gamestream/`, `crates/moonlight-sys/` | GameStream host (ported from Sunshine) and the Moonlight client core |
 | `crates/rm-client/` | command-line client used by end-to-end tests |
 | `crates/rm-decode/`, `rm-core/`, `rm-agent/`, `rm-fakeagent/` | decoder, shared logic, test agents |
 | `scripts/`, `.github/workflows/` | builds, end-to-end tests on real macOS runners, releases |
 | `deploy/` | relay installer and guide |
-| `docs/SPEC.md` | original design notes |
+| `docs/USER-GUIDE.md`, `docs/ARCHITECTURE.md` | user guide; architecture, protocol and encryption |
+| `docs/SPEC.md` | the original design notes (historical, in Vietnamese) |
 
 ## Contributing
 

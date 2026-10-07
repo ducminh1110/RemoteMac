@@ -7,7 +7,7 @@ fn main() {
         std::process::exit(1)
     });
     let key = rm_relay::env_key();
-    eprintln!("rm-relay listening on {addr} (plaintext transport; admission key {})", if key.is_some() { "required" } else { "off" });
+    eprintln!("rm-relay listening on {addr} (sessions are end-to-end encrypted by the two sides; admission key {})", if key.is_some() { "required" } else { "off" });
     let throttle_kbps = std::env::var("RM_RELAY_THROTTLE_KBPS").ok().and_then(|v| v.parse().ok());
     if let Some(k) = throttle_kbps {
         eprintln!("test mode: each direction limited to {k} kbit/s");

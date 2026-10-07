@@ -18,8 +18,9 @@ broadcast (port 7471) and connects straight to it.
 | `RM_RELAY_KEY` (admission key) | the server and every machine allowed to use it | the relay refuses anyone without it |
 | ID + password | the Mac and you | pairs the right PC with the right Mac; only a matching password proof is let through |
 
-> The session link is not yet end-to-end encrypted (see *Security* in the README). Run your own
-> relay, keep the key private, and never commit it: on GitHub keep it in Actions secrets only.
+> Sessions are end-to-end encrypted: the relay only carries ciphertext and never learns the
+> password. It does see who connects to which ID and how much traffic flows. Keep the admission
+> key private and never commit it; on GitHub keep it in Actions secrets only.
 
 ---
 
