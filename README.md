@@ -228,7 +228,8 @@ builds that connect over the internet without typing a relay, set these at build
 | `RM_RELAY_KEY` / `RM_BUILD_RELAY_KEY` | viewer / Mac host | relay admission key built in |
 
 The **Release builds** workflow (`.github/workflows/release.yml`) does exactly this, using
-the repository variable `RM_DEFAULT_RELAY` and the secret `RM_RELAY_KEY`. Pushing a `v*` tag
+the repository variable `RM_DEFAULT_RELAY` and the secret `RM_RELAY_KEY`. Pushing a version tag
+(`1.0.0` or `v1.0.0`), or running the workflow by hand with a version, runs the tests and
 publishes a GitHub release with all three packages.
 
 ## Using MacBridge
