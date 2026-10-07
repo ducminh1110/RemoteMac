@@ -997,8 +997,11 @@ mod display_tests {
 pub mod session {
     use sha2::{Digest, Sha256};
 
-    /// Default public relay.
-    pub const DEFAULT_RELAY: &str = "remotemac.mooo.com:7470";
+    /// The relay this build uses when none is given: none in the source; a distribution sets one
+    /// at build time (`RM_DEFAULT_RELAY=host:port cargo build`), as the official releases do.
+    pub fn default_relay() -> Option<&'static str> {
+        option_env!("RM_DEFAULT_RELAY").filter(|r| !r.trim().is_empty())
+    }
 
     /// "123 456 789", "123-456-789" -> "123456789"; None unless it is 9 digits.
     pub fn normalize_id(id: &str) -> Option<String> {

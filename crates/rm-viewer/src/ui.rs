@@ -31,7 +31,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 pub struct Options {
-    pub relay: String,
+    /// relay server (None: only a Mac on this network can be reached)
+    pub relay: Option<String>,
     pub session: String,
     pub token: String,
     /// Ask for the Mac's ID and password in a window (session/token are derived from them).
@@ -268,6 +269,7 @@ pub fn run(opts: Options) -> i32 {
         }
         crate::splash::register(hinst);
         crate::settings_ui::register(hinst);
+        crate::navball::register(hinst, ball_menu);
         let controller = match CreateWindowExW(WINDOW_EX_STYLE(0), w!("RmController"), w!("rm-controller"), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(hinst), None) {
             Ok(h) => h,
             Err(e) => {
@@ -297,12 +299,11 @@ pub fn run(opts: Options) -> i32 {
         let mut opts = opts;
         let (link, rx) = if opts.prompt {
             // ID + password window; it connects in the background and shows why an attempt failed
-            let relay = opts.relay.clone();
             let app = opts.app.clone();
             let id = crate::connect::last_id();
-            let got = crate::connect::connect_window(id.as_deref(), None, |typed, password| {
+            let got = crate::connect::connect_window(id.as_deref(), None, |typed, password, relay| {
                 let (session, token) = (rm_protocol::session::relay_session(typed), rm_protocol::session::token(typed, password));
-                net::connect_with(&relay, &session, &token, app.as_deref(), false, wake)
+                net::connect_with(Some(relay).filter(|r| !r.trim().is_empty()), &session, &token, app.as_deref(), false, wake)
                     .map(|x| (x, rm_protocol::session::display_id(typed)))
                     .map_err(|e| {
                         eprintln!("connect failed: {e}");
@@ -313,7 +314,7 @@ pub fn run(opts: Options) -> i32 {
             opts.session = shown_id;
             x
         } else {
-            match net::connect(&opts.relay, &opts.session, &opts.token, opts.app.as_deref(), wake) {
+            match net::connect(opts.relay.as_deref(), &opts.session, &opts.token, opts.app.as_deref(), wake) {
                 Ok(x) => x,
                 Err(e) => {
                     eprintln!("connect failed: {e}");
@@ -1352,8 +1353,11 @@ fn toggle_fullscreen(frame: HWND) {
             layout(frame);
             if !desktop {
                 with_app(|a| a.link.send(&Message::WindowFullscreen { window_id: id, on: true }));
+            } else {
+                crate::navball::show(frame); // the Mac Desktop: a navigation ball, no bar at the top edge
             }
         } else {
+            crate::navball::hide(frame);
             let mut from = RECT::default();
             let _ = GetWindowRect(frame, &mut from);
             with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).map(|r| { r.reveal = true }));
@@ -1374,7 +1378,58 @@ fn toggle_fullscreen(frame: HWND) {
     }
 }
 
-/// In fullscreen the bar slides in while the pointer is at the top edge, as the Mac's menu bar does.
+/// The navigation ball's menu (Mac Desktop in fullscreen), opened beside the ball at `at`.
+fn ball_menu(frame: HWND, at: POINT) {
+    const EXIT: u32 = 1;
+    const MINIMIZE: u32 = 2;
+    const SETTINGS: u32 = 3;
+    const POINTER: u32 = 4;
+    const CLOSE: u32 = 5;
+    unsafe {
+        let Ok(m) = CreatePopupMenu() else { return };
+        let pointer = local_cursor().load(std::sync::atomic::Ordering::Relaxed);
+        let _ = AppendMenuW(m, MF_STRING, EXIT as usize, w!("Exit full screen\tF11"));
+        let _ = AppendMenuW(m, MF_STRING, MINIMIZE as usize, w!("Minimize"));
+        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(m, MF_STRING | if pointer { MF_CHECKED } else { MF_UNCHECKED }, POINTER as usize, w!("Show this PC's pointer\tCtrl+Alt+Shift+C"));
+        let _ = AppendMenuW(m, MF_STRING, SETTINGS as usize, w!("Settings…\tCtrl+Alt+Shift+P"));
+        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(m, MF_STRING, CLOSE as usize, w!("Disconnect Mac Desktop"));
+        let side = if crate::navball::opens_left(frame, at) { TPM_RIGHTALIGN } else { TPM_LEFTALIGN };
+        let _ = SetForegroundWindow(frame);
+        let cmd = TrackPopupMenuEx(m, (side | TPM_TOPALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON).0, at.x, at.y, frame, None).0 as u32;
+        let _ = DestroyMenu(m);
+        match cmd {
+            EXIT => toggle_fullscreen(frame),
+            MINIMIZE => { let _ = ShowWindow(frame, SW_MINIMIZE); }
+            SETTINGS => open_settings(Some(frame)),
+            POINTER => set_local_pointer(!pointer),
+            CLOSE => { let _ = PostMessageW(Some(frame), WM_CLOSE, WPARAM(0), LPARAM(0)); }
+            _ => {}
+        }
+    }
+}
+
+/// This PC's pointer over the picture on or off (kept for next time; the Mac leaves its own
+/// pointer out of the video while this one shows).
+fn set_local_pointer(on: bool) {
+    local_cursor().store(on, std::sync::atomic::Ordering::Relaxed);
+    unsafe {
+        let _ = SetCursor(if on { LoadCursorW(None, IDC_ARROW).ok() } else { None });
+    }
+    eprintln!("local pointer over the picture: {}", if on { "shown" } else { "hidden (the Mac's pointer is in the video)" });
+    let mut st = crate::settings::Settings::load();
+    st.local_cursor = on;
+    let _ = st.save();
+    with_app(|a| a.link.send(&st.message(net::display_scale(), net::screen_px())));
+}
+
+fn is_desktop(frame: HWND) -> bool {
+    with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.app == DESKTOP_APP)).flatten().unwrap_or(false)
+}
+
+/// In fullscreen the bar slides in while the pointer is at the top edge, as the Mac's menu bar does
+/// (not on the Mac Desktop: its own menu bar is there; it has the navigation ball instead).
 fn set_reveal(frame: HWND, reveal: bool) {
     let changed = with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).and_then(|r| (r.fullscreen && r.reveal != reveal).then(|| r.reveal = reveal))).flatten().is_some();
     if changed {
@@ -2003,7 +2058,7 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         WM_ERASEBKGND => LRESULT(1),
         WM_MOUSEMOVE => {
             let (x, y) = lp_xy(lp);
-            if is_fullscreen(frame) {
+            if is_fullscreen(frame) && !is_desktop(frame) {
                 // pointer at the top edge: the bar slides in; leaving it: it goes again
                 let revealed = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.reveal)).flatten().unwrap_or(false);
                 if !revealed && y <= 1 {
@@ -2078,14 +2133,7 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             // Ctrl+Alt+Shift+C: this PC's pointer over the picture on/off, as in Moonlight
             if vk == 'C' as u32 && mods.ctrl && mods.alt && mods.shift {
                 if down {
-                    let on = !local_cursor().fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
-                    let _ = SetCursor(if on { LoadCursorW(None, IDC_ARROW).ok() } else { None });
-                    eprintln!("local pointer over the picture: {}", if on { "shown" } else { "hidden (the Mac's pointer is in the video)" });
-                    // the Mac leaves its own pointer out while this one shows (kept for next time)
-                    let mut st = crate::settings::Settings::load();
-                    st.local_cursor = on;
-                    let _ = st.save();
-                    with_app(|a| a.link.send(&st.message(net::display_scale(), net::screen_px())));
+                    set_local_pointer(!local_cursor().load(std::sync::atomic::Ordering::Relaxed));
                 }
                 return LRESULT(0);
             }

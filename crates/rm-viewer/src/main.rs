@@ -9,7 +9,9 @@ fn main() {
         eprintln!("usage: RemoteMac.exe                      (asks for the Mac's ID and password)\n       RemoteMac.exe --id 123456789 --password PASS\n       RM_SESSION_TOKEN=.. RemoteMac.exe --session NAME   (legacy)\n  [--relay HOST:PORT] [--app testapp] [--raw-ctrl] [--no-clipboard] [--renderer d3d11|gdi] [--mac-file-panel] [--no-shortcuts] [--smoke] [--showcase DIR --apps xcode,textedit --settle SECS --type TEXT]");
         std::process::exit(0)
     }
-    let relay = get("--relay").or_else(|| std::env::var("RM_RELAY").ok().filter(|r| !r.is_empty())).unwrap_or_else(|| rm_protocol::session::DEFAULT_RELAY.into());
+    // a Mac on this network is found by its ID; for one elsewhere: --relay, $RM_RELAY, the relay
+    // built into this build (none in the source), or what the connect window is given
+    let relay = get("--relay").or_else(|| std::env::var("RM_RELAY").ok().filter(|r| !r.is_empty())).or_else(|| rm_protocol::session::default_relay().map(String::from));
     // --session (legacy, token from RM_SESSION_TOKEN) | --id + --password | the connect window
     let (session, token, prompt) = match (get("--session"), get("--id"), get("--password").or_else(|| std::env::var("RM_PASSWORD").ok())) {
         (Some(s), _, _) => (s, std::env::var("RM_SESSION_TOKEN").unwrap_or_default(), false),
@@ -34,7 +36,7 @@ fn main() {
                 rm_viewer::native::message_box("MacBridge", &msg);
             }
         }));
-        eprintln!("RemoteMac viewer {} starting (relay {relay})", env!("CARGO_PKG_VERSION"));
+        eprintln!("MacBridge {} starting (relay {})", env!("CARGO_PKG_VERSION"), relay.as_deref().unwrap_or("none: this network only"));
         let opts = rm_viewer::ui::Options { relay, session, token, prompt: prompt && !has("--smoke") && !has("--showcase"), app: get("--app"), ctrl_as_command: !has("--raw-ctrl"), smoke: has("--smoke"), clipboard: !has("--no-clipboard"), d3d: get("--renderer").as_deref() != Some("gdi"), windows_file_picker: !has("--mac-file-panel") && !has("--showcase"), shortcuts: !has("--no-shortcuts"),
             showcase: get("--showcase").map(|dir| rm_viewer::ui::ShowcaseOptions {
                 apps: get("--apps").unwrap_or_else(|| "xcode".into()).split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),

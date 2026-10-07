@@ -24,7 +24,8 @@ while let a = argv.next() {
     }
 }
 let env = ProcessInfo.processInfo.environment
-let relayAddr = relayArg ?? env["RM_RELAY"] ?? defaultRelay
+// no relay: reachable from this network only (the viewer finds the Mac by its ID there)
+let relayAddr: String? = [relayArg, env["RM_RELAY"], defaultRelay].compactMap { $0?.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty }
 let sessionID: String, token: String
 if let s = sessionArg {
     guard let t = env["RM_SESSION_TOKEN"] else { fail(usage) }
@@ -39,10 +40,14 @@ if let s = sessionArg {
     sessionID = relaySession(id: id); token = sessionToken(id: id, password: password)
     if env["RM_QUIET_BANNER"] == nil {
         print("")
-        print("  RemoteMac is ready — connect from Windows with:")
+        print("  MacBridge is ready — connect from Windows with:")
         print("    ID session to connect: \(displayID(id))")
         print("    Password: \(password)")
-        print("  (relay \(relayAddr); Ctrl+C to stop)")
+        if let r = relayAddr {
+            print("  (on this network directly, from elsewhere through the relay \(r); Ctrl+C to stop)")
+        } else {
+            print("  (on this network only; to be reached from elsewhere, start with --relay HOST:PORT; Ctrl+C to stop)")
+        }
         print("")
         fflush(stdout)
         setenv("RM_QUIET_BANNER", "1", 1) // printed once, not again after each session
@@ -71,16 +76,78 @@ func probeCapabilities() -> [String: Any] {
 }
 
 // ---- connect + handshake ------------------------------------------------------------------------
-let conn: Conn
-do { conn = try Conn.connect(hostPort: relayAddr) } catch {
-    log("relay \(relayAddr) not reachable (\(error)); retrying in 5 s"); restartForNextClient(after: 5)
+/// The first viewer to arrive, on this network (straight to our port) or through the relay;
+/// whichever comes first, the other way is closed.
+final class ClientRace {
+    private let lock = NSLock()
+    private let done = DispatchSemaphore(value: 0)
+    private var winner: Conn?
+    /// the winner came straight over the local network
+    private(set) var local = false
+    /// a relay connection still waiting for its client
+    private var pending: Conn?
+    static let lan = "on this network"
+    var taken: Bool { lock.lock(); defer { lock.unlock() }; return winner != nil }
+    func waiting(_ c: Conn?) { lock.lock(); pending = c; lock.unlock() }
+    /// `c` is the connection taken, unless another came first (then it is closed).
+    func offer(_ c: Conn, _ how: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard winner == nil else { close(c.fd); return }
+        winner = c; local = how == ClientRace.lan; log("client connected (\(how))"); done.signal()
+    }
+    func wait() -> Conn {
+        done.wait()
+        lock.lock(); defer { lock.unlock() }
+        // a relay join still waiting is dropped (under the lock: its fd is still open)
+        if let p = pending, p !== winner { Darwin.shutdown(p.fd, SHUT_RDWR) }
+        return winner!
+    }
 }
-log("relay joined, session=\(sessionID) (token not logged); waiting for a client")
-do { try joinRelay(conn, session: sessionID, token: token) } catch {
-    // nobody came within the relay's wait (or the relay refused): wait again
-    log("\(error); waiting again"); restartForNextClient(after: 2)
+
+func waitForClient() -> (Conn, local: Bool) {
+    let lan = env["RM_NO_LAN"] == nil && sessionArg == nil ? LanListener(session: sessionID) : nil
+    if let l = lan { log("on this network at port \(l.tcpPort) (found by the viewer through UDP \(lanPort))") }
+    guard lan != nil || relayAddr != nil else { fail("no relay given and the local network port is unavailable: start with --relay HOST:PORT") }
+    let race = ClientRace()
+    if let relay = relayAddr {
+        let lanToo = lan != nil
+        Thread {
+            var announced = false
+            while !race.taken {
+                let c: Conn
+                do { c = try Conn.connect(hostPort: relay) } catch {
+                    // without the LAN as well, nothing can come: start over as before
+                    if !lanToo { log("relay \(relay) not reachable (\(error)); retrying in 5 s"); restartForNextClient(after: 5) }
+                    if !announced { log("relay \(relay) not reachable (\(error)); still reachable on this network, retrying") }
+                    announced = true; sleep(5); continue
+                }
+                if race.taken { close(c.fd); return }
+                race.waiting(c)
+                if !announced { log("relay \(relay) joined, session=\(sessionID) (token not logged); waiting for a client") }
+                announced = true
+                do { try joinRelay(c, session: sessionID, token: token) } catch {
+                    race.waiting(nil); close(c.fd)
+                    if race.taken { return }
+                    // nobody came within the relay's wait (or the relay refused): wait again
+                    if !lanToo { log("\(error); waiting again"); restartForNextClient(after: 2) }
+                    log("relay: \(error); waiting again"); sleep(2); continue
+                }
+                race.waiting(nil)
+                race.offer(c, "through the relay")
+                return
+            }
+        }.start()
+    } else {
+        log("waiting for a client on this network (no relay)")
+    }
+    if let l = lan {
+        Thread { if let c = l.accept(token: token) { race.offer(c, ClientRace.lan) } }.start()
+    }
+    let c = race.wait()
+    lan?.close() // the LAN port closes once a client is in
+    return (c, race.local)
 }
-log("client connected")
+let (conn, cameLocally) = waitForClient()
 
 func readJSON() throws -> [String: Any]? {
     guard let (_, payload) = try conn.readFrame() else { return nil }
@@ -142,7 +209,9 @@ sender.onBitrate = { b in
     for ws in all { ws.setBitrate(b) }
 }
 // video over UDP + FEC beside the TCP connection (RM_NO_UDP=1: TCP only)
-if env["RM_NO_UDP"] == nil, let u = UdpLink(hostPort: relayAddr, session: sessionID, token: token, key: relayKey()) {
+// (with the client on this network, or no relay, a port that ignores it stands in for the
+// relay: the direct path comes from the offer)
+if env["RM_NO_UDP"] == nil, let u = UdpLink(hostPort: cameLocally ? "127.0.0.1:9" : relayAddr ?? "127.0.0.1:9", session: sessionID, token: token, key: relayKey()) {
     sender.udp = u
     u.requestKeyframe = { wid in sender.requestKeyframe?(wid) }
     u.onAlive = { up in

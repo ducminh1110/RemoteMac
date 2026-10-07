@@ -252,6 +252,10 @@ pub fn friendly_error(e: &str) -> String {
         "The server is busy. Try again shortly."
     } else if e.contains("handshake") {
         "Connected, but the Mac did not complete the handshake. Update remotemac on the Mac."
+    } else if e.contains("wrong password") {
+        "Wrong password."
+    } else if e.contains("not found on this network") {
+        return e.to_string();
     } else {
         return format!("Cannot reach the MacBridge server: {e}");
     };
@@ -260,13 +264,17 @@ pub fn friendly_error(e: &str) -> String {
 
 /// Connect, handshake, optionally launch `app`, and start the receive thread.
 /// `wake` is called (from the receive thread) after events are queued.
-pub fn connect(relay: &str, session: &str, token: &str, app: Option<&str>, wake: impl Fn() + Send + Sync + 'static) -> Result<(Link, Receiver<UiEvent>), String> {
+pub fn connect(relay: Option<&str>, session: &str, token: &str, app: Option<&str>, wake: impl Fn() + Send + Sync + 'static) -> Result<(Link, Receiver<UiEvent>), String> {
     connect_with(relay, session, token, app, true, wake)
 }
 
-/// [`connect`]; `wait: false` fails at once when the Mac is not waiting at the relay.
-pub fn connect_with(relay: &str, session: &str, token: &str, app: Option<&str>, wait: bool, wake: impl Fn() + Send + Sync + 'static) -> Result<(Link, Receiver<UiEvent>), String> {
-    let stream = rm_relay::join_with(relay, session, rm_relay::Role::Client, token, wait).map_err(|e| format!("relay: {e}"))?;
+/// [`connect`]; `wait: false` fails at once when the Mac is not waiting at the relay. A Mac on
+/// this network (found by its ID) is joined straight; else `relay` is used.
+pub fn connect_with(relay: Option<&str>, session: &str, token: &str, app: Option<&str>, wait: bool, wake: impl Fn() + Send + Sync + 'static) -> Result<(Link, Receiver<UiEvent>), String> {
+    let (stream, route) = rm_relay::lan::connect(relay, session, token, wait)?;
+    eprintln!("connected {}", match &route { rm_relay::lan::Route::Lan(a) => format!("on this network ({a})"), rm_relay::lan::Route::Relay(r) => format!("through the relay {r}") });
+    let relay = route.udp_relay();
+    let relay = relay.as_str();
     let writer = stream.try_clone().map_err(|e| e.to_string())?;
     let sess = Session::handshake(stream).map_err(|e| format!("handshake: {e}"))?;
     let (tx, rx) = channel();
@@ -546,7 +554,7 @@ mod tests {
         std::thread::spawn(move || { let _ = rm_fakeagent::serve_via_relay(&a, "v-1", tok); });
         std::thread::sleep(Duration::from_millis(150));
 
-        let (link, rx) = connect(&addr, "v-1", tok, Some("testapp"), || {}).unwrap();
+        let (link, rx) = connect(Some(&addr), "v-1", tok, Some("testapp"), || {}).unwrap();
         let (mut created, mut frames, mut titled) = (None, 0, false);
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         while std::time::Instant::now() < deadline && !(frames >= 20 && titled) {
@@ -585,7 +593,7 @@ mod tests {
         let p2p = loss.is_none();
         std::thread::spawn(move || { let _ = rm_fakeagent::serve_via_relay_with(&a, &s2, tok, p2p); });
         std::thread::sleep(Duration::from_millis(150));
-        let (link, rx) = connect(&addr, session, tok, Some("testapp"), || {}).unwrap();
+        let (link, rx) = connect(Some(&addr), session, tok, Some("testapp"), || {}).unwrap();
         let (mut tcp, mut udp) = (0, 0);
         let deadline = std::time::Instant::now() + Duration::from_secs(12);
         while std::time::Instant::now() < deadline && udp < 60 {
@@ -615,7 +623,7 @@ mod tests {
         let (a, tok) = (addr.clone(), "viewer-p2p-token-0123456789");
         std::thread::spawn(move || { let _ = rm_fakeagent::serve_via_relay(&a, "v-p2p", tok); });
         std::thread::sleep(Duration::from_millis(150));
-        let (link, rx) = connect(&addr, "v-p2p", tok, Some("testapp"), || {}).unwrap();
+        let (link, rx) = connect(Some(&addr), "v-p2p", tok, Some("testapp"), || {}).unwrap();
         let u = link.udp.clone().unwrap();
         let (mut win, mut typed, mut titled, mut frames_after) = (None, false, false, 0);
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
@@ -655,7 +663,7 @@ mod tests {
         let (a, tok) = (addr.clone(), "viewer-test-token-multi-0123456789");
         std::thread::spawn(move || { let _ = rm_fakeagent::serve_via_relay(&a, "v-2", tok); });
         std::thread::sleep(Duration::from_millis(150));
-        let (link, rx) = connect(&addr, "v-2", tok, Some("testapp"), || {}).unwrap();
+        let (link, rx) = connect(Some(&addr), "v-2", tok, Some("testapp"), || {}).unwrap();
         link.send(&Message::AppLaunch { application_id: "notes".into(), arguments: vec![], working_directory: None, environment: Default::default() });
 
         let file = std::env::temp_dir().join(format!("rm-upload-{}.bin", std::process::id()));

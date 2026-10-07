@@ -237,7 +237,10 @@ fn run(sock: UdpSocket, relay: SocketAddr, register: Vec<u8>, stats: Arc<Mutex<L
             let _ = sock.send_to(&register, relay);
             last_reg = Some(now);
         }
-        if registered && now.duration_since(last_fb) >= Duration::from_millis(200) {
+        // reports and pings once the relay knows us, or once there is a direct path (on the LAN
+        // there is no relay at all)
+        let up = registered || p2p.lock().is_ok_and(|p| p.direct.is_some());
+        if up && now.duration_since(last_fb) >= Duration::from_millis(200) {
             let mut fb = r.take_stats();
             let rec_now: u64 = gs.values().map(|(d, _)| d.recovered).sum();
             fb.expected += gs_expected;
@@ -260,7 +263,7 @@ fn run(sock: UdpSocket, relay: SocketAddr, register: Vec<u8>, stats: Arc<Mutex<L
                 s.active = last_video.is_some_and(|t| now.duration_since(t) < Duration::from_secs(1));
             }
         }
-        if registered && last_ping.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(250)) {
+        if up && last_ping.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(250)) {
             let _ = sock.send_to(&udp::ping(epoch.elapsed().as_micros() as u64), dest(&p2p));
             last_ping = Some(now);
         }

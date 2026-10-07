@@ -4,7 +4,8 @@
 import Foundation
 import CryptoKit
 
-let defaultRelay = "remotemac.mooo.com:7470"
+/// The relay used when none is given: built in by release builds, none from source.
+let defaultRelay: String? = builtinRelay.trimmingCharacters(in: .whitespaces).isEmpty ? nil : builtinRelay
 
 func sessionToken(id: String, password: String) -> String {
     let digest = SHA256.hash(data: Data("remotemac/v1:\(id):\(password)".utf8))

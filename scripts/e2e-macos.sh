@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end on one macOS machine: relay + remote-agent-mac + Rust client over loopback.
+# End-to-end on one macOS machine: relay + remote-agent-mac + Rust client over loopback
+# (found on the local network by its ID; the far-link run goes through the relay).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 [[ "$(uname)" == "Darwin" ]] || { echo "must run on macOS" >&2; exit 2; }
@@ -21,11 +22,16 @@ AGENT=$!
 sleep 2
 echo "=== agent banner"; cat out/agent-banner.txt
 grep -q "ID session to connect: 123 456 789" out/agent-banner.txt || { echo "agent banner missing the ID"; RC_BANNER=1; }
-# a wrong password is refused at once
-if ./target/release/remote-mac --relay 127.0.0.1:$PORT --id $ID --password wrong-password 2>out/client-wrong.log >/dev/null; then
-  echo "wrong password was accepted"; RC_BANNER=1
+# a wrong password is refused at once: by the relay, and by the Mac itself on this network
+if RM_NO_LAN=1 ./target/release/remote-mac --relay 127.0.0.1:$PORT --id $ID --password wrong-password 2>out/client-wrong.log >/dev/null; then
+  echo "wrong password was accepted (relay)"; RC_BANNER=1
 fi
-grep -q "session mismatch" out/client-wrong.log || { echo "wrong password: unexpected reply: $(cat out/client-wrong.log)"; RC_BANNER=1; }
+grep -q "session mismatch" out/client-wrong.log || { echo "wrong password (relay): unexpected reply: $(cat out/client-wrong.log)"; RC_BANNER=1; }
+if ./target/release/remote-mac --id $ID --password wrong-password 2>out/client-wrong-lan.log >/dev/null; then
+  echo "wrong password was accepted (LAN)"; RC_BANNER=1
+fi
+grep -q "wrong password" out/client-wrong-lan.log || { echo "wrong password (LAN): unexpected reply: $(cat out/client-wrong-lan.log)"; RC_BANNER=1; }
+# the viewer finds the Mac on this network by its ID and connects straight to it
 ./target/release/remote-mac --relay 127.0.0.1:$PORT --id $ID --password "$PASS" --e2e testapp 2>out/client.log | tee out/e2e.txt
 RC=${PIPESTATUS[0]}
 [[ -n "${RC_BANNER:-}" && $RC == 0 ]] && RC=1
@@ -41,11 +47,12 @@ awk -v l="${LOSS:-100}" 'BEGIN { exit !(l < 3) }' || { echo "loss misreported on
 # client and agent swap addresses and punch through: video ends up on the direct path
 grep -q "path=direct:" out/e2e.txt || { echo "no direct path between client and agent"; [[ $RC == 0 ]] && RC=1; }
 grep -q "direct path to the client" out/agent.log || { echo "agent never saw a direct path"; [[ $RC == 0 ]] && RC=1; }
+grep -q "client connected (on this network)" out/agent.log || { echo "the client did not come straight over the local network"; [[ $RC == 0 ]] && RC=1; }
 
 # far, lossy link: a relay limited to 6 Mbit/s that drops 5% of UDP packets; FEC rebuilds them
 # and the agent adapts its bitrate instead of queueing video (informational, not gating)
-# (RM_NO_P2P: this one must go through the throttled relay)
-export RM_NO_P2P=1
+# (RM_NO_P2P, RM_NO_LAN: this one must go through the throttled relay)
+export RM_NO_P2P=1 RM_NO_LAN=1
 RM_RELAY_THROTTLE_KBPS=6000 RM_RELAY_UDP_LOSS_PCT=5 ./target/release/rm-relay 127.0.0.1:$((PORT+1)) 2>out/relay-slow.log &
 SLOW=$!
 sleep 1

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# RemoteMac relay server: one-shot setup from A to Z (Ubuntu / Debian).
+# MacBridge (RemoteMac) relay server: one-shot setup from A to Z (Ubuntu / Debian).
 #
 #   sudo ./remotemac-relay-setup.sh                # install or update, keep the existing key
-#   sudo ./remotemac-relay-setup.sh --port 7470 --key KEY
+#   sudo ./remotemac-relay-setup.sh --port 7470 --key KEY --name relay.example.com
 #
 # It installs the rm-relay binary (bundled next to this script, or built from the bundled source
 # when this machine's CPU has no prebuilt binary), stores the admission key, runs the relay as a
@@ -15,13 +15,15 @@ PORT=7470
 KEY=""
 # key the RemoteMac.exe / remotemac builds of this release carry (filled in by the release build)
 BUILTIN_KEY="__RM_BUILTIN_KEY__"
-DNS_NAME="remotemac.mooo.com"
+# the DNS name pointing at this server (only checked; the IP address works as well)
+DNS_NAME="${RM_DNS_NAME:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --port) PORT="$2"; shift 2 ;;
     --key) KEY="$2"; shift 2 ;;
-    -h|--help) sed -n 2,10p "$0"; exit 0 ;;
+    --name) DNS_NAME="$2"; shift 2 ;;
+    -h|--help) sed -n 2,11p "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -141,21 +143,24 @@ if [[ -n "$KEY" ]]; then
   [[ "$REPLY" == "ERR not admitted"* ]] && ok "strangers are refused (admission key enforced)" || warn "unexpected probe reply: '$REPLY'"
 fi
 PUBLIC_IP="$(curl -s --max-time 4 https://api.ipify.org || true)"
-DNS_IP="$(getent ahostsv4 "$DNS_NAME" 2>/dev/null | awk 'NR==1{print $1}' || true)"
+DNS_IP=""
+[[ -n "$DNS_NAME" ]] && DNS_IP="$(getent ahostsv4 "$DNS_NAME" 2>/dev/null | awk 'NR==1{print $1}' || true)"
 if [[ -n "$PUBLIC_IP" && -n "$DNS_IP" ]]; then
-  [[ "$PUBLIC_IP" == "$DNS_IP" ]] && ok "$DNS_NAME -> $DNS_IP (this server)" || warn "$DNS_NAME points to $DNS_IP but this server is $PUBLIC_IP: fix the A record at FreeDNS"
+  [[ "$PUBLIC_IP" == "$DNS_IP" ]] && ok "$DNS_NAME -> $DNS_IP (this server)" || warn "$DNS_NAME points to $DNS_IP but this server is $PUBLIC_IP: fix its A record"
 fi
+ADDR="${DNS_NAME:-${PUBLIC_IP:-THIS-SERVER}}"
 
 echo
-bold "RemoteMac relay is installed."
+bold "MacBridge relay is installed: $ADDR:$PORT"
 echo
 bold "Open these ports in your provider's firewall / security group (inbound):"
-echo "    TCP $PORT   RemoteMac relay: connection, control, input (Mac and Windows connect here)"
-echo "    UDP $PORT   RemoteMac relay: video with FEC (the smooth path; without it video uses TCP)"
+echo "    TCP $PORT   MacBridge relay: connection, control, input (Mac and Windows connect here)"
+echo "    UDP $PORT   MacBridge relay: video with FEC (the smooth path; without it video uses TCP)"
 echo "    TCP 22     SSH (to administer the server)"
 echo "    (nothing else; the Mac and the PC open no ports at all, both only connect out)"
 echo
-echo "Check from Windows (PowerShell):  Test-NetConnection $DNS_NAME -Port $PORT"
+echo "Use it:   on the Mac  ./macbridge --relay $ADDR:$PORT --password ...;  on Windows type $ADDR:$PORT under Relay server"
+echo "Check from Windows (PowerShell):  Test-NetConnection $ADDR -Port $PORT"
 echo "Logs:     journalctl -u rm-relay -f"
 echo "Restart:  sudo systemctl restart rm-relay"
 if [[ -n "$KEY" && "$KEY" != "$BUILTIN_KEY" ]]; then

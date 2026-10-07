@@ -1,15 +1,21 @@
 name: Release builds
 
-# The three things a user downloads, all set up for remotemac.mooo.com:
-#   remotemac-macos.tar.gz   the Mac agent (universal: Apple silicon + Intel):  ./remotemac --password PASS
-#   RemoteMac-windows.zip    RemoteMac.exe: type the Mac's ID and password, done
-#   remotemac-relay.tar.gz   the relay server + remotemac-relay-setup.sh (installs it from A to Z)
-# The relay admission key comes from the RM_RELAY_KEY secret and is built into all three.
+# The three things a user downloads:
+#   MacBridge-macos.tar.gz   the Mac app (universal: Apple silicon + Intel):  ./macbridge --password PASS
+#   MacBridge-windows.zip    MacBridge.exe: type the Mac's ID and password, done
+#   macbridge-relay.tar.gz   the relay server + remotemac-relay-setup.sh (installs it from A to Z)
+# The source has no relay in it. These builds get one built in: the repository variable
+# RM_DEFAULT_RELAY (host:port), and on the official repository remotemac.mooo.com:7470; the
+# relay's admission key comes from the RM_RELAY_KEY secret. A tag v* publishes them as a release.
 on:
   workflow_dispatch:
   push:
     branches: [claude/inspiring-einstein-er2d37]
+    tags: ['v*']
     paths: [agent/**, crates/**, deploy/**, scripts/build-agent-macos.sh, .github/workflows/release.yml, Cargo.*]
+
+env:
+  DEFAULT_RELAY: ${{ vars.RM_DEFAULT_RELAY || (github.repository == 'ducminh1110/RemoteMac' && 'remotemac.mooo.com:7470' || '') }}
 
 permissions:
   contents: read
@@ -23,6 +29,7 @@ jobs:
       - name: Build universal remotemac
         env:
           RM_BUILD_RELAY_KEY: ${{ secrets.RM_RELAY_KEY }}
+          RM_BUILD_DEFAULT_RELAY: ${{ env.DEFAULT_RELAY }}
         run: |
           set -euo pipefail
           for arch in arm64 x86_64; do
@@ -30,60 +37,68 @@ jobs:
             mv out/remote-agent-mac out/remotemac-$arch
           done
           rm -f out/BuildConfig.swift
-          mkdir -p dist/remotemac
-          lipo -create out/remotemac-arm64 out/remotemac-x86_64 -output dist/remotemac/remotemac
-          codesign --force -s - dist/remotemac/remotemac
-          lipo -info dist/remotemac/remotemac
-          dist/remotemac/remotemac --help
-          cat > dist/remotemac/README.txt <<'TXT'
-          RemoteMac for macOS (14 or later, Apple silicon and Intel)
+          mkdir -p dist/MacBridge
+          lipo -create out/remotemac-arm64 out/remotemac-x86_64 -output dist/MacBridge/macbridge
+          codesign --force -s - dist/MacBridge/macbridge
+          lipo -info dist/MacBridge/macbridge
+          dist/MacBridge/macbridge --help
+          cat > dist/MacBridge/README.txt <<'TXT'
+          MacBridge for macOS (14 or later, Apple silicon and Intel)
 
-            xattr -d com.apple.quarantine remotemac 2>/dev/null; chmod +x remotemac
-            ./remotemac --password YOUR-PASSWORD
+            xattr -d com.apple.quarantine macbridge 2>/dev/null; chmod +x macbridge
+            ./macbridge --password YOUR-PASSWORD
 
           It prints:
             ID session to connect: 123 456 789
             Password: YOUR-PASSWORD
-          Type both into RemoteMac.exe on Windows. The ID stays the same on this Mac.
+          Type both into MacBridge.exe on Windows. The ID stays the same on this Mac.
+          On the same network the PC finds this Mac by its ID and connects straight to it;
+          from elsewhere it goes through the relay built into this build
+          (another one: ./macbridge --relay HOST:PORT --password ...).
           First run: allow Terminal in System Settings > Privacy & Security >
           Screen Recording and Accessibility, then run the command again.
           Without --password a random password is shown. Ctrl+C stops it.
           TXT
-          sed -i '' 's/^          //' dist/remotemac/README.txt
-          tar -C dist -czf dist/remotemac-macos.tar.gz remotemac
+          sed -i '' 's/^          //' dist/MacBridge/README.txt
+          tar -C dist -czf dist/MacBridge-macos.tar.gz MacBridge
       - uses: actions/upload-artifact@v4
         with:
-          name: remotemac-macos
-          path: dist/remotemac-macos.tar.gz
+          name: MacBridge-macos
+          path: dist/MacBridge-macos.tar.gz
 
   windows:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Build RemoteMac.exe
+      - name: Build MacBridge.exe
         env:
           RM_RELAY_KEY: ${{ secrets.RM_RELAY_KEY }}
+          RM_DEFAULT_RELAY: ${{ env.DEFAULT_RELAY }}
         run: cargo build --release -p rm-viewer
       - name: Package
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist\RemoteMac | Out-Null
-          Copy-Item target\release\remote-mac-viewer.exe dist\RemoteMac\RemoteMac.exe
+          New-Item -ItemType Directory -Force dist\MacBridge | Out-Null
+          Copy-Item target\release\remote-mac-viewer.exe dist\MacBridge\MacBridge.exe
           @"
-          RemoteMac for Windows
+          MacBridge for Windows
 
-          1. On the Mac run:  ./remotemac --password YOUR-PASSWORD
-          2. Open RemoteMac.exe, type the ID and the password the Mac shows, press Connect.
+          1. On the Mac run:  ./macbridge --password YOUR-PASSWORD
+          2. Open MacBridge.exe, type the ID and the password the Mac shows, press Connect.
+
+          On the same network MacBridge finds the Mac by its ID and connects straight to it.
+          From elsewhere it goes through the relay server shown under "Relay server"
+          (this build fills in its own; any other relay can be typed there).
 
           The Mac's apps open as windows here (and in the Start menu while connected);
           "Mac Desktop" shows the whole Mac screen. The last ID is remembered.
-          "@ -replace '(?m)^          ', '' | Set-Content dist\RemoteMac\README.txt
-          Compress-Archive -Path dist\RemoteMac\* -DestinationPath dist\RemoteMac-windows.zip
+          "@ -replace '(?m)^          ', '' | Set-Content dist\MacBridge\README.txt
+          Compress-Archive -Path dist\MacBridge\* -DestinationPath dist\MacBridge-windows.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: RemoteMac-windows
-          path: dist/RemoteMac-windows.zip
+          name: MacBridge-windows
+          path: dist/MacBridge-windows.zip
 
   relay-bin:
     strategy:
@@ -141,10 +156,13 @@ jobs:
           chmod +x dist/remotemac-relay/remotemac-relay-setup.sh
           bash -n dist/remotemac-relay/remotemac-relay-setup.sh
           cat > dist/remotemac-relay/README.txt <<'TXT'
-          RemoteMac relay server (remotemac.mooo.com), Ubuntu / Debian, x86_64 or ARM
+          MacBridge relay server, Ubuntu / Debian, x86_64 or ARM
 
-            tar -xzf remotemac-relay.tar.gz && cd remotemac-relay
-            sudo ./remotemac-relay-setup.sh
+            tar -xzf macbridge-relay.tar.gz && cd remotemac-relay
+            sudo ./remotemac-relay-setup.sh --name relay.example.com
+
+          (--name: the DNS name pointing at this server, optional; --key KEY: an
+          admission key, optional, then given to the Mac and PC as RM_RELAY_KEY.)
 
           Installs the relay as a systemd service, opens the port in ufw/iptables,
           checks it and prints the ports to open in your provider's firewall:
@@ -152,7 +170,7 @@ jobs:
           Running it again updates the relay.
           TXT
           sed -i 's/^          //' dist/remotemac-relay/README.txt
-          tar -C dist -czf dist/remotemac-relay.tar.gz remotemac-relay
+          tar -C dist -czf dist/macbridge-relay.tar.gz remotemac-relay
       - name: Try the setup script's relay locally
         run: |
           set -euo pipefail
@@ -163,5 +181,33 @@ jobs:
           grep -q "ERR not admitted" reply.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: remotemac-relay
-          path: dist/remotemac-relay.tar.gz
+          name: macbridge-relay
+          path: dist/macbridge-relay.tar.gz
+
+  publish:
+    needs: [mac, windows, relay]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ls -la dist
+          cat > notes.md <<'MD'
+          **MacBridge.exe** (Windows 10/11) and **macbridge** (macOS 14+, Apple silicon + Intel), and the relay server.
+
+          On the same network the PC finds the Mac by its ID and connects straight to it. From elsewhere it goes
+          through a relay: these builds come with one; your own is one command away (`macbridge-relay.tar.gz`).
+          See the README for setup.
+          MD
+          sed -i 's/^          //' notes.md
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "MacBridge $GITHUB_REF_NAME" --notes-file notes.md \
+            dist/MacBridge-macos.tar.gz dist/MacBridge-windows.zip dist/macbridge-relay.tar.gz

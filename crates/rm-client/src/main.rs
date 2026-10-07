@@ -1,8 +1,7 @@
 use rm_client::Session;
-use rm_relay::Role;
 
 fn usage() -> ! {
-    eprintln!("usage: remote-mac [--relay HOST:PORT] (--id ID --password PASS | --session NAME) [--launch APP_ID | --e2e APP_ID | --record FILE --apps a,b [--settle SECS] [--shots DIR]]\n       --session takes its token from $RM_SESSION_TOKEN; the relay defaults to $RM_RELAY or remotemac.mooo.com:7470");
+    eprintln!("usage: remote-mac [--relay HOST:PORT] (--id ID --password PASS | --session NAME) [--launch APP_ID | --e2e APP_ID | --record FILE --apps a,b [--settle SECS] [--shots DIR]]\n       --session takes its token from $RM_SESSION_TOKEN; a Mac on this network is found by its ID; otherwise the relay is --relay, $RM_RELAY or the one built in");
     std::process::exit(2)
 }
 
@@ -26,7 +25,7 @@ fn main() {
             _ => usage(),
         }
     }
-    let relay = relay.or_else(|| std::env::var("RM_RELAY").ok().filter(|r| !r.is_empty())).unwrap_or_else(|| rm_protocol::session::DEFAULT_RELAY.into());
+    let relay = relay.or_else(|| std::env::var("RM_RELAY").ok().filter(|r| !r.is_empty())).or_else(|| rm_protocol::session::default_relay().map(String::from));
     // ID + password (what the Mac prints) or the legacy session name + RM_SESSION_TOKEN
     let (session, token, wait) = match (session, id, password) {
         (Some(s), _, _) => (s, std::env::var("RM_SESSION_TOKEN").unwrap_or_else(|_| usage()), true),
@@ -36,7 +35,8 @@ fn main() {
         }
         _ => usage(),
     };
-    let stream = rm_relay::join_with(&relay, &session, Role::Client, &token, wait).unwrap_or_else(|e| fail("relay", e));
+    let (stream, route) = rm_relay::lan::connect(relay.as_deref(), &session, &token, wait).unwrap_or_else(|e| fail("connect", e));
+    eprintln!("connected {}", match &route { rm_relay::lan::Route::Lan(a) => format!("on this network ({a})"), rm_relay::lan::Route::Relay(r) => format!("through the relay {r}") });
     let udp = std::env::var_os("RM_NO_UDP").is_none();
     let timed = e2e.is_some() || record.is_some();
     // the handshake gets a patient timeout (the Mac probes its encoder first) ...
@@ -48,7 +48,7 @@ fn main() {
         sock.set_read_timeout(Some(std::time::Duration::from_millis(if udp { 20 } else { 1000 }))).ok();
     }
     if udp && timed {
-        if let Err(e) = s.attach_udp(&relay, &session, &token) {
+        if let Err(e) = s.attach_udp(&route.udp_relay(), &session, &token) {
             eprintln!("UDP video unavailable: {e}");
         }
     }

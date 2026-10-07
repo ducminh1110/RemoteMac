@@ -5,8 +5,10 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p out
 swiftc -O probe/macos/testapp.swift -o out/rm-testapp 2>out/compile-testapp.log || { cat out/compile-testapp.log; exit 3; }
-# relay admission key built in (release builds pass RM_RELAY_KEY from a secret; empty otherwise)
-printf 'let builtinRelayKey = "%s"\n' "${RM_BUILD_RELAY_KEY:-}" > out/BuildConfig.swift
+# built in: the relay used when none is given (release builds set RM_BUILD_DEFAULT_RELAY; from
+# source there is none, and the Mac is reached on its own network only until --relay is given)
+# and that relay's admission key (from a secret; empty otherwise)
+printf 'let builtinRelay = "%s"\nlet builtinRelayKey = "%s"\n' "${RM_BUILD_DEFAULT_RELAY:-}" "${RM_BUILD_RELAY_KEY:-}" > out/BuildConfig.swift
 clang -fobjc-arc -O2 ${RM_SWIFT_TARGET:+-target $RM_SWIFT_TARGET} -c agent/macos/VirtualDisplay.m -o out/VirtualDisplay.o 2>out/compile-vdisplay.log || { cat out/compile-vdisplay.log; exit 3; }
 # the GameStream library (Rust, crates/rm-gamestream) for the same architecture
 case "${RM_SWIFT_TARGET:-$(uname -m)}" in

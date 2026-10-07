@@ -6,6 +6,8 @@
 //! transport only. Before any real use, wrap the relay leg in TLS and put an
 //! end-to-end Noise/QUIC session between client and agent (docs/SPEC.md §7).
 
+pub mod lan;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};

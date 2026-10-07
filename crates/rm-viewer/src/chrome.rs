@@ -175,6 +175,45 @@ pub fn display_request(w: i32, h: i32, scale: f64) -> (u32, u32, u32) {
     (pts(w) * mac_scale, pts(h) * mac_scale, mac_scale)
 }
 
+/// The Mac Desktop's navigation ball (in fullscreen, instead of a bar sliding in at the top edge):
+/// a dark glass disc with concentric white rings, `size` px square, premultiplied BGRA for a
+/// layered window. `lit`: under the pointer (more opaque).
+pub fn nav_ball(size: usize, lit: bool) -> Vec<u8> {
+    let c = size as f64 / 2.0;
+    let r = c - 1.0;
+    let glass = if lit { 0.86 } else { 0.5 };
+    // (radius as a part of the disc, white's alpha): ring, ring, centre dot
+    let rings = [(0.66, 0.30), (0.50, 0.55)];
+    let dot = 0.34;
+    let cover = |d: f64, edge: f64| (edge - d + 0.5).clamp(0.0, 1.0);
+    let mut out = vec![0u8; size * size * 4];
+    for y in 0..size {
+        for x in 0..size {
+            let d = ((x as f64 + 0.5 - c).powi(2) + (y as f64 + 0.5 - c).powi(2)).sqrt();
+            let a_disc = cover(d, r) * glass;
+            if a_disc <= 0.0 {
+                continue;
+            }
+            // white over the dark disc: each ring a 1.5 px line, the dot filled
+            let mut white = 0.0f64;
+            for (k, a) in rings {
+                let line = (1.0 - ((d - k * r).abs() - 0.75)).clamp(0.0, 1.0);
+                white = white.max(line * a);
+            }
+            white = white.max(cover(d, dot * r) * 0.92);
+            // rim: a faint light edge, as glass has
+            white = white.max((1.0 - (d - (r - 1.0)).abs()).clamp(0.0, 1.0) * 0.25);
+            let (dark, a) = (28.0, a_disc);
+            let v = dark * (1.0 - white) + 255.0 * white; // colour (straight) inside the disc
+            let alpha = a.max(white * cover(d, r));
+            let pm = (v * alpha).round().clamp(0.0, 255.0) as u8;
+            let o = (y * size + x) * 4;
+            out[o..o + 4].copy_from_slice(&[pm, pm, pm, (alpha * 255.0).round() as u8]);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +247,24 @@ mod tests {
         assert_eq!(display_request(1920, 1080, 1.0), (1920, 1080, 1));
         assert_eq!(display_request(2880, 1620, 1.5), (3840, 2160, 2));
         assert_eq!(display_request(3840, 2160, 2.0), (3840, 2160, 2));
+    }
+
+    #[test]
+    fn nav_ball_is_a_round_premultiplied_sprite() {
+        let n = 48;
+        let b = nav_ball(n, false);
+        assert_eq!(b.len(), n * n * 4);
+        let px = |b: &[u8], x: usize, y: usize| { let o = (y * n + x) * 4; [b[o], b[o + 1], b[o + 2], b[o + 3]] };
+        assert_eq!(px(&b, 0, 0), [0, 0, 0, 0], "corners are clear");
+        let centre = px(&b, n / 2, n / 2);
+        assert!(centre[0] > 200 && centre[3] > 200, "white dot in the middle: {centre:?}");
+        for x in 0..n {
+            for y in 0..n {
+                let p = px(&b, x, y);
+                assert!(p[0] <= p[3], "premultiplied at {x},{y}: {p:?}");
+            }
+        }
+        assert!(px(&nav_ball(n, true), 4, n / 2)[3] > px(&b, 4, n / 2)[3], "brighter under the pointer");
     }
 
     #[test]
