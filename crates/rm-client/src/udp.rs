@@ -12,6 +12,7 @@ use rm_gamestream::depacketizer::Depacketizer;
 use rm_protocol::udp::{self, InputQueue, Out, Reassembler};
 use std::collections::HashMap;
 use rm_relay::Role;
+use rm_protocol::secure::{Keys, SealedUdp};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -63,7 +64,7 @@ pub struct UdpVideo {
     stop: Arc<AtomicBool>,
     epoch: Instant,
     p2p: Arc<Mutex<P2p>>,
-    sock: UdpSocket,
+    sock: SealedUdp,
     relay: SocketAddr,
 }
 
@@ -123,17 +124,19 @@ impl Drop for UdpVideo {
 /// blocked, the agent just keeps sending video over TCP.
 /// `on_offer(secret, candidates)` is called once our addresses are known: send them to the agent
 /// as `Message::P2pOffer` (RM_NO_P2P=1: never, everything stays on the relay).
-pub fn start(relay: &str, session: &str, token: &str, on_out: impl FnMut(Out) + Send + 'static, on_offer: impl FnOnce(String, Vec<String>) + Send + 'static) -> std::io::Result<UdpVideo> {
+/// `relay_token` registers with the relay; `keys` (from the session's handshake) encrypt it all.
+pub fn start(relay: &str, session: &str, relay_token: &str, keys: Option<&Keys>, on_out: impl FnMut(Out) + Send + 'static, on_offer: impl FnOnce(String, Vec<String>) + Send + 'static) -> std::io::Result<UdpVideo> {
     let addr = relay.to_socket_addrs()?.next().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "relay address"))?;
     let bind = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
     let sock = UdpSocket::bind(bind)?;
     rm_relay::big_udp_buffers(&sock);
+    let sock = SealedUdp::new(sock, keys);
     sock.set_read_timeout(Some(Duration::from_millis(5)))?;
     let stats = Arc::new(Mutex::new(LinkStats::default()));
     let stop = Arc::new(AtomicBool::new(false));
     let epoch = Instant::now();
     let p2p = Arc::new(Mutex::new(P2p { secret: udp::random_secret(), peer: None, direct: None, last_direct: Instant::now(), verified: vec![], input: InputQueue::default() }));
-    let register = rm_relay::udp_register(session, Role::Client, token, rm_relay::env_key().as_deref());
+    let register = rm_relay::udp_register(session, Role::Client, relay_token, rm_relay::env_key().as_deref());
     let tunnel: TunnelIn = Arc::new(Mutex::new(None));
     let (s2, st2, stop2, p2, tn2) = (sock.try_clone()?, stats.clone(), stop.clone(), p2p.clone(), tunnel.clone());
     let offer: Option<OnOffer> = std::env::var_os("RM_NO_P2P").is_none().then(|| Box::new(on_offer) as OnOffer);
@@ -165,7 +168,7 @@ fn is_private(a: &SocketAddr) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run(sock: UdpSocket, relay: SocketAddr, register: Vec<u8>, stats: Arc<Mutex<LinkStats>>, stop: Arc<AtomicBool>, epoch: Instant, p2p: Arc<Mutex<P2p>>, mut on_out: impl FnMut(Out), mut offer: Option<OnOffer>, tunnel: TunnelIn) {
+fn run(sock: SealedUdp, relay: SocketAddr, register: Vec<u8>, stats: Arc<Mutex<LinkStats>>, stop: Arc<AtomicBool>, epoch: Instant, p2p: Arc<Mutex<P2p>>, mut on_out: impl FnMut(Out), mut offer: Option<OnOffer>, tunnel: TunnelIn) {
     let mut r = Reassembler::new();
     // GameStream (Sunshine-format) streams, one per window (RTP SSRC), and their sequence
     // numbers for the loss report

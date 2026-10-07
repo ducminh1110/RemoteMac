@@ -9,9 +9,9 @@ mkdir -p out/mac-screens
 ./scripts/build-agent-macos.sh || exit 3
 if [[ -n "${RM_LIVE_ID:-}" ]]; then
   # the way users run it: ID + password
-  RM_TESTAPP="$PWD/out/rm-testapp" ./out/remote-agent-mac --relay "$RM_RELAY" --id "$RM_LIVE_ID" --password "$RM_LIVE_PASSWORD" >out/agent-banner.txt 2>out/agent.log &
+  RM_TESTAPP="$PWD/out/rm-testapp" ./out/remote-agent-mac --logs-enabled --relay "$RM_RELAY" --id "$RM_LIVE_ID" --password "$RM_LIVE_PASSWORD" >out/agent-banner.txt 2>out/agent.log &
 else
-  RM_TESTAPP="$PWD/out/rm-testapp" ./out/remote-agent-mac --relay "$RM_RELAY" --session "$RM_SESSION" 2>out/agent.log &
+  RM_TESTAPP="$PWD/out/rm-testapp" ./out/remote-agent-mac --logs-enabled --relay "$RM_RELAY" --session "$RM_SESSION" 2>out/agent.log &
 fi
 AGENT=$!
 limit=$(( $(date +%s) + ${RM_WAIT_SECS:-1500} ))

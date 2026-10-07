@@ -31,7 +31,7 @@ struct Direct {
 pub type TunnelFn = Box<dyn Fn(u8, &[u8]) + Send>;
 
 pub struct AgentUdp {
-    sock: UdpSocket,
+    sock: rm_protocol::secure::SealedUdp,
     relay: SocketAddr,
     secret: [u8; 16],
     direct: Mutex<Direct>,
@@ -50,10 +50,11 @@ pub struct AgentUdp {
 }
 
 impl AgentUdp {
-    pub fn start(relay: &str, session: &str, token: &str) -> std::io::Result<Arc<Self>> {
+    pub fn start(relay: &str, session: &str, token: &str, keys: Option<&rm_protocol::secure::Keys>) -> std::io::Result<Arc<Self>> {
         let addr = relay.to_socket_addrs()?.next().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "relay address"))?;
         let sock = UdpSocket::bind(if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" })?;
         rm_relay::big_udp_buffers(&sock);
+        let sock = rm_protocol::secure::SealedUdp::new(sock, keys);
         sock.set_read_timeout(Some(Duration::from_millis(20)))?;
         let me = Arc::new(Self {
             sock,

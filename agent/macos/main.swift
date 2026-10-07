@@ -1,17 +1,31 @@
-// remotemac (remote-agent-mac): terminal-launched macOS agent. Speaks the rm-protocol over a relay.
-//   ./remotemac --password SECRET            -> shows "ID session to connect" + password
-//   ./remotemac                              -> same, with a random password
-//   RM_SESSION_TOKEN=... ./remotemac --relay HOST:PORT --session NAME   (scripts, CI)
+// macbridge (remote-agent-mac): the Mac side of MacBridge, started from Terminal.
+//   ./macbridge --password SECRET     -> shows the ID and the password, then runs in the background
+//   ./macbridge                       -> same, with a random password
+//   ./macbridge --stop                -> stops the one running in the background
+//   RM_SESSION_TOKEN=... ./macbridge --relay HOST:PORT --session NAME   (scripts, CI)
+// Nothing is logged unless --logs-enabled is given.
 import Foundation
 import AppKit
 import ApplicationServices
 import VideoToolbox
 
-func log(_ s: String) { FileHandle.standardError.write(Data("[agent] \(s)\n".utf8)) }
-func fail(_ s: String) -> Never { log(s); exit(1) }
+/// Logs only when asked for (--logs-enabled, or RM_LOGS=1): to stderr, or in the background to
+/// ~/Library/Logs/MacBridge/macbridge.log.
+let logsEnabled = CommandLine.arguments.contains("--logs-enabled") || ProcessInfo.processInfo.environment["RM_LOGS"] == "1"
+func log(_ s: String) { if logsEnabled { FileHandle.standardError.write(Data("[agent] \(s)\n".utf8)) } }
+/// Errors that stop the app are always shown.
+func fail(_ s: String) -> Never { FileHandle.standardError.write(Data("macbridge: \(s)\n".utf8)); exit(1) }
 
-let usage = "usage: remotemac [--password SECRET] [--id 123456789] [--relay HOST:PORT]\n       RM_SESSION_TOKEN=.. remotemac --relay HOST:PORT --session NAME"
-var relayArg: String?, sessionArg: String?, passwordArg: String?, idArg: String?
+let usage = """
+usage: macbridge [--password SECRET] [--id 123456789] [--relay HOST:PORT] [--foreground] [--logs-enabled]
+       macbridge --stop
+       RM_SESSION_TOKEN=.. macbridge --relay HOST:PORT --session NAME
+  --relay HOST:PORT  reachable from anywhere through this relay (it also gives this Mac its ID)
+  --foreground       stay in the terminal instead of going to the background
+  --logs-enabled     write a log (stderr; in the background ~/Library/Logs/MacBridge/macbridge.log)
+  --stop             stop the MacBridge running in the background
+"""
+var relayArg: String?, sessionArg: String?, passwordArg: String?, idArg: String?, foreground = false
 var argv = CommandLine.arguments.dropFirst().makeIterator()
 while let a = argv.next() {
     switch a {
@@ -19,11 +33,22 @@ while let a = argv.next() {
     case "--session": sessionArg = argv.next()
     case "--password": passwordArg = argv.next()
     case "--id": idArg = argv.next()?.filter(\.isNumber)
+    case "--foreground": foreground = true
+    case "--logs-enabled": break
+    case "--stop": exit(stopBackground() ? 0 : 1)
     case "-h", "--help": print(usage); exit(0)
     default: fail(usage)
     }
 }
 let env = ProcessInfo.processInfo.environment
+// started in the background (below): our own session, so closing the terminal does not end us
+if env["RM_DAEMON"] != nil { becomeDaemon() }
+/// From a terminal (not a script) with the ID and password: show them, then go to the background.
+let goBackground = !foreground && env["RM_DAEMON"] == nil && sessionArg == nil && isatty(STDOUT_FILENO) == 1
+if goBackground, let pid = runningInBackground() {
+    print("MacBridge is already running in the background (pid \(pid)). Stop it with: \(CommandLine.arguments[0]) --stop")
+    exit(1)
+}
 // no relay: reachable from this network only (the viewer finds the Mac by its ID there)
 let relayAddr: String? = [relayArg, env["RM_RELAY"], defaultRelay].compactMap { $0?.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty }
 let sessionID: String, token: String
@@ -55,13 +80,27 @@ if let s = sessionArg {
         print("    ID session to connect: \(displayID(id))")
         print("    Password: \(password)")
         if let r = relayAddr {
-            print("  (on this network directly, from elsewhere through the relay \(r); Ctrl+C to stop)")
+            print("    Reachable on this network directly, and from anywhere through the relay \(r)")
         } else {
-            print("  (on this network only; to be reached from elsewhere, start with --relay HOST:PORT; Ctrl+C to stop)")
+            print("    Reachable on this network only (from anywhere: start with --relay HOST:PORT)")
+        }
+        print("    Connections are end-to-end encrypted.")
+        for w in permissionWarnings() { print("  ! \(w)") }
+        print("")
+        setenv("RM_QUIET_BANNER", "1", 1) // printed once, not again after each session
+        if goBackground {
+            if let pid = startInBackground() {
+                print("  Running in the background (pid \(pid)). Stop it with: \(CommandLine.arguments[0]) --stop")
+                if logsEnabled { print("  Log: \(backgroundLogPath)") }
+                print("")
+                exit(0)
+            }
+            print("  (could not go to the background: running here; Ctrl+C to stop)")
+        } else {
+            print("  Ctrl+C to stop.")
         }
         print("")
         fflush(stdout)
-        setenv("RM_QUIET_BANNER", "1", 1) // printed once, not again after each session
     }
 }
 
@@ -136,7 +175,7 @@ func waitForClient() -> (Conn, local: Bool) {
                 race.waiting(c)
                 if !announced { log("relay \(relay) joined, session=\(sessionID) (token not logged); waiting for a client") }
                 announced = true
-                do { try joinRelay(c, session: sessionID, token: token) } catch {
+                do { try joinRelay(c, session: sessionID) } catch {
                     race.waiting(nil); close(c.fd)
                     if race.taken { return }
                     // nobody came within the relay's wait (or the relay refused): wait again
@@ -152,13 +191,33 @@ func waitForClient() -> (Conn, local: Bool) {
         log("waiting for a client on this network (no relay)")
     }
     if let l = lan {
-        Thread { if let c = l.accept(token: token) { race.offer(c, ClientRace.lan) } }.start()
+        Thread { if let c = l.accept(token: relayToken(sessionID)) { race.offer(c, ClientRace.lan) } }.start()
     }
     let c = race.wait()
     lan?.close() // the LAN port closes once a client is in
     return (c, race.local)
 }
 let (conn, cameLocally) = waitForClient()
+
+// ---- end-to-end encryption: the viewer proves the password, both agree on the keys ---------------
+/// Wrong passwords in a row (kept across the restart for the next client): five lock it for a minute.
+let failState = (env["RM_PAKE_FAILS"] ?? "0:0").split(separator: ":").compactMap { Double($0) }
+let failCount = Int(failState.first ?? 0), lockedUntil = failState.count > 1 ? failState[1] : 0
+let sessionKeys: SessionKeys
+do {
+    sessionKeys = try agentHandshake(conn, session: sessionID, secret: token, locked: Date().timeIntervalSince1970 < lockedUntil)
+    setenv("RM_PAKE_FAILS", "0:0", 1)
+} catch SecureError.wrongPassword {
+    let n = failCount + 1
+    log("a viewer gave a wrong password (\(n) in a row)")
+    setenv("RM_PAKE_FAILS", n >= 5 ? "0:\(Date().timeIntervalSince1970 + 60)" : "\(n):0", 1)
+    restartForNextClient(after: 1)
+} catch {
+    log("\(error); waiting again")
+    restartForNextClient(after: 1)
+}
+conn.cipher = StreamCipher(sessionKeys)
+log("end-to-end encrypted (ChaCha20-Poly1305)")
 
 func readJSON() throws -> [String: Any]? {
     guard let (_, payload) = try conn.readFrame() else { return nil }
@@ -178,6 +237,7 @@ do {
 log("handshake complete")
 let sender = Sender(conn: conn)
 log("fec self-test \(fecSelfTest() ? "ok" : "FAILED")")
+log("secure self-test \(secureSelfTest() ? "ok" : "FAILED")")
 
 // ---- runtime -------------------------------------------------------------------------------------
 let apps = AppManager()
@@ -222,7 +282,7 @@ sender.onBitrate = { b in
 // video over UDP + FEC beside the TCP connection (RM_NO_UDP=1: TCP only)
 // (with the client on this network, or no relay, a port that ignores it stands in for the
 // relay: the direct path comes from the offer)
-if env["RM_NO_UDP"] == nil, let u = UdpLink(hostPort: cameLocally ? "127.0.0.1:9" : relayAddr ?? "127.0.0.1:9", session: sessionID, token: token, key: relayKey()) {
+if env["RM_NO_UDP"] == nil, let u = UdpLink(hostPort: cameLocally ? "127.0.0.1:9" : relayAddr ?? "127.0.0.1:9", session: sessionID, token: relayToken(sessionID), key: relayKey(), cipher: DatagramCipher(sessionKeys)) {
     sender.udp = u
     u.requestKeyframe = { wid in sender.requestKeyframe?(wid) }
     u.onAlive = { up in

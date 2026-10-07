@@ -17,7 +17,7 @@ PORT=47960
 ./target/release/rm-relay 127.0.0.1:$PORT 2>out/relay.log &
 RELAY=$!
 sleep 1
-./out/remote-agent-mac --relay 127.0.0.1:$PORT --session rec-1 2>out/agent.log &
+./out/remote-agent-mac --logs-enabled --relay 127.0.0.1:$PORT --session rec-1 2>out/agent.log &
 AGENT=$!
 sleep 2
 ./target/release/remote-mac --relay 127.0.0.1:$PORT --session rec-1 --record out/recording/session.rmrec --apps "$APPS" --settle 15 --shots out/recording 2>out/recorder.log

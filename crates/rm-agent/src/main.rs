@@ -35,8 +35,13 @@ fn main() {
 
     let registry = AppRegistry::default_macos(root);
     let mut launcher = ProcessLauncher::new();
-    let mut stream = rm_relay::join(&relay, &session, Role::Agent, &token).unwrap_or_else(|e| {
+    let stream = rm_relay::join(&relay, &session, Role::Agent, &rm_protocol::session::relay_token(&session)).unwrap_or_else(|e| {
         eprintln!("relay join failed: {e}");
+        std::process::exit(1)
+    });
+    // the session token proved and the keys agreed end to end, as the Mac app does
+    let (mut stream, _) = rm_protocol::secure::agent_tcp(stream, &session, &token).unwrap_or_else(|e| {
+        eprintln!("{e}");
         std::process::exit(1)
     });
     eprintln!("READY");

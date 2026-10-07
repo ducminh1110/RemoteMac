@@ -885,6 +885,7 @@ mod tests {
 /// the application it belongs to and its time from the start of that application's segment.
 /// Lets a real Mac session be replayed to a viewer elsewhere (`rm-fakeagent --replay`).
 pub mod fec;
+pub mod secure;
 pub mod udp;
 
 pub mod recording {
@@ -1020,7 +1021,16 @@ pub mod session {
         format!("rm-{id}")
     }
 
-    /// Session token (48 hex chars) from ID and password.
+    /// What the relay (and the Mac's local network port) is shown to pair the two sides: made
+    /// from the session name only, so it tells nothing about the password. The password is
+    /// proved, and the session keys agreed, end to end afterwards ([`crate::secure`]).
+    pub fn relay_token(session: &str) -> String {
+        let h = Sha256::digest(format!("remotemac/v2/relay:{session}").as_bytes());
+        h.iter().map(|b| format!("{b:02x}")).collect::<String>()[..48].to_string()
+    }
+
+    /// The session secret (48 hex chars) from ID and password: the input of the end-to-end
+    /// handshake, never sent anywhere.
     pub fn token(id: &str, password: &str) -> String {
         let h = Sha256::digest(format!("remotemac/v1:{id}:{password}").as_bytes());
         h.iter().map(|b| format!("{b:02x}")).collect::<String>()[..48].to_string()

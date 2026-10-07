@@ -1,7 +1,7 @@
 // Reachable on the local network without a relay (crates/rm-relay/src/lan.rs is the viewer's
 // side): a broadcast "RMLAN?<session>" on UDP 7471 is answered with "RMLAN!<session> <tcp port>",
-// and that TCP port takes the same join line a relay does; the token (hash of ID and password)
-// is checked here. After "READY" the stream is the session, as one paired through a relay.
+// and that TCP port takes the same join line a relay does. After "READY" the end-to-end
+// handshake proves the password, as through a relay.
 import Foundation
 
 let lanPort: UInt16 = 7471
@@ -12,8 +12,6 @@ final class LanListener {
     private let tcp: Int32
     let tcpPort: UInt16
     private var closed = false
-    private var failures = 0
-    private var lockedUntil = Date.distantPast
 
     init?(session: String) {
         self.session = session
@@ -58,8 +56,7 @@ final class LanListener {
         }
     }
 
-    /// The next viewer that knows the password (others are turned away; after 5 wrong ones in a
-    /// row, everyone for a minute). nil once closed.
+    /// The next viewer asking for this session. nil once closed.
     func accept(token: String) -> Conn? {
         while !closed {
             var from = sockaddr_storage(); var flen = socklen_t(MemoryLayout<sockaddr_storage>.size)
@@ -71,16 +68,10 @@ final class LanListener {
             let c = Conn(fd: fd)
             guard let line = try? c.readLine(maxLen: 512),
                   let j = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { Darwin.close(fd); continue }
-            if Date() < lockedUntil {
-                try? c.writeAll(Data("ERR locked, try again in a minute\n".utf8)); Darwin.close(fd); continue
-            }
+            // the password is proved in the end-to-end handshake that follows (Secure.swift)
             guard j["session_id"] as? String == session, j["token"] as? String == token else {
-                failures += 1
-                if failures >= 5 { failures = 0; lockedUntil = Date().addingTimeInterval(60) }
-                log("LAN: a viewer gave a wrong password")
-                try? c.writeAll(Data("ERR wrong password\n".utf8)); Darwin.close(fd); continue
+                try? c.writeAll(Data("ERR no such session\n".utf8)); Darwin.close(fd); continue
             }
-            failures = 0
             tv = timeval(tv_sec: 0, tv_usec: 0)
             setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
             var one: Int32 = 1

@@ -6,7 +6,7 @@ fn main() {
     let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let has = |k: &str| args.iter().any(|a| a == k);
     if has("-h") || has("--help") {
-        eprintln!("usage: RemoteMac.exe                      (asks for the Mac's ID and password)\n       RemoteMac.exe --id 123456789 --password PASS\n       RM_SESSION_TOKEN=.. RemoteMac.exe --session NAME   (legacy)\n  [--relay HOST:PORT] [--app testapp] [--raw-ctrl] [--no-clipboard] [--renderer d3d11|gdi] [--mac-file-panel] [--no-shortcuts] [--smoke] [--showcase DIR --apps xcode,textedit --settle SECS --type TEXT]");
+        eprintln!("usage: MacBridge.exe                      (asks for the Mac's ID and password)\n       MacBridge.exe --id 123456789 --password PASS\n       RM_SESSION_TOKEN=.. MacBridge.exe --session NAME   (legacy)\n  [--relay HOST:PORT] [--app testapp] [--logs-enabled] [--raw-ctrl] [--no-clipboard] [--renderer d3d11|gdi] [--mac-file-panel] [--no-shortcuts] [--smoke] [--showcase DIR --apps xcode,textedit --settle SECS --type TEXT]");
         std::process::exit(0)
     }
     // a Mac on this network is found by its ID; for one elsewhere: --relay, $RM_RELAY, the relay
@@ -26,11 +26,14 @@ fn main() {
     };
     #[cfg(windows)]
     {
-        // no console in the release build: log to a file, and never die without a word
-        rm_viewer::native::log_to_file(&rm_viewer::log_path());
+        // no console in the release build: a log file only when asked for (--logs-enabled), and
+        // never die without a word
+        if rm_viewer::logs_enabled() {
+            rm_viewer::native::log_to_file(&rm_viewer::log_path());
+        }
         let quiet = has("--smoke") || has("--showcase");
         std::panic::set_hook(Box::new(move |info| {
-            let msg = format!("MacBridge stopped because of an internal error:\n\n{info}\n\nLog: {}", rm_viewer::log_path().display());
+            let msg = format!("MacBridge stopped because of an internal error:\n\n{info}\n\n{}", rm_viewer::log_hint());
             eprintln!("{msg}");
             if !quiet {
                 rm_viewer::native::message_box("MacBridge", &msg);

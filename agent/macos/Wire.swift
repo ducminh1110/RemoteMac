@@ -2,6 +2,7 @@
 //   u32 BE length | u8 channel | payload     (length counts channel byte + payload)
 // Control/metadata/input payloads are JSON; the Video channel is binary (see VideoPacket).
 import Foundation
+import CryptoKit
 
 enum Chan: UInt8 { case input = 0, control = 1, windowMetadata = 2, video = 3, clipboard = 4, files = 5, telemetry = 6 }
 
@@ -20,6 +21,10 @@ struct WireError: Error, CustomStringConvertible { let description: String }
 final class Conn {
     let fd: Int32
     private let writeLock = NSLock()
+    /// set once the end-to-end handshake is done: from then on everything is encrypted
+    var cipher: StreamCipher?
+    /// decrypted bytes not read yet
+    private var rbuf = Data()
     init(fd: Int32) { self.fd = fd }
 
     static func connect(hostPort: String) throws -> Conn {
@@ -51,8 +56,24 @@ final class Conn {
         throw WireError(description: "connect \(hostPort) failed")
     }
 
+    /// Write all of `data`: as encrypted records once the handshake is done.
     func writeAll(_ data: Data) throws {
         writeLock.lock(); defer { writeLock.unlock() }
+        guard let c = cipher else { try rawWrite(data); return }
+        var off = 0
+        repeat {
+            let end = min(off + 65536, data.count)
+            let box = try ChaChaPoly.seal(data.subdata(in: (data.startIndex + off)..<(data.startIndex + end)), using: c.tx, nonce: secureNonce(c.txCounter))
+            c.txCounter += 1
+            let n = box.ciphertext.count + box.tag.count
+            var rec = Data([UInt8(n >> 24), UInt8((n >> 16) & 0xff), UInt8((n >> 8) & 0xff), UInt8(n & 0xff)])
+            rec.append(box.ciphertext); rec.append(box.tag)
+            try rawWrite(rec)
+            off = end
+        } while off < data.count
+    }
+
+    private func rawWrite(_ data: Data) throws {
         try data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
             var off = 0
             while off < raw.count {
@@ -63,8 +84,28 @@ final class Conn {
         }
     }
 
-    /// Reads exactly n bytes; nil on clean EOF before the first byte.
+    /// Reads exactly n bytes (decrypted once the handshake is done); nil on clean EOF before the
+    /// first byte.
     func readExact(_ n: Int) throws -> Data? {
+        guard let c = cipher else { return try rawReadExact(n) }
+        while rbuf.count < n {
+            guard let head = try rawReadExact(4) else {
+                if rbuf.isEmpty { return nil }
+                throw WireError(description: "eof mid-frame")
+            }
+            let len = Int(head.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) })
+            guard len >= 16, len <= 65536 + 16, let ct = try rawReadExact(len) else { throw WireError(description: "bad encrypted record") }
+            let box = try ChaChaPoly.SealedBox(nonce: secureNonce(c.rxCounter), ciphertext: Data(ct.prefix(len - 16)), tag: Data(ct.suffix(16)))
+            guard let pt = try? ChaChaPoly.open(box, using: c.rx) else { throw WireError(description: "encrypted record failed authentication") }
+            c.rxCounter += 1
+            rbuf.append(pt)
+        }
+        let out = Data(rbuf.prefix(n))
+        rbuf = Data(rbuf.dropFirst(n))
+        return out
+    }
+
+    private func rawReadExact(_ n: Int) throws -> Data? {
         var buf = Data(count: n)
         var off = 0
         try buf.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) in
@@ -133,9 +174,10 @@ func relayKey() -> String? {
     ProcessInfo.processInfo.environment["RM_RELAY_KEY"].flatMap({ $0.isEmpty ? nil : $0 }) ?? (builtinRelayKey.isEmpty ? nil : builtinRelayKey)
 }
 
-func joinRelay(_ conn: Conn, session: String, token: String) throws {
+func joinRelay(_ conn: Conn, session: String) throws {
+    // the relay sees a token made from the session only (the password is proved end to end);
     // the owner secret: a relay that handed out this ID lets only its owner wait under it
-    var join: [String: Any] = ["session_id": session, "role": "agent", "token": token, "owner": ownerSecret()]
+    var join: [String: Any] = ["session_id": session, "role": "agent", "token": relayToken(session), "owner": ownerSecret()]
     if let key = relayKey() { join["key"] = key }
     let line = try JSONSerialization.data(withJSONObject: join)
     try conn.writeAll(line + Data([10]))

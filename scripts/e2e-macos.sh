@@ -17,26 +17,31 @@ PORT=47900
 ./target/release/rm-relay 127.0.0.1:$PORT 2>out/relay.log &
 RELAY=$!
 sleep 1
-./out/remote-agent-mac --relay 127.0.0.1:$PORT --id $ID --password "$PASS" >out/agent-banner.txt 2>out/agent.log &
+./out/remote-agent-mac --logs-enabled --relay 127.0.0.1:$PORT --id $ID --password "$PASS" >out/agent-banner.txt 2>out/agent.log &
 AGENT=$!
 sleep 2
 echo "=== agent banner"; cat out/agent-banner.txt
 grep -q "ID session to connect: 123 456 789" out/agent-banner.txt || { echo "agent banner missing the ID"; RC_BANNER=1; }
-# a wrong password is refused at once: by the relay, and by the Mac itself on this network
+# a wrong password is refused at once by the Mac (end-to-end handshake), through the relay and
+# on this network alike; the relay never sees anything it could check a password against
 if RM_NO_LAN=1 ./target/release/remote-mac --relay 127.0.0.1:$PORT --id $ID --password wrong-password 2>out/client-wrong.log >/dev/null; then
   echo "wrong password was accepted (relay)"; RC_BANNER=1
 fi
-grep -q "session mismatch" out/client-wrong.log || { echo "wrong password (relay): unexpected reply: $(cat out/client-wrong.log)"; RC_BANNER=1; }
+grep -q "wrong password" out/client-wrong.log || { echo "wrong password (relay): unexpected reply: $(cat out/client-wrong.log)"; RC_BANNER=1; }
+sleep 3 # the Mac starts over for the next viewer
 if ./target/release/remote-mac --id $ID --password wrong-password 2>out/client-wrong-lan.log >/dev/null; then
   echo "wrong password was accepted (LAN)"; RC_BANNER=1
 fi
 grep -q "wrong password" out/client-wrong-lan.log || { echo "wrong password (LAN): unexpected reply: $(cat out/client-wrong-lan.log)"; RC_BANNER=1; }
+sleep 3
 # the viewer finds the Mac on this network by its ID and connects straight to it
 ./target/release/remote-mac --relay 127.0.0.1:$PORT --id $ID --password "$PASS" --e2e testapp 2>out/client.log | tee out/e2e.txt
 RC=${PIPESTATUS[0]}
 [[ -n "${RC_BANNER:-}" && $RC == 0 ]] && RC=1
 # the Swift FEC must produce the same bytes as the Rust one, and video must have used UDP
 grep -q "fec self-test ok" out/agent.log || { echo "Swift FEC self-test failed (parity differs from Rust)"; [[ $RC == 0 ]] && RC=1; }
+grep -q "secure self-test ok" out/agent.log || { echo "Swift secure self-test failed (differs from Rust)"; [[ $RC == 0 ]] && RC=1; }
+grep -q "end-to-end encrypted" out/client.log || { echo "the session was not end-to-end encrypted"; [[ $RC == 0 ]] && RC=1; }
 UDP_FRAMES=$(sed -n 's/^UDP frames=\([0-9]*\).*/\1/p' out/e2e.txt)
 echo "video frames received over UDP: ${UDP_FRAMES:-0}"
 [[ "${UDP_FRAMES:-0}" -gt 30 ]] || { echo "video did not move to UDP"; [[ $RC == 0 ]] && RC=1; }
@@ -56,7 +61,7 @@ export RM_NO_P2P=1 RM_NO_LAN=1
 RM_RELAY_THROTTLE_KBPS=6000 RM_RELAY_UDP_LOSS_PCT=5 ./target/release/rm-relay 127.0.0.1:$((PORT+1)) 2>out/relay-slow.log &
 SLOW=$!
 sleep 1
-./out/remote-agent-mac --relay 127.0.0.1:$((PORT+1)) --id 987654321 --password "$PASS" >/dev/null 2>out/agent-slow.log &
+./out/remote-agent-mac --logs-enabled --relay 127.0.0.1:$((PORT+1)) --id 987654321 --password "$PASS" >/dev/null 2>out/agent-slow.log &
 AGENT_SLOW=$!
 sleep 2
 ./target/release/remote-mac --relay 127.0.0.1:$((PORT+1)) --id 987654321 --password "$PASS" --e2e testapp 2>out/client-slow.log | tee out/e2e-slow.txt || true

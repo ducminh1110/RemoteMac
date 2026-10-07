@@ -118,7 +118,11 @@ final class UdpLink {
     private(set) var dropped = 0, sentFrames = 0
     private var wasAlive = false
 
-    init?(hostPort: String, session: String, token: String, key: String?) {
+    /// encrypts the datagrams of the session (Secure.swift)
+    private let cipher: DatagramCipher?
+
+    init?(hostPort: String, session: String, token: String, key: String?, cipher: DatagramCipher? = nil) {
+        self.cipher = cipher
         guard let idx = hostPort.lastIndex(of: ":") else { return nil }
         let host = String(hostPort[..<idx]), port = String(hostPort[hostPort.index(after: idx)...])
         var hints = addrinfo(); hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_DGRAM
@@ -154,7 +158,8 @@ final class UdpLink {
     /// The client's reports are coming in: video may go this way.
     var alive: Bool { cond.lock(); defer { cond.unlock() }; return CFAbsoluteTimeGetCurrent() - lastReport < 1.5 }
 
-    private func sendTo(_ d: Data, _ to: sockaddr_storage) {
+    private func sendTo(_ plain: Data, _ to: sockaddr_storage) {
+        let d = cipher?.seal(plain) ?? plain
         var a = to
         let len = socklen_t(a.ss_family == sa_family_t(AF_INET6) ? MemoryLayout<sockaddr_in6>.size : MemoryLayout<sockaddr_in>.size)
         _ = d.withUnsafeBytes { b in withUnsafePointer(to: &a) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sendto(fd, b.baseAddress, d.count, 0, $0, len) } } }
@@ -224,8 +229,14 @@ final class UdpLink {
             if lost { log("direct path lost; back through the relay"); onPath?(nil) }
 
             var ss = sockaddr_storage(); var sl = socklen_t(MemoryLayout<sockaddr_storage>.size)
-            let n = withUnsafeMutablePointer(to: &ss) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { recvfrom(fd, &buf, buf.count, 0, $0, &sl) } }
+            var n = withUnsafeMutablePointer(to: &ss) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { recvfrom(fd, &buf, buf.count, 0, $0, &sl) } }
             guard n >= 3, let from = addrKey(ss) else { continue }
+            // the session's datagrams are encrypted: open them (forged ones are dropped)
+            if let c = cipher, buf[0] == 0x52, buf[1] == 0x4D, DatagramCipher.sealed(buf[2]) {
+                guard let pt = c.open(Array(buf[0..<n])) else { continue }
+                for i in 0..<pt.count { buf[i] = pt[i] }
+                n = pt.count
+            }
             // STUN answer: our public address
             if !offered && n >= 20 && buf[0] == 1 && buf[1] == 1 && Array(buf[8..<20]) == stunTx {
                 if let a = parseStun(Array(buf[0..<n])) { publicAddr = a }

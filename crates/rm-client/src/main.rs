@@ -35,20 +35,23 @@ fn main() {
         }
         _ => usage(),
     };
-    let (stream, route) = rm_relay::lan::connect(relay.as_deref(), &session, &token, wait).unwrap_or_else(|e| fail("connect", e));
+    let (stream, route) = rm_relay::lan::connect(relay.as_deref(), &session, &rm_protocol::session::relay_token(&session), wait).unwrap_or_else(|e| fail("connect", e));
     eprintln!("connected {}", match &route { rm_relay::lan::Route::Lan(a) => format!("on this network ({a})"), rm_relay::lan::Route::Relay(r) => format!("through the relay {r}") });
+    // the password proved and the keys agreed end to end: everything after this is encrypted
+    let (stream, keys) = rm_protocol::secure::client_tcp(stream, &session, &token).unwrap_or_else(|e| fail("secure handshake", e));
+    eprintln!("end-to-end encrypted (ChaCha20-Poly1305)");
     let udp = std::env::var_os("RM_NO_UDP").is_none();
     let timed = e2e.is_some() || record.is_some();
     // the handshake gets a patient timeout (the Mac probes its encoder first) ...
-    stream.set_read_timeout(timed.then(|| std::time::Duration::from_secs(10))).ok();
-    let sock = stream.try_clone().unwrap_or_else(|e| fail("socket", e));
+    stream.get_ref().set_read_timeout(timed.then(|| std::time::Duration::from_secs(10))).ok();
+    let sock = stream.get_ref().try_clone().unwrap_or_else(|e| fail("socket", e));
     let mut s = Session::handshake(stream).unwrap_or_else(|e| fail("handshake", e));
     if timed {
         // ... then a short one when UDP video comes in beside the TCP stream
         sock.set_read_timeout(Some(std::time::Duration::from_millis(if udp { 20 } else { 1000 }))).ok();
     }
     if udp && timed {
-        if let Err(e) = s.attach_udp(&route.udp_relay(), &session, &token) {
+        if let Err(e) = s.attach_udp(&route.udp_relay(), &session, Some(&keys)) {
             eprintln!("UDP video unavailable: {e}");
         }
     }

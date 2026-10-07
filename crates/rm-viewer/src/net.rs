@@ -6,6 +6,8 @@ use rm_decode::{H264Decoder, Picture};
 use rm_protocol::{write_message, Frame, Message};
 use std::collections::HashMap;
 use std::net::TcpStream;
+/// The connection to the Mac, end-to-end encrypted.
+type Secure = rm_protocol::secure::SecureStream<TcpStream>;
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 
@@ -219,7 +221,7 @@ impl Link {
     }
 
     /// The writer thread for `stream`.
-    fn start(stream: TcpStream) -> Link {
+    fn start(stream: Secure) -> Link {
         let (tx, rx) = channel::<Message>();
         let pending = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let p = pending.clone();
@@ -254,6 +256,8 @@ pub fn friendly_error(e: &str) -> String {
         "Connected, but the Mac did not complete the handshake. Update remotemac on the Mac."
     } else if e.contains("wrong password") {
         "Wrong password."
+    } else if e.contains("older MacBridge") {
+        "The Mac runs an older MacBridge without encryption. Update the Mac and this PC to the same version."
     } else if e.contains("not found on this network") {
         return e.to_string();
     } else {
@@ -271,8 +275,11 @@ pub fn connect(relay: Option<&str>, session: &str, token: &str, app: Option<&str
 /// [`connect`]; `wait: false` fails at once when the Mac is not waiting at the relay. A Mac on
 /// this network (found by its ID) is joined straight; else `relay` is used.
 pub fn connect_with(relay: Option<&str>, session: &str, token: &str, app: Option<&str>, wait: bool, wake: impl Fn() + Send + Sync + 'static) -> Result<(Link, Receiver<UiEvent>), String> {
-    let (stream, route) = rm_relay::lan::connect(relay, session, token, wait)?;
+    let (stream, route) = rm_relay::lan::connect(relay, session, &rm_protocol::session::relay_token(session), wait)?;
     eprintln!("connected {}", match &route { rm_relay::lan::Route::Lan(a) => format!("on this network ({a})"), rm_relay::lan::Route::Relay(r) => format!("through the relay {r}") });
+    // the password proved and the keys agreed end to end (the relay sees only ciphertext)
+    let (stream, keys) = rm_protocol::secure::client_tcp(stream, session, token).map_err(|e| e.to_string())?;
+    eprintln!("end-to-end encrypted (ChaCha20-Poly1305)");
     let relay = route.udp_relay();
     let relay = relay.as_str();
     let writer = stream.try_clone().map_err(|e| e.to_string())?;
@@ -286,7 +293,7 @@ pub fn connect_with(relay: Option<&str>, session: &str, token: &str, app: Option
         let v = video.clone();
         let l = link.clone();
         let offer = move |secret, candidates| l.send(&Message::P2pOffer { secret, candidates });
-        match rm_client::udp::start(relay, session, token, move |o| v.on_udp(o), offer) {
+        match rm_client::udp::start(relay, session, &rm_protocol::session::relay_token(session), Some(&keys), move |o| v.on_udp(o), offer) {
             Ok(u) => {
                 u.set_tunnel_handler(crate::gsdesktop::from_host_udp);
                 let u = Arc::new(u);
@@ -456,7 +463,7 @@ fn spawn_decoder(id: u64, link: Link, tx: Sender<UiEvent>, wake: Arc<dyn Fn() + 
     DecodeWorker { tx: ftx, resync: false }
 }
 
-fn recv_loop(mut sess: Session<TcpStream>, _link: Link, video: Arc<Video>, tx: Sender<UiEvent>, wake: Arc<dyn Fn() + Send + Sync>) {
+fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Sender<UiEvent>, wake: Arc<dyn Fn() + Send + Sync>) {
     let emit = |e: UiEvent| {
         if tx.send(e).is_ok() {
             wake();

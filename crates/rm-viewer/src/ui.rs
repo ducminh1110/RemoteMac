@@ -1116,7 +1116,7 @@ fn handle_event(ev: UiEvent) {
             let interactive = with_app(|a| a.smoke.is_none() && a.showcase.is_none()).unwrap_or(false);
             if interactive {
                 // never vanish without a word
-                native::message_box("MacBridge", &format!("The connection to the Mac was closed.\n\n{why}\n\nLog: {}", crate::log_path().display()));
+                native::message_box("MacBridge", &format!("The connection to the Mac was closed.\n\n{why}\n\n{}", crate::log_hint()));
             }
             on_mac_gone();
             quit(if with_app(|a| a.smoke.is_some()).unwrap_or(false) { 1 } else { 0 });

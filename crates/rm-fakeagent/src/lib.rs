@@ -589,6 +589,13 @@ fn start_gamestream<W: Write + Send + 'static>(writer: &Writer<W>, st: &Arc<Mute
     });
 }
 
+/// Wait at the relay as the Mac of `session`, then run the end-to-end handshake with the
+/// session secret `secret`, as the Mac does.
+pub fn secure_join(relay: &str, session: &str, secret: &str) -> Result<(rm_protocol::secure::SecureStream<TcpStream>, rm_protocol::secure::Keys), String> {
+    let s = rm_relay::join(relay, session, rm_relay::Role::Agent, &rm_protocol::session::relay_token(session)).map_err(|e| e.to_string())?;
+    rm_protocol::secure::agent_tcp(s, session, secret).map_err(|e| e.to_string())
+}
+
 /// Bind to a relay as the agent and serve one client.
 pub fn serve_via_relay(relay: &str, session: &str, token: &str) -> Result<(), String> {
     serve_via_relay_with(relay, session, token, true)
@@ -596,10 +603,10 @@ pub fn serve_via_relay(relay: &str, session: &str, token: &str) -> Result<(), St
 
 /// [`serve_via_relay`]; `p2p: false` keeps all UDP on the relay (no direct path).
 pub fn serve_via_relay_with(relay: &str, session: &str, token: &str, p2p: bool) -> Result<(), String> {
-    let s = rm_relay::join(relay, session, rm_relay::Role::Agent, token).map_err(|e| e.to_string())?;
-    let w: TcpStream = s.try_clone().map_err(|e| e.to_string())?;
+    let (s, keys) = secure_join(relay, session, token)?;
+    let w = s.try_clone().map_err(|e| e.to_string())?;
     // UDP video unless RM_NO_UDP is set (tests of the TCP path)
-    let udp = if std::env::var_os("RM_NO_UDP").is_some() { None } else { udp_agent::AgentUdp::start(relay, session, token).ok() };
+    let udp = if std::env::var_os("RM_NO_UDP").is_some() { None } else { udp_agent::AgentUdp::start(relay, session, &rm_protocol::session::relay_token(session), Some(&keys)).ok() };
     if let Some(u) = &udp {
         u.p2p.store(p2p, std::sync::atomic::Ordering::Relaxed);
     }

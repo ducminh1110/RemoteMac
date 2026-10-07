@@ -90,13 +90,15 @@ impl<S: Read + Write> Session<S> {
 
     /// Receive video over UDP too (through the same relay). Use a short read timeout on the
     /// TCP stream so UDP frames are not held up behind it.
-    pub fn attach_udp(&mut self, relay: &str, session: &str, token: &str) -> std::io::Result<()> {
+    /// `keys`: the session's, from its secure handshake (None: plain, for tests without one).
+    pub fn attach_udp(&mut self, relay: &str, session: &str, keys: Option<&rm_protocol::secure::Keys>) -> std::io::Result<()> {
         let (tx, rx) = std::sync::mpsc::channel();
         let (otx, orx) = std::sync::mpsc::channel();
         let u = udp::start(
             relay,
             session,
-            token,
+            &rm_protocol::session::relay_token(session),
+            keys,
             move |o| {
                 let _ = tx.send(o);
             },
@@ -226,11 +228,12 @@ mod tests {
         std::thread::spawn(move || { let _ = rm_fakeagent::serve_via_relay(&a, "fake-1", tok); });
         std::thread::sleep(std::time::Duration::from_millis(150));
 
-        let stream = join(&addr, "fake-1", Role::Client, tok).unwrap();
-        // as the CLI runs it: video over UDP beside a short-timeout TCP stream
-        stream.set_read_timeout(Some(std::time::Duration::from_millis(20))).unwrap();
+        // as the CLI runs it: end-to-end encrypted, video over UDP beside a short-timeout TCP stream
+        let stream = join(&addr, "fake-1", Role::Client, &rm_protocol::session::relay_token("fake-1")).unwrap();
+        let (stream, keys) = rm_protocol::secure::client_tcp(stream, "fake-1", tok).unwrap();
+        stream.get_ref().set_read_timeout(Some(std::time::Duration::from_millis(20))).unwrap();
         let mut sess = Session::handshake(stream).unwrap();
-        sess.attach_udp(&addr, "fake-1", tok).unwrap();
+        sess.attach_udp(&addr, "fake-1", Some(&keys)).unwrap();
         let report = crate::e2e::run(&mut sess, "testapp");
         for c in &report.checks {
             assert!(c.1, "check failed: {} -> {}", c.0, c.2);
@@ -251,8 +254,9 @@ mod tests {
         let a = addr.clone();
         std::thread::spawn(move || { let _ = rm_fakeagent::serve_via_relay(&a, "rec-1", tok); });
         std::thread::sleep(std::time::Duration::from_millis(150));
-        let stream = join(&addr, "rec-1", Role::Client, tok).unwrap();
-        stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+        let stream = join(&addr, "rec-1", Role::Client, &rm_protocol::session::relay_token("rec-1")).unwrap();
+        let (stream, _) = rm_protocol::secure::client_tcp(stream, "rec-1", tok).unwrap();
+        stream.get_ref().set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
         let mut sess = Session::handshake(stream).unwrap();
         let mut file = vec![];
         let plan = crate::record::Plan { apps: vec!["testapp".into(), "notes".into()], settle: std::time::Duration::from_secs(2), max: std::time::Duration::from_secs(10), on_segment_end: Box::new(|_| {}) };
