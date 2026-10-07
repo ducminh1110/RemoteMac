@@ -44,7 +44,7 @@ uint32_t rm_virtual_display_create(uint32_t width, uint32_t height, int hidpi, c
         uint32_t scale = hidpi ? 2 : 1;
         CGVirtualDisplayDescriptor *d = [[D alloc] init];
         d.queue = dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0);
-        d.name = @"Remote Mac Display";
+        d.name = @"MacBridge Display";
         d.maxPixelsWide = width * scale;
         d.maxPixelsHigh = height * scale;
         // ~110 ppi at 1x, so macOS picks sensible UI sizes
@@ -54,7 +54,10 @@ uint32_t rm_virtual_display_create(uint32_t width, uint32_t height, int hidpi, c
         if (!v || v.displayID == 0) { fail(err, errlen, @"virtual display could not be created"); return 0; }
         CGVirtualDisplaySettings *s = [[S alloc] init];
         s.hiDPI = hidpi ? 1 : 0;
-        s.modes = @[[[M alloc] initWithWidth:width height:height refreshRate:60]];
+        // HiDPI: the full-pixel mode too, which macOS offers as width x height at 2x (some
+        // systems, VMs among them, only list the Retina mode when it is there)
+        s.modes = hidpi ? @[[[M alloc] initWithWidth:width height:height refreshRate:60], [[M alloc] initWithWidth:width * 2 height:height * 2 refreshRate:60]]
+                        : @[[[M alloc] initWithWidth:width height:height refreshRate:60]];
         if (![v applySettings:s]) { fail(err, errlen, @"display mode was refused"); return 0; }
         current = v;
         return v.displayID;

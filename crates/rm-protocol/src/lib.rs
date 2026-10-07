@@ -209,6 +209,9 @@ pub enum WindowRole {
     OpenPanel,
     /// A file *save* panel.
     SavePanel,
+    /// A popover, pop-up menu or completion list over `parent_id` (Xcode's search options, a
+    /// pop-up button's list): shown where the Mac shows it, borderless, never taking focus.
+    Popup,
 }
 
 /// One entry of an application's menu bar, as read from the Mac (Accessibility).
@@ -301,10 +304,57 @@ pub enum Message {
     /// Client -> agent: enter / leave fullscreen for this window (on the virtual display when
     /// there is one); the new size arrives as `WindowMoved`.
     WindowFullscreen { window_id: u64, on: bool },
+    /// Client -> agent: the decoder lost sync (or just started): send an IDR frame now. Like
+    /// Moonlight, keyframes come on request instead of on a fixed timer.
+    RequestKeyframe { window_id: u64 },
+    /// Client -> agent, after the handshake: what the client's decoder takes. `high_profile`:
+    /// H.264 High (Windows' own decoder) instead of Main (the portable fallback).
+    /// `scale`: the client's display scale (1.5 = 150 %): the agent captures at that many
+    /// pixels per point, so the picture is shown 1:1 (as sharp as a native window).
+    VideoDecoder {
+        high_profile: bool,
+        hardware: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scale: Option<f64>,
+        /// The client's screen as "W,H,S" (pixels at Mac scale S): a Mac whose own screen is 1x
+        /// lays out its desktop on a HiDPI virtual display of that size, so apps render at 2x.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        screen: Option<String>,
+    },
+    /// Either direction: how to reach this side directly (see `udp` "direct path"):
+    /// `candidates` are "ip:port" of its UDP socket (LAN addresses, the public one), `secret` is
+    /// 32 hex digits a punch to this side must carry.
+    P2pOffer { secret: String, candidates: Vec<String> },
+    /// Client -> agent: the user's stream settings (as Moonlight's): frames per second, a fixed
+    /// bitrate (None: Auto, the agent adapts), pixels per Mac point (None: keep), the layout
+    /// for app windows as `VideoDecoder::screen` ("": the Mac's own; None: keep).
+    StreamSettings {
+        fps: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bitrate_kbps: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        screen: Option<String>,
+        /// The Mac's pointer drawn into the picture (false: the viewer shows its own instead).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mac_cursor: Option<bool>,
+    },
+    /// Either direction: one step of a GameStream RTSP connection carried for the Mac Desktop
+    /// in full GameStream mode (crates/rm-gamestream tunnel.rs). `op`: "open" (PC -> Mac),
+    /// "data", "close".
+    GsTunnel {
+        id: u32,
+        op: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        data_base64: String,
+    },
 
     /// Either direction: the clipboard now holds this text. `seq` lets each side ignore
     /// the echo of a change it applied itself.
     ClipboardSet { seq: u64, text: String },
+    /// Either direction: a picture was copied (a .bmp file, 32-bit or what Windows had).
+    ClipboardImage { seq: u64, bmp_base64: String },
 
     /// Client -> agent: start uploading a local file the user picked (Files channel).
     FileUploadBegin { transfer_id: u64, name: String, size: u64 },
@@ -341,7 +391,7 @@ impl Message {
                 Channel::WindowMetadata
             }
             Ping { .. } | Pong { .. } => Channel::Telemetry,
-            ClipboardSet { .. } => Channel::Clipboard,
+            ClipboardSet { .. } | ClipboardImage { .. } => Channel::Clipboard,
             FileUploadBegin { .. } | FileUploadChunk { .. } | FileUploadEnd { .. } => Channel::Files,
             _ => Channel::Control,
         }
@@ -405,7 +455,7 @@ pub fn read_message<R: Read>(r: &mut R) -> Result<Option<Message>, ProtocolError
     let mut head = [0u8; 4];
     match r.read(&mut head[..1])? {
         0 => return Ok(None),
-        _ => r.read_exact(&mut head[1..])?,
+        _ => read_full(r, &mut head[1..])?,
     }
     let len = u32::from_be_bytes(head) as usize;
     if len == 0 {
@@ -415,13 +465,13 @@ pub fn read_message<R: Read>(r: &mut R) -> Result<Option<Message>, ProtocolError
         return Err(ProtocolError::FrameTooLarge(len, MAX_BULK_FRAME));
     }
     let mut ch = [0u8; 1];
-    r.read_exact(&mut ch)?;
+    read_full(r, &mut ch)?;
     let channel = Channel::from_u8(ch[0])?;
     if len > channel.max_frame() {
         return Err(ProtocolError::FrameTooLarge(len, channel.max_frame()));
     }
     let mut payload = vec![0u8; len - 1];
-    r.read_exact(&mut payload)?;
+    read_full(r, &mut payload)?;
     serde_json::from_slice(&payload).map(Some).map_err(|e| ProtocolError::Malformed(e.to_string()))
 }
 
@@ -569,12 +619,28 @@ pub enum Frame {
     Video(VideoFrame),
 }
 
-/// Blocking read of one frame of either kind. `Ok(None)` on clean EOF.
+/// `read_exact` that rides out read timeouts: once a frame has started it is read to its end
+/// (a timeout there would lose bytes and desynchronise the stream).
+fn read_full<R: Read>(r: &mut R, mut buf: &mut [u8]) -> std::io::Result<()> {
+    use std::io::ErrorKind::*;
+    while !buf.is_empty() {
+        match r.read(buf) {
+            Ok(0) => return Err(std::io::Error::new(UnexpectedEof, "eof mid-frame")),
+            Ok(n) => buf = &mut buf[n..],
+            Err(e) if matches!(e.kind(), Interrupted | WouldBlock | TimedOut) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Blocking read of one frame of either kind. `Ok(None)` on clean EOF. A read timeout can only
+/// surface before the first byte of a frame, never in the middle of one.
 pub fn read_frame<R: Read>(r: &mut R) -> Result<Option<Frame>, ProtocolError> {
     let mut head = [0u8; 4];
     match r.read(&mut head[..1])? {
         0 => return Ok(None),
-        _ => r.read_exact(&mut head[1..])?,
+        _ => read_full(r, &mut head[1..])?,
     }
     let len = u32::from_be_bytes(head) as usize;
     if len == 0 {
@@ -584,13 +650,13 @@ pub fn read_frame<R: Read>(r: &mut R) -> Result<Option<Frame>, ProtocolError> {
         return Err(ProtocolError::FrameTooLarge(len, MAX_BULK_FRAME));
     }
     let mut ch = [0u8; 1];
-    r.read_exact(&mut ch)?;
+    read_full(r, &mut ch)?;
     let channel = Channel::from_u8(ch[0])?;
     if len > channel.max_frame() {
         return Err(ProtocolError::FrameTooLarge(len, channel.max_frame()));
     }
     let mut payload = vec![0u8; len - 1];
-    r.read_exact(&mut payload)?;
+    read_full(r, &mut payload)?;
     if channel == Channel::Video {
         VideoFrame::decode_payload(&payload).map(|v| Some(Frame::Video(v)))
     } else {
@@ -818,6 +884,10 @@ mod tests {
 /// Recordings of an agent session (`.rmrec`): what the agent sent, frame by frame, tagged with
 /// the application it belongs to and its time from the start of that application's segment.
 /// Lets a real Mac session be replayed to a viewer elsewhere (`rm-fakeagent --replay`).
+pub mod fec;
+pub mod secure;
+pub mod udp;
+
 pub mod recording {
     use super::ProtocolError;
     use std::io::{Read, Write};
@@ -918,5 +988,67 @@ mod display_tests {
         }
         let j = serde_json::to_string(&Message::WindowFullscreen { window_id: 3, on: true }).unwrap();
         assert_eq!(j, r#"{"type":"window_fullscreen","window_id":3,"on":true}"#);
+    }
+}
+
+/// Connecting with an ID and a password (`remotemac --password ...` on the Mac, the connect
+/// dialog on Windows). The relay pairs by the ID; both sides derive the same session token from
+/// ID + password, so only someone who knows the password gets in. Kept identical in Swift
+/// (`agent/macos/Session.swift`): see the shared test vector below.
+pub mod session {
+    use sha2::{Digest, Sha256};
+
+    /// The relay this build uses when none is given: none in the source; a distribution sets one
+    /// at build time (`RM_DEFAULT_RELAY=host:port cargo build`), as the official releases do.
+    pub fn default_relay() -> Option<&'static str> {
+        option_env!("RM_DEFAULT_RELAY").filter(|r| !r.trim().is_empty())
+    }
+
+    /// "123 456 789", "123-456-789" -> "123456789"; None unless it is 9 digits.
+    pub fn normalize_id(id: &str) -> Option<String> {
+        let d: String = id.chars().filter(|c| !c.is_whitespace() && *c != '-').collect();
+        (d.len() == 9 && d.bytes().all(|b| b.is_ascii_digit())).then_some(d)
+    }
+
+    /// "123456789" -> "123 456 789" (how it is shown and typed).
+    pub fn display_id(id: &str) -> String {
+        let d: Vec<char> = id.chars().collect();
+        d.chunks(3).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>().join(" ")
+    }
+
+    /// Relay session name for an ID.
+    pub fn relay_session(id: &str) -> String {
+        format!("rm-{id}")
+    }
+
+    /// What the relay (and the Mac's local network port) is shown to pair the two sides: made
+    /// from the session name only, so it tells nothing about the password. The password is
+    /// proved, and the session keys agreed, end to end afterwards ([`crate::secure`]).
+    pub fn relay_token(session: &str) -> String {
+        let h = Sha256::digest(format!("remotemac/v2/relay:{session}").as_bytes());
+        h.iter().map(|b| format!("{b:02x}")).collect::<String>()[..48].to_string()
+    }
+
+    /// The session secret (48 hex chars) from ID and password: the input of the end-to-end
+    /// handshake, never sent anywhere.
+    pub fn token(id: &str, password: &str) -> String {
+        let h = Sha256::digest(format!("remotemac/v1:{id}:{password}").as_bytes());
+        h.iter().map(|b| format!("{b:02x}")).collect::<String>()[..48].to_string()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn ids_and_tokens() {
+            assert_eq!(normalize_id(" 123 456-789 ").as_deref(), Some("123456789"));
+            assert_eq!(normalize_id("12345678"), None);
+            assert_eq!(normalize_id("12345678a"), None);
+            assert_eq!(display_id("123456789"), "123 456 789");
+            assert_eq!(relay_session("123456789"), "rm-123456789");
+            // shared vector with the Swift agent (scripts/e2e-macos.sh connects both with it)
+            assert_eq!(token("123456789", "s3cret"), "3a6365467c85f122da38bf3b7192b081049bbf94ace2a9e0");
+        }
     }
 }

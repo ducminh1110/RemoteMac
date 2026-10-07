@@ -1,5 +1,7 @@
 // Files the user picked on Windows, written into ~/Downloads/RemoteMac Uploads. The client names the
 // file; we never let it choose a directory: names are sanitised exactly like rm_protocol::sanitize_upload_name.
+// They are only there for the session: when it ends (and at start, after a crash) the folder is
+// removed, so nothing piles up on the Mac's disk.
 import Foundation
 
 let maxUpload: UInt64 = 2 << 30
@@ -22,6 +24,18 @@ final class UploadStore {
     init(send: @escaping ([String: Any]) -> Void) {
         self.send = send
         dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads/RemoteMac Uploads", isDirectory: true)
+    }
+
+    /// Remove everything uploaded (the session is over): open transfers are dropped too.
+    func cleanup() {
+        for a in active.values { try? a.handle.close() }
+        active.removeAll()
+        let fm = FileManager.default
+        if let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey]) {
+            let bytes = items.reduce(0) { $0 + ((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
+            try? fm.removeItem(at: dir)
+            if !items.isEmpty { log("uploads cleaned: \(items.count) file(s), \(bytes / 1024) KB freed") }
+        }
     }
 
     private func fail(_ id: UInt64, _ reason: String) {

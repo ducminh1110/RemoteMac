@@ -1,0 +1,16 @@
+[package]
+name = "moonlight-sys"
+description = "moonlight-common-c (Moonlight's streaming core) built from third_party, with a Rust crypto backend"
+version.workspace = true
+edition.workspace = true
+license = "GPL-3.0-or-later"
+links = "moonlight-common-c"
+build = "build.rs"
+
+[dependencies]
+aes = "0.8"
+aes-gcm = "0.10"
+getrandom = "0.2"
+
+[build-dependencies]
+cc = "1"

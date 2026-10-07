@@ -3,7 +3,10 @@
 # with all apps open, as PNG files in $Out, plus showcase.txt.
 param(
   [Parameter(Mandatory)] [string] $Relay,
-  [Parameter(Mandatory)] [string] $Session,
+  [string] $Session = "",
+  # the user's way in: the ID and password the Mac prints (instead of -Session + RM_SESSION_TOKEN)
+  [string] $Id = "",
+  [string] $Password = "",
   [string] $Apps = "xcode",
   [string] $Out = "out\showcase",
   [int] $Settle = 12,
@@ -16,7 +19,7 @@ New-Item -ItemType Directory -Force -Path $Out | Out-Null
 Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $Out "ready"), (Join-Path $Out "desktop.done")
 $log = Join-Path $Out "viewer.log"
 $viewer = Start-Process -PassThru -NoNewWindow -FilePath target\release\remote-mac-viewer.exe `
-  -ArgumentList ("--relay $Relay --session $Session --showcase `"$Out`" --apps $Apps --settle $Settle --no-shortcuts" + $(if ($Type) { " --type `"$Type`"" } else { "" })) -RedirectStandardError $log
+  -ArgumentList ("--relay $Relay " + $(if ($Id) { "--id $Id --password $Password" } else { "--session $Session" }) + " --showcase `"$Out`" --apps $Apps --settle $Settle --no-shortcuts" + $(if ($Type) { " --type `"$Type`"" } else { "" })) -RedirectStandardError $log
 
 function Save-Desktop([string] $path) {
   try {

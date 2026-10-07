@@ -14,16 +14,19 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 pub const CLASS: PCWSTR = w!("RmLauncher");
 /// COPYDATASTRUCT.dwData tag for "launch this application id".
 pub const COPYDATA_LAUNCH: usize = 0x524D_4C31; // "RML1"
+/// WM_COMMAND id of the Settings button
+pub const ID_SETTINGS: usize = 300;
 const ICON_PX: i32 = 64;
 /// Layout (DIPs at 96 dpi): heading band, footer band, side margin.
 const HEAD: i32 = 76;
-const FOOT: i32 = 34;
+const FOOT: i32 = 16;
 const SIDE: i32 = 18;
 const BG: (u8, u8, u8) = (247, 247, 248);
 
 pub struct Launcher {
     pub hwnd: HWND,
     pub list: HWND,
+    settings: HWND,
     images: HIMAGELIST,
     /// Application ids in list order.
     pub ids: Vec<String>,
@@ -46,7 +49,7 @@ impl Launcher {
         unsafe {
             let icc = INITCOMMONCONTROLSEX { dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_LISTVIEW_CLASSES };
             let _ = InitCommonControlsEx(&icc);
-            let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("Remote Mac"), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 680, 460, None, None, Some(hinst), None).ok()?;
+            let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("MacBridge"), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 680, 460, None, None, Some(hinst), None).ok()?;
             let list = CreateWindowExW(WINDOW_EX_STYLE(0), WC_LISTVIEWW, w!(""), WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | LVS_ICON | LVS_AUTOARRANGE | LVS_SINGLESEL),
                 0, 0, 600, 380, Some(hwnd), None, Some(hinst), None).ok()?;
             let images = ImageList_Create(ICON_PX, ICON_PX, ILC_COLOR32, 8, 8);
@@ -61,7 +64,9 @@ impl Launcher {
             let ex = (LVS_EX_DOUBLEBUFFER | LVS_EX_BORDERSELECT) as isize;
             SendMessageW(list, LVM_SETEXTENDEDLISTVIEWSTYLE, Some(WPARAM(ex as usize)), Some(LPARAM(ex)));
             let _ = windows::Win32::UI::Controls::SetWindowTheme(list, w!("Explorer"), PCWSTR::null());
-            let l = Self { hwnd, list, images, ids: vec![], footer: String::new(), _font: ui };
+            let settings = CreateWindowExW(WINDOW_EX_STYLE(0), w!("BUTTON"), w!("⚙  Settings"), WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0), 0, 0, 110, 30, Some(hwnd), Some(HMENU(ID_SETTINGS as *mut c_void)), Some(hinst), None).ok()?;
+            SendMessageW(settings, WM_SETFONT, Some(WPARAM(ui.0 as usize)), Some(LPARAM(1)));
+            let l = Self { hwnd, list, settings, images, ids: vec![], footer: String::new(), _font: ui };
             let mut l = l;
             l.fit(); // WM_SIZE during creation came before the viewer's state existed
             l.status("connecting…");
@@ -75,7 +80,7 @@ impl Launcher {
     pub fn status(&mut self, s: &str) {
         self.footer = s.to_string();
         unsafe {
-            let _ = SetWindowTextW(self.hwnd, &HSTRING::from(format!("Remote Mac — {s}")));
+            // the title stays "MacBridge": what is connected where is no concern of the app list
             let _ = InvalidateRect(Some(self.hwnd), None, false);
         }
     }
@@ -91,10 +96,12 @@ impl Launcher {
             let mut rc = RECT::default();
             let _ = GetClientRect(self.hwnd, &mut rc);
             let _ = MoveWindow(self.list, px(SIDE), px(HEAD), (rc.right - 2 * px(SIDE)).max(1), (rc.bottom - px(HEAD) - px(FOOT)).max(1), true);
+            // Settings, top right in the heading band
+            let _ = MoveWindow(self.settings, rc.right - px(SIDE) - px(116), px(22), px(116), px(32), true);
         }
     }
 
-    /// Heading ("Remote Mac" + what is connected) and the mono footer, around the app grid.
+    /// Heading ("MacBridge" + how many apps) above the app grid.
     pub fn paint(&self, hdc: HDC) {
         let sc = self.scale();
         let px = |v: i32| (v as f64 * sc).round() as i32;
@@ -110,22 +117,13 @@ impl Launcher {
             let mono = font(crate::native::mono_face(), px(11), 400);
             let old = SelectObject(hdc, title.into());
             SetTextColor(hdc, rgb((22, 22, 24)));
-            let mut t: Vec<u16> = "Remote Mac".encode_utf16().collect();
+            let mut t: Vec<u16> = "MacBridge".encode_utf16().collect();
             let mut r = RECT { left: px(SIDE + 6), top: px(16), right: rc.right - px(SIDE), bottom: px(46) };
             DrawTextW(hdc, &mut t, &mut r, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
             SelectObject(hdc, sub.into());
             SetTextColor(hdc, rgb((120, 120, 128)));
-            let mut t: Vec<u16> = format!("{} Mac applications · double-click to open", self.ids.len()).encode_utf16().collect();
+            let mut t: Vec<u16> = format!("{} apps · double-click to open", self.ids.len()).encode_utf16().collect();
             let mut r = RECT { left: px(SIDE + 6), top: px(46), right: rc.right - px(SIDE), bottom: px(66) };
-            DrawTextW(hdc, &mut t, &mut r, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
-            // hairline above the footer
-            let line = CreateSolidBrush(rgb((228, 228, 232)));
-            FillRect(hdc, &RECT { left: 0, top: rc.bottom - px(FOOT), right: rc.right, bottom: rc.bottom - px(FOOT) + 1 }, line);
-            let _ = DeleteObject(line.into());
-            SelectObject(hdc, mono.into());
-            SetTextColor(hdc, rgb((132, 132, 140)));
-            let mut t: Vec<u16> = self.footer.encode_utf16().collect();
-            let mut r = RECT { left: px(SIDE + 6), top: rc.bottom - px(FOOT), right: rc.right - px(SIDE), bottom: rc.bottom };
             DrawTextW(hdc, &mut t, &mut r, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
             SelectObject(hdc, old);
             for f in [title, sub, mono] {

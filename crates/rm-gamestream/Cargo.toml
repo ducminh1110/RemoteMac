@@ -1,0 +1,18 @@
+[package]
+name = "rm-gamestream"
+description = "GameStream (Moonlight protocol) host, ported from Sunshine: RTSP, encrypted ENet control and input, RTP video with Reed-Solomon FEC"
+version.workspace = true
+edition.workspace = true
+license = "GPL-3.0-or-later"
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+moonlight-sys = { path = "../moonlight-sys" }
+aes = "0.8"
+aes-gcm = "0.10"
+getrandom = "0.2"
+
+[dev-dependencies]
+openh264 = "0.9"

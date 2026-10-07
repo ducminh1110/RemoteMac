@@ -41,6 +41,11 @@ final class InputInjector {
     private var lastPoint = CGPoint.zero
     private var activatedPid: pid_t = 0
     private var leftDown = false, rightDown = false
+    /// Mac Desktop: presses and releases received per path and button, and acted on per button
+    private var received: [String: Int] = [:], injected: [String: Int] = [:]
+
+    /// A new Mac Desktop session: its clicks are counted afresh.
+    func resetDesktopClicks() { received = [:]; injected = [:] }
     private let desktop: DesktopSession
     init(tracker: WindowTracker, desktop: DesktopSession) { self.tracker = tracker; self.desktop = desktop }
 
@@ -64,7 +69,7 @@ final class InputInjector {
             guard let e = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: (msg["down"] as? Bool) ?? true) else { return "event failed" }
             e.flags = flags(msg["modifiers"] as? [String] ?? [])
             if w.pid == 0 { e.post(tap: .cghidEventTap) } else { e.postToPid(w.pid) }
-            usleep(15_000)
+            usleep(2_000)
         case "mouse_move":
             let p = CGPoint(x: w.content.minX + num(msg["x"]), y: w.content.minY + num(msg["y"]))
             lastPoint = p
@@ -72,6 +77,15 @@ final class InputInjector {
             let type: CGEventType = leftDown ? .leftMouseDragged : rightDown ? .rightMouseDragged : .mouseMoved
             post(type, p, button: rightDown && !leftDown ? .right : .left, pid: w.pid)
         case "mouse_button":
+            // the Mac Desktop's presses and releases come twice (GameStream's input stream and
+            // the viewer's own input path, both in order): only the first copy of each acts
+            if wid == desktopWindowID {
+                let key = msg["button"] as? String ?? "left", path = msg["path"] as? String ?? "link"
+                let n = (received[path + key] ?? 0) + 1
+                received[path + key] = n
+                if n <= (injected[key] ?? 0) { return nil }
+                injected[key] = n
+            }
             let p = CGPoint(x: w.content.minX + num(msg["x"]), y: w.content.minY + num(msg["y"]))
             lastPoint = p
             let down = (msg["down"] as? Bool) ?? true
@@ -94,16 +108,43 @@ final class InputInjector {
     }
 
     private func post(_ type: CGEventType, _ p: CGPoint, button: CGMouseButton, pid: pid_t) {
-        if pid != 0 && (activatedPid != pid || type == .leftMouseDown) {
+        // bring the app forward only when it is not already (waiting on every click made each
+        // one land 150 ms late)
+        if pid != 0 && (activatedPid != pid || (type == .leftMouseDown && NSWorkspace.shared.frontmostApplication?.processIdentifier != pid)) {
+            let front = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
             NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
-            activatedPid = pid; usleep(150_000)
+            activatedPid = pid
+            if !front { usleep(60_000) }
         }
-        CGWarpMouseCursorPosition(p); CGAssociateMouseAndMouseCursorPosition(1)
-        guard let e = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: button) else { return }
-        e.setIntegerValueField(.mouseEventClickState, value: 1)
+        // No CGWarpMouseCursorPosition: a warp makes macOS hold back mouse events for 0.25 s, so a
+        // button-up right after it came late and the Dock took the click for a press-and-hold
+        // (its Quit / Options menu). A mouse event posted at a point moves the pointer itself.
+        guard let e = CGEvent(mouseEventSource: Self.source, mouseType: type, mouseCursorPosition: p, mouseButton: button) else { return }
+        // double and triple clicks: a press soon after the last one, close to it, counts up
+        // (Finder opens on a double click, text selects words and lines)
+        if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown {
+            let now = CFAbsoluteTimeGetCurrent()
+            let near = abs(p.x - lastDown.x) <= 4 && abs(p.y - lastDown.y) <= 4
+            clicks = (near && now - lastDownAt <= NSEvent.doubleClickInterval && button == lastButton) ? clicks + 1 : 1
+            lastDown = p; lastDownAt = now; lastButton = button
+        }
+        // no modifiers from the system's state (a Control left down would turn a click into a
+        // Control-click: the Dock's Options / Quit menu)
+        e.flags = []
+        e.setIntegerValueField(.mouseEventClickState, value: Int64(type == .mouseMoved ? 0 : clicks))
         e.setIntegerValueField(.mouseEventButtonNumber, value: Int64(button.rawValue))
         e.post(tap: .cghidEventTap)
     }
+
+    /// Our own event source with no suppression of local events after synthetic ones.
+    private static let source: CGEventSource? = {
+        let s = CGEventSource(stateID: .hidSystemState)
+        s?.localEventsSuppressionInterval = 0
+        return s
+    }()
+    private var clicks: Int64 = 1
+    private var lastDown = CGPoint(x: -100, y: -100), lastDownAt: CFAbsoluteTime = 0
+    private var lastButton: CGMouseButton = .left
 
     private func typeUnicode(_ s: String, pid: pid_t) {
         for ch in s {
@@ -112,7 +153,7 @@ final class InputInjector {
                 guard let e = CGEvent(keyboardEventSource: CGEventSource(stateID: .hidSystemState), virtualKey: 0, keyDown: down) else { continue }
                 e.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
                 if pid == 0 { e.post(tap: .cghidEventTap) } else { e.postToPid(pid) }
-                usleep(15_000)
+                usleep(2_000)
             }
         }
     }

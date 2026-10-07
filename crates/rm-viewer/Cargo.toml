@@ -15,6 +15,9 @@ rm-protocol = { path = "../rm-protocol" }
 rm-client = { path = "../rm-client" }
 rm-relay = { path = "../rm-relay" }
 rm-decode = { path = "../rm-decode" }
+moonlight-sys = { path = "../moonlight-sys" }
+rm-gamestream = { path = "../rm-gamestream" }
+serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.61"
@@ -35,13 +38,19 @@ features = [
   "Win32_UI_Shell",
   "Win32_UI_Shell_PropertiesSystem",
   "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D_Fxc",
   "Win32_Graphics_Direct3D11",
   "Win32_Graphics_Dxgi",
   "Win32_Graphics_Dxgi_Common",
   "Win32_UI_Controls",
   "Win32_Graphics_Dwm",
   "Win32_Graphics_DirectComposition",
+  "Win32_Media",
+  "Win32_Media_MediaFoundation",
+  "Win32_System_Console",
+  "Win32_System_Threading",
 ]
 
 [dev-dependencies]
 rm-fakeagent = { path = "../rm-fakeagent" }
+openh264 = "0.9"

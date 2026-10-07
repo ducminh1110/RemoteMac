@@ -66,10 +66,23 @@ pub fn is_text_char(c: u16) -> bool {
 
 /// Map a client-area point to remote-window coordinates, clamped to the remote window.
 pub fn scale_point(cx: i32, cy: i32, client: (i32, i32), remote: (u32, u32)) -> (f64, f64) {
-    let (cw, ch) = (client.0.max(1) as f64, client.1.max(1) as f64);
-    let x = (cx as f64 * remote.0 as f64 / cw).clamp(0.0, remote.0.saturating_sub(1) as f64);
-    let y = (cy as f64 * remote.1 as f64 / ch).clamp(0.0, remote.1.saturating_sub(1) as f64);
+    // the picture keeps its shape inside the client area (letterboxed), as it is drawn
+    let (ox, oy, w, h) = fit_rect((client.0.max(1), client.1.max(1)), remote);
+    let x = ((cx - ox) as f64 * remote.0 as f64 / w.max(1) as f64).clamp(0.0, remote.0.saturating_sub(1) as f64);
+    let y = ((cy - oy) as f64 * remote.1 as f64 / h.max(1) as f64).clamp(0.0, remote.1.saturating_sub(1) as f64);
     (x, y)
+}
+
+/// Where a `source`-sized picture goes in `area`: as large as fits without changing its shape,
+/// centred (Moonlight's scaleSourceToDestinationSurface). (x, y, w, h) in area pixels.
+pub fn fit_rect(area: (i32, i32), source: (u32, u32)) -> (i32, i32, i32, i32) {
+    let (aw, ah) = (area.0.max(1) as f64, area.1.max(1) as f64);
+    let (sw, sh) = (source.0.max(1) as f64, source.1.max(1) as f64);
+    let s = (aw / sw).min(ah / sh);
+    let (w, h) = ((sw * s).round() as i32, (sh * s).round() as i32);
+    // within a pixel or two of the area: use it all (rounding, not a different shape)
+    let (w, h) = (if (area.0 - w).abs() <= 2 { area.0 } else { w }, if (area.1 - h).abs() <= 2 { area.1 } else { h });
+    ((area.0 - w) / 2, (area.1 - h) / 2, w, h)
 }
 
 /// Combine a UTF-16 high surrogate with the following low surrogate (WM_CHAR delivers them separately).
@@ -129,6 +142,10 @@ mod tests {
         assert_eq!(scale_point(240, 176, (960, 704), (480, 352)), (120.0, 88.0));
         assert_eq!(scale_point(-50, 9999, (100, 100), (480, 352)), (0.0, 351.0));
         assert_eq!(scale_point(5, 5, (0, 0), (480, 352)).0, 479.0); // degenerate client does not divide by zero
+        // a 16:10 Mac screen on a 16:9 monitor: bars left and right, no stretching
+        assert_eq!(fit_rect((1920, 1080), (1440, 900)), (96, 0, 1728, 1080));
+        assert_eq!(scale_point(96, 540, (1920, 1080), (1440, 900)), (0.0, 450.0));
+        assert_eq!(scale_point(10, 540, (1920, 1080), (1440, 900)), (0.0, 450.0));
     }
 
     #[test]

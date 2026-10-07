@@ -6,6 +6,7 @@ use rm_protocol::{negotiate, read_frame, read_message, write_message, AppInfo, C
 
 pub mod e2e;
 pub mod record;
+pub mod udp;
 use std::io::{Read, Write};
 
 pub struct Session<S: Read + Write> {
@@ -13,6 +14,10 @@ pub struct Session<S: Read + Write> {
     pub state: SessionState,
     pub negotiated: Negotiated,
     pub capabilities: CapabilityReport,
+    /// UDP video (frames rebuilt from FEC shards) when attached
+    udp: Option<(std::sync::Arc<udp::UdpVideo>, std::sync::mpsc::Receiver<rm_protocol::udp::Out>)>,
+    /// our direct-path offer, once the UDP thread knows our addresses (sent by `recv`)
+    offer: Option<std::sync::mpsc::Receiver<Message>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -43,12 +48,12 @@ impl<S: Read + Write> Session<S> {
             m => return Err(unexpected(m)),
         };
         let state = SessionState::Connecting.next(Event::HandshakeComplete).expect("valid transition");
-        Ok(Self { stream, state, negotiated, capabilities })
+        Ok(Self { stream, state, negotiated, capabilities, udp: None, offer: None })
     }
 
     pub fn list_apps(&mut self) -> Result<Vec<AppInfo>, ClientError> {
         write_message(&mut self.stream, &Message::ListApps)?;
-        match next(&mut self.stream)? {
+        match self.next_msg()? {
             Message::Apps { apps } => Ok(apps),
             m => Err(unexpected(m)),
         }
@@ -59,9 +64,23 @@ impl<S: Read + Write> Session<S> {
             &mut self.stream,
             &Message::AppLaunch { application_id: application_id.into(), arguments, working_directory: None, environment: Default::default() },
         )?;
-        match next(&mut self.stream)? {
+        match self.next_msg()? {
             Message::AppLaunched { pid, .. } => Ok(pid),
             m => Err(unexpected(m)),
+        }
+    }
+
+    /// The next control message; the agent's direct-path offer is taken on the way.
+    fn next_msg(&mut self) -> Result<Message, ClientError> {
+        loop {
+            match next(&mut self.stream)? {
+                Message::P2pOffer { secret, candidates } => {
+                    if let Some((u, _)) = &self.udp {
+                        u.peer_offer(&secret, &candidates);
+                    }
+                }
+                m => return Ok(m),
+            }
         }
     }
 
@@ -69,22 +88,77 @@ impl<S: Read + Write> Session<S> {
         write_message(&mut self.stream, m)
     }
 
-    /// Next frame of any kind (control message or video).
+    /// Receive video over UDP too (through the same relay). Use a short read timeout on the
+    /// TCP stream so UDP frames are not held up behind it.
+    /// `keys`: the session's, from its secure handshake (None: plain, for tests without one).
+    pub fn attach_udp(&mut self, relay: &str, session: &str, keys: Option<&rm_protocol::secure::Keys>) -> std::io::Result<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (otx, orx) = std::sync::mpsc::channel();
+        let u = udp::start(
+            relay,
+            session,
+            &rm_protocol::session::relay_token(session),
+            keys,
+            false,
+            move |o| {
+                let _ = tx.send(o);
+            },
+            move |secret, candidates| {
+                let _ = otx.send(Message::P2pOffer { secret, candidates });
+            },
+        )?;
+        self.udp = Some((std::sync::Arc::new(u), rx));
+        self.offer = Some(orx);
+        Ok(())
+    }
+
+    /// The UDP path (GameStream tunnel datagrams ride it too).
+    pub fn udp(&self) -> Option<std::sync::Arc<udp::UdpVideo>> {
+        self.udp.as_ref().map(|(u, _)| u.clone())
+    }
+
+    pub fn udp_stats(&self) -> Option<udp::LinkStats> {
+        self.udp.as_ref().and_then(|(u, _)| u.stats.lock().ok().map(|s| s.clone()))
+    }
+
+    /// Next frame of any kind (control message or video, from TCP or UDP).
     pub fn recv(&mut self) -> Result<Option<Frame>, ProtocolError> {
-        read_frame(&mut self.stream)
+        while let Some(o) = self.udp.as_ref().and_then(|(_, rx)| rx.try_recv().ok()) {
+            match o {
+                rm_protocol::udp::Out::Frame(v) => return Ok(Some(Frame::Video(v))),
+                // a frame lost even with FEC: ask for a keyframe and carry on
+                rm_protocol::udp::Out::Lost(id) => write_message(&mut self.stream, &Message::RequestKeyframe { window_id: id })?,
+            }
+        }
+        if let Some(m) = self.offer.as_ref().and_then(|o| o.try_recv().ok()) {
+            write_message(&mut self.stream, &m)?;
+        }
+        let f = read_frame(&mut self.stream)?;
+        if let (Some(Frame::Msg(Message::P2pOffer { secret, candidates })), Some((u, _))) = (&f, &self.udp) {
+            u.peer_offer(secret, candidates);
+        }
+        Ok(f)
     }
 
     pub fn terminate(&mut self, application_id: &str) -> Result<(), ClientError> {
         write_message(&mut self.stream, &Message::AppTerminate { application_id: application_id.into() })?;
-        match next(&mut self.stream)? {
+        match self.next_msg()? {
             Message::AppExited { .. } => Ok(()),
             m => Err(unexpected(m)),
         }
     }
 }
 
+/// The next control message, riding out short read timeouts (the stream may have one so that
+/// UDP video is not held up) for up to 15 s.
 fn next<S: Read>(s: &mut S) -> Result<Message, ClientError> {
-    read_message(s)?.ok_or(ClientError::Closed)
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        match read_message(s) {
+            Err(ProtocolError::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) && std::time::Instant::now() < deadline => continue,
+            r => return r?.ok_or(ClientError::Closed),
+        }
+    }
 }
 
 fn unexpected(m: Message) -> ClientError {
@@ -155,14 +229,19 @@ mod tests {
         std::thread::spawn(move || { let _ = rm_fakeagent::serve_via_relay(&a, "fake-1", tok); });
         std::thread::sleep(std::time::Duration::from_millis(150));
 
-        let stream = join(&addr, "fake-1", Role::Client, tok).unwrap();
-        stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+        // as the CLI runs it: end-to-end encrypted, video over UDP beside a short-timeout TCP stream
+        let stream = join(&addr, "fake-1", Role::Client, &rm_protocol::session::relay_token("fake-1")).unwrap();
+        let (stream, keys) = rm_protocol::secure::client_tcp(stream, "fake-1", tok).unwrap();
+        stream.get_ref().set_read_timeout(Some(std::time::Duration::from_millis(20))).unwrap();
         let mut sess = Session::handshake(stream).unwrap();
+        sess.attach_udp(&addr, "fake-1", Some(&keys)).unwrap();
         let report = crate::e2e::run(&mut sess, "testapp");
         for c in &report.checks {
             assert!(c.1, "check failed: {} -> {}", c.0, c.2);
         }
         assert!(report.decoded >= 30 && report.fps() > 5.0, "decoded={} fps={}", report.decoded, report.fps());
+        let udp = sess.udp_stats().unwrap();
+        assert!(udp.frames >= 30, "video must have come over UDP: {udp:?}");
     }
 
     /// Record a session with the fake agent, then replay it: the replayed client sees the same
@@ -176,8 +255,9 @@ mod tests {
         let a = addr.clone();
         std::thread::spawn(move || { let _ = rm_fakeagent::serve_via_relay(&a, "rec-1", tok); });
         std::thread::sleep(std::time::Duration::from_millis(150));
-        let stream = join(&addr, "rec-1", Role::Client, tok).unwrap();
-        stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+        let stream = join(&addr, "rec-1", Role::Client, &rm_protocol::session::relay_token("rec-1")).unwrap();
+        let (stream, _) = rm_protocol::secure::client_tcp(stream, "rec-1", tok).unwrap();
+        stream.get_ref().set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
         let mut sess = Session::handshake(stream).unwrap();
         let mut file = vec![];
         let plan = crate::record::Plan { apps: vec!["testapp".into(), "notes".into()], settle: std::time::Duration::from_secs(2), max: std::time::Duration::from_secs(10), on_segment_end: Box::new(|_| {}) };

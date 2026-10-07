@@ -1,3 +1,7 @@
+> **Historical document.** These are the original design notes (in Vietnamese), from when
+> MacBridge targeted temporary GitHub Actions macOS runners. The current design is described in
+> [ARCHITECTURE.md](ARCHITECTURE.md).
+
 # Remote Mac App — Spec (phương án 2: GitHub Actions + terminal-launched agent)
 
 Stream **từng ứng dụng macOS** (Xcode là mục tiêu cuối) sang cửa sổ riêng trên Windows.

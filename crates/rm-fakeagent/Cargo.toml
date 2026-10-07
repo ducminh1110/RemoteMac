@@ -11,6 +11,8 @@ name = "rm-fakeagent"
 path = "src/main.rs"
 
 [dependencies]
+serde_json.workspace = true
 rm-protocol = { path = "../rm-protocol" }
+rm-gamestream = { path = "../rm-gamestream" }
 rm-relay = { path = "../rm-relay" }
 openh264 = "0.9"

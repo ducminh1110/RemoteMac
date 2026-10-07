@@ -31,9 +31,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 pub struct Options {
-    pub relay: String,
+    /// relay server (None: only a Mac on this network can be reached)
+    pub relay: Option<String>,
     pub session: String,
     pub token: String,
+    /// Ask for the Mac's ID and password in a window (session/token are derived from them).
+    pub prompt: bool,
     pub app: Option<String>,
     pub ctrl_as_command: bool,
     pub smoke: bool,
@@ -62,6 +65,8 @@ pub struct ShowcaseOptions {
 const WM_UI_EVENT: u32 = WM_APP + 1;
 /// wParam = remote id of an open panel to replace with the Windows file picker.
 const WM_PICK_FILE: u32 = WM_APP + 2;
+/// The monitor's vertical blank: show the pictures that arrived since the last one.
+const WM_VSYNC: u32 = WM_APP + 3;
 const TIMER_ID: usize = 1;
 const WM_MOUSE_LEAVE: u32 = 0x02A3;
 
@@ -118,6 +123,8 @@ struct App {
     showcase: Option<Showcase>,
     exit: Option<i32>,
     hinst: isize,
+    /// the Mac Desktop launched in full GameStream mode: its session key
+    gs_key: Option<[u8; 16]>,
     controller: isize,
     /// HICON per remote application id, shared by all its windows.
     icons: HashMap<String, isize>,
@@ -125,6 +132,8 @@ struct App {
     clipboard: bool,
     /// Text we just put on the Windows clipboard ourselves (its change notification is not echoed).
     clip_applied: Option<String>,
+    /// digest of the picture the Mac last put here (not sent back)
+    clip_applied_image: Option<u64>,
     clip_seq: u64,
     d3d: bool,
     /// Windows are composition windows (rounded, anti-aliased): decided once at start.
@@ -145,7 +154,88 @@ struct App {
     /// Virtual display last asked of the Mac (DisplayConfigure), and what it answered.
     display_req: Option<(u32, u32, u32)>,
     display: Option<(u32, u32)>,
+    stats: Stats,
+    /// frame pacing: pictures wait here for the next vblank (newest per window)
+    pending: HashMap<u64, (net::Pic, net::FrameMeta)>,
+    /// set when pictures are pending: the pacer thread posts WM_VSYNC at the next vblank
+    vsync: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// stats overlay on (Ctrl+Alt+Shift+S), and its last text
+    overlay: bool,
+    overlay_lines: Vec<String>,
+    stats_logged: Instant,
 }
+
+/// Stream health over the last second: the stats overlay and the log.
+struct Stats {
+    shown: u64,
+    /// pictures replaced before they were shown (a newer one came first)
+    skipped: u64,
+    udp: u64,
+    bytes: u64,
+    decode_us: u64,
+    /// capture -> fully received (agent clock), summed over `recv_n` pictures
+    recv_ms: f64,
+    recv_n: u64,
+    /// capture -> presented
+    shown_ms: f64,
+    shown_n: u64,
+    size: (usize, usize),
+    since: Instant,
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self { shown: 0, skipped: 0, udp: 0, bytes: 0, decode_us: 0, recv_ms: 0.0, recv_n: 0, shown_ms: 0.0, shown_n: 0, size: (0, 0), since: Instant::now() }
+    }
+}
+
+impl Stats {
+    fn note(&mut self, m: &net::FrameMeta, shown_agent_us: Option<i64>, size: (usize, usize)) {
+        self.shown += 1;
+        self.udp += m.via_udp as u64;
+        self.bytes += m.bytes as u64;
+        self.decode_us += m.decode_us as u64;
+        self.size = size;
+        let ok = |ms: f64| (0.0..5000.0).contains(&ms);
+        if let Some(r) = m.received_agent_us {
+            let ms = (r - m.pts_us as i64) as f64 / 1000.0;
+            if ok(ms) {
+                self.recv_ms += ms;
+                self.recv_n += 1;
+            }
+        }
+        if let Some(n) = shown_agent_us {
+            let ms = (n - m.pts_us as i64) as f64 / 1000.0;
+            if ok(ms) {
+                self.shown_ms += ms;
+                self.shown_n += 1;
+            }
+        }
+    }
+
+    /// The overlay's lines (as Moonlight's: video, network, latency, decoder).
+    fn lines(&self, link: Option<rm_client::udp::LinkStats>, pacing: bool) -> Vec<String> {
+        let secs = self.since.elapsed().as_secs_f64().max(0.001);
+        let avg = |sum: f64, n: u64| if n > 0 { format!("{:.1} ms", sum / n as f64) } else { "-".into() };
+        let mut v = vec![format!("Video   {}x{}  {:.0} fps  {:.1} Mbit/s", self.size.0, self.size.1, self.shown as f64 / secs, self.bytes as f64 * 8.0 / secs / 1e6)];
+        match link {
+            Some(l) if l.active => v.push(format!(
+                "Network UDP+FEC {}  RTT {}  loss {:.1}%  fixed {}  lost {}",
+                l.direct.map_or("via server".into(), |d| format!("direct {d}")),
+                l.rtt_ms.map_or("-".into(), |r| format!("{r:.0} ms")),
+                l.loss * 100.0,
+                l.recovered,
+                l.lost
+            )),
+            Some(l) => v.push(format!("Network TCP (UDP {})  RTT {}", if l.ready { "idle" } else { "blocked" }, l.rtt_ms.map_or("-".into(), |r| format!("{r:.0} ms")))),
+            None => v.push("Network TCP".into()),
+        }
+        v.push(format!("Latency capture->shown {}  (->received {}, decode {:.1} ms)", avg(self.shown_ms, self.shown_n), avg(self.recv_ms, self.recv_n), self.decode_us as f64 / self.shown.max(1) as f64 / 1000.0));
+        v.push(format!("Decoder {:?}  pacing {}  frames skipped {}", net::decoder_kind(), if pacing { "vsync" } else { "off" }, self.skipped));
+        v
+    }
+}
+
 
 thread_local! { static APP: RefCell<Option<App>> = const { RefCell::new(None) }; }
 
@@ -177,6 +267,9 @@ pub fn run(opts: Options) -> i32 {
                 return 1;
             }
         }
+        crate::splash::register(hinst);
+        crate::settings_ui::register(hinst);
+        crate::navball::register(hinst, ball_menu);
         let controller = match CreateWindowExW(WINDOW_EX_STYLE(0), w!("RmController"), w!("rm-controller"), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(hinst), None) {
             Ok(h) => h,
             Err(e) => {
@@ -188,11 +281,45 @@ pub fn run(opts: Options) -> i32 {
         let wake = move || {
             let _ = PostMessageW(Some(hwnd_of(ctl)), WM_UI_EVENT, WPARAM(0), LPARAM(0));
         };
-        let (link, rx) = match net::connect(&opts.relay, &opts.session, &opts.token, opts.app.as_deref(), wake) {
-            Ok(x) => x,
-            Err(e) => {
-                eprintln!("connect failed: {e}");
-                return 1;
+        native::load_fonts();
+        // decided before any window exists: composition windows, and with them GPU pictures
+        let use_comp = opts.d3d && comp::available();
+        net::set_decoder(choose_decoder(use_comp));
+        // sharp like a native window: the Mac renders at this PC's pixel density
+        let sys_scale = windows::Win32::UI::HiDpi::GetDpiForSystem().max(96) as f64 / 96.0;
+        net::set_display_scale(sys_scale);
+        // and the Mac lays out its screen at this PC's size, Retina, when its own screen is 1x
+        // (Ultra sharpness: always at 2x, the pictures scaled down here)
+        let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+        net::set_screen_px((sw, sh));
+        PIXEL_FOR_PIXEL.store(crate::settings::Settings::load().pixel_for_pixel(), std::sync::atomic::Ordering::Relaxed);
+        let fit = crate::settings::Settings::load().app_screen((sw, sh), sys_scale);
+        net::set_screen_fit((!fit.is_empty()).then_some(fit));
+        eprintln!("video decoder: {:?}", net::decoder_kind());
+        let mut opts = opts;
+        let (link, rx) = if opts.prompt {
+            // ID + password window; it connects in the background and shows why an attempt failed
+            let app = opts.app.clone();
+            let id = crate::connect::last_id();
+            let got = crate::connect::connect_window(id.as_deref(), None, |typed, password, relay| {
+                let (session, token) = (rm_protocol::session::relay_session(typed), rm_protocol::session::token(typed, password));
+                net::connect_with(Some(relay).filter(|r| !r.trim().is_empty()), &session, &token, app.as_deref(), false, wake)
+                    .map(|x| (x, rm_protocol::session::display_id(typed)))
+                    .map_err(|e| {
+                        eprintln!("connect failed: {e}");
+                        net::friendly_error(&e)
+                    })
+            });
+            let Some((x, shown_id)) = got else { return 0 };
+            opts.session = shown_id;
+            x
+        } else {
+            match net::connect(opts.relay.as_deref(), &opts.session, &opts.token, opts.app.as_deref(), wake) {
+                Ok(x) => x,
+                Err(e) => {
+                    eprintln!("connect failed: {e}");
+                    return 1;
+                }
             }
         };
         eprintln!("connected; waiting for windows");
@@ -202,24 +329,23 @@ pub fn run(opts: Options) -> i32 {
             shortcuts::remove_all(d);
         }
         link.send(&Message::ListApps);
-        let mut launcher = Launcher::create(hinst, opts.app.is_none() && !opts.smoke);
-        if let Some(l) = launcher.as_mut() {
-            l.status(&format!("relay {} · session {}", opts.relay, opts.session));
-        }
+        let launcher = Launcher::create(hinst, opts.app.is_none() && !opts.smoke);
         if launcher.is_none() {
             eprintln!("warning: launcher window could not be created");
         }
         let smoke = opts.smoke.then(Smoke::new);
-        native::load_fonts();
-        let use_comp = opts.d3d && comp::available();
         eprintln!("window surfaces: {}", if use_comp { "DirectComposition (rounded corners)" } else if opts.d3d { "Direct3D 11" } else { "GDI" });
         let showcase = opts.showcase.map(Showcase::new);
         APP.with(|a| {
-            *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, smoke, showcase, exit: None, hinst: hinst.0 as isize, controller: ctl,
-                icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_seq: 0, d3d: opts.d3d, comp: use_comp,
+            *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, smoke, showcase, exit: None, hinst: hinst.0 as isize, gs_key: None, controller: ctl,
+                icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_applied_image: None, clip_seq: 0, d3d: opts.d3d, comp: use_comp,
                 launcher, panels: HashMap::new(), uploads: HashMap::new(), next_transfer: 1, redirect_panels: opts.windows_file_picker,
-                shortcut_dir, app_names: vec![], icon_rgba: HashMap::new(), menus: HashMap::new(), display_req: None, display: None })
+                shortcut_dir, app_names: vec![], icon_rgba: HashMap::new(), menus: HashMap::new(), display_req: None, display: None, stats: Stats::default(),
+                pending: HashMap::new(), vsync: None, overlay: std::env::var_os("RM_STATS").is_some(), overlay_lines: vec![], stats_logged: Instant::now() - Duration::from_secs(4) })
         });
+        let pacer = if use_comp { start_pacer(ctl) } else { None };
+        eprintln!("frame pacing: {}", if pacer.is_some() { "vsync" } else { "off" });
+        with_app(|a| a.vsync = pacer);
         SetTimer(Some(controller), TIMER_ID, 100, None);
         if opts.clipboard && !native::listen_clipboard(controller) {
             eprintln!("warning: clipboard listener unavailable; clipboard sync off");
@@ -234,14 +360,73 @@ pub fn run(opts: Options) -> i32 {
     }
 }
 
+/// Best decoder this PC has: the GPU (DXVA through Media Foundation, pictures stay in video
+/// memory; needs composition windows), else Media Foundation in software, else openh264.
+/// RM_DECODER=hardware|platform|software forces one.
+fn choose_decoder(use_comp: bool) -> net::DecoderKind {
+    use net::DecoderKind::*;
+    let forced = match std::env::var("RM_DECODER").ok().as_deref() {
+        Some("hardware") => Some(Hardware),
+        Some("platform") => Some(Platform),
+        Some("software") => Some(Software),
+        _ => None,
+    };
+    if let Some(k) = forced {
+        return k;
+    }
+    // the user's choice in Settings (CPU, or GPU when this PC has one)
+    match crate::settings::Settings::load().decoder {
+        2 => return Platform,
+        1 if use_comp && crate::gpu::shared().is_some_and(|g| g.hardware) => return Hardware,
+        _ => {}
+    }
+    // probe on a thread of its own (Media Foundation wants a multithreaded COM apartment)
+    std::thread::spawn(move || {
+        let gpu = crate::gpu::shared().filter(|g| g.hardware);
+        if gpu.is_some() {
+            // checked once: are GPU pictures drawn with the right colours (zero-copy) or copied?
+            eprintln!("GPU colour conversion: {}", if crate::nv12::shared().is_some() { "shader (zero-copy, as Moonlight)" } else { "unavailable, pictures are copied" });
+        }
+        if use_comp && gpu.is_some() && crate::mfdec::MfDecoder::new(gpu).is_ok() {
+            Hardware
+        } else if crate::mfdec::MfDecoder::new(None).is_ok() {
+            Platform
+        } else {
+            Software
+        }
+    })
+    .join()
+    .unwrap_or(Software)
+}
+
 /// The Mac is no longer reachable from this viewer: its apps leave the Start menu and Search.
 fn on_mac_gone() {
+    MAC_GONE.store(true, std::sync::atomic::Ordering::Release);
     if let Some(d) = with_app(|a| a.shortcut_dir.clone()).flatten() {
+        let _guard = SHORTCUT_LOCK.lock(); // after a sync in flight
         shortcuts::remove_all(&d);
     }
 }
 
+/// Shortcuts are (re)written on a worker thread, at most once a second: with every Mac app in
+/// the Start menu, writing them on the UI thread at each icon froze the viewer.
+static SHORTCUT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static SHORTCUTS_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static MAC_GONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+thread_local! { static SHORTCUTS_DIRTY: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) }; }
+
 fn sync_shortcuts() {
+    // note it; shortcuts_tick writes them shortly
+    SHORTCUTS_DIRTY.with(|d| if d.get().is_none() { d.set(Some(Instant::now())) });
+}
+
+fn shortcuts_tick() {
+    use std::sync::atomic::Ordering;
+    let due = SHORTCUTS_DIRTY.with(|d| d.get().is_some_and(|t| t.elapsed() >= Duration::from_millis(700)));
+    if !due || SHORTCUTS_BUSY.load(Ordering::Acquire) {
+        return;
+    }
+    SHORTCUTS_DIRTY.with(|d| d.set(None));
     let Some((dir, apps)) = with_app(|a| {
         let dir = a.shortcut_dir.clone()?;
         let apps: Vec<shortcuts::AppEntry> = a.app_names.iter().map(|(id, n)| (id.clone(), n.clone(), a.icon_rgba.get(id).cloned())).collect();
@@ -249,11 +434,21 @@ fn sync_shortcuts() {
     })
     .flatten() else { return };
     let Ok(exe) = std::env::current_exe() else { return };
-    for r in shortcuts::sync(&dir, &exe, &apps) {
-        if let Err(e) = r {
-            eprintln!("warning: shortcut not written: {e}");
+    SHORTCUTS_BUSY.store(true, Ordering::Release);
+    std::thread::spawn(move || {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
-    }
+        let _guard = SHORTCUT_LOCK.lock();
+        if !MAC_GONE.load(Ordering::Acquire) {
+            for r in shortcuts::sync(&dir, &exe, &apps) {
+                if let Err(e) = r {
+                    eprintln!("warning: shortcut not written: {e}");
+                }
+            }
+        }
+        SHORTCUTS_BUSY.store(false, Ordering::Release);
+    });
 }
 
 fn quit(code: i32) {
@@ -270,7 +465,13 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             drain_events();
             LRESULT(0)
         }
+        WM_VSYNC => {
+            on_vsync();
+            LRESULT(0)
+        }
         WM_TIMER => {
+            stats_tick();
+            shortcuts_tick();
             smoke_tick();
             showcase_tick();
             LRESULT(0)
@@ -303,6 +504,10 @@ unsafe extern "system" fn launcher_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             with_app(|a| a.launcher.as_ref().map(|l| l.fit()));
             LRESULT(0)
         }
+        WM_COMMAND if wp.0 & 0xffff == launcher::ID_SETTINGS => {
+            open_settings(Some(hwnd));
+            LRESULT(0)
+        }
         WM_NOTIFY => {
             if let Some(app) = with_app(|a| a.launcher.as_ref().and_then(|l| l.activated(lp))).flatten() {
                 launch_app(&app);
@@ -328,6 +533,71 @@ unsafe extern "system" fn launcher_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
     }
 }
 
+/// Pixel for pixel (Settings): Mac points are shown one pixel each, not one DIP each.
+static PIXEL_FOR_PIXEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Screen pixels per Mac point for a remote window's picture.
+fn pic_scale(dpi_scale: f64) -> f64 {
+    if PIXEL_FOR_PIXEL.load(std::sync::atomic::Ordering::Relaxed) { 1.0 } else { dpi_scale }
+}
+
+/// The Settings window; saving applies what can be applied now (frame rate, bitrate,
+/// sharpness on the Mac; the pointer here) and keeps the rest for windows opened later.
+fn open_settings(owner: Option<HWND>) {
+    let Some(hinst) = with_app(|a| a.hinst) else { return };
+    crate::settings_ui::show(HINSTANCE(hinst as *mut c_void), owner, crate::settings::Settings::load(), |s| {
+        if let Err(e) = s.save() {
+            eprintln!("settings not saved: {e}");
+        }
+        local_cursor().store(s.local_cursor, std::sync::atomic::Ordering::Relaxed);
+        PIXEL_FOR_PIXEL.store(s.pixel_for_pixel(), std::sync::atomic::Ordering::Relaxed);
+        with_app(|a| a.link.send(&s.message(net::display_scale(), net::screen_px())));
+        eprintln!("settings: {s:?}");
+    });
+}
+
+/// "fit=W,H,S" for the Mac Desktop: the monitor the launcher is on, in points as on this PC,
+/// at the Mac Desktop scale chosen in Settings (1x or 2x; streamed at exactly that size).
+fn desktop_fit() -> Option<String> {
+    let anchor = with_app(|a| a.launcher.as_ref().map(|l| l.hwnd.0 as isize)).flatten().unwrap_or(0);
+    let hwnd = hwnd_of(anchor);
+    let mon = monitor_rect(hwnd);
+    let scale = if anchor != 0 { native::dpi_scale(hwnd) } else { unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem().max(96) as f64 / 96.0 } };
+    let (w, h) = (mon.right - mon.left, mon.bottom - mon.top);
+    (w > 0 && h > 0).then(|| format!("fit={}", crate::settings::Settings::load().desktop_screen((w, h), scale)))
+}
+
+/// A Mac window bigger than this monitor's work area is fitted into it, and the Mac app is
+/// resized to match (the picture is never cut off or larger than the laptop's screen).
+fn fit_to_work_area(hwnd: HWND) {
+    unsafe {
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let _ = GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info);
+        let work = info.rcWork;
+        let mut wr = RECT::default();
+        let _ = GetWindowRect(hwnd, &mut wr);
+        let (ww, wh) = (wr.right - wr.left, wr.bottom - wr.top);
+        let (aw, ah) = (work.right - work.left, work.bottom - work.top);
+        if ww <= aw && wh <= ah {
+            if wr.left < work.left || wr.top < work.top || wr.right > work.right || wr.bottom > work.bottom {
+                // fits, but hangs off the screen: bring it in
+                let x = wr.left.clamp(work.left, work.right - ww);
+                let y = wr.top.clamp(work.top, work.bottom - wh);
+                let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            return;
+        }
+        let (cw, ch) = content_of(hwnd).map(client_size).unwrap_or_else(|| client_size(hwnd));
+        let (nw, nh) = (cw - (ww - aw).max(0), ch - (wh - ah).max(0));
+        resize_content(hwnd, nw.max(200), nh.max(150));
+        let mut nr = RECT::default();
+        let _ = GetWindowRect(hwnd, &mut nr);
+        let _ = SetWindowPos(hwnd, None, work.left + (aw - (nr.right - nr.left)).max(0) / 2, work.top + (ah - (nr.bottom - nr.top)).max(0) / 2, 0, 0, SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE);
+        eprintln!("window larger than the screen: fitted to {}x{} px, Mac app resized to match", nw, nh);
+        request_remote_resize(hwnd);
+    }
+}
+
 /// Launch an app, or bring its existing main window to the front (like clicking a running app).
 fn launch_app(app: &str) {
     let existing = with_app(|a| a.remotes.iter().find(|(_, r)| r.app == app && r.parent.is_none()).map(|(k, _)| *k)).flatten();
@@ -337,7 +607,27 @@ fn launch_app(app: &str) {
             let _ = SetForegroundWindow(hwnd_of(h));
         },
         None => {
-            with_app(|a| a.link.send(&Message::AppLaunch { application_id: app.into(), arguments: vec![], working_directory: None, environment: Default::default() }));
+            // Mac Desktop: the Mac lays out its screen at this PC's resolution (virtual display,
+            // as BetterDummy), so it fills the monitor 1:1
+            let mut arguments: Vec<String> = if app == DESKTOP_APP { desktop_fit().into_iter().collect() } else { vec![] };
+            // the Mac Desktop streams over full GameStream (Moonlight's client core) unless
+            // RM_GAMESTREAM=0: the Mac starts a host session with this key
+            if app == DESKTOP_APP && crate::gsdesktop::enabled() {
+                let (key, hex) = crate::gsdesktop::new_key();
+                arguments.push(format!("gamestream={hex}"));
+                with_app(|a| a.gs_key = Some(key));
+            }
+            // the "opening" card: icon, name, what is happening and how far along
+            if let Some((hinst, name, icon, smoke)) = with_app(|a| {
+                let name = a.app_names.iter().find(|(id, _)| id == app).map(|(_, n)| n.clone()).unwrap_or_else(|| if app == DESKTOP_APP { "Mac Desktop".into() } else { app.to_string() });
+                (a.hinst, name, a.icons.get(app).map(|i| HICON(*i as *mut c_void)), a.smoke.is_some())
+            }) {
+                if !smoke {
+                    crate::splash::show(HINSTANCE(hinst as *mut c_void), app, &name, icon);
+                }
+            }
+            with_app(|a| a.link.send(&Message::AppLaunch { application_id: app.into(), arguments, working_directory: None, environment: Default::default() }));
+            crate::splash::step(app, 2);
         }
     }
 }
@@ -380,22 +670,253 @@ fn pick_file_for_panel(panel: u64) {
     });
 }
 
+/// Digest of a .bmp file's picture (its DIB: the file header is rebuilt on each side).
+fn dib_digest(bmp: &[u8]) -> u64 {
+    bmp.iter().skip(14).fold(0xcbf29ce484222325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x100000001b3))
+}
+
 /// Windows clipboard changed: forward it unless we caused the change ourselves.
 fn on_local_clipboard(owner: HWND) {
-    let Some(text) = native::clipboard_text(owner) else { return };
-    with_app(|a| {
-        if !a.clipboard || a.clip_applied.as_deref() == Some(text.as_str()) {
-            return;
+    if !with_app(|a| a.clipboard).unwrap_or(false) {
+        return;
+    }
+    if let Some(text) = native::clipboard_text(owner) {
+        with_app(|a| {
+            if a.clip_applied.take().as_deref() == Some(text.as_str()) {
+                return; // the Mac's own text coming back
+            }
+            a.clip_seq += 1;
+            eprintln!("clipboard -> Mac: {} characters", text.chars().count());
+            a.link.send(&Message::ClipboardSet { seq: a.clip_seq, text });
+        });
+    } else if let Some(bmp) = native::clipboard_bmp(owner) {
+        // a picture (a screenshot, an image copied in a browser); the Mac gets it as an image
+        let digest = dib_digest(&bmp);
+        with_app(|a| {
+            if a.clip_applied_image.take() == Some(digest) || bmp.len() > 11 << 20 {
+                return;
+            }
+            a.clip_seq += 1;
+            eprintln!("clipboard -> Mac: picture, {} bytes", bmp.len());
+            a.link.send(&Message::ClipboardImage { seq: a.clip_seq, bmp_base64: rm_protocol::base64_encode(&bmp) });
+        });
+    }
+}
+
+fn stats_tick() {
+    let Some((lines, overlay)) = with_app(|a| {
+        if a.stats.since.elapsed() < Duration::from_secs(1) {
+            return None;
         }
-        a.clip_seq += 1;
-        a.link.send(&Message::ClipboardSet { seq: a.clip_seq, text });
+        let link = a.link.udp.as_ref().and_then(|u| u.stats.lock().ok().map(|s| s.clone()));
+        let lines = a.stats.lines(link, a.vsync.is_some());
+        if a.stats.shown > 0 && a.stats_logged.elapsed() >= Duration::from_secs(5) {
+            eprintln!("stream: {}", lines.join(" | "));
+            a.stats_logged = Instant::now();
+        }
+        a.stats = Stats::default();
+        a.overlay_lines = lines.clone();
+        Some((lines, a.overlay))
+    })
+    .flatten() else { return };
+    if overlay {
+        draw_overlays(&lines);
+    }
+}
+
+/// Draw the stats panel on every composition window (top left of the picture).
+fn draw_overlays(lines: &[String]) {
+    let keys: Vec<(isize, f64)> = with_app(|a| a.remotes.iter().filter(|(_, r)| r.comp.is_some()).map(|(k, r)| (*k, r.scale)).collect()).unwrap_or_default();
+    for (k, scale) in keys {
+        let (w, h, px) = overlay_bitmap(lines, scale);
+        let bar = bar_px(hwnd_of(k));
+        let m = (10.0 * scale) as i32;
+        with_app(|a| a.remotes.get_mut(&k).and_then(|r| r.comp.as_mut()).map(|c| c.set_overlay(m, bar + m, w, h, &px)));
+    }
+}
+
+fn hide_overlays() {
+    with_app(|a| {
+        for r in a.remotes.values_mut() {
+            if let Some(c) = r.comp.as_mut() {
+                c.set_overlay(0, 0, 0, 0, &[]);
+            }
+        }
     });
+}
+
+/// The panel: white JetBrains Mono on translucent black, premultiplied BGRA.
+fn overlay_bitmap(lines: &[String], scale: f64) -> (i32, i32, Vec<u8>) {
+    unsafe {
+        let px = (12.0 * scale).round() as i32;
+        let pad = (8.0 * scale).round() as i32;
+        let line_h = (px as f64 * 1.45).round() as i32;
+        let screen = GetDC(None);
+        let mem = CreateCompatibleDC(Some(screen));
+        let font = CreateFontW(-px, 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, 0, &HSTRING::from(native::mono_face()));
+        let oldf = SelectObject(mem, font.into());
+        let mut wmax = 0;
+        let texts: Vec<Vec<u16>> = lines.iter().map(|l| l.encode_utf16().collect()).collect();
+        for t in &texts {
+            let mut sz = SIZE::default();
+            let _ = GetTextExtentPoint32W(mem, t, &mut sz);
+            wmax = wmax.max(sz.cx);
+        }
+        let (w, h) = (wmax + 2 * pad, line_h * lines.len() as i32 + 2 * pad - (line_h - px) / 2);
+        let dib = BITMAPINFO { bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() }, ..Default::default() };
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let Ok(bmp) = CreateDIBSection(Some(mem), &dib, DIB_RGB_COLORS, &mut bits, None, 0) else {
+            SelectObject(mem, oldf);
+            let _ = DeleteObject(font.into());
+            let _ = DeleteDC(mem);
+            ReleaseDC(None, screen);
+            return (0, 0, vec![]);
+        };
+        let old = SelectObject(mem, bmp.into());
+        fill(mem, RECT { left: 0, top: 0, right: w, bottom: h }, (0, 0, 0));
+        SetBkMode(mem, TRANSPARENT);
+        SetTextColor(mem, rgb((255, 255, 255)));
+        for (i, t) in texts.iter().enumerate() {
+            let _ = TextOutW(mem, pad, pad + i as i32 * line_h, t);
+        }
+        let _ = GdiFlush();
+        let src = std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize);
+        // white text over black at 70%: premultiplied, alpha from the text's coverage
+        let out: Vec<u8> = src.chunks_exact(4).flat_map(|p| {
+            let l = p[0].max(p[1]).max(p[2]);
+            let a = l.max(178);
+            [l, l, l, a]
+        }).collect();
+        SelectObject(mem, old);
+        SelectObject(mem, oldf);
+        let _ = DeleteObject(bmp.into());
+        let _ = DeleteObject(font.into());
+        let _ = DeleteDC(mem);
+        ReleaseDC(None, screen);
+        (w, h, out)
+    }
+}
+
+/// Frame pacing (RM_PACING=1): a thread waits for the monitor's vertical blank and, when
+/// pictures are waiting, has the UI show them then. By default a picture is shown the moment it
+/// is decoded (Moonlight's lowest-latency setting): the compositor puts it on the next refresh
+/// anyway, and waiting for a vblank first only adds up to a frame of delay.
+fn start_pacer(ctl: isize) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    if std::env::var("RM_PACING").ok().as_deref() != Some("1") && !crate::settings::Settings::load().pacing {
+        return None;
+    }
+    let g = crate::gpu::shared().filter(|g| g.hardware)?;
+    let output = unsafe {
+        use windows::core::Interface;
+        let dxgi = g.device.cast::<windows::Win32::Graphics::Dxgi::IDXGIDevice>().ok()?;
+        dxgi.GetAdapter().ok()?.EnumOutputs(0).ok()?
+    };
+    struct Out(windows::Win32::Graphics::Dxgi::IDXGIOutput);
+    unsafe impl Send for Out {}
+    let out = Out(output);
+    let flag = std::sync::Arc::new(AtomicBool::new(false));
+    let f = flag.clone();
+    std::thread::Builder::new()
+        .name("rm-vsync".into())
+        .spawn(move || {
+            let out = out;
+            loop {
+                if unsafe { out.0.WaitForVBlank() }.is_err() {
+                    std::thread::sleep(Duration::from_millis(16));
+                }
+                if f.swap(false, Ordering::AcqRel) {
+                    unsafe {
+                        let _ = PostMessageW(Some(hwnd_of(ctl)), WM_VSYNC, WPARAM(0), LPARAM(0));
+                    }
+                }
+            }
+        })
+        .ok()?;
+    Some(flag)
+}
+
+/// Put a decoded picture on its window (GPU texture, uploaded BGRA, or GDI repaint).
+fn present_frame(id: u64, picture: net::Pic, meta: net::FrameMeta) {
+    let key = with_app(|a| {
+        let key = *a.by_id.get(&id)?;
+        let shown_agent_us = a.link.udp.as_ref().and_then(|u| u.agent_now_us());
+        let r = a.remotes.get_mut(&key)?;
+        r.frames += 1;
+        let size = picture.size();
+        let gpu_ok = match (&picture, r.comp.as_mut(), r.presenter.as_mut()) {
+            (net::Pic::Gpu(g), Some(c), _) => {
+                let ok = c.present_gpu(g);
+                if !ok {
+                    net::hardware_failed(&format!("showing a GPU picture failed ({})", c.last_error));
+                }
+                ok
+            }
+            (net::Pic::Cpu(p), Some(c), _) => c.present(p),
+            (net::Pic::Cpu(p), None, Some(d)) => d.present(p),
+            _ => false,
+        };
+        if !gpu_ok && r.presenter.take().is_some() {
+            eprintln!("Direct3D presenter failed; falling back to GDI for window {id}");
+        }
+        if let net::Pic::Cpu(p) = picture {
+            r.picture = Some(p);
+        }
+        a.stats.note(&meta, shown_agent_us, size);
+        Some((key, gpu_ok))
+    })
+    .flatten();
+    if let Some((k, false)) = key {
+        if let Some(c) = content_of(hwnd_of(k)) {
+            unsafe { let _ = InvalidateRect(Some(c), None, false); }
+        }
+    }
+}
+
+/// Show what waited for this vblank.
+fn on_vsync() {
+    let pending: Vec<(u64, (net::Pic, net::FrameMeta))> = with_app(|a| a.pending.drain().collect()).unwrap_or_default();
+    for (id, (picture, meta)) in pending {
+        present_frame(id, picture, meta);
+    }
 }
 
 fn drain_events() {
     let events: Vec<UiEvent> = with_app(|a| a.rx.try_iter().collect()).unwrap_or_default();
-    for ev in events {
+    for ev in latest_frames_only(events) {
         handle_event(ev);
+    }
+}
+
+/// Of several pictures queued for one window only the newest is shown (the others would only
+/// add latency); everything else keeps its order.
+fn latest_frames_only(events: Vec<UiEvent>) -> Vec<UiEvent> {
+    let mut last: HashMap<u64, usize> = HashMap::new();
+    for (i, e) in events.iter().enumerate() {
+        if let UiEvent::Frame { id, .. } = e {
+            last.insert(*id, i);
+        }
+    }
+    let skipped = events.iter().enumerate().filter(|(i, e)| matches!(e, UiEvent::Frame { id, .. } if last.get(id) != Some(i))).count();
+    if skipped > 0 {
+        with_app(|a| a.stats.skipped += skipped as u64);
+    }
+    events.into_iter().enumerate().filter(|(i, e)| !matches!(e, UiEvent::Frame { id, .. } if last.get(id) != Some(i))).map(|(_, e)| e).collect()
+}
+
+/// Show a decoded picture now, or at the next vblank when pacing is on.
+fn frame_arrived(id: u64, picture: net::Pic, meta: net::FrameMeta) {
+    match with_app(|a| a.vsync.clone()).flatten() {
+        // paced: wait for the next vblank (a newer picture replaces a waiting one)
+        Some(flag) => {
+            with_app(|a| {
+                if a.pending.insert(id, (picture, meta)).is_some() {
+                    a.stats.skipped += 1;
+                }
+            });
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+        None => present_frame(id, picture, meta),
     }
 }
 
@@ -411,7 +932,20 @@ fn handle_event(ev: UiEvent) {
                 .unwrap_or(0);
                 unsafe { let _ = PostMessageW(Some(hwnd_of(ctl)), WM_PICK_FILE, WPARAM(id as usize), LPARAM(0)); }
             } else {
+                if parent.is_none() {
+                    crate::splash::step(&app, 3);
+                }
                 create_remote_window(id, &app, &title, (x, y, w, h), parent, role);
+                if app == DESKTOP_APP && parent.is_none() {
+                    if let Some((link, key)) = with_app(|a| a.gs_key.take().map(|k| (a.link.clone(), k))).flatten() {
+                        if let Err(e) = net::start_gamestream_desktop(&link, id, key, (w, h), (w.min(65535) as u16, h.min(65535) as u16)) {
+                            eprintln!("Mac Desktop GameStream not started: {e}");
+                        }
+                    }
+                }
+                if parent.is_none() {
+                    crate::splash::step(&app, 4); // the window is there: waiting for its first picture
+                }
             }
         }
         UiEvent::Apps(apps) => {
@@ -501,50 +1035,58 @@ fn handle_event(ev: UiEvent) {
                 }
             }
         }
+        UiEvent::ClipboardImage(bmp) => {
+            let digest = dib_digest(&bmp);
+            let owner = with_app(|a| a.clipboard.then(|| {
+                a.clip_applied_image = Some(digest);
+                a.controller
+            }))
+            .flatten();
+            if let Some(owner) = owner {
+                if !native::set_clipboard_bmp(hwnd_of(owner), &bmp) {
+                    eprintln!("warning: could not put the Mac's picture on the Windows clipboard");
+                }
+            }
+        }
         UiEvent::Title { id, title } => {
             if let Some(h) = with_app(|a| a.by_id.get(&id).copied()).flatten() {
                 unsafe { let _ = SetWindowTextW(hwnd_of(h), &HSTRING::from(title)); }
             }
         }
-        UiEvent::Resized { id, w, h } => {
+        UiEvent::Resized { id, x, y, w, h } => {
             let target = with_app(|a| {
                 let key = *a.by_id.get(&id)?;
                 let r = a.remotes.get_mut(&key)?;
                 r.rw = w;
                 r.rh = h;
-                Some((key, r.scale, r.maximized || r.fullscreen))
+                if r.role == WindowRole::Popup {
+                    r.rx = x;
+                    r.ry = y;
+                }
+                Some((key, pic_scale(r.scale), r.maximized || r.fullscreen, r.role == WindowRole::Popup))
             })
             .flatten();
-            if let Some((key, scale, maximized)) = target {
-                if !maximized {
+            if let Some((key, scale, maximized, popup)) = target {
+                if popup {
+                    place_popup(hwnd_of(key));
+                } else if !maximized {
                     resize_content(hwnd_of(key), (w as f64 * scale).round() as i32, (h as f64 * scale).round() as i32);
                 }
             }
         }
-        UiEvent::Frame { id, picture } => {
-            let key = with_app(|a| {
-                let key = *a.by_id.get(&id)?;
-                let r = a.remotes.get_mut(&key)?;
-                r.frames += 1;
-                let gpu_ok = match (r.comp.as_mut(), r.presenter.as_mut()) {
-                    (Some(c), _) => c.present(&picture),
-                    (None, Some(p)) => p.present(&picture),
-                    _ => false,
-                };
-                if !gpu_ok && r.presenter.take().is_some() {
-                    eprintln!("Direct3D presenter failed; falling back to GDI for window {id}");
-                }
-                r.picture = Some(picture);
-                Some((key, gpu_ok))
-            })
-            .flatten();
-            if let Some((k, false)) = key {
-                if let Some(c) = content_of(hwnd_of(k)) {
-                    unsafe { let _ = InvalidateRect(Some(c), None, false); }
+        UiEvent::Frame { id, picture, meta } => {
+            // the app's first picture is on screen: its launch card is done
+            if let Some(app) = with_app(|a| a.by_id.get(&id).and_then(|k| a.remotes.get(k)).map(|r| r.app.clone())).flatten() {
+                if crate::splash::showing(&app) {
+                    crate::splash::done(&app);
                 }
             }
+            frame_arrived(id, picture, meta)
         }
         UiEvent::Destroyed { id } => {
+            if crate::gsdesktop::active_window() == Some(id) {
+                crate::gsdesktop::stop();
+            }
             if let Some(h) = with_app(|a| a.by_id.remove(&id)).flatten() {
                 with_app(|a| a.remotes.remove(&h));
                 unsafe { let _ = DestroyWindow(hwnd_of(h)); }
@@ -558,9 +1100,24 @@ fn handle_event(ev: UiEvent) {
             }
         }
         UiEvent::AppExited(app) => eprintln!("remote app exited: {app}"),
-        UiEvent::Notice(n) => eprintln!("notice: {n}"),
+        UiEvent::Launched(app) => crate::splash::step(&app, 3),
+        UiEvent::Notice(n) => {
+            eprintln!("notice: {n}");
+            // a launch the Mac refused: the card says why
+            if n.starts_with("launch") || n.starts_with("unknown_app") || n.starts_with("not_running") {
+                let apps = with_app(|a| a.app_names.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>()).unwrap_or_default();
+                for app in apps.iter().filter(|id| n.contains(id.as_str())) {
+                    crate::splash::fail(app, n.split_once(": ").map_or(n.as_str(), |x| x.1));
+                }
+            }
+        }
         UiEvent::Disconnected(why) => {
             eprintln!("disconnected: {why}");
+            let interactive = with_app(|a| a.smoke.is_none() && a.showcase.is_none()).unwrap_or(false);
+            if interactive {
+                // never vanish without a word
+                native::message_box("MacBridge", &format!("The connection to the Mac was closed.\n\n{why}\n\n{}", crate::log_hint()));
+            }
             on_mac_gone();
             quit(if with_app(|a| a.smoke.is_some()).unwrap_or(false) { 1 } else { 0 });
         }
@@ -573,15 +1130,21 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         // Dialogs, sheets and panels become *owned* windows: they stay above their parent,
         // minimise with it and do not get their own taskbar button, as on the Mac.
         let owned = owner.is_some() && role != WindowRole::Window;
+        // A popover / pop-up list is part of its parent's picture on the Mac: no frame, no title
+        // bar, no taskbar button, and clicking it leaves the parent active (as a menu does).
+        let popup = role == WindowRole::Popup;
         // No Windows caption: the viewer draws a Mac title bar (traffic lights) itself; the thick
         // frame keeps resizing, snapping and the shadow.
-        let mut style = WS_POPUP.0 | WS_THICKFRAME.0 | WS_SYSMENU.0 | WS_CLIPCHILDREN.0;
-        if !owned {
+        let mut style = if popup { WS_POPUP.0 | WS_CLIPCHILDREN.0 } else { WS_POPUP.0 | WS_THICKFRAME.0 | WS_SYSMENU.0 | WS_CLIPCHILDREN.0 };
+        if !owned && !popup {
             style |= WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0;
         }
         let hinst = HINSTANCE(hinst as *mut c_void);
         let use_comp = with_app(|a| a.comp).unwrap_or(false);
-        let ex = if use_comp { WS_EX_NOREDIRECTIONBITMAP } else { WINDOW_EX_STYLE(0) };
+        let mut ex = if use_comp { WS_EX_NOREDIRECTIONBITMAP } else { WINDOW_EX_STYLE(0) };
+        if popup {
+            ex |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+        }
         let hwnd = CreateWindowExW(ex, w!("RmRemoteWindow"), &HSTRING::from(title), WINDOW_STYLE(style), 40 + x.max(0), 40 + y.max(0),
             w as i32, h as i32, if owned { owner.map(hwnd_of) } else { None }, None, Some(hinst), None);
         let Ok(hwnd) = hwnd else {
@@ -607,7 +1170,7 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
             native::round_corners(hwnd);
         }
         let aumid = format!("RemoteMac.{}", app.replace(|c: char| !c.is_ascii_alphanumeric(), "_"));
-        if !owned && !native::set_app_user_model_id(hwnd, &aumid) {
+        if !owned && !popup && !native::set_app_user_model_id(hwnd, &aumid) {
             // Taskbar identity before the window is shown: own group + icon per remote application.
             eprintln!("warning: could not set AppUserModelID {aumid}");
         }
@@ -624,7 +1187,7 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
             (cached, parent_origin)
         })
         .unwrap_or((None, None));
-        if !owned {
+        if !owned && !popup {
             // The Mac app's menu bar comes down into its window, like on the Mac but per window.
             let menus = with_app(|a| {
                 let m = a.menus.get(app).cloned();
@@ -641,18 +1204,26 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         if let Some(icon) = cached {
             native::set_window_icon(hwnd, HICON(icon as *mut c_void));
         }
-        resize_content(hwnd, (w as f64 * scale).round() as i32, (h as f64 * scale).round() as i32);
-        if let (true, Some(o), Some((px, py))) = (owned, owner, parent_origin) {
+        let pt = pic_scale(scale);
+        resize_content(hwnd, (w as f64 * pt).round() as i32, (h as f64 * pt).round() as i32);
+        if !owned && !popup && app != DESKTOP_APP {
+            fit_to_work_area(hwnd);
+        }
+        if popup {
+            place_popup(hwnd);
+        } else if let (true, Some(o), Some((px, py))) = (owned, owner, parent_origin) {
             // keep the dialog where the Mac put it relative to its parent
             let mut orc = RECT::default();
             let _ = GetWindowRect(hwnd_of(o), &mut orc);
-            let nx = orc.left + ((x - px) as f64 * scale).round() as i32;
-            let ny = orc.top + ((y - py) as f64 * scale).round() as i32;
+            let nx = orc.left + ((x - px) as f64 * pt).round() as i32;
+            let ny = orc.top + ((y - py) as f64 * pt).round() as i32;
             let _ = SetWindowPos(hwnd, None, nx, ny, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
         }
         layout(hwnd);
-        keep_on_screen(hwnd);
-        let _ = ShowWindow(hwnd, SW_SHOW);
+        if !popup {
+            keep_on_screen(hwnd);
+        }
+        let _ = ShowWindow(hwnd, if popup { SW_SHOWNOACTIVATE } else { SW_SHOW });
         let compositor = if use_comp { comp::Comp::new(hwnd) } else { None };
         let presenter = if compositor.is_none() && with_app(|a| a.d3d).unwrap_or(false) { d3d::Presenter::new(content, w, h) } else { None };
         let renderer = compositor.as_ref().map(|c| c.kind).or(presenter.as_ref().map(|p| p.kind)).unwrap_or("gdi");
@@ -693,7 +1264,36 @@ fn content_of(frame: HWND) -> Option<HWND> {
 
 /// Height of the chrome (title bar, plus the menu strip when the app has a menu bar).
 fn bar_px(frame: HWND) -> i32 {
-    with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| if r.fullscreen && !r.reveal { 0 } else { chrome::bar_height(r.scale, r.menu != 0) })).flatten().unwrap_or(0)
+    with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| if (r.fullscreen && !r.reveal) || r.role == WindowRole::Popup { 0 } else { chrome::bar_height(r.scale, r.menu != 0) })).flatten().unwrap_or(0)
+}
+
+fn is_popup(frame: HWND) -> bool {
+    with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.role == WindowRole::Popup)).flatten().unwrap_or(false)
+}
+
+/// Put a popup exactly where the Mac shows it over its parent's picture, at the parent's
+/// picture scale (so a list lines up with the button it came from).
+fn place_popup(frame: HWND) {
+    let Some((parent, x, y, w, h, scale)) = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| (r.parent, r.rx, r.ry, r.rw, r.rh, pic_scale(r.scale)))).flatten() else { return };
+    let host = parent.and_then(|p| with_app(|a| {
+        let k = *a.by_id.get(&p)?;
+        a.remotes.get(&k).map(|r| (r.content, r.rx, r.ry, r.rw, r.rh))
+    }).flatten());
+    unsafe {
+        let Some((content, px, py, pw, ph)) = host else {
+            // no parent window here: where the Mac has it, at this screen's scale
+            let _ = SetWindowPos(frame, None, 40 + x.max(0), 40 + y.max(0), (w as f64 * scale).round() as i32, (h as f64 * scale).round() as i32, SWP_NOZORDER | SWP_NOACTIVATE);
+            layout(frame);
+            return;
+        };
+        let content = hwnd_of(content);
+        let (ox, oy, fw, fh) = fit_rect(client_size(content), (pw, ph));
+        let (kx, ky) = (fw as f64 / pw.max(1) as f64, fh as f64 / ph.max(1) as f64);
+        let mut pt = POINT { x: ox + ((x - px) as f64 * kx).round() as i32, y: oy + ((y - py) as f64 * ky).round() as i32 };
+        let _ = ClientToScreen(content, &mut pt);
+        let _ = SetWindowPos(frame, None, pt.x, pt.y, ((w as f64 * kx).round() as i32).max(1), ((h as f64 * ky).round() as i32).max(1), SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    layout(frame);
 }
 
 fn is_fullscreen(frame: HWND) -> bool {
@@ -753,8 +1353,11 @@ fn toggle_fullscreen(frame: HWND) {
             layout(frame);
             if !desktop {
                 with_app(|a| a.link.send(&Message::WindowFullscreen { window_id: id, on: true }));
+            } else {
+                crate::navball::show(frame); // the Mac Desktop: a navigation ball, no bar at the top edge
             }
         } else {
+            crate::navball::hide(frame);
             let mut from = RECT::default();
             let _ = GetWindowRect(frame, &mut from);
             with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).map(|r| { r.reveal = true }));
@@ -775,7 +1378,58 @@ fn toggle_fullscreen(frame: HWND) {
     }
 }
 
-/// In fullscreen the bar slides in while the pointer is at the top edge, as the Mac's menu bar does.
+/// The navigation ball's menu (Mac Desktop in fullscreen), opened beside the ball at `at`.
+fn ball_menu(frame: HWND, at: POINT) {
+    const EXIT: u32 = 1;
+    const MINIMIZE: u32 = 2;
+    const SETTINGS: u32 = 3;
+    const POINTER: u32 = 4;
+    const CLOSE: u32 = 5;
+    unsafe {
+        let Ok(m) = CreatePopupMenu() else { return };
+        let pointer = local_cursor().load(std::sync::atomic::Ordering::Relaxed);
+        let _ = AppendMenuW(m, MF_STRING, EXIT as usize, w!("Exit full screen\tF11"));
+        let _ = AppendMenuW(m, MF_STRING, MINIMIZE as usize, w!("Minimize"));
+        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(m, MF_STRING | if pointer { MF_CHECKED } else { MF_UNCHECKED }, POINTER as usize, w!("Show this PC's pointer\tCtrl+Alt+Shift+C"));
+        let _ = AppendMenuW(m, MF_STRING, SETTINGS as usize, w!("Settings…\tCtrl+Alt+Shift+P"));
+        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(m, MF_STRING, CLOSE as usize, w!("Disconnect Mac Desktop"));
+        let side = if crate::navball::opens_left(frame, at) { TPM_RIGHTALIGN } else { TPM_LEFTALIGN };
+        let _ = SetForegroundWindow(frame);
+        let cmd = TrackPopupMenuEx(m, (side | TPM_TOPALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON).0, at.x, at.y, frame, None).0 as u32;
+        let _ = DestroyMenu(m);
+        match cmd {
+            EXIT => toggle_fullscreen(frame),
+            MINIMIZE => { let _ = ShowWindow(frame, SW_MINIMIZE); }
+            SETTINGS => open_settings(Some(frame)),
+            POINTER => set_local_pointer(!pointer),
+            CLOSE => { let _ = PostMessageW(Some(frame), WM_CLOSE, WPARAM(0), LPARAM(0)); }
+            _ => {}
+        }
+    }
+}
+
+/// This PC's pointer over the picture on or off (kept for next time; the Mac leaves its own
+/// pointer out of the video while this one shows).
+fn set_local_pointer(on: bool) {
+    local_cursor().store(on, std::sync::atomic::Ordering::Relaxed);
+    unsafe {
+        let _ = SetCursor(if on { LoadCursorW(None, IDC_ARROW).ok() } else { None });
+    }
+    eprintln!("local pointer over the picture: {}", if on { "shown" } else { "hidden (the Mac's pointer is in the video)" });
+    let mut st = crate::settings::Settings::load();
+    st.local_cursor = on;
+    let _ = st.save();
+    with_app(|a| a.link.send(&st.message(net::display_scale(), net::screen_px())));
+}
+
+fn is_desktop(frame: HWND) -> bool {
+    with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.app == DESKTOP_APP)).flatten().unwrap_or(false)
+}
+
+/// In fullscreen the bar slides in while the pointer is at the top edge, as the Mac's menu bar does
+/// (not on the Mac Desktop: its own menu bar is there; it has the navigation ball instead).
 fn set_reveal(frame: HWND, reveal: bool) {
     let changed = with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).and_then(|r| (r.fullscreen && r.reveal != reveal).then(|| r.reveal = reveal))).flatten().is_some();
     if changed {
@@ -805,7 +1459,7 @@ fn layout(frame: HWND) {
 /// Current picture size of the window expressed in Mac points.
 fn client_points(frame: HWND) -> (u32, u32, f64) {
     let (cw, ch) = content_of(frame).map(client_size).unwrap_or_else(|| client_size(frame));
-    let scale = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.scale)).flatten().unwrap_or(1.0);
+    let scale = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| pic_scale(r.scale))).flatten().unwrap_or(1.0);
     ((cw as f64 / scale).round().max(1.0) as u32, (ch as f64 / scale).round().max(1.0) as u32, scale)
 }
 
@@ -1178,6 +1832,9 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             }
             LRESULT(0)
         }
+        WM_NCHITTEST if is_popup(hwnd) => LRESULT(HTCLIENT as isize),
+        // clicking a popup (a Mac menu or popover) leaves its parent window active
+        WM_MOUSEACTIVATE if is_popup(hwnd) => LRESULT(MA_NOACTIVATE as isize),
         WM_NCHITTEST => {
             let r = DefWindowProcW(hwnd, msg, wp, lp);
             if r.0 as u32 != HTCLIENT {
@@ -1331,8 +1988,23 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             LRESULT(0)
         }
         WM_CLOSE => {
-            // Closing the local window asks the remote window to close; we disappear when it does.
-            send_for(hwnd, |r, _| Some(Message::WindowClose { window_id: r.id }));
+            // The close button quits the app when this is its last main window (as Windows apps
+            // do), instead of leaving it running in the Mac's Dock; with other windows of the app
+            // still open, only this one closes. Either way we disappear when the Mac says so.
+            let quit = with_app(|a| {
+                let r = a.remotes.get(&(hwnd.0 as isize))?;
+                let last = r.role == WindowRole::Window
+                    && r.parent.is_none()
+                    && r.app != DESKTOP_APP
+                    && r.app != "finder"
+                    && !a.remotes.iter().any(|(k, o)| *k != hwnd.0 as isize && o.app == r.app && o.role == WindowRole::Window && o.parent.is_none());
+                last.then(|| r.app.clone())
+            })
+            .flatten();
+            match quit {
+                Some(app) => with_app(|a| a.link.send(&Message::AppTerminate { application_id: app })).unwrap_or(()),
+                None => send_for(hwnd, |r, _| Some(Message::WindowClose { window_id: r.id })),
+            }
             LRESULT(0)
         }
         WM_DESTROY => {
@@ -1352,9 +2024,23 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
 }
 
 /// The picture of a remote window: input goes to the Mac, frames are drawn here.
+/// Show this PC's pointer over the picture too (Ctrl+Alt+Shift+C, as Moonlight; RM_LOCAL_CURSOR=1
+/// starts with it on). Off by default: the Mac's own pointer is in the video, where it really
+/// is and with its real shape, as Sunshine streams it and Moonlight shows it.
+static LOCAL_CURSOR: std::sync::OnceLock<std::sync::atomic::AtomicBool> = std::sync::OnceLock::new();
+
+fn local_cursor() -> &'static std::sync::atomic::AtomicBool {
+    LOCAL_CURSOR.get_or_init(|| std::sync::atomic::AtomicBool::new(std::env::var_os("RM_LOCAL_CURSOR").is_some() || crate::settings::Settings::load().local_cursor))
+}
+
 unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let frame = GetParent(hwnd).unwrap_or_default();
     match msg {
+        // over the picture the Mac's pointer (in the video) is the pointer
+        WM_SETCURSOR if (lp.0 & 0xffff) as u32 == HTCLIENT && !local_cursor().load(std::sync::atomic::Ordering::Relaxed) => {
+            SetCursor(None);
+            LRESULT(1)
+        }
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
@@ -1372,7 +2058,7 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         WM_ERASEBKGND => LRESULT(1),
         WM_MOUSEMOVE => {
             let (x, y) = lp_xy(lp);
-            if is_fullscreen(frame) {
+            if is_fullscreen(frame) && !is_desktop(frame) {
                 // pointer at the top edge: the bar slides in; leaving it: it goes again
                 let revealed = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.reveal)).flatten().unwrap_or(false);
                 if !revealed && y <= 1 {
@@ -1437,6 +2123,32 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 return LRESULT(0);
             }
             let mods = current_mods();
+            // Ctrl+Alt+Shift+P: Settings (frame rate, bitrate, sharpness, ...)
+            if vk == 'P' as u32 && mods.ctrl && mods.alt && mods.shift {
+                if down {
+                    open_settings(Some(frame));
+                }
+                return LRESULT(0);
+            }
+            // Ctrl+Alt+Shift+C: this PC's pointer over the picture on/off, as in Moonlight
+            if vk == 'C' as u32 && mods.ctrl && mods.alt && mods.shift {
+                if down {
+                    set_local_pointer(!local_cursor().load(std::sync::atomic::Ordering::Relaxed));
+                }
+                return LRESULT(0);
+            }
+            // Ctrl+Alt+Shift+S: the stats overlay, as in Moonlight
+            if vk == 'S' as u32 && mods.ctrl && mods.alt && mods.shift {
+                if down {
+                    let (on, lines) = with_app(|a| {
+                        a.overlay = !a.overlay;
+                        (a.overlay, a.overlay_lines.clone())
+                    })
+                    .unwrap_or((false, vec![]));
+                    if on { draw_overlays(&lines) } else { hide_overlays() }
+                }
+                return LRESULT(0);
+            }
             if sends_as_text(vk, mods) {
                 return LRESULT(0); // WM_CHAR delivers the character, layout-correct
             }

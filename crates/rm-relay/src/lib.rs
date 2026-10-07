@@ -1,18 +1,18 @@
 //! Session rendezvous relay. It pairs one `agent` and one `client` per
 //! session id and then forwards opaque bytes. It never parses application
-//! data, so an end-to-end encrypted layer can sit on top without changes.
-//!
-//! SECURITY STATUS: this transport is plaintext TCP. It is a development
-//! transport only. Before any real use, wrap the relay leg in TLS and put an
-//! end-to-end Noise/QUIC session between client and agent (docs/SPEC.md §7).
+//! data: the two sides encrypt end to end on top (`rm_protocol::secure`), so the
+//! relay only carries ciphertext and never learns the password.
+
+pub mod ids;
+pub mod lan;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MAX_HELLO_LINE: u64 = 512;
 const MAX_PENDING: usize = 1024;
@@ -32,12 +32,31 @@ pub struct Join {
     /// Admission key of a relay that is reachable from the internet (`RM_RELAY_KEY`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// False: do not wait for the peer; if nobody is waiting under this session the relay answers
+    /// `ERR no such session` at once (a viewer asking for a Mac that is not online).
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub wait: bool,
+    /// An agent's owner secret: needed to wait under an ID this relay handed out ([`ids`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
-/// Admission key for joins, from the environment (`RM_RELAY_KEY`), if set.
-pub fn env_key() -> Option<String> {
-    std::env::var("RM_RELAY_KEY").ok().filter(|k| !k.is_empty())
+fn yes() -> bool {
+    true
 }
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+/// Admission key for joins: the environment (`RM_RELAY_KEY`), else the key built into this
+/// binary (release builds set `RM_RELAY_KEY` at compile time, so users need not configure it).
+pub fn env_key() -> Option<String> {
+    std::env::var("RM_RELAY_KEY").ok().filter(|k| !k.is_empty()).or_else(|| option_env!("RM_RELAY_KEY").filter(|k| !k.is_empty()).map(String::from))
+}
+
+/// Wrong tokens allowed per session before it is locked (stops password guessing).
+pub const MAX_FAILURES: u32 = 5;
+pub const LOCKOUT: Duration = Duration::from_secs(60);
 
 struct Pending {
     token: String,
@@ -52,15 +71,159 @@ pub struct Config {
     /// When set, only joins presenting this key are paired (anyone else is refused before
     /// taking a slot): a relay on a public address is not an open pipe.
     pub key: Option<String>,
+    /// Test aid: limit each direction to this many kilobits per second (a slow, far link).
+    pub throttle_kbps: Option<u32>,
+    /// Test aid: drop this share (0..1) of forwarded UDP datagrams (a lossy link).
+    pub udp_loss: Option<f64>,
+    /// Where the IDs handed out to Macs are kept (None: in memory only).
+    pub ids_path: Option<std::path::PathBuf>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { pair_timeout: Duration::from_secs(300), hello_timeout: Duration::from_secs(10), key: None }
+        Self { pair_timeout: Duration::from_secs(300), hello_timeout: Duration::from_secs(10), key: None, throttle_kbps: None, udp_loss: None, ids_path: None }
+    }
+}
+
+// ---- UDP: the same port also forwards datagrams (video) between the two peers of a session
+// that is paired over TCP. Datagram: "RM" | type | ...; types below 16 are the relay's own.
+
+pub const UDP_REGISTER: u8 = 1;
+pub const UDP_STATUS: u8 = 2;
+pub const UDP_KEEPALIVE: u8 = 3;
+/// UDP_STATUS values
+pub const UDP_WAITING: u8 = 0;
+pub const UDP_PEER_READY: u8 = 1;
+pub const UDP_REFUSED: u8 = 0xFF;
+
+/// Big socket buffers for UDP video: a keyframe is a burst of hundreds of datagrams, and the
+/// defaults (macOS: ~42 KB) drop part of it even on loopback.
+pub fn big_udp_buffers(sock: &UdpSocket) {
+    let s = socket2::SockRef::from(sock);
+    let _ = s.set_recv_buffer_size(4 << 20);
+    let _ = s.set_send_buffer_size(4 << 20);
+}
+
+/// "I am `role` of `session` (token, admission key)": sent until the relay answers UDP_STATUS,
+/// then now and then to keep NAT bindings open.
+pub fn udp_register(session_id: &str, role: Role, token: &str, key: Option<&str>) -> Vec<u8> {
+    let mut d = vec![b'R', b'M', UDP_REGISTER, matches!(role, Role::Client) as u8];
+    for f in [session_id, token, key.unwrap_or("")] {
+        d.push(f.len().min(255) as u8);
+        d.extend_from_slice(&f.as_bytes()[..f.len().min(255)]);
+    }
+    d
+}
+
+fn parse_register(p: &[u8]) -> Option<(Role, String, String, String)> {
+    if p.len() < 5 || &p[..3] != b"RM\x01" {
+        return None;
+    }
+    let role = if p[3] == 1 { Role::Client } else { Role::Agent };
+    let mut fields = vec![];
+    let mut i = 4;
+    for _ in 0..3 {
+        let n = *p.get(i)? as usize;
+        fields.push(String::from_utf8(p.get(i + 1..i + 1 + n)?.to_vec()).ok()?);
+        i += 1 + n;
+    }
+    let key = fields.pop()?;
+    let token = fields.pop()?;
+    Some((role, fields.pop()?, token, key))
+}
+
+struct UdpPair {
+    token: String,
+    agent: Option<SocketAddr>,
+    client: Option<SocketAddr>,
+}
+
+#[derive(Default)]
+struct UdpState {
+    pairs: HashMap<String, UdpPair>,
+    by_addr: HashMap<SocketAddr, (String, Role)>,
+}
+
+type Udp = Arc<Mutex<UdpState>>;
+
+impl UdpState {
+    fn forget(&mut self, session: &str) {
+        if let Some(p) = self.pairs.remove(session) {
+            for a in [p.agent, p.client].into_iter().flatten() {
+                self.by_addr.remove(&a);
+            }
+        }
+    }
+}
+
+fn udp_loop(sock: UdpSocket, udp: Udp, cfg: Config) {
+    let mut buf = vec![0u8; 2048];
+    let mut rng: u64 = 0x9E37_79B9_7F4A_7C15 ^ std::process::id() as u64;
+    // token bucket per destination when throttled (drops what exceeds ~100 ms of burst)
+    let mut buckets: HashMap<SocketAddr, (f64, Instant)> = HashMap::new();
+    let rate = cfg.throttle_kbps.map(|k| k as f64 * 1000.0 / 8.0);
+    loop {
+        let Ok((n, from)) = sock.recv_from(&mut buf) else { continue };
+        let p = &buf[..n];
+        if n < 3 || &p[..2] != b"RM" {
+            continue;
+        }
+        match p[2] {
+            UDP_REGISTER => {
+                let Some((role, session, token, key)) = parse_register(p) else { continue };
+                let admitted = cfg.key.as_ref().is_none_or(|k| constant_time_eq(k, &key));
+                let mut st = udp.lock().unwrap();
+                let status = match st.pairs.get_mut(&session) {
+                    Some(pair) if admitted && constant_time_eq(&pair.token, &token) => {
+                        let slot = if role == Role::Agent { &mut pair.agent } else { &mut pair.client };
+                        let old = slot.replace(from);
+                        let ready = pair.agent.is_some() && pair.client.is_some();
+                        if let Some(o) = old.filter(|o| *o != from) {
+                            st.by_addr.remove(&o);
+                        }
+                        st.by_addr.insert(from, (session.clone(), role));
+                        if ready { UDP_PEER_READY } else { UDP_WAITING }
+                    }
+                    _ => UDP_REFUSED,
+                };
+                drop(st);
+                let _ = sock.send_to(&[b'R', b'M', UDP_STATUS, status], from);
+            }
+            UDP_KEEPALIVE | UDP_STATUS => {}
+            _ => {
+                let to = {
+                    let st = udp.lock().unwrap();
+                    st.by_addr.get(&from).and_then(|(s, role)| st.pairs.get(s).and_then(|p| if *role == Role::Agent { p.client } else { p.agent }))
+                };
+                let Some(to) = to else { continue };
+                if let Some(loss) = cfg.udp_loss {
+                    rng ^= rng << 13;
+                    rng ^= rng >> 7;
+                    rng ^= rng << 17;
+                    if (rng % 10_000) as f64 / 10_000.0 < loss {
+                        continue;
+                    }
+                }
+                if let Some(rate) = rate {
+                    let now = Instant::now();
+                    let b = buckets.entry(to).or_insert((rate * 0.1, now));
+                    b.0 = (b.0 + now.duration_since(b.1).as_secs_f64() * rate).min(rate * 0.1);
+                    b.1 = now;
+                    if b.0 < n as f64 {
+                        continue;
+                    }
+                    b.0 -= n as f64;
+                }
+                let _ = sock.send_to(p, to);
+            }
+        }
     }
 }
 
 type Table = Arc<Mutex<HashMap<String, Pending>>>;
+type IdTable = Arc<Mutex<ids::Ids>>;
+/// session -> (wrong tokens, since)
+type Failures = Arc<Mutex<HashMap<String, (u32, Instant)>>>;
 
 pub fn constant_time_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
@@ -77,10 +240,22 @@ fn valid_session_id(s: &str) -> bool {
 
 pub fn serve(listener: TcpListener, cfg: Config) {
     let table: Table = Arc::new(Mutex::new(HashMap::new()));
+    let failures: Failures = Arc::new(Mutex::new(HashMap::new()));
+    let udp: Udp = Arc::new(Mutex::new(UdpState::default()));
+    let ids: IdTable = Arc::new(Mutex::new(ids::Ids::open(cfg.ids_path.clone())));
+    // UDP on the same address and port number as the TCP listener
+    match listener.local_addr().and_then(UdpSocket::bind) {
+        Ok(sock) => {
+            big_udp_buffers(&sock);
+            let (u, c) = (udp.clone(), cfg.clone());
+            thread::spawn(move || udp_loop(sock, u, c));
+        }
+        Err(e) => eprintln!("rm-relay: no UDP forwarding ({e}); video falls back to TCP"),
+    }
     for conn in listener.incoming().flatten() {
-        let (table, cfg) = (table.clone(), cfg.clone());
+        let (table, failures, udp, cfg, ids) = (table.clone(), failures.clone(), udp.clone(), cfg.clone(), ids.clone());
         thread::spawn(move || {
-            let _ = handle(conn, table, cfg);
+            let _ = handle(conn, table, failures, udp, cfg, ids);
         });
     }
 }
@@ -89,7 +264,9 @@ fn reject(mut s: TcpStream, why: &str) -> std::io::Result<()> {
     s.write_all(format!("ERR {why}\n").as_bytes())
 }
 
-fn handle(conn: TcpStream, table: Table, cfg: Config) -> std::io::Result<()> {
+fn handle(mut conn: TcpStream, table: Table, failures: Failures, udp: Udp, cfg: Config, ids: IdTable) -> std::io::Result<()> {
+    // small control/input messages must not wait for Nagle
+    let _ = conn.set_nodelay(true);
     conn.set_read_timeout(Some(cfg.hello_timeout))?;
     // Read the join line byte-by-byte-ish via a limited BufReader, taking care
     // not to swallow payload bytes that follow it.
@@ -101,6 +278,22 @@ fn handle(conn: TcpStream, table: Table, cfg: Config) -> std::io::Result<()> {
         }
     }
     conn.set_read_timeout(None)?;
+    // a Mac asking for its ID
+    if let Ok(c) = serde_json::from_str::<ids::Claim>(line.trim()) {
+        if let Some(k) = &cfg.key {
+            if !constant_time_eq(k, c.key.as_deref().unwrap_or("")) {
+                return reject(conn, "not admitted");
+            }
+        }
+        if !ids::valid_owner(&c.claim_id) {
+            return reject(conn, "bad owner");
+        }
+        let id = ids.lock().unwrap().claim(&c.claim_id, c.want.as_deref());
+        return match id {
+            Some(id) => conn.write_all(format!("ID {id}\n").as_bytes()),
+            None => reject(conn, "no IDs left"),
+        };
+    }
     let join: Join = match serde_json::from_str(line.trim()) {
         Ok(j) => j,
         Err(_) => return reject(conn, "bad hello"),
@@ -113,20 +306,52 @@ fn handle(conn: TcpStream, table: Table, cfg: Config) -> std::io::Result<()> {
     if !valid_session_id(&join.session_id) || join.token.len() < 16 || join.token.len() > 128 {
         return reject(conn, "bad session or token");
     }
+    // only its Mac waits under an ID this relay handed out
+    if join.role == Role::Agent {
+        if let Some(id) = join.session_id.strip_prefix("rm-") {
+            if !ids.lock().unwrap().may_use(id, join.owner.as_deref()) {
+                return reject(conn, "this ID belongs to another Mac");
+            }
+        }
+    }
 
+    {
+        let mut f = failures.lock().unwrap();
+        f.retain(|_, (_, since)| since.elapsed() < LOCKOUT);
+        if f.get(&join.session_id).is_some_and(|(n, _)| *n >= MAX_FAILURES) {
+            drop(f);
+            return reject(conn, "locked");
+        }
+    }
     let peer = {
         let mut t = table.lock().unwrap();
+        // the same side again with the same token: the earlier one is gone (a Mac that was reached
+        // on its own network meanwhile, or restarted) and this one takes its place
+        if let Some(p) = t.get(&join.session_id) {
+            if p.role == join.role && constant_time_eq(&p.token, &join.token) {
+                let old = t.remove(&join.session_id).unwrap();
+                let _ = reject(old.stream, "replaced");
+            }
+        }
         match t.remove(&join.session_id) {
             Some(p) => {
                 if !constant_time_eq(&p.token, &join.token) || p.role == join.role {
-                    // Put the legitimate waiter back; refuse the intruder.
+                    // Put the legitimate waiter back; refuse the intruder, and count the attempt.
                     t.insert(join.session_id.clone(), p);
                     drop(t);
+                    let mut f = failures.lock().unwrap();
+                    let e = f.entry(join.session_id.clone()).or_insert((0, Instant::now()));
+                    e.0 += 1;
                     return reject(conn, "session mismatch");
                 }
+                failures.lock().unwrap().remove(&join.session_id);
                 Some(p)
             }
             None => {
+                if !join.wait {
+                    drop(t);
+                    return reject(conn, "no such session");
+                }
                 if t.len() >= MAX_PENDING {
                     drop(t);
                     return reject(conn, "relay busy");
@@ -158,21 +383,51 @@ fn handle(conn: TcpStream, table: Table, cfg: Config) -> std::io::Result<()> {
             let mut b = conn;
             a.write_all(b"READY\n")?;
             b.write_all(b"READY\n")?;
-            pipe(a, b);
+            // while the pair lives, its two peers may also exchange UDP datagrams
+            udp.lock().unwrap().forget(&join.session_id);
+            udp.lock().unwrap().pairs.insert(join.session_id.clone(), UdpPair { token: join.token.clone(), agent: None, client: None });
+            pipe(a, b, cfg.throttle_kbps);
+            udp.lock().unwrap().forget(&join.session_id);
             Ok(())
         }
     }
 }
 
-fn pipe(a: TcpStream, b: TcpStream) {
+/// Copy bytes, at most `kbps` kilobits per second when set (token bucket, 20 ms quanta).
+fn copy_limited(r: &mut TcpStream, w: &mut TcpStream, kbps: Option<u32>) {
+    let Some(kbps) = kbps else {
+        let _ = std::io::copy(r, w);
+        return;
+    };
+    let rate = kbps as f64 * 1000.0 / 8.0; // bytes per second
+    let mut buf = vec![0u8; 16 * 1024];
+    let start = Instant::now();
+    let mut sent = 0f64;
+    loop {
+        let n = match r.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        sent += n as f64;
+        let due = Duration::from_secs_f64(sent / rate);
+        if let Some(wait) = due.checked_sub(start.elapsed()) {
+            thread::sleep(wait);
+        }
+        if w.write_all(&buf[..n]).is_err() {
+            return;
+        }
+    }
+}
+
+fn pipe(a: TcpStream, b: TcpStream, kbps: Option<u32>) {
     let (mut a_r, mut b_w) = (a.try_clone().unwrap(), b.try_clone().unwrap());
     let (mut b_r, mut a_w) = (b, a);
     let t1 = thread::spawn(move || {
-        let _ = std::io::copy(&mut a_r, &mut b_w);
+        copy_limited(&mut a_r, &mut b_w, kbps);
         let _ = b_w.shutdown(std::net::Shutdown::Both);
     });
     let t2 = thread::spawn(move || {
-        let _ = std::io::copy(&mut b_r, &mut a_w);
+        copy_limited(&mut b_r, &mut a_w, kbps);
         let _ = a_w.shutdown(std::net::Shutdown::Both);
     });
     let _ = t1.join();
@@ -181,8 +436,16 @@ fn pipe(a: TcpStream, b: TcpStream) {
 
 /// Client/agent helper: connect, send join line, wait for READY.
 pub fn join(addr: &str, session_id: &str, role: Role, token: &str) -> std::io::Result<TcpStream> {
-    let mut s = TcpStream::connect(addr)?;
-    let j = serde_json::to_string(&Join { session_id: session_id.into(), role, token: token.into(), key: env_key() }).unwrap();
+    join_with(addr, session_id, role, token, true)
+}
+
+/// [`join`], optionally failing at once (`ERR no such session`) when the peer is not waiting.
+pub fn join_with(addr: &str, session_id: &str, role: Role, token: &str, wait: bool) -> std::io::Result<TcpStream> {
+    use std::net::ToSocketAddrs;
+    let target = addr.to_socket_addrs()?.next().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "relay address not found"))?;
+    let mut s = TcpStream::connect_timeout(&target, Duration::from_secs(10))?;
+    let _ = s.set_nodelay(true);
+    let j = serde_json::to_string(&Join { session_id: session_id.into(), role, token: token.into(), key: env_key(), wait, owner: None }).unwrap();
     s.write_all(j.as_bytes())?;
     s.write_all(b"\n")?;
     let mut line = Vec::new();
@@ -254,7 +517,8 @@ mod tests {
             let _ = join(&a2, "sess-3", Role::Agent, TOK);
         });
         thread::sleep(Duration::from_millis(100));
-        assert!(join(&addr, "sess-3", Role::Agent, TOK).is_err());
+        // another Mac (another token) cannot take the waiting one's place
+        assert_eq!(join(&addr, "sess-3", Role::Agent, "another-token-0123456789").unwrap_err().to_string(), "ERR session mismatch");
     }
 
     #[test]
@@ -271,7 +535,7 @@ mod tests {
 
     #[test]
     fn pair_timeout_evicts() {
-        let addr = start(Config { pair_timeout: Duration::from_millis(200), hello_timeout: Duration::from_secs(2), key: None });
+        let addr = start(Config { pair_timeout: Duration::from_millis(200), hello_timeout: Duration::from_secs(2), ..Default::default() });
         let r = join(&addr, "sess-4", Role::Agent, TOK);
         // the waiter is told READY never comes; it receives ERR pair timeout
         assert!(r.is_err());
@@ -289,7 +553,7 @@ mod tests {
         let addr = start(Config { key: Some("relay-admission-key".into()), ..Default::default() });
         let line = |key: Option<&str>| {
             let mut s = TcpStream::connect(&addr).unwrap();
-            let j = serde_json::to_string(&Join { session_id: "k1".into(), role: Role::Agent, token: TOK.into(), key: key.map(Into::into) }).unwrap();
+            let j = serde_json::to_string(&Join { session_id: "k1".into(), role: Role::Agent, token: TOK.into(), key: key.map(Into::into), wait: true, owner: None }).unwrap();
             s.write_all(format!("{j}\n").as_bytes()).unwrap();
             s.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
             let mut buf = [0u8; 64];
@@ -300,5 +564,135 @@ mod tests {
         assert_eq!(line(Some("wrong")).1, "ERR not admitted\n");
         let (_waiter, reply) = line(Some("relay-admission-key"));
         assert_eq!(reply, "", "an admitted agent waits for its client");
+    }
+
+    #[test]
+    fn macs_get_their_ids_from_the_relay() {
+        let addr = start(Config::default());
+        let ask = |line: &str| {
+            let mut s = TcpStream::connect(&addr).unwrap();
+            s.write_all(format!("{line}\n").as_bytes()).unwrap();
+            s.set_read_timeout(Some(Duration::from_millis(400))).unwrap();
+            let mut buf = [0u8; 64];
+            let n = s.read(&mut buf).unwrap_or(0);
+            (s, String::from_utf8_lossy(&buf[..n]).trim().to_string())
+        };
+        let owner = "0123456789abcdef0123456789abcdef";
+        let (_, r) = ask(&format!(r#"{{"claim_id":"{owner}"}}"#));
+        let id = r.strip_prefix("ID ").expect(&r).to_string();
+        assert!(ids::valid_id(&id), "{id}");
+        let (_, again) = ask(&format!(r#"{{"claim_id":"{owner}","want":"{id}"}}"#));
+        assert_eq!(again, format!("ID {id}"));
+        let (_, other) = ask(&format!(r#"{{"claim_id":"{}","want":"{id}"}}"#, "f".repeat(32)));
+        assert_ne!(other, format!("ID {id}"), "a taken ID goes to nobody else");
+        assert_eq!(ask(r#"{"claim_id":"short"}"#).1, "ERR bad owner");
+        // only its owner waits under it
+        let agent = |owner: Option<&str>| {
+            let j = serde_json::to_string(&Join { session_id: format!("rm-{id}"), role: Role::Agent, token: TOK.into(), key: None, wait: true, owner: owner.map(Into::into) }).unwrap();
+            ask(&j)
+        };
+        assert_eq!(agent(None).1, "ERR this ID belongs to another Mac");
+        assert_eq!(agent(Some(&"f".repeat(32))).1, "ERR this ID belongs to another Mac");
+        let (_waiting, r) = agent(Some(owner));
+        assert_eq!(r, "", "its owner waits for a client");
+    }
+
+    #[test]
+    fn a_returning_mac_takes_its_own_place() {
+        let addr = start(Config::default());
+        let a = addr.clone();
+        let first = thread::spawn(move || join(&a, "again-1", Role::Agent, TOK).map(|_| ()));
+        thread::sleep(Duration::from_millis(100));
+        // the Mac waits again (its first wait is stale): no mismatch, and the old wait ends
+        let a = addr.clone();
+        let second = thread::spawn(move || join(&a, "again-1", Role::Agent, TOK).map(|_| ()));
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(first.join().unwrap().unwrap_err().to_string(), "ERR replaced");
+        assert!(join(&addr, "again-1", Role::Client, TOK).is_ok());
+        assert!(second.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn password_guessing_locks_the_session() {
+        let addr = start(Config::default());
+        let _agent = std::thread::spawn({
+            let a = addr.clone();
+            move || join(&a, "lock-1", Role::Agent, TOK)
+        });
+        thread::sleep(Duration::from_millis(100));
+        let attempt = |tok: &str| join(&addr, "lock-1", Role::Client, tok).err().map(|e| e.to_string());
+        for _ in 0..MAX_FAILURES {
+            assert_eq!(attempt("wrong-token-0123456789").as_deref(), Some("ERR session mismatch"));
+        }
+        // now even the right token is refused for a while
+        assert_eq!(attempt(TOK).as_deref(), Some("ERR locked"));
+    }
+
+    #[test]
+    fn client_need_not_wait_for_an_offline_mac() {
+        let addr = start(Config::default());
+        let t = Instant::now();
+        let e = join_with(&addr, "offline-1", Role::Client, TOK, false).unwrap_err();
+        assert_eq!(e.to_string(), "ERR no such session");
+        assert!(t.elapsed() < Duration::from_secs(2));
+        // with the Mac waiting, the same join pairs
+        let a = addr.clone();
+        let agent = thread::spawn(move || join(&a, "offline-1", Role::Agent, TOK).map(|_| ()));
+        thread::sleep(Duration::from_millis(100));
+        assert!(join_with(&addr, "offline-1", Role::Client, TOK, false).is_ok());
+        assert!(agent.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn udp_flows_between_the_paired_peers_only() {
+        let addr = start(Config::default());
+        let a = addr.clone();
+        let agent = thread::spawn(move || join(&a, "udp-1", Role::Agent, TOK).unwrap());
+        thread::sleep(Duration::from_millis(100));
+        let _client_tcp = join(&addr, "udp-1", Role::Client, TOK).unwrap();
+        let _agent_tcp = agent.join().unwrap();
+        let sock = |s: &str| {
+            let u = UdpSocket::bind("127.0.0.1:0").unwrap();
+            u.connect(s).unwrap();
+            u.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+            u
+        };
+        let (ua, uc, intruder) = (sock(&addr), sock(&addr), sock(&addr));
+        let status = |u: &UdpSocket| {
+            let mut b = [0u8; 16];
+            let n = u.recv(&mut b).unwrap();
+            b[..n].to_vec()
+        };
+        intruder.send(&udp_register("udp-1", Role::Client, "wrong-token-0123456789", None)).unwrap();
+        assert_eq!(status(&intruder), [b'R', b'M', UDP_STATUS, UDP_REFUSED]);
+        ua.send(&udp_register("udp-1", Role::Agent, TOK, None)).unwrap();
+        assert_eq!(status(&ua), [b'R', b'M', UDP_STATUS, UDP_WAITING]);
+        uc.send(&udp_register("udp-1", Role::Client, TOK, None)).unwrap();
+        assert_eq!(status(&uc), [b'R', b'M', UDP_STATUS, UDP_PEER_READY]);
+        ua.send(b"RM\x10video").unwrap();
+        assert_eq!(status(&uc), b"RM\x10video");
+        uc.send(b"RM\x11feedback").unwrap();
+        assert_eq!(status(&ua), b"RM\x11feedback");
+        // the refused socket cannot inject anything
+        intruder.send(b"RM\x10evil").unwrap();
+        let mut b = [0u8; 16];
+        assert!(ua.recv(&mut b).is_err() && uc.recv(&mut b).is_err());
+    }
+
+    #[test]
+    fn throttled_link_is_slow() {
+        let addr = start(Config { throttle_kbps: Some(800), ..Default::default() }); // 100 KB/s
+        let a = addr.clone();
+        let agent = thread::spawn(move || {
+            let mut s = join(&a, "slow-1", Role::Agent, TOK).unwrap();
+            s.write_all(&vec![7u8; 50_000]).unwrap();
+        });
+        thread::sleep(Duration::from_millis(100));
+        let mut c = join(&addr, "slow-1", Role::Client, TOK).unwrap();
+        let t = Instant::now();
+        let mut got = vec![0u8; 50_000];
+        c.read_exact(&mut got).unwrap();
+        assert!(t.elapsed() >= Duration::from_millis(400), "50 KB at 100 KB/s took {:?}", t.elapsed());
+        agent.join().unwrap();
     }
 }

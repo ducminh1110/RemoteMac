@@ -172,7 +172,7 @@ fn play<W: Write>(w: &Writer<W>, app: &str, records: &[Record], stop: &AtomicBoo
 
 /// Bind to a relay as the agent and replay the recording to one client.
 pub fn replay_via_relay(relay: &str, session: &str, token: &str, rec: Recording) -> Result<(), String> {
-    let s = rm_relay::join(relay, session, rm_relay::Role::Agent, token).map_err(|e| e.to_string())?;
+    let (s, _) = crate::secure_join(relay, session, token)?;
     let w = s.try_clone().map_err(|e| e.to_string())?;
     serve_replay(s, w, Arc::new(rec)).map_err(|e| e.to_string())
 }

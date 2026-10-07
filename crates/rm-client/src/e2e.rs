@@ -75,6 +75,9 @@ struct Ctx<'a, S: Read + Write> {
     desktop: Option<(u64, rm_protocol::Rect)>,
     desktop_frames: usize,
     desktop_video: Option<(u16, u16)>,
+    /// Mac Desktop over full GameStream: the client tunnel and the messages it wants sent
+    gs_tunnel: Option<std::sync::Arc<rm_gamestream::tunnel::ClientTunnel>>,
+    gs_out: Option<std::sync::mpsc::Receiver<Message>>,
 }
 
 fn is_timeout(e: &ProtocolError) -> bool {
@@ -162,6 +165,15 @@ impl<S: Read + Write> Ctx<'_, S> {
                 self.icon = Some((size, rm_protocol::base64_decode(&rgba_base64).unwrap_or_default()))
             }
             Frame::Msg(Message::Error { code, message }) => self.errors.push(format!("{code}: {message}")),
+            Frame::Msg(Message::GsTunnel { id, op, data_base64 }) => {
+                if let Some(t) = &self.gs_tunnel {
+                    match op.as_str() {
+                        "data" => t.tcp_from_host(id, &rm_protocol::base64_decode(&data_base64).unwrap_or_default()),
+                        "close" => t.tcp_close_from_host(id),
+                        _ => {}
+                    }
+                }
+            }
             Frame::Msg(_) => {}
         }
     }
@@ -172,6 +184,11 @@ impl<S: Read + Write> Ctx<'_, S> {
         while Instant::now() < deadline {
             if done(self) {
                 return true;
+            }
+            // what the GameStream tunnel wants sent to the Mac (RTSP over this connection)
+            let out: Vec<Message> = self.gs_out.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
+            for m in out {
+                self.send(m);
             }
             match self.sess.recv() {
                 Ok(Some(f)) => self.absorb(f),
@@ -199,7 +216,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let caps_dump = serde_json::to_string(&sess.capabilities).unwrap_or_default();
     let mut c = Ctx { sess, r: Report::default(), started: Instant::now(), first_video: None, last_title: String::new(),
         destroyed: false, exited: false, launched_pid: None, errors: vec![], non_annexb: 0,
-        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None, main_rect: None, desktop: None, desktop_frames: 0, desktop_video: None };
+        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None, main_rect: None, desktop: None, desktop_frames: 0, desktop_video: None, gs_tunnel: None, gs_out: None };
 
     c.r.check("agent reports capture+input+GUI", caps_ok, caps_dump);
 
@@ -403,9 +420,88 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
         c.r.check("input on the desktop reaches the app under the pointer", false, "no desktop or main window");
     }
 
+    // ---- Mac Desktop over full GameStream: Moonlight's client core (moonlight-common-c) ->
+    // tunnel -> the agent's Sunshine-style host session (Rust, linked into the Swift agent)
+    gamestream_desktop(&mut c);
+
     // ---- lifecycle
     c.send(Message::AppTerminate { application_id: app.into() });
     let ok = c.pump(10, |c| c.destroyed && c.exited);
     c.r.check("terminate -> WindowDestroyed + AppExited", ok, format!("destroyed={} exited={}", c.destroyed, c.exited));
     c.r
+}
+
+fn gamestream_desktop<S: Read + Write>(c: &mut Ctx<S>) {
+    use rm_gamestream::tunnel::{ClientTunnel, ToHost};
+    let Some(udp) = c.sess.udp() else {
+        c.r.check("Mac Desktop over full GameStream (Moonlight client core through the tunnel)", false, "no UDP path");
+        return;
+    };
+    let key = rm_protocol::udp::random_secret();
+    let (tx, rx) = std::sync::mpsc::channel::<Message>();
+    let u2 = udp.clone();
+    let tunnel = match ClientTunnel::start(std::sync::Arc::new(move |m: ToHost| {
+        let msg = match m {
+            ToHost::Udp { kind, data } => return u2.send_tunnel(kind, data),
+            ToHost::TcpOpen { id } => Message::GsTunnel { id, op: "open".into(), data_base64: String::new() },
+            ToHost::TcpData { id, data } => Message::GsTunnel { id, op: "data".into(), data_base64: rm_protocol::base64_encode(data) },
+            ToHost::TcpClose { id } => Message::GsTunnel { id, op: "close".into(), data_base64: String::new() },
+        };
+        let _ = tx.send(msg);
+    })) {
+        Ok(t) => t,
+        Err(e) => {
+            c.r.check("Mac Desktop over full GameStream (Moonlight client core through the tunnel)", false, format!("tunnel: {e}"));
+            return;
+        }
+    };
+    let t2 = tunnel.clone();
+    udp.set_tunnel_handler(move |flow, data| t2.udp_from_host(flow, data));
+    c.gs_tunnel = Some(tunnel.clone());
+    c.gs_out = Some(rx);
+    c.desktop = None;
+    c.desktop_frames = 0;
+    c.send(Message::AppLaunch { application_id: "desktop".into(), arguments: vec![format!("gamestream={}", rm_protocol::udp::hex(&key))], working_directory: None, environment: Default::default() });
+    let up = c.pump(12, |c| c.desktop.is_some());
+    // the picture is there at once, the usual way, while Moonlight still connects
+    let shown = up && c.pump(8, |c| c.desktop_frames >= 1);
+    c.r.check("Mac Desktop shows at once while GameStream connects (usual stream)", shown, format!("desktop={:?} usual frames={}", c.desktop, c.desktop_frames));
+    let port = tunnel.rtsp_port;
+    let connected = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(i32::MIN));
+    let c2 = connected.clone();
+    if up {
+        std::thread::spawn(move || {
+            let p = rm_gamestream::moonlight::Params { rtsp_port: port, key, width: 1280, height: 720, fps: 60, bitrate_kbps: 20_000, packet_size: 1200, remote: true };
+            let r = rm_gamestream::moonlight::connect(p, |_, _| {});
+            c2.store(r.err().unwrap_or(0), std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+    // the handshake crosses the tunnel through this loop, then frames flow
+    let streamed = up && c.pump(25, |_| rm_gamestream::moonlight::frames().0 >= 30);
+    let (frames, idrs) = rm_gamestream::moonlight::frames();
+    c.r.check(
+        "Mac Desktop over full GameStream (Moonlight client core through the tunnel)",
+        streamed && idrs >= 1,
+        format!("desktop={:?} connect={} frames={frames} idr={idrs}", c.desktop, connected.load(std::sync::atomic::Ordering::SeqCst)),
+    );
+    if streamed {
+        // GameStream's pictures arrive: the viewer says so, and the usual stream stops
+        c.send(Message::GsTunnel { id: 0, op: "ready".into(), data_base64: String::new() });
+        c.pump(1, |_| false);
+        let before = c.desktop_frames;
+        c.pump(2, |_| false);
+        c.r.check("once GameStream carries the desktop, the usual stream stops", c.desktop_frames <= before + 2, format!("usual frames in 2 s after ready: {}", c.desktop_frames - before));
+        // input through Moonlight's encrypted input stream reaches the Mac (the test app, still
+        // in front, counts what is typed)
+        let before = c.last_title.clone();
+        rm_gamestream::moonlight::send_input(&rm_gamestream::Input::Text("m".into()));
+        let ok = c.pump(8, |c| c.last_title != before && c.last_title.contains("chars]"));
+        c.r.check("GameStream input (ENet) reaches the Mac", ok, format!("before={before:?} after={:?}", c.last_title));
+        rm_gamestream::moonlight::stop();
+    }
+    if let Some(did) = c.desktop.map(|d| d.0) {
+        c.send(Message::AppTerminate { application_id: "desktop".into() });
+        c.pump(8, |c| c.destroyed_ids.contains(&did));
+    }
+    c.gs_tunnel = None;
 }

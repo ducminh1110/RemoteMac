@@ -4,6 +4,7 @@
 //! a child window, and file uploads. Lets clients be tested without a Mac.
 
 pub mod replay;
+pub mod udp_agent;
 
 use openh264::encoder::Encoder;
 use openh264::formats::{RgbaSliceU8, YUVBuffer};
@@ -13,7 +14,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub const WIDTH: usize = 480;
 pub const HEIGHT: usize = 352;
@@ -80,6 +81,15 @@ struct State {
     desktop: Option<u64>,
     /// the window that last got a click on the desktop (keyboard focus there)
     front: Option<u64>,
+    /// UDP video path (when served through a relay)
+    udp: Option<Arc<udp_agent::AgentUdp>>,
+    /// windows whose next frame must be a keyframe (the client lost one)
+    key_requests: std::collections::HashSet<u64>,
+    /// the Mac Desktop in full GameStream mode: its host session behind the tunnel
+    gs: Option<Arc<rm_gamestream::tunnel::HostTunnel>>,
+    /// the viewer shows GameStream's pictures: the desktop goes only that way (until then also
+    /// the usual way, as the Mac app does)
+    gs_ready: bool,
 }
 
 type Writer<W> = Arc<Mutex<W>>;
@@ -128,7 +138,8 @@ fn open_window<W: Write + Send + 'static>(
     send(writer, &Message::WindowCreated { window_id: id, application_id: app.into(), title: t, bounds, parent_id: parent, role })?;
     let wr = writer.clone();
     let hue = (60 * id % 256) as u8;
-    let handle = std::thread::spawn(move || video_loop(wr, id, w, h, hue, stop));
+    let st2 = st.clone();
+    let handle = std::thread::spawn(move || video_loop(wr, st2, id, w, h, hue, stop));
     st.lock().unwrap().windows.get_mut(&id).unwrap().video = Some(handle);
     Ok(id)
 }
@@ -144,6 +155,10 @@ fn close_window<W: Write>(writer: &Writer<W>, st: &Arc<Mutex<State>>, id: u64) -
         s.rects.remove(&id);
         if s.desktop == Some(id) {
             s.desktop = None;
+            s.gs_ready = false;
+            if let Some(g) = s.gs.take() {
+                g.session.stop();
+            }
         }
         if s.front == Some(id) {
             s.front = None;
@@ -198,7 +213,12 @@ fn menu_key(path: &[u32]) -> Option<&'static str> {
 }
 
 /// Serve one client.
-pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Result<(), ProtocolError> {
+pub fn serve<S: Read + Write + Send + 'static>(reader: S, writer: S) -> Result<(), ProtocolError> {
+    serve_with(reader, writer, None)
+}
+
+/// [`serve`], sending video over `udp` while the client's reports come in.
+pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, udp: Option<Arc<udp_agent::AgentUdp>>) -> Result<(), ProtocolError> {
     let writer: Writer<S> = Arc::new(Mutex::new(writer));
     match read_message(&mut reader)? {
         Some(Message::ClientHello(_)) => {}
@@ -206,9 +226,34 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
     }
     send(&writer, &Message::ServerHello(Hello::ours("rm-fakeagent", &["h264"], &["control", "video", "files"])))?;
     send(&writer, &Message::CapabilityReport(caps()))?;
-    let st = Arc::new(Mutex::new(State::default()));
+    // TCP messages and input that came over UDP (the direct path) go through one loop
+    let (tx, rx) = std::sync::mpsc::channel::<Result<Option<Message>, ProtocolError>>();
+    if let Some(u) = &udp {
+        if u.p2p.load(std::sync::atomic::Ordering::Relaxed) {
+            send(&writer, &u.offer())?;
+        }
+        let (itx, irx) = std::sync::mpsc::channel::<Message>();
+        *u.inputs.lock().unwrap() = Some(itx);
+        let t = tx.clone();
+        std::thread::spawn(move || {
+            for m in irx {
+                if t.send(Ok(Some(m))).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+    let gs_tx = tx.clone();
+    std::thread::spawn(move || loop {
+        let r = read_message(&mut reader);
+        let end = !matches!(r, Ok(Some(_)));
+        if tx.send(r).is_err() || end {
+            return;
+        }
+    });
+    let st = Arc::new(Mutex::new(State { udp, ..Default::default() }));
 
-    while let Some(msg) = read_message(&mut reader)? {
+    while let Some(msg) = rx.recv().map_err(|_| ProtocolError::Io(std::io::Error::other("reader gone")))?? {
         // A menu command does what its keyboard shortcut does, in the app's main window.
         let msg = match msg {
             Message::MenuInvoke { application_id, path } => {
@@ -244,8 +289,13 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
                 let apps = APPS.iter().map(|(id, name)| AppInfo { id: (*id).into(), name: (*name).into(), available: true, version: None }).collect();
                 send(&writer, &Message::Apps { apps })?;
             }
-            Message::AppLaunch { application_id, .. } => match APPS.iter().find(|(id, _)| *id == application_id) {
+            Message::AppLaunch { application_id, arguments, .. } => match APPS.iter().find(|(id, _)| *id == application_id) {
                 Some((id, name)) => {
+                    if *id == "desktop" {
+                        if let Some(hex) = arguments.iter().find_map(|a| a.strip_prefix("gamestream=")) {
+                            start_gamestream(&writer, &st, hex, gs_tx.clone());
+                        }
+                    }
                     send(&writer, &Message::AppLaunched { application_id: (*id).into(), pid: 4000 + APPS.iter().position(|a| a.0 == *id).unwrap() as u32 })?;
                     open_window(&writer, &st, id, name, WindowRole::Window, None)?;
                 }
@@ -258,6 +308,23 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
                 retitle(&writer, &st, window_id)?;
             }
             Message::ClipboardSet { text, .. } => st.lock().unwrap().clipboard = text,
+            Message::StreamSettings { .. } => {}
+            Message::GsTunnel { id, op, data_base64 } => {
+                let gs = st.lock().unwrap().gs.clone();
+                if let Some(t) = gs {
+                    match op.as_str() {
+                        "ready" => st.lock().unwrap().gs_ready = true,
+                        "open" => t.tcp_open(id),
+                        "data" => t.tcp_data(id, &rm_protocol::base64_decode(&data_base64).unwrap_or_default()),
+                        _ => t.tcp_close(id),
+                    }
+                }
+            }
+            Message::P2pOffer { secret, candidates } => {
+                if let Some(u) = st.lock().unwrap().udp.clone() {
+                    u.peer_offer(&secret, &candidates);
+                }
+            }
             Message::GetAppIcon { application_id } => {
                 let size = 64u32;
                 let tint = if application_id == "notes" { 60 } else { 200 };
@@ -398,7 +465,8 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
                     send(&writer, &Message::WindowMoved { window_id, bounds })?;
                     let wr = writer.clone();
                     let hue = (60 * window_id % 256) as u8;
-                    let handle = std::thread::spawn(move || video_loop(wr, window_id, w as usize, h as usize, hue, stop));
+                    let st2 = st.clone();
+                    let handle = std::thread::spawn(move || video_loop(wr, st2, window_id, w as usize, h as usize, hue, stop));
                     if let Some(win) = st.lock().unwrap().windows.get_mut(&window_id) {
                         win.video = Some(handle);
                     }
@@ -411,6 +479,9 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
                 }
             }
             Message::Ping { nonce } => send(&writer, &Message::Pong { nonce })?,
+            Message::RequestKeyframe { window_id } => {
+                st.lock().unwrap().key_requests.insert(window_id);
+            }
             _ => {}
         }
     }
@@ -426,21 +497,42 @@ pub fn serve<S: Read + Write + Send + 'static>(mut reader: S, writer: S) -> Resu
     Ok(())
 }
 
-fn video_loop<W: Write>(w: Writer<W>, id: u64, width: usize, height: usize, hue: u8, stop: Arc<AtomicBool>) {
+fn video_loop<W: Write>(w: Writer<W>, st: Arc<Mutex<State>>, id: u64, width: usize, height: usize, hue: u8, stop: Arc<AtomicBool>) {
     let Ok(mut enc) = Encoder::new() else { return };
-    let start = Instant::now();
     let mut t = 0usize;
+    let mut on_udp = false;
     while !stop.load(Ordering::SeqCst) {
+        let (udp, asked) = {
+            let mut s = st.lock().unwrap();
+            (s.udp.clone().filter(|u| u.alive()), s.key_requests.remove(&id))
+        };
+        // a keyframe when asked, and when switching transport (the client resyncs on it)
+        if asked || udp.is_some() != on_udp {
+            enc.force_intra_frame();
+        }
+        on_udp = udp.is_some();
         let rgba = animated_frame(width, height, t, hue);
         let yuv = YUVBuffer::from_rgb_source(RgbaSliceU8::new(&rgba, (width, height)));
         let Ok(bs) = enc.encode(&yuv) else { continue };
         let data = bs.to_vec();
         let keyframe = data.windows(5).any(|x| x[..4] == [0, 0, 0, 1] && x[4] & 0x1f == 5);
-        if !data.is_empty() {
-            let f = VideoFrame { window_id: id, pts_us: start.elapsed().as_micros() as u64, keyframe, codec: CODEC_H264, width: width as u16, height: height as u16, data };
-            let Ok(bytes) = encode_video(&f) else { continue };
-            if w.lock().unwrap().write_all(&bytes).is_err() {
-                return;
+        let (gs, gs_ready) = {
+            let s = st.lock().unwrap();
+            (s.gs.clone().filter(|_| s.desktop == Some(id)), s.gs_ready)
+        };
+        let gs_only = gs.is_some() && gs_ready;
+        if let (Some(g), false) = (gs, data.is_empty()) {
+            g.session.send_frame(&data, keyframe, std::time::Instant::now());
+        }
+        if !gs_only && !data.is_empty() {
+            let f = VideoFrame { window_id: id, pts_us: udp_agent::clock_us(), keyframe, codec: CODEC_H264, width: width as u16, height: height as u16, data };
+            if let Some(u) = &udp {
+                u.send(&f);
+            } else {
+                let Ok(bytes) = encode_video(&f) else { continue };
+                if w.lock().unwrap().write_all(&bytes).is_err() {
+                    return;
+                }
             }
         }
         t += 1;
@@ -448,9 +540,87 @@ fn video_loop<W: Write>(w: Writer<W>, id: u64, width: usize, height: usize, hue:
     }
 }
 
+/// Mac Desktop in full GameStream mode: a host session (rm-gamestream) behind the tunnel, as
+/// the Swift agent runs one. Its input becomes the desktop's own input messages.
+fn start_gamestream<W: Write + Send + 'static>(writer: &Writer<W>, st: &Arc<Mutex<State>>, hex: &str, input: std::sync::mpsc::Sender<Result<Option<Message>, ProtocolError>>) {
+    use rm_gamestream::tunnel::{HostTunnel, Outbound};
+    let (Some(key), Some(udp)) = (rm_protocol::udp::unhex16(hex), st.lock().unwrap().udp.clone()) else { return };
+    let (w, u) = (writer.clone(), udp.clone());
+    let out = Arc::new(move |o: Outbound| match o {
+        Outbound::Udp { kind, data } => u.send_tunnel(kind, data),
+        Outbound::TcpData { id, data } => {
+            let _ = send(&w, &Message::GsTunnel { id, op: "data".into(), data_base64: base64_encode(data) });
+        }
+        Outbound::TcpClose { id } => {
+            let _ = send(&w, &Message::GsTunnel { id, op: "close".into(), data_base64: String::new() });
+        }
+    });
+    let Ok(t) = HostTunnel::start(key, 20, out) else { return };
+    let t2 = t.clone();
+    *udp.tunnel.lock().unwrap() = Some(Box::new(move |flow, data| t2.udp_in(flow, data)));
+    {
+        let mut s = st.lock().unwrap();
+        s.gs = Some(t.clone());
+        s.gs_ready = false;
+    }
+    let st2 = st.clone();
+    let mut at = (0.0f64, 0.0f64);
+    std::thread::spawn(move || loop {
+        let e = t.events.lock().unwrap().recv_timeout(Duration::from_millis(500));
+        let desktop = st2.lock().unwrap().desktop;
+        match e {
+            // the pointer, from Moonlight's reference space to desktop points
+            Ok(rm_gamestream::Event::Input(rm_gamestream::Input::MouseAbs { x, y, width, height })) if width > 0 && height > 0 => {
+                at = (x as f64 * DESKTOP.0 as f64 / width as f64, y as f64 * DESKTOP.1 as f64 / height as f64);
+            }
+            Ok(rm_gamestream::Event::Input(rm_gamestream::Input::Button { button, down })) => {
+                if let Some(d) = desktop {
+                    let button = match button { 3 => MouseButton::Right, 2 => MouseButton::Middle, _ => MouseButton::Left };
+                    let _ = input.send(Ok(Some(Message::MouseButton { window_id: d, button, down, x: at.0, y: at.1 })));
+                }
+            }
+            Ok(rm_gamestream::Event::RequestIdr) => {
+                if let Some(d) = desktop {
+                    st2.lock().unwrap().key_requests.insert(d);
+                }
+            }
+            Ok(rm_gamestream::Event::Input(rm_gamestream::Input::Text(text))) => {
+                if let Some(d) = desktop {
+                    let _ = input.send(Ok(Some(Message::TextInput { window_id: d, text })));
+                }
+            }
+            Ok(rm_gamestream::Event::Ended) => return,
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if st2.lock().unwrap().gs.is_none() {
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+    });
+}
+
+/// Wait at the relay as the Mac of `session`, then run the end-to-end handshake with the
+/// session secret `secret`, as the Mac does.
+pub fn secure_join(relay: &str, session: &str, secret: &str) -> Result<(rm_protocol::secure::SecureStream<TcpStream>, rm_protocol::secure::Keys), String> {
+    let s = rm_relay::join(relay, session, rm_relay::Role::Agent, &rm_protocol::session::relay_token(session)).map_err(|e| e.to_string())?;
+    rm_protocol::secure::agent_tcp(s, session, secret).map_err(|e| e.to_string())
+}
+
 /// Bind to a relay as the agent and serve one client.
 pub fn serve_via_relay(relay: &str, session: &str, token: &str) -> Result<(), String> {
-    let s = rm_relay::join(relay, session, rm_relay::Role::Agent, token).map_err(|e| e.to_string())?;
-    let w: TcpStream = s.try_clone().map_err(|e| e.to_string())?;
-    serve(s, w).map_err(|e| e.to_string())
+    serve_via_relay_with(relay, session, token, true)
+}
+
+/// [`serve_via_relay`]; `p2p: false` keeps all UDP on the relay (no direct path).
+pub fn serve_via_relay_with(relay: &str, session: &str, token: &str, p2p: bool) -> Result<(), String> {
+    let (s, keys) = secure_join(relay, session, token)?;
+    let w = s.try_clone().map_err(|e| e.to_string())?;
+    // UDP video unless RM_NO_UDP is set (tests of the TCP path)
+    let udp = if std::env::var_os("RM_NO_UDP").is_some() { None } else { udp_agent::AgentUdp::start(relay, session, &rm_protocol::session::relay_token(session), Some(&keys)).ok() };
+    if let Some(u) = &udp {
+        u.p2p.store(p2p, std::sync::atomic::Ordering::Relaxed);
+    }
+    serve_with(s, w, udp).map_err(|e| e.to_string())
 }
