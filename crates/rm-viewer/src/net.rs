@@ -284,6 +284,8 @@ pub fn connect_with(relay: Option<&str>, session: &str, token: &str, app: Option
     let relay = route.udp_relay();
     let relay = relay.as_str();
     let writer = stream.try_clone().map_err(|e| e.to_string())?;
+    // the raw socket, to cut a connection that went silent (see the heartbeat below)
+    let raw = stream.get_ref().try_clone().map_err(|e| e.to_string())?;
     let sess = Session::handshake(stream).map_err(|e| format!("handshake: {e}"))?;
     let (tx, rx) = channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
@@ -317,7 +319,8 @@ pub fn connect_with(relay: Option<&str>, session: &str, token: &str, app: Option
     }
     *GS_VIDEO.lock().unwrap() = Some(video.clone());
     let l2 = link.clone();
-    std::thread::spawn(move || recv_loop(sess, l2, video, tx, wake));
+    let alive = Heartbeat::start(link.clone(), raw);
+    std::thread::spawn(move || recv_loop(sess, l2, video, tx, wake, alive));
     Ok((link, rx))
 }
 
@@ -468,14 +471,64 @@ fn spawn_decoder(id: u64, link: Link, tx: Sender<UiEvent>, wake: Arc<dyn Fn() + 
     DecodeWorker { tx: ftx, resync: false }
 }
 
-fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Sender<UiEvent>, wake: Arc<dyn Fn() + Send + Sync>) {
+/// Keeps the connection honest: a ping to the Mac every 2 s (the Mac ends a session it has not
+/// heard from in a while, and waits for the next one), and a connection that has carried
+/// nothing from the Mac for 10 s is cut: a network gone without a word (Wi-Fi off, cable out)
+/// otherwise looks like a quiet Mac forever.
+pub struct Heartbeat {
+    heard: std::sync::atomic::AtomicU64,
+    stop: std::sync::atomic::AtomicBool,
+    epoch: std::time::Instant,
+}
+
+/// Silence from the Mac that ends the connection.
+const SILENT_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+impl Heartbeat {
+    fn start(link: Link, raw: TcpStream) -> Arc<Heartbeat> {
+        let hb = Arc::new(Heartbeat { heard: Default::default(), stop: Default::default(), epoch: std::time::Instant::now() });
+        let h = hb.clone();
+        let _ = std::thread::Builder::new().name("rm-heartbeat".into()).spawn(move || {
+            let mut nonce = 0u64;
+            while !h.stop.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                nonce += 1;
+                link.send(&Message::Ping { nonce });
+                let silent = h.epoch.elapsed().saturating_sub(std::time::Duration::from_millis(h.heard.load(std::sync::atomic::Ordering::Relaxed)));
+                if silent > SILENT_LIMIT {
+                    eprintln!("nothing from the Mac for {} s: the connection is gone", silent.as_secs());
+                    let _ = raw.shutdown(std::net::Shutdown::Both);
+                    return;
+                }
+            }
+        });
+        hb
+    }
+
+    fn heard(&self) {
+        self.heard.store(self.epoch.elapsed().as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Sender<UiEvent>, wake: Arc<dyn Fn() + Send + Sync>, alive: Arc<Heartbeat>) {
     let emit = |e: UiEvent| {
         if tx.send(e).is_ok() {
             wake();
         }
     };
+    struct StopOnExit(Arc<Heartbeat>);
+    impl Drop for StopOnExit {
+        fn drop(&mut self) {
+            self.0.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let _stop = StopOnExit(alive.clone());
     loop {
-        match sess.recv() {
+        let r = sess.recv();
+        if matches!(r, Ok(Some(_))) {
+            alive.heard();
+        }
+        match r {
             // the Mac Desktop's picture comes the usual way until GameStream has it
             Ok(Some(Frame::Video(v))) if !crate::gsdesktop::owns(v.window_id) => video.push(v, false),
             Ok(Some(Frame::Video(_))) => {}

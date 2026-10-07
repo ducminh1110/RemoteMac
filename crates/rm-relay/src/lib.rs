@@ -267,6 +267,10 @@ fn reject(mut s: TcpStream, why: &str) -> std::io::Result<()> {
 fn handle(mut conn: TcpStream, table: Table, failures: Failures, udp: Udp, cfg: Config, ids: IdTable) -> std::io::Result<()> {
     // small control/input messages must not wait for Nagle
     let _ = conn.set_nodelay(true);
+    // a peer whose network vanished without a word (no FIN, no RST) is noticed by the kernel
+    // after about half a minute, and its pair is torn down instead of waiting forever
+    let ka = socket2::TcpKeepalive::new().with_time(Duration::from_secs(20)).with_interval(Duration::from_secs(5));
+    let _ = socket2::SockRef::from(&conn).set_tcp_keepalive(&ka);
     conn.set_read_timeout(Some(cfg.hello_timeout))?;
     // Read the join line byte-by-byte-ish via a limited BufReader, taking care
     // not to swallow payload bytes that follow it.

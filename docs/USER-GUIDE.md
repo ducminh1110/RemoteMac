@@ -146,6 +146,11 @@ Command-line options (for shortcuts and scripts):
 
 The stats overlay (Ctrl+Alt+Shift+S) shows which path is in use.
 
+**If the connection drops** (Wi-Fi lost, a cable pulled, the network changing), both sides
+notice within about 10 seconds. The Mac goes back to waiting for a viewer and keeps your apps
+open. The Windows app connects again by itself for up to two minutes, then reopens the apps
+you had open.
+
 ## 5. Working with Mac apps
 
 - **Each Mac window is a Windows window**, with its own taskbar button. While connected, the

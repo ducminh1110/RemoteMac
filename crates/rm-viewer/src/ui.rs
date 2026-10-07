@@ -303,8 +303,12 @@ pub fn run(opts: Options) -> i32 {
             let id = crate::connect::last_id();
             let got = crate::connect::connect_window(id.as_deref(), None, |typed, password, relay| {
                 let (session, token) = (rm_protocol::session::relay_session(typed), rm_protocol::session::token(typed, password));
-                net::connect_with(Some(relay).filter(|r| !r.trim().is_empty()), &session, &token, app.as_deref(), false, wake)
-                    .map(|x| (x, rm_protocol::session::display_id(typed)))
+                let relay = Some(relay).filter(|r| !r.trim().is_empty());
+                net::connect_with(relay, &session, &token, app.as_deref(), false, wake)
+                    .map(|x| {
+                        remember_session(relay, &session, &token);
+                        (x, rm_protocol::session::display_id(typed))
+                    })
                     .map_err(|e| {
                         eprintln!("connect failed: {e}");
                         net::friendly_error(&e)
@@ -315,7 +319,12 @@ pub fn run(opts: Options) -> i32 {
             x
         } else {
             match net::connect(opts.relay.as_deref(), &opts.session, &opts.token, opts.app.as_deref(), wake) {
-                Ok(x) => x,
+                Ok(x) => {
+                    if !opts.smoke && opts.showcase.is_none() {
+                        remember_session(opts.relay.as_deref(), &opts.session, &opts.token);
+                    }
+                    x
+                }
                 Err(e) => {
                     eprintln!("connect failed: {e}");
                     return 1;
@@ -397,6 +406,113 @@ fn choose_decoder(use_comp: bool) -> net::DecoderKind {
     })
     .join()
     .unwrap_or(Software)
+}
+
+// ------------------------------------------------------------------ reconnecting
+
+/// How to reach the Mac again: (relay, session, session secret) of the connection made.
+static SESSION: std::sync::Mutex<Option<(Option<String>, String, String)>> = std::sync::Mutex::new(None);
+/// A connection made again in the background, for the UI thread to take over.
+static RECONNECTED: std::sync::Mutex<Option<Reconnected>> = std::sync::Mutex::new(None);
+type Reconnected = Result<(Link, Receiver<UiEvent>), String>;
+/// How long a lost connection is tried again before giving up.
+const RECONNECT_FOR: Duration = Duration::from_secs(120);
+
+fn remember_session(relay: Option<&str>, session: &str, token: &str) {
+    *SESSION.lock().unwrap() = Some((relay.map(String::from), session.to_string(), token.to_string()));
+}
+
+/// The connection is gone: close the Mac's windows here, remember which apps were open, and
+/// connect again in the background (the Mac waits for the next connection; its apps stay open).
+/// False when there is nothing to reconnect to.
+fn start_reconnect() -> bool {
+    let Some((relay, session, token)) = SESSION.lock().unwrap().clone() else { return false };
+    let Some(ctl) = with_app(|a| a.controller) else { return false };
+    crate::gsdesktop::stop();
+    let (windows, open_apps) = with_app(|a| {
+        let mut apps: Vec<String> = vec![];
+        for r in a.remotes.values().filter(|r| r.parent.is_none() && r.role == WindowRole::Window) {
+            if !apps.contains(&r.app) {
+                apps.push(r.app.clone());
+            }
+        }
+        let windows: Vec<isize> = a.remotes.keys().copied().collect();
+        a.remotes.clear();
+        a.by_id.clear();
+        a.panels.clear();
+        a.gs_key = None;
+        (windows, apps)
+    })
+    .unwrap_or_default();
+    for h in windows {
+        unsafe {
+            let _ = DestroyWindow(hwnd_of(h));
+        }
+    }
+    *REOPEN.lock().unwrap() = open_apps;
+    on_mac_gone();
+    if let Some(l) = with_app(|a| a.launcher.as_ref().map(|l| l.hwnd.0 as isize)).flatten() {
+        unsafe {
+            let _ = SetWindowTextW(hwnd_of(l), w!("MacBridge — connection lost, connecting again…"));
+            let _ = ShowWindow(hwnd_of(l), SW_SHOW);
+        }
+    }
+    eprintln!("connection lost: connecting again for up to {} s", RECONNECT_FOR.as_secs());
+    let _ = std::thread::Builder::new().name("rm-reconnect".into()).spawn(move || {
+        let wake = move || unsafe {
+            let _ = PostMessageW(Some(hwnd_of(ctl)), WM_UI_EVENT, WPARAM(0), LPARAM(0));
+        };
+        let until = Instant::now() + RECONNECT_FOR;
+        let result = loop {
+            std::thread::sleep(Duration::from_secs(2));
+            match net::connect_with(relay.as_deref(), &session, &token, None, false, wake) {
+                Ok(x) => break Ok(x),
+                // the Mac now has another password, or is locked: trying again does not help
+                Err(e) if e.contains("wrong password") || e.contains("locked") => break Err(e),
+                Err(e) if Instant::now() >= until => break Err(e),
+                Err(e) => eprintln!("connecting again: {e}"),
+            }
+        };
+        *RECONNECTED.lock().unwrap() = Some(result);
+        wake();
+    });
+    true
+}
+
+/// Apps whose windows were open when the connection was lost: opened again once it is back.
+static REOPEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// On the UI thread: take over a connection made again, or give up.
+fn take_reconnected() {
+    let Some(result) = RECONNECTED.lock().unwrap().take() else { return };
+    match result {
+        Ok((link, rx)) => {
+            eprintln!("connected again");
+            MAC_GONE.store(false, std::sync::atomic::Ordering::Release);
+            let launcher = with_app(|a| {
+                a.link = link;
+                a.rx = rx;
+                a.display_req = None;
+                a.link.send(&Message::ListApps);
+                a.launcher.as_ref().map(|l| l.hwnd.0 as isize)
+            })
+            .flatten();
+            if let Some(l) = launcher {
+                unsafe {
+                    let _ = SetWindowTextW(hwnd_of(l), w!("MacBridge"));
+                }
+            }
+            // the apps that were open come back (still running on the Mac: their windows reappear)
+            let apps = std::mem::take(&mut *REOPEN.lock().unwrap());
+            for app in apps {
+                launch_app(&app);
+            }
+        }
+        Err(why) => {
+            native::message_box("MacBridge", &format!("The connection to the Mac was lost and could not be made again.\n\n{}\n\n{}", net::friendly_error(&why), crate::log_hint()));
+            quit(0);
+        }
+    }
 }
 
 /// The Mac is no longer reachable from this viewer: its apps leave the Start menu and Search.
@@ -882,6 +998,7 @@ fn on_vsync() {
 }
 
 fn drain_events() {
+    take_reconnected();
     let events: Vec<UiEvent> = with_app(|a| a.rx.try_iter().collect()).unwrap_or_default();
     for ev in latest_frames_only(events) {
         handle_event(ev);
@@ -1114,6 +1231,10 @@ fn handle_event(ev: UiEvent) {
         UiEvent::Disconnected(why) => {
             eprintln!("disconnected: {why}");
             let interactive = with_app(|a| a.smoke.is_none() && a.showcase.is_none()).unwrap_or(false);
+            // a connection lost (network, the Mac restarting): connect again by itself
+            if interactive && start_reconnect() {
+                return;
+            }
             if interactive {
                 // never vanish without a word
                 native::message_box("MacBridge", &format!("The connection to the Mac was closed.\n\n{why}\n\n{}", crate::log_hint()));

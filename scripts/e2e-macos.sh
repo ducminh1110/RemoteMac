@@ -54,6 +54,22 @@ grep -q "path=direct:" out/e2e.txt || { echo "no direct path between client and 
 grep -q "direct path to the client" out/agent.log || { echo "agent never saw a direct path"; [[ $RC == 0 ]] && RC=1; }
 grep -q "client connected (on this network)" out/agent.log || { echo "the client did not come straight over the local network"; [[ $RC == 0 ]] && RC=1; }
 
+# a viewer whose network vanishes without a word: the Mac notices (heartbeat) and takes the next
+# connection; the apps of the lost session stay open
+sleep 3
+./target/release/remote-mac --id $ID --password "$PASS" --vanish 2>out/client-vanish.log &
+VANISH=$!
+for _ in $(seq 1 30); do grep -q "nothing from the viewer" out/agent.log && break; sleep 1; done
+grep -q "nothing from the viewer" out/agent.log || { echo "the Mac did not notice a viewer gone silent"; [[ $RC == 0 ]] && RC=1; }
+grep -q "the apps stay open" out/agent.log || { echo "the Mac did not keep the apps for a lost connection"; [[ $RC == 0 ]] && RC=1; }
+sleep 3
+if ./target/release/remote-mac --id $ID --password "$PASS" >out/client-after.log 2>&1; then
+  echo "a new connection after the lost one: ok"
+else
+  echo "no new connection after a lost one: $(tail -3 out/client-after.log)"; [[ $RC == 0 ]] && RC=1
+fi
+kill $VANISH 2>/dev/null
+
 # far, lossy link: a relay limited to 6 Mbit/s that drops 5% of UDP packets; FEC rebuilds them
 # and the agent adapts its bitrate instead of queueing video (informational, not gating)
 # (RM_NO_P2P, RM_NO_LAN: this one must go through the throttled relay)

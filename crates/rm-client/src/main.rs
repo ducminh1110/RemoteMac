@@ -8,6 +8,7 @@ fn usage() -> ! {
 fn main() {
     let (mut relay, mut session, mut launch, mut e2e) = (None, None, None, None);
     let (mut record, mut apps, mut settle, mut shots) = (None, None, None, None);
+    let mut vanish = false;
     let (mut id, mut password) = (None, std::env::var("RM_PASSWORD").ok());
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -22,6 +23,9 @@ fn main() {
             "--apps" => apps = args.next(),
             "--settle" => settle = args.next().and_then(|s| s.parse::<u64>().ok()),
             "--shots" => shots = args.next(),
+            // test aid: a viewer whose network goes away without a word (one ping, then silence
+            // with the connection left open)
+            "--vanish" => vanish = true,
             _ => usage(),
         }
     }
@@ -46,6 +50,12 @@ fn main() {
     stream.get_ref().set_read_timeout(timed.then(|| std::time::Duration::from_secs(10))).ok();
     let sock = stream.get_ref().try_clone().unwrap_or_else(|e| fail("socket", e));
     let mut s = Session::handshake(stream).unwrap_or_else(|e| fail("handshake", e));
+    if vanish {
+        s.send(&rm_protocol::Message::Ping { nonce: 1 }).unwrap_or_else(|e| fail("ping", e));
+        eprintln!("connected; now silent, as a viewer whose network is gone");
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        std::process::exit(0);
+    }
     if timed {
         // ... then a short one when UDP video comes in beside the TCP stream
         sock.set_read_timeout(Some(std::time::Duration::from_millis(if udp { 20 } else { 1000 }))).ok();

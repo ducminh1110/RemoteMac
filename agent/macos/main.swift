@@ -750,6 +750,7 @@ func handle(_ m: [String: Any]) {
             }
         }
     case "ping":
+        viewerSendsHeartbeats = true
         send(["type": "pong", "nonce": m["nonce"] ?? 0])
     case "gs_tunnel":
         guard let t = gsTunnel else { break }
@@ -776,16 +777,40 @@ func handle(_ m: [String: Any]) {
 // input runs on its own queue (inputQueue), in arrival order, whether it came over TCP or straight over UDP
 sender.udp?.onInput = { m in inputQueue.async { handle(m) } }
 
+// ---- a viewer gone without a word (network lost) is noticed, and the Mac waits for the next ----
+/// The viewer pings every 2 s (older viewers do not: then nothing is assumed).
+var viewerSendsHeartbeats = false
+/// When the viewer was last heard over the connection.
+var heardOverTCP = CFAbsoluteTimeGetCurrent()
+/// The session ended because the viewer went silent, not because it closed.
+var connectionLost = false
+Thread {
+    while true {
+        sleep(1)
+        let heard = max(heardOverTCP, sender.udp?.lastHeard ?? 0)
+        let silent = CFAbsoluteTimeGetCurrent() - heard
+        if viewerSendsHeartbeats && silent > 10 {
+            log("nothing from the viewer for \(Int(silent)) s: the connection is gone; waiting for the next one")
+            connectionLost = true
+            Darwin.shutdown(conn.fd, SHUT_RDWR) // the read loop ends, and with it the session
+            return
+        }
+    }
+}.start()
+
 let reader = Thread {
     do {
         while let (ch, payload) = try conn.readFrame() {
+            heardOverTCP = CFAbsoluteTimeGetCurrent()
             guard ch != .video, let m = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] else { continue }
             // other messages wait for the input before them (typing, then closing the window)
             if inputTypes.contains(m["type"] as? String ?? "") { inputQueue.async { handle(m) } } else { inputQueue.sync {}; handle(m) }
         }
         log("client disconnected")
     } catch { log("read loop ended: \(error)") }
-    apps.terminateAll()
+    // the viewer closed: its apps close with it; the connection was lost: they stay open, and the
+    // viewer finds them again when it connects back
+    if connectionLost { log("the apps stay open for the viewer to come back to") } else { apps.terminateAll() }
     displays.setChromeHidden(false) // the menu bar and Dock as the user had them
     displays.unmirrorDesktop()
     uploads.cleanup()   // the session's uploaded files go with it
