@@ -24,6 +24,7 @@ usage: macbridge [--password SECRET] [--id 123456789] [--relay HOST:PORT] [--for
   --foreground       stay in the terminal instead of going to the background
   --logs-enabled     write a log (stderr; in the background ~/Library/Logs/MacBridge/macbridge.log)
   --stop             stop the MacBridge running in the background
+  --version          show the version
 """
 var relayArg: String?, sessionArg: String?, passwordArg: String?, idArg: String?, foreground = false
 var argv = CommandLine.arguments.dropFirst().makeIterator()
@@ -37,6 +38,7 @@ while let a = argv.next() {
     case "--logs-enabled": break
     case "--stop": exit(stopBackground() ? 0 : 1)
     case "-h", "--help": print(usage); exit(0)
+    case "--version": print("macbridge \(appVersion)"); exit(0)
     default: fail(usage)
     }
 }
@@ -231,7 +233,7 @@ do {
         try conn.send(["type": "error", "code": "version_mismatch", "message": "agent speaks protocol 1, client \(cmin)...\(cmax)"]); exit(1)
     }
     try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video"],
-                   "max_surface": [3840, 2160], "agent": "remote-agent-mac 0.2 \(ProcessInfo.processInfo.operatingSystemVersionString)"])
+                   "max_surface": [3840, 2160], "agent": "macbridge \(appVersion) \(ProcessInfo.processInfo.operatingSystemVersionString)"])
     try conn.send(probeCapabilities())
 } catch { fail("handshake: \(error)") }
 log("handshake complete")

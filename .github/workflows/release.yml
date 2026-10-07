@@ -6,12 +6,13 @@ name: Release builds
 #   macbridge-relay.tar.gz   the relay server + remotemac-relay-setup.sh (installs it from A to Z)
 # The source has no relay in it. These builds get one built in: the repository variable
 # RM_DEFAULT_RELAY (host:port), and on the official repository remotemac.mooo.com:7470; the
-# relay's admission key comes from the RM_RELAY_KEY secret. A tag v* publishes them as a release.
+# relay's admission key comes from the RM_RELAY_KEY secret. A version tag (1.0.0 or v1.0.0)
+# runs the tests, builds all three and publishes them as a GitHub release.
 on:
   workflow_dispatch:
   push:
     branches: [claude/inspiring-einstein-er2d37]
-    tags: ['v*']
+    tags: ['v*', '[0-9]*']
     paths: [agent/**, crates/**, deploy/**, scripts/build-agent-macos.sh, .github/workflows/release.yml, Cargo.*]
 
 env:
@@ -187,9 +188,18 @@ jobs:
           name: macbridge-relay
           path: dist/macbridge-relay.tar.gz
 
+  test:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit and end-to-end tests (protocol, encryption, relay, viewer logic)
+        run: cargo test --workspace
+
   publish:
-    needs: [mac, windows, relay]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, mac, windows, relay]
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -205,12 +215,31 @@ jobs:
           set -euo pipefail
           ls -la dist
           cat > notes.md <<'MD'
-          **MacBridge.exe** (Windows 10/11) and **macbridge** (macOS 14+, Apple silicon + Intel), and the relay server.
+          ## Downloads
 
-          On the same network the PC finds the Mac by its ID and connects straight to it. From elsewhere it goes
-          through a relay: these builds come with one; your own is one command away (`macbridge-relay.tar.gz`).
-          See the README for setup.
+          | File | For |
+          |---|---|
+          | `MacBridge-windows.zip` | Windows 10/11 x64: `MacBridge.exe` |
+          | `MacBridge-macos.tar.gz` | macOS 14+, Apple silicon and Intel: `macbridge` |
+          | `macbridge-relay.tar.gz` | your own relay server (Linux x86_64 / ARM64), one-command installer |
+
+          **Mac:** `./macbridge --password YOUR-PASSWORD` shows the ID and the password, then runs in the background
+          (`./macbridge --stop` ends it). **Windows:** open `MacBridge.exe`, type both, press Connect.
+
+          ## Highlights
+
+          - Each Mac app as its own native Windows window; the whole Mac Desktop over GameStream (Moonlight's core),
+            with a floating navigation ball.
+          - On the same network the PC finds the Mac by its ID and connects straight to it; from elsewhere through a
+            relay (these builds come with one; your own is one command away). The relay hands out unique Mac IDs.
+          - End-to-end encryption: a password-authenticated key exchange, then ChaCha20-Poly1305 on everything; the
+            relay never learns the password or the content.
+          - Low latency: UDP with FEC, adaptive bitrate, a direct peer-to-peer path when the networks allow.
+          - No logs unless asked for (`--logs-enabled`).
+
+          Both sides must run the same version. If you run your own relay, update it with the new
+          `macbridge-relay.tar.gz` as well. See the [user guide](../../blob/HEAD/docs/USER-GUIDE.md).
           MD
           sed -i 's/^          //' notes.md
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "MacBridge $GITHUB_REF_NAME" --notes-file notes.md \
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "MacBridge ${GITHUB_REF_NAME#v}" --notes-file notes.md --latest \
             dist/MacBridge-macos.tar.gz dist/MacBridge-windows.zip dist/macbridge-relay.tar.gz

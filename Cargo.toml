@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/moonlight-sys", "crates/rm-gamestream", "crates/rm-decode", "crates/rm-fakeagent", "crates/rm-viewer", "crates/rm-protocol", "crates/rm-core", "crates/rm-relay", "crates/rm-agent", "crates/rm-client"]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 

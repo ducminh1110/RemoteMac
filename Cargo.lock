@@ -329,7 +329,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "moonlight-sys"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -450,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "rm-agent"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "rm-core",
  "rm-protocol",
@@ -462,7 +462,7 @@ dependencies = [
 
 [[package]]
 name = "rm-client"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "rm-agent",
  "rm-core",
@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "rm-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "rm-protocol",
  "serde",
@@ -488,14 +488,14 @@ dependencies = [
 
 [[package]]
 name = "rm-decode"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "openh264",
 ]
 
 [[package]]
 name = "rm-fakeagent"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "openh264",
  "rm-gamestream",
@@ -506,7 +506,7 @@ dependencies = [
 
 [[package]]
 name = "rm-gamestream"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -517,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "rm-protocol"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chacha20poly1305",
  "hkdf",
@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "rm-relay"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "rm-viewer"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "moonlight-sys",
  "openh264",
