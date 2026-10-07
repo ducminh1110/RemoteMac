@@ -460,8 +460,12 @@ fn gamestream_desktop<S: Read + Write>(c: &mut Ctx<S>) {
     c.gs_tunnel = Some(tunnel.clone());
     c.gs_out = Some(rx);
     c.desktop = None;
+    c.desktop_frames = 0;
     c.send(Message::AppLaunch { application_id: "desktop".into(), arguments: vec![format!("gamestream={}", rm_protocol::udp::hex(&key))], working_directory: None, environment: Default::default() });
     let up = c.pump(12, |c| c.desktop.is_some());
+    // the picture is there at once, the usual way, while Moonlight still connects
+    let shown = up && c.pump(8, |c| c.desktop_frames >= 1);
+    c.r.check("Mac Desktop shows at once while GameStream connects (usual stream)", shown, format!("desktop={:?} usual frames={}", c.desktop, c.desktop_frames));
     let port = tunnel.rtsp_port;
     let connected = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(i32::MIN));
     let c2 = connected.clone();
@@ -481,6 +485,12 @@ fn gamestream_desktop<S: Read + Write>(c: &mut Ctx<S>) {
         format!("desktop={:?} connect={} frames={frames} idr={idrs}", c.desktop, connected.load(std::sync::atomic::Ordering::SeqCst)),
     );
     if streamed {
+        // GameStream's pictures arrive: the viewer says so, and the usual stream stops
+        c.send(Message::GsTunnel { id: 0, op: "ready".into(), data_base64: String::new() });
+        c.pump(1, |_| false);
+        let before = c.desktop_frames;
+        c.pump(2, |_| false);
+        c.r.check("once GameStream carries the desktop, the usual stream stops", c.desktop_frames <= before + 2, format!("usual frames in 2 s after ready: {}", c.desktop_frames - before));
         // input through Moonlight's encrypted input stream reaches the Mac (the test app, still
         // in front, counts what is typed)
         let before = c.last_title.clone();

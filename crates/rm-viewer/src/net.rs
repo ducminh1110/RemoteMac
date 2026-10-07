@@ -280,6 +280,7 @@ pub fn connect_with(relay: Option<&str>, session: &str, token: &str, app: Option
     // the password proved and the keys agreed end to end (the relay sees only ciphertext)
     let (stream, keys) = rm_protocol::secure::client_tcp(stream, session, token).map_err(|e| e.to_string())?;
     eprintln!("end-to-end encrypted (ChaCha20-Poly1305)");
+    let lan = matches!(route, rm_relay::lan::Route::Lan(_));
     let relay = route.udp_relay();
     let relay = relay.as_str();
     let writer = stream.try_clone().map_err(|e| e.to_string())?;
@@ -293,7 +294,7 @@ pub fn connect_with(relay: Option<&str>, session: &str, token: &str, app: Option
         let v = video.clone();
         let l = link.clone();
         let offer = move |secret, candidates| l.send(&Message::P2pOffer { secret, candidates });
-        match rm_client::udp::start(relay, session, &rm_protocol::session::relay_token(session), Some(&keys), move |o| v.on_udp(o), offer) {
+        match rm_client::udp::start(relay, session, &rm_protocol::session::relay_token(session), Some(&keys), lan, move |o| v.on_udp(o), offer) {
             Ok(u) => {
                 u.set_tunnel_handler(crate::gsdesktop::from_host_udp);
                 let u = Arc::new(u);
@@ -340,7 +341,10 @@ pub fn start_gamestream_desktop(link: &Link, id: u64, key: [u8; 16], points: (u3
             ToHost::TcpClose { id } => l.send(&Message::GsTunnel { id, op: "close".into(), data_base64: String::new() }),
         }
     };
-    crate::gsdesktop::start(id, key, points, pixels, to_host, move |f| video.push(f, true))
+    // once GameStream's pictures arrive, the Mac stops sending the usual ones (until then the
+    // desktop shows at once, as an app window does)
+    let ready = link.clone();
+    crate::gsdesktop::start(id, key, points, pixels, to_host, move |f| video.push(f, true), move || ready.send(&Message::GsTunnel { id: 0, op: "ready".into(), data_base64: String::new() }))
 }
 
 /// One window's decoder on its own thread: the socket keeps being read (input echoes, menus,
@@ -367,7 +371,8 @@ impl Video {
 
     fn on_udp(&self, o: rm_protocol::udp::Out) {
         match o {
-            rm_protocol::udp::Out::Frame(v) => self.push(v, true),
+            rm_protocol::udp::Out::Frame(v) if !crate::gsdesktop::owns(v.window_id) => self.push(v, true),
+            rm_protocol::udp::Out::Frame(_) => {}
             // lost even with FEC: the decoder needs a fresh keyframe
             rm_protocol::udp::Out::Lost(id) => self.link().send(&Message::RequestKeyframe { window_id: id }),
         }
@@ -471,7 +476,9 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
     };
     loop {
         match sess.recv() {
-            Ok(Some(Frame::Video(v))) => video.push(v, false),
+            // the Mac Desktop's picture comes the usual way until GameStream has it
+            Ok(Some(Frame::Video(v))) if !crate::gsdesktop::owns(v.window_id) => video.push(v, false),
+            Ok(Some(Frame::Video(_))) => {}
             Ok(Some(Frame::Msg(m))) => match m {
                 Message::WindowCreated { window_id, application_id, title, bounds, parent_id, role } => emit(UiEvent::WindowCreated { id: window_id, app: application_id, title, x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, parent: parent_id, role }),
                 Message::Apps { apps } => emit(UiEvent::Apps(apps)),

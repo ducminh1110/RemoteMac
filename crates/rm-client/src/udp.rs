@@ -125,7 +125,9 @@ impl Drop for UdpVideo {
 /// `on_offer(secret, candidates)` is called once our addresses are known: send them to the agent
 /// as `Message::P2pOffer` (RM_NO_P2P=1: never, everything stays on the relay).
 /// `relay_token` registers with the relay; `keys` (from the session's handshake) encrypt it all.
-pub fn start(relay: &str, session: &str, relay_token: &str, keys: Option<&Keys>, on_out: impl FnMut(Out) + Send + 'static, on_offer: impl FnOnce(String, Vec<String>) + Send + 'static) -> std::io::Result<UdpVideo> {
+/// `quick_offer`: the Mac is on this network, offer our addresses at once (the public one from
+/// STUN is not needed), so the direct path is up within moments.
+pub fn start(relay: &str, session: &str, relay_token: &str, keys: Option<&Keys>, quick_offer: bool, on_out: impl FnMut(Out) + Send + 'static, on_offer: impl FnOnce(String, Vec<String>) + Send + 'static) -> std::io::Result<UdpVideo> {
     let addr = relay.to_socket_addrs()?.next().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "relay address"))?;
     let bind = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
     let sock = UdpSocket::bind(bind)?;
@@ -140,7 +142,8 @@ pub fn start(relay: &str, session: &str, relay_token: &str, keys: Option<&Keys>,
     let tunnel: TunnelIn = Arc::new(Mutex::new(None));
     let (s2, st2, stop2, p2, tn2) = (sock.try_clone()?, stats.clone(), stop.clone(), p2p.clone(), tunnel.clone());
     let offer: Option<OnOffer> = std::env::var_os("RM_NO_P2P").is_none().then(|| Box::new(on_offer) as OnOffer);
-    std::thread::Builder::new().name("rm-udp".into()).spawn(move || run(s2, addr, register, st2, stop2, epoch, p2, on_out, offer, tn2))?;
+    let offer_after = Duration::from_millis(if quick_offer { 50 } else { 1200 });
+    std::thread::Builder::new().name("rm-udp".into()).spawn(move || run(s2, addr, register, st2, stop2, epoch, p2, on_out, offer, tn2, offer_after))?;
     Ok(UdpVideo { stats, tunnel, stop, epoch, p2p, sock, relay: addr })
 }
 
@@ -168,7 +171,7 @@ fn is_private(a: &SocketAddr) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run(sock: SealedUdp, relay: SocketAddr, register: Vec<u8>, stats: Arc<Mutex<LinkStats>>, stop: Arc<AtomicBool>, epoch: Instant, p2p: Arc<Mutex<P2p>>, mut on_out: impl FnMut(Out), mut offer: Option<OnOffer>, tunnel: TunnelIn) {
+fn run(sock: SealedUdp, relay: SocketAddr, register: Vec<u8>, stats: Arc<Mutex<LinkStats>>, stop: Arc<AtomicBool>, epoch: Instant, p2p: Arc<Mutex<P2p>>, mut on_out: impl FnMut(Out), mut offer: Option<OnOffer>, tunnel: TunnelIn, offer_after: Duration) {
     let mut r = Reassembler::new();
     // GameStream (Sunshine-format) streams, one per window (RTP SSRC), and their sequence
     // numbers for the loss report
@@ -200,7 +203,7 @@ fn run(sock: SealedUdp, relay: SocketAddr, register: Vec<u8>, stats: Arc<Mutex<L
                 }
                 stun_sent += 1;
             }
-            if now.duration_since(started) >= Duration::from_millis(1200) {
+            if now.duration_since(started) >= offer_after {
                 let secret = p2p.lock().map(|p| udp::hex(&p.secret)).unwrap_or_default();
                 (offer.take().unwrap())(secret, std::mem::take(&mut cands));
             }

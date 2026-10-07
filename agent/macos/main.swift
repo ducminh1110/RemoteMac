@@ -284,7 +284,7 @@ sender.onBitrate = { b in
 // video over UDP + FEC beside the TCP connection (RM_NO_UDP=1: TCP only)
 // (with the client on this network, or no relay, a port that ignores it stands in for the
 // relay: the direct path comes from the offer)
-if env["RM_NO_UDP"] == nil, let u = UdpLink(hostPort: cameLocally ? "127.0.0.1:9" : relayAddr ?? "127.0.0.1:9", session: sessionID, token: relayToken(sessionID), key: relayKey(), cipher: DatagramCipher(sessionKeys)) {
+if env["RM_NO_UDP"] == nil, let u = UdpLink(hostPort: cameLocally ? "127.0.0.1:9" : relayAddr ?? "127.0.0.1:9", session: sessionID, token: relayToken(sessionID), key: relayKey(), cipher: DatagramCipher(sessionKeys), quickOffer: cameLocally) {
     sender.udp = u
     u.requestKeyframe = { wid in sender.requestKeyframe?(wid) }
     u.onAlive = { up in
@@ -431,6 +431,9 @@ func keyTo(_ pid: pid_t, _ code: CGKeyCode, _ flags: CGEventFlags = []) {
 // The client's Moonlight core reaches it through the tunnel: RTSP as "gs_tunnel" messages on
 // this connection, the UDP flows as "RM" 25 datagrams on the UDP path.
 var gsTunnel: OpaquePointer?
+/// The viewer gets GameStream's pictures: the desktop goes only that way. Until then it also goes
+/// the usual way, so it shows at once (as an app window does) while Moonlight connects.
+var gsReady = false
 var gsPoint = CGPoint.zero
 let gsOut: rm_gs_out = { _, kind, id, data, len in
     let bytes = data.map { Data(bytes: $0, count: len) } ?? Data()
@@ -468,6 +471,7 @@ func gsStart(keyHex: String) -> Bool {
 func gsStop() {
     guard let t = gsTunnel else { return }
     gsTunnel = nil
+    gsReady = false
     sender.udp?.onTunnel = nil
     rm_gs_desktop_stop(t)
 }
@@ -481,7 +485,11 @@ func gsEvent(_ e: RmGsEvent) {
     case 2:
         streamsLock.lock(); let ws = streams[desktopWindowID]; streamsLock.unlock()
         ws?.requestKeyframe(); return
-    case 3: log("Mac Desktop GameStream: client left"); return
+    case 3:
+        log("Mac Desktop GameStream: client left; the desktop goes the usual way")
+        gsReady = false
+        streamsLock.lock(); let ws = streams[desktopWindowID]; streamsLock.unlock()
+        ws?.requestKeyframe(); return
     case 10:
         if [0x10, 0x11, 0x12, 0x14, 0x5B, 0x5C].contains(e.a) || (0xA0...0xA5).contains(e.a) { return } // modifiers ride on keys
         guard let n = rm_gs_vk_name(UInt16(e.a)) else { return }
@@ -552,9 +560,8 @@ func handle(_ m: [String: Any]) {
             if let t = gsTunnel {
                 let age = agentClockUs() > pkt.ptsMicros ? agentClockUs() - pkt.ptsMicros : 0
                 _ = pkt.data.withUnsafeBytes { rm_gs_desktop_frame(t, $0.baseAddress?.assumingMemoryBound(to: UInt8.self), pkt.data.count, pkt.keyframe, age) }
-            } else {
-                sender.sendVideo(pkt)
             }
+            if gsTunnel == nil || !gsReady { sender.sendVideo(pkt) }
         }
         ws.pixels = fittedPixels
         ws.setBitrate(sender.bitrate)
@@ -748,6 +755,9 @@ func handle(_ m: [String: Any]) {
         guard let t = gsTunnel else { break }
         let id = UInt32(int(m["id"]))
         switch m["op"] as? String ?? "" {
+        case "ready":
+            // the viewer shows GameStream's pictures now: the usual stream of the desktop stops
+            if !gsReady { gsReady = true; log("Mac Desktop: GameStream carries the desktop now") }
         case "open": rm_gs_desktop_tcp_open(t, id)
         case "data":
             let d = Data(base64Encoded: m["data_base64"] as? String ?? "") ?? Data()

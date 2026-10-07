@@ -116,6 +116,11 @@ pub fn connect(p: Params, sink: impl Fn(Vec<u8>, bool) + Send + 'static) -> Resu
     Ok(())
 }
 
+/// Abort a [`connect`] in progress (it then returns an error soon). Safe at any time.
+pub fn interrupt() {
+    unsafe { ml::LiInterruptConnection() };
+}
+
 pub fn stop() {
     let _g = LOCK.lock().unwrap();
     unsafe { ml::LiStopConnection() };

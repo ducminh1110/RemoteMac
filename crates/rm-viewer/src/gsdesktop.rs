@@ -13,12 +13,16 @@ use rm_protocol::Message;
 use std::sync::{Arc, Mutex};
 
 struct State {
+    /// which start this is (frames of an earlier session are dropped)
+    session: u64,
     window_id: u64,
     tunnel: Arc<ClientTunnel>,
     /// the desktop's size in Mac points (pointer positions are in this space)
     points: (u32, u32),
     /// picture size, from the stream's SPS (for the decoder's crop)
     pixels: (u16, u16),
+    /// GameStream's pictures are arriving: the usual ones of this window are dropped
+    streaming: bool,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -36,6 +40,11 @@ pub fn new_key() -> ([u8; 16], String) {
 
 pub fn active_window() -> Option<u64> {
     STATE.lock().unwrap().as_ref().map(|s| s.window_id)
+}
+
+/// Whether GameStream carries `window_id`'s picture now (its usual frames are then dropped).
+pub fn owns(window_id: u64) -> bool {
+    STATE.lock().unwrap().as_ref().is_some_and(|s| s.window_id == window_id && s.streaming)
 }
 
 /// RTSP bytes from the Mac.
@@ -58,50 +67,112 @@ pub fn from_host_udp(flow: u8, data: &[u8]) {
     }
 }
 
-/// Start Moonlight's client for the Mac Desktop window `window_id` (`points` in Mac points,
-/// `pixels` the expected picture size). `to_host` carries the tunnel; `sink` gets frames.
-pub fn start(window_id: u64, key: [u8; 16], points: (u32, u32), pixels: (u16, u16), to_host: impl Fn(ToHost) + Send + Sync + 'static, sink: impl Fn(rm_protocol::VideoFrame) + Send + 'static) -> Result<(), String> {
-    if STATE.lock().unwrap().is_some() {
-        return Err("a Mac Desktop GameStream session is already running".into());
-    }
-    let tunnel = ClientTunnel::start(Arc::new(to_host)).map_err(|e| e.to_string())?;
-    let port = tunnel.rtsp_port;
-    *STATE.lock().unwrap() = Some(State { window_id, tunnel, points, pixels });
-    std::thread::Builder::new()
-        .name("rm-moonlight".into())
-        .spawn(move || {
-            let st = crate::settings::Settings::load();
-            let bitrate = if st.bitrate_mbps > 0 { st.bitrate_mbps * 1000 } else { 40_000 };
-            let params = moonlight::Params { rtsp_port: port, key, width: pixels.0 as u32, height: pixels.1 as u32, fps: st.fps, bitrate_kbps: bitrate, packet_size: 1200, remote: true };
-            let r = moonlight::connect(params, move |data, idr| {
-                let (id, (w, h)) = {
-                    let mut st = STATE.lock().unwrap();
-                    let Some(s) = st.as_mut() else { return };
-                    // the picture size comes with every IDR's SPS (GameStream sends no size)
-                    if idr {
-                        if let Some((w, h)) = rm_gamestream::sps::h264_size(&data) {
-                            s.pixels = (w.min(65535) as u16, h.min(65535) as u16);
-                        }
-                    }
-                    (s.window_id, s.pixels)
-                };
-                sink(rm_protocol::VideoFrame { window_id: id, pts_us: 0, keyframe: idr, codec: rm_protocol::CODEC_H264, width: w, height: h, data });
-            });
-            match r {
-                Ok(()) => eprintln!("Mac Desktop streams over GameStream (Moonlight's client core)"),
-                Err(e) => {
-                    eprintln!("Mac Desktop GameStream: could not connect ({e})");
-                    STATE.lock().unwrap().take();
-                }
-            }
-        })
-        .map_err(|e| e.to_string())?;
-    Ok(())
+/// What the Moonlight thread does, in order: a stop always ends the session before it before the
+/// next one connects (moonlight-common-c keeps one connection per process).
+enum Op {
+    Connect { session: u64, params: moonlight::Params, sink: Box<dyn Fn(rm_protocol::VideoFrame) + Send>, on_streaming: Box<dyn FnOnce() + Send> },
+    Stop,
 }
 
+static OPS: Mutex<Option<std::sync::mpsc::Sender<Op>>> = Mutex::new(None);
+static NEXT_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn ops() -> Option<std::sync::mpsc::Sender<Op>> {
+    let mut g = OPS.lock().unwrap();
+    if g.is_none() {
+        let (tx, rx) = std::sync::mpsc::channel::<Op>();
+        std::thread::Builder::new().name("rm-moonlight".into()).spawn(move || run_ops(rx)).ok()?;
+        *g = Some(tx);
+    }
+    g.clone()
+}
+
+fn run_ops(rx: std::sync::mpsc::Receiver<Op>) {
+    let mut connected = false;
+    for op in rx {
+        match op {
+            Op::Stop => {
+                if std::mem::take(&mut connected) {
+                    moonlight::stop();
+                }
+            }
+            Op::Connect { session, params, sink, on_streaming } => {
+                // a stop already queued for this session: do not connect at all
+                if STATE.lock().unwrap().as_ref().map(|s| s.session) != Some(session) {
+                    continue;
+                }
+                let on_streaming = Mutex::new(Some(on_streaming));
+                let r = moonlight::connect(params, move |data, idr| {
+                    let (id, (w, h), first) = {
+                        let mut st = STATE.lock().unwrap();
+                        let Some(s) = st.as_mut().filter(|s| s.session == session) else { return };
+                        // GameStream takes over at a keyframe (the decoder starts there)
+                        if !s.streaming && !idr {
+                            return;
+                        }
+                        let first = !s.streaming;
+                        s.streaming = true;
+                        // the picture size comes with every IDR's SPS (GameStream sends no size)
+                        if idr {
+                            if let Some((w, h)) = rm_gamestream::sps::h264_size(&data) {
+                                s.pixels = (w.min(65535) as u16, h.min(65535) as u16);
+                            }
+                        }
+                        (s.window_id, s.pixels, first)
+                    };
+                    if first {
+                        eprintln!("Mac Desktop: GameStream pictures arriving; it carries the desktop now");
+                        if let Some(f) = on_streaming.lock().unwrap().take() {
+                            f();
+                        }
+                    }
+                    sink(rm_protocol::VideoFrame { window_id: id, pts_us: 0, keyframe: idr, codec: rm_protocol::CODEC_H264, width: w, height: h, data });
+                });
+                match r {
+                    Ok(()) => {
+                        connected = true;
+                        eprintln!("Mac Desktop streams over GameStream (Moonlight's client core)");
+                    }
+                    Err(e) => {
+                        // the desktop keeps its usual stream
+                        eprintln!("Mac Desktop GameStream: could not connect ({e}); the desktop stays on the usual stream");
+                        let mut st = STATE.lock().unwrap();
+                        if st.as_ref().is_some_and(|s| s.session == session) {
+                            st.take();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Start Moonlight's client for the Mac Desktop window `window_id` (`points` in Mac points,
+/// `pixels` the expected picture size). `to_host` carries the tunnel; `sink` gets frames;
+/// `on_streaming` is called once, at the first picture (the Mac then stops the usual stream,
+/// which shows the desktop until then).
+pub fn start(window_id: u64, key: [u8; 16], points: (u32, u32), pixels: (u16, u16), to_host: impl Fn(ToHost) + Send + Sync + 'static, sink: impl Fn(rm_protocol::VideoFrame) + Send + 'static, on_streaming: impl FnOnce() + Send + 'static) -> Result<(), String> {
+    // a session left over (its window went away while it was still connecting) ends first
+    stop();
+    let ops = ops().ok_or("no thread for Moonlight")?;
+    let tunnel = ClientTunnel::start(Arc::new(to_host)).map_err(|e| e.to_string())?;
+    let port = tunnel.rtsp_port;
+    let session = NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    *STATE.lock().unwrap() = Some(State { session, window_id, tunnel, points, pixels, streaming: false });
+    let st = crate::settings::Settings::load();
+    let bitrate = if st.bitrate_mbps > 0 { st.bitrate_mbps * 1000 } else { 40_000 };
+    let params = moonlight::Params { rtsp_port: port, key, width: pixels.0 as u32, height: pixels.1 as u32, fps: st.fps, bitrate_kbps: bitrate, packet_size: 1200, remote: true };
+    ops.send(Op::Connect { session, params, sink: Box::new(sink), on_streaming: Box::new(on_streaming) }).map_err(|e| e.to_string())
+}
+
+/// End the session. Never blocks the caller: a connect in progress is interrupted, and the stop
+/// runs on the Moonlight thread, after it.
 pub fn stop() {
     if STATE.lock().unwrap().take().is_some() {
-        moonlight::stop();
+        moonlight::interrupt();
+        if let Some(ops) = ops() {
+            let _ = ops.send(Op::Stop);
+        }
     }
 }
 

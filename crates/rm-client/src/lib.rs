@@ -99,6 +99,7 @@ impl<S: Read + Write> Session<S> {
             session,
             &rm_protocol::session::relay_token(session),
             keys,
+            false,
             move |o| {
                 let _ = tx.send(o);
             },

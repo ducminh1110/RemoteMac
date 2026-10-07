@@ -87,6 +87,9 @@ struct State {
     key_requests: std::collections::HashSet<u64>,
     /// the Mac Desktop in full GameStream mode: its host session behind the tunnel
     gs: Option<Arc<rm_gamestream::tunnel::HostTunnel>>,
+    /// the viewer shows GameStream's pictures: the desktop goes only that way (until then also
+    /// the usual way, as the Mac app does)
+    gs_ready: bool,
 }
 
 type Writer<W> = Arc<Mutex<W>>;
@@ -152,6 +155,7 @@ fn close_window<W: Write>(writer: &Writer<W>, st: &Arc<Mutex<State>>, id: u64) -
         s.rects.remove(&id);
         if s.desktop == Some(id) {
             s.desktop = None;
+            s.gs_ready = false;
             if let Some(g) = s.gs.take() {
                 g.session.stop();
             }
@@ -306,8 +310,10 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
             Message::ClipboardSet { text, .. } => st.lock().unwrap().clipboard = text,
             Message::StreamSettings { .. } => {}
             Message::GsTunnel { id, op, data_base64 } => {
-                if let Some(t) = st.lock().unwrap().gs.clone() {
+                let gs = st.lock().unwrap().gs.clone();
+                if let Some(t) = gs {
                     match op.as_str() {
+                        "ready" => st.lock().unwrap().gs_ready = true,
                         "open" => t.tcp_open(id),
                         "data" => t.tcp_data(id, &rm_protocol::base64_decode(&data_base64).unwrap_or_default()),
                         _ => t.tcp_close(id),
@@ -510,13 +516,15 @@ fn video_loop<W: Write>(w: Writer<W>, st: Arc<Mutex<State>>, id: u64, width: usi
         let Ok(bs) = enc.encode(&yuv) else { continue };
         let data = bs.to_vec();
         let keyframe = data.windows(5).any(|x| x[..4] == [0, 0, 0, 1] && x[4] & 0x1f == 5);
-        let gs = {
+        let (gs, gs_ready) = {
             let s = st.lock().unwrap();
-            s.gs.clone().filter(|_| s.desktop == Some(id))
+            (s.gs.clone().filter(|_| s.desktop == Some(id)), s.gs_ready)
         };
+        let gs_only = gs.is_some() && gs_ready;
         if let (Some(g), false) = (gs, data.is_empty()) {
             g.session.send_frame(&data, keyframe, std::time::Instant::now());
-        } else if !data.is_empty() {
+        }
+        if !gs_only && !data.is_empty() {
             let f = VideoFrame { window_id: id, pts_us: udp_agent::clock_us(), keyframe, codec: CODEC_H264, width: width as u16, height: height as u16, data };
             if let Some(u) = &udp {
                 u.send(&f);
@@ -550,7 +558,11 @@ fn start_gamestream<W: Write + Send + 'static>(writer: &Writer<W>, st: &Arc<Mute
     let Ok(t) = HostTunnel::start(key, 20, out) else { return };
     let t2 = t.clone();
     *udp.tunnel.lock().unwrap() = Some(Box::new(move |flow, data| t2.udp_in(flow, data)));
-    st.lock().unwrap().gs = Some(t.clone());
+    {
+        let mut s = st.lock().unwrap();
+        s.gs = Some(t.clone());
+        s.gs_ready = false;
+    }
     let st2 = st.clone();
     let mut at = (0.0f64, 0.0f64);
     std::thread::spawn(move || loop {

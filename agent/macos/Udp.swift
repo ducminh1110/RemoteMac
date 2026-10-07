@@ -121,8 +121,12 @@ final class UdpLink {
     /// encrypts the datagrams of the session (Secure.swift)
     private let cipher: DatagramCipher?
 
-    init?(hostPort: String, session: String, token: String, key: String?, cipher: DatagramCipher? = nil) {
+    /// on the viewer's own network: offer our addresses at once (no public address to wait for)
+    private let quickOffer: Bool
+
+    init?(hostPort: String, session: String, token: String, key: String?, cipher: DatagramCipher? = nil, quickOffer: Bool = false) {
         self.cipher = cipher
+        self.quickOffer = quickOffer
         guard let idx = hostPort.lastIndex(of: ":") else { return nil }
         let host = String(hostPort[..<idx]), port = String(hostPort[hostPort.index(after: idx)...])
         var hints = addrinfo(); hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_DGRAM
@@ -207,7 +211,7 @@ final class UdpLink {
                     for s in stun { sendTo(req, s) }
                     stunSent += 1
                 }
-                if now - started >= 1.2 && port > 0 {
+                if now - started >= (quickOffer ? 0.05 : 1.2) && port > 0 {
                     var cands = lanAddresses().map { "\($0):\(port)" }
                     if relayKey.hasPrefix("127.") { cands.append("127.0.0.1:\(port)") }
                     if let p = publicAddr, !cands.contains(p) { cands.append(p) }
