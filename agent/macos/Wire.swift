@@ -134,7 +134,8 @@ func relayKey() -> String? {
 }
 
 func joinRelay(_ conn: Conn, session: String, token: String) throws {
-    var join: [String: Any] = ["session_id": session, "role": "agent", "token": token]
+    // the owner secret: a relay that handed out this ID lets only its owner wait under it
+    var join: [String: Any] = ["session_id": session, "role": "agent", "token": token, "owner": ownerSecret()]
     if let key = relayKey() { join["key"] = key }
     let line = try JSONSerialization.data(withJSONObject: join)
     try conn.writeAll(line + Data([10]))

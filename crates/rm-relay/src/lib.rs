@@ -6,6 +6,7 @@
 //! transport only. Before any real use, wrap the relay leg in TLS and put an
 //! end-to-end Noise/QUIC session between client and agent (docs/SPEC.md §7).
 
+pub mod ids;
 pub mod lan;
 
 use serde::{Deserialize, Serialize};
@@ -38,6 +39,9 @@ pub struct Join {
     /// `ERR no such session` at once (a viewer asking for a Mac that is not online).
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub wait: bool,
+    /// An agent's owner secret: needed to wait under an ID this relay handed out ([`ids`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 fn yes() -> bool {
@@ -74,11 +78,13 @@ pub struct Config {
     pub throttle_kbps: Option<u32>,
     /// Test aid: drop this share (0..1) of forwarded UDP datagrams (a lossy link).
     pub udp_loss: Option<f64>,
+    /// Where the IDs handed out to Macs are kept (None: in memory only).
+    pub ids_path: Option<std::path::PathBuf>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { pair_timeout: Duration::from_secs(300), hello_timeout: Duration::from_secs(10), key: None, throttle_kbps: None, udp_loss: None }
+        Self { pair_timeout: Duration::from_secs(300), hello_timeout: Duration::from_secs(10), key: None, throttle_kbps: None, udp_loss: None, ids_path: None }
     }
 }
 
@@ -218,6 +224,7 @@ fn udp_loop(sock: UdpSocket, udp: Udp, cfg: Config) {
 }
 
 type Table = Arc<Mutex<HashMap<String, Pending>>>;
+type IdTable = Arc<Mutex<ids::Ids>>;
 /// session -> (wrong tokens, since)
 type Failures = Arc<Mutex<HashMap<String, (u32, Instant)>>>;
 
@@ -238,6 +245,7 @@ pub fn serve(listener: TcpListener, cfg: Config) {
     let table: Table = Arc::new(Mutex::new(HashMap::new()));
     let failures: Failures = Arc::new(Mutex::new(HashMap::new()));
     let udp: Udp = Arc::new(Mutex::new(UdpState::default()));
+    let ids: IdTable = Arc::new(Mutex::new(ids::Ids::open(cfg.ids_path.clone())));
     // UDP on the same address and port number as the TCP listener
     match listener.local_addr().and_then(UdpSocket::bind) {
         Ok(sock) => {
@@ -248,9 +256,9 @@ pub fn serve(listener: TcpListener, cfg: Config) {
         Err(e) => eprintln!("rm-relay: no UDP forwarding ({e}); video falls back to TCP"),
     }
     for conn in listener.incoming().flatten() {
-        let (table, failures, udp, cfg) = (table.clone(), failures.clone(), udp.clone(), cfg.clone());
+        let (table, failures, udp, cfg, ids) = (table.clone(), failures.clone(), udp.clone(), cfg.clone(), ids.clone());
         thread::spawn(move || {
-            let _ = handle(conn, table, failures, udp, cfg);
+            let _ = handle(conn, table, failures, udp, cfg, ids);
         });
     }
 }
@@ -259,7 +267,7 @@ fn reject(mut s: TcpStream, why: &str) -> std::io::Result<()> {
     s.write_all(format!("ERR {why}\n").as_bytes())
 }
 
-fn handle(conn: TcpStream, table: Table, failures: Failures, udp: Udp, cfg: Config) -> std::io::Result<()> {
+fn handle(mut conn: TcpStream, table: Table, failures: Failures, udp: Udp, cfg: Config, ids: IdTable) -> std::io::Result<()> {
     // small control/input messages must not wait for Nagle
     let _ = conn.set_nodelay(true);
     conn.set_read_timeout(Some(cfg.hello_timeout))?;
@@ -273,6 +281,22 @@ fn handle(conn: TcpStream, table: Table, failures: Failures, udp: Udp, cfg: Conf
         }
     }
     conn.set_read_timeout(None)?;
+    // a Mac asking for its ID
+    if let Ok(c) = serde_json::from_str::<ids::Claim>(line.trim()) {
+        if let Some(k) = &cfg.key {
+            if !constant_time_eq(k, c.key.as_deref().unwrap_or("")) {
+                return reject(conn, "not admitted");
+            }
+        }
+        if !ids::valid_owner(&c.claim_id) {
+            return reject(conn, "bad owner");
+        }
+        let id = ids.lock().unwrap().claim(&c.claim_id, c.want.as_deref());
+        return match id {
+            Some(id) => conn.write_all(format!("ID {id}\n").as_bytes()),
+            None => reject(conn, "no IDs left"),
+        };
+    }
     let join: Join = match serde_json::from_str(line.trim()) {
         Ok(j) => j,
         Err(_) => return reject(conn, "bad hello"),
@@ -284,6 +308,14 @@ fn handle(conn: TcpStream, table: Table, failures: Failures, udp: Udp, cfg: Conf
     }
     if !valid_session_id(&join.session_id) || join.token.len() < 16 || join.token.len() > 128 {
         return reject(conn, "bad session or token");
+    }
+    // only its Mac waits under an ID this relay handed out
+    if join.role == Role::Agent {
+        if let Some(id) = join.session_id.strip_prefix("rm-") {
+            if !ids.lock().unwrap().may_use(id, join.owner.as_deref()) {
+                return reject(conn, "this ID belongs to another Mac");
+            }
+        }
     }
 
     {
@@ -408,7 +440,7 @@ pub fn join_with(addr: &str, session_id: &str, role: Role, token: &str, wait: bo
     let target = addr.to_socket_addrs()?.next().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "relay address not found"))?;
     let mut s = TcpStream::connect_timeout(&target, Duration::from_secs(10))?;
     let _ = s.set_nodelay(true);
-    let j = serde_json::to_string(&Join { session_id: session_id.into(), role, token: token.into(), key: env_key(), wait }).unwrap();
+    let j = serde_json::to_string(&Join { session_id: session_id.into(), role, token: token.into(), key: env_key(), wait, owner: None }).unwrap();
     s.write_all(j.as_bytes())?;
     s.write_all(b"\n")?;
     let mut line = Vec::new();
@@ -515,7 +547,7 @@ mod tests {
         let addr = start(Config { key: Some("relay-admission-key".into()), ..Default::default() });
         let line = |key: Option<&str>| {
             let mut s = TcpStream::connect(&addr).unwrap();
-            let j = serde_json::to_string(&Join { session_id: "k1".into(), role: Role::Agent, token: TOK.into(), key: key.map(Into::into), wait: true }).unwrap();
+            let j = serde_json::to_string(&Join { session_id: "k1".into(), role: Role::Agent, token: TOK.into(), key: key.map(Into::into), wait: true, owner: None }).unwrap();
             s.write_all(format!("{j}\n").as_bytes()).unwrap();
             s.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
             let mut buf = [0u8; 64];
@@ -526,6 +558,37 @@ mod tests {
         assert_eq!(line(Some("wrong")).1, "ERR not admitted\n");
         let (_waiter, reply) = line(Some("relay-admission-key"));
         assert_eq!(reply, "", "an admitted agent waits for its client");
+    }
+
+    #[test]
+    fn macs_get_their_ids_from_the_relay() {
+        let addr = start(Config::default());
+        let ask = |line: &str| {
+            let mut s = TcpStream::connect(&addr).unwrap();
+            s.write_all(format!("{line}\n").as_bytes()).unwrap();
+            s.set_read_timeout(Some(Duration::from_millis(400))).unwrap();
+            let mut buf = [0u8; 64];
+            let n = s.read(&mut buf).unwrap_or(0);
+            (s, String::from_utf8_lossy(&buf[..n]).trim().to_string())
+        };
+        let owner = "0123456789abcdef0123456789abcdef";
+        let (_, r) = ask(&format!(r#"{{"claim_id":"{owner}"}}"#));
+        let id = r.strip_prefix("ID ").expect(&r).to_string();
+        assert!(ids::valid_id(&id), "{id}");
+        let (_, again) = ask(&format!(r#"{{"claim_id":"{owner}","want":"{id}"}}"#));
+        assert_eq!(again, format!("ID {id}"));
+        let (_, other) = ask(&format!(r#"{{"claim_id":"{}","want":"{id}"}}"#, "f".repeat(32)));
+        assert_ne!(other, format!("ID {id}"), "a taken ID goes to nobody else");
+        assert_eq!(ask(r#"{"claim_id":"short"}"#).1, "ERR bad owner");
+        // only its owner waits under it
+        let agent = |owner: Option<&str>| {
+            let j = serde_json::to_string(&Join { session_id: format!("rm-{id}"), role: Role::Agent, token: TOK.into(), key: None, wait: true, owner: owner.map(Into::into) }).unwrap();
+            ask(&j)
+        };
+        assert_eq!(agent(None).1, "ERR this ID belongs to another Mac");
+        assert_eq!(agent(Some(&"f".repeat(32))).1, "ERR this ID belongs to another Mac");
+        let (_waiting, r) = agent(Some(owner));
+        assert_eq!(r, "", "its owner waits for a client");
     }
 
     #[test]

@@ -88,7 +88,7 @@ pub fn discover_on(session: &str, wait: Duration, port: u16) -> Option<SocketAdd
 pub fn join_direct(addr: SocketAddr, session: &str, token: &str) -> std::io::Result<TcpStream> {
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
     let _ = s.set_nodelay(true);
-    let j = serde_json::to_string(&Join { session_id: session.into(), role: Role::Client, token: token.into(), key: None, wait: true }).unwrap();
+    let j = serde_json::to_string(&Join { session_id: session.into(), role: Role::Client, token: token.into(), key: None, wait: true, owner: None }).unwrap();
     s.write_all(j.as_bytes())?;
     s.write_all(b"\n")?;
     s.set_read_timeout(Some(Duration::from_secs(10)))?;

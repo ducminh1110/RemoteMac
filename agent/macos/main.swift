@@ -32,7 +32,18 @@ if let s = sessionArg {
     sessionID = s; token = t
 } else {
     // ID + password mode; a restart for the next client keeps both (RM_PASSWORD, RM_ID)
-    let id = idArg ?? env["RM_ID"] ?? persistentID()
+    // the ID: given, else from the relay (it keeps IDs unique there), else this Mac's own
+    // (with no relay it is only reached on this network, where the viewer looks for it by ID)
+    let id: String
+    if let given = idArg ?? env["RM_ID"] {
+        id = given
+    } else if let r = relayAddr, let i = claimID(relay: r) {
+        id = i; log("ID \(i) from the relay \(r)")
+    } else if let r = relayAddr, let i = savedRelayID(r) {
+        id = i; log("ID \(i): the one the relay \(r) gave before (it did not answer now)")
+    } else {
+        id = persistentID(); log("ID \(id): this Mac's own\(relayAddr == nil ? " (no relay: reached on this network only)" : "")")
+    }
     guard id.count == 9 else { fail("the ID must be 9 digits") }
     let password = passwordArg ?? env["RM_PASSWORD"] ?? randomPassword()
     guard password.count >= 4 else { fail("the password must have at least 4 characters") }

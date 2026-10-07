@@ -17,5 +17,10 @@ fn main() {
         eprintln!("test mode: dropping {:.1}% of UDP datagrams", p * 100.0);
     }
     eprintln!("UDP forwarding on {addr} (video; open this port for UDP too)");
-    rm_relay::serve(l, rm_relay::Config { key, throttle_kbps, udp_loss, ..Default::default() });
+    let ids_path = rm_relay::ids::default_path();
+    match &ids_path {
+        Some(p) => eprintln!("Mac IDs handed out are kept in {}", p.display()),
+        None => eprintln!("Mac IDs handed out are kept in memory only (set RM_RELAY_IDS=FILE to keep them)"),
+    }
+    rm_relay::serve(l, rm_relay::Config { key, throttle_kbps, udp_loss, ids_path, ..Default::default() });
 }

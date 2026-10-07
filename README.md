@@ -122,6 +122,19 @@ MacBridge picks the path for you:
    time). The Mac waits on both paths at once, and the first viewer to arrive gets the
    session.
 
+**Where the Mac's ID comes from**
+
+| Mac started with | ID | Reachable |
+|---|---|---|
+| `--relay host:port` | handed out by **that relay** | on this network, and from anywhere through that relay |
+| no `--relay`, build with a preset relay (official releases) | handed out by the **preset relay** | on this network, and from anywhere |
+| no `--relay`, build without a preset (from source) | made up by the Mac itself | **on this network only** |
+
+A relay gives each Mac its own ID, which never collides with another Mac's, and lets only that
+Mac (proved by a secret kept in `~/Library/Application Support/RemoteMac/owner`) wait under it.
+The Mac remembers the ID per relay, so it stays the same across runs. `--id 123456789` sets an
+ID by hand.
+
 | Build | Relay preset | Reaching a Mac on another network |
 |---|---|---|
 | Official release | yes (public relay) | works out of the box |

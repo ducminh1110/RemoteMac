@@ -95,6 +95,8 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+# the Mac IDs it hands out are kept here ($STATE_DIRECTORY/ids.json)
+StateDirectory=rm-relay
 
 [Install]
 WantedBy=multi-user.target

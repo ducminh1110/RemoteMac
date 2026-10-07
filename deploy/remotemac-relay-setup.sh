@@ -107,6 +107,8 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+# the Mac IDs it hands out are kept here (ids.json)
+StateDirectory=rm-relay
 LimitNOFILE=65536
 
 [Install]
