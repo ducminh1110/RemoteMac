@@ -5,7 +5,7 @@ import Foundation
 import CryptoKit
 
 /// MacBridge's version (the same as the Windows app's, Cargo.toml).
-let appVersion = "1.0.2"
+let appVersion = "1.2.0-beta.1"
 
 /// The relay used when none is given: built in by release builds, none from source.
 let defaultRelay: String? = builtinRelay.trimmingCharacters(in: .whitespaces).isEmpty ? nil : builtinRelay

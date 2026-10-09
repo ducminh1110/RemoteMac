@@ -9,10 +9,12 @@ server, see [deploy/RELAY-SETUP.md](../deploy/RELAY-SETUP.md).
 - [3. The Windows app](#3-the-windows-app)
 - [4. How the connection is made](#4-how-the-connection-is-made)
 - [5. Working with Mac apps](#5-working-with-mac-apps)
-- [6. Settings and shortcuts](#6-settings-and-shortcuts)
-- [7. Logs](#7-logs)
-- [8. Troubleshooting](#8-troubleshooting)
-- [9. Updating and uninstalling](#9-updating-and-uninstalling)
+- [6. Sound](#6-sound)
+- [7. Desktop Fusion (experimental)](#7-desktop-fusion-experimental)
+- [8. Settings and shortcuts](#8-settings-and-shortcuts)
+- [9. Logs](#9-logs)
+- [10. Troubleshooting](#10-troubleshooting)
+- [11. Updating and uninstalling](#11-updating-and-uninstalling)
 
 ## 1. Requirements
 
@@ -20,7 +22,7 @@ server, see [deploy/RELAY-SETUP.md](../deploy/RELAY-SETUP.md).
 |---|---|
 | Mac | macOS 14 (Sonoma) or later, Apple silicon or Intel, a logged-in user session |
 | PC | Windows 10 or 11, 64-bit; a GPU with D3D11 is recommended (software rendering works) |
-| Network | same network, or both able to reach a relay on TCP and UDP port 7470 |
+| Network | same network; or the PC able to reach the Mac's address (TCP and UDP 7471); or both able to reach a relay on TCP and UDP port 7470 |
 
 Both sides must run the same MacBridge version: the Windows app tells you when the Mac runs an
 older one.
@@ -32,16 +34,24 @@ older one.
 ```bash
 tar -xzf MacBridge-macos.tar.gz && cd MacBridge
 xattr -d com.apple.quarantine macbridge 2>/dev/null; chmod +x macbridge
-./macbridge --password choose-a-password
+./macbridge.sh --password choose-a-password
 ```
+
+`macbridge.sh` is the launcher. Before it starts `macbridge` it checks that the program is next
+to it and runnable, that the Mac runs macOS 14 or later, that Gatekeeper's quarantine mark is
+gone, and which permissions are still missing, and says how to fix each. It then runs
+`macbridge` with the same options (`./macbridge` on its own works as well).
+`./macbridge.sh --check` only checks: it exits with 0 when everything is in place.
 
 The first time, macOS asks for two permissions for your terminal app (Terminal, iTerm, …):
 
-1. **Screen Recording**, so that windows can be captured;
+1. **Screen Recording**, so that windows can be captured (and the Mac's sound, see
+   [Sound](#6-sound));
 2. **Accessibility**, so that the mouse and keyboard can be driven.
 
-Allow both in **System Settings → Privacy & Security**, then run the command again. MacBridge
-lists what is still missing when it starts.
+Allow both in **System Settings → Privacy & Security**, quit the terminal app completely and
+open it again (macOS applies the change at its next start), then run the command again.
+MacBridge never changes these settings itself.
 
 ### What it shows
 
@@ -65,14 +75,17 @@ does not stop it. Only one MacBridge runs in the background at a time.
 | `--password SECRET` | the password viewers must type (at least 4 characters; without it a random one is shown) |
 | `--relay HOST:PORT` | be reachable from anywhere through this relay, which also gives this Mac its ID |
 | `--id 123456789` | use this ID instead of one handed out by the relay |
+| `--port PORT` | the TCP port a PC types this Mac's address with (7471 by default) |
 | `--foreground` | stay in the terminal (Ctrl+C stops it) |
-| `--logs-enabled` | write a log (see [Logs](#7-logs)) |
+| `--logs-enabled` | write a log (see [Logs](#9-logs)) |
 | `--stop` | stop the MacBridge running in the background |
+| `--check-permissions` | list the permissions macOS gives MacBridge here (exit 3 when one is missing) |
+| `--version` | print the version |
 | `--help` | list the options |
 
 Environment variables: `RM_RELAY` (as `--relay`), `RM_RELAY_KEY` (the relay's admission key, if
-it has one), `RM_NO_LAN=1` (do not answer on the local network), `RM_LOGS=1` (as
-`--logs-enabled`).
+it has one), `RM_NO_LAN=1` (do not answer on the local network), `RM_PORT` (as `--port`),
+`RM_LOGS=1` (as `--logs-enabled`).
 
 ### The ID
 
@@ -116,9 +129,13 @@ The connect window asks for:
 |---|---|
 | **ID** | the 9 digits the Mac shows (spaces and dashes are fine) |
 | **Password** | the Mac's password |
+| **Find it by its ID** | the PC looks for the Mac on this network, then through the relay |
 | **Relay server** | only needed for a Mac on another network. Release builds fill in their relay. Type `host:port` for another relay. It is remembered. |
+| **Type its address** | connect straight to the Mac's address instead: `192.168.1.20`, `mac.example.com`, `fe80::1`, `[2001:db8::5]:7471` (7471 is the default port). The Mac prints its addresses when it starts. |
 
-Press **Connect**. The launcher opens with the Mac's apps, **Mac Desktop** first.
+Press **Connect**. While it connects, the window shows the step it is at (finding the Mac,
+checking the password, agreeing on features, starting the picture). The launcher then opens
+with the Mac's apps, **Mac Desktop** first.
 
 Command-line options (for shortcuts and scripts):
 
@@ -126,9 +143,10 @@ Command-line options (for shortcuts and scripts):
 |---|---|
 | `--id 123456789 --password PASS` | connect without the connect window |
 | `--relay HOST:PORT` | the relay for a Mac on another network |
+| `--direct HOST[:PORT]` | connect straight to the Mac's address (IPv4, IPv6 or a name) |
 | `--app ID` | open this Mac app right away (as in the launcher, e.g. `com.apple.safari`) |
 | `--logs-enabled` | write a log |
-| `--raw-ctrl` | send Ctrl as Control (by default Ctrl acts as ⌘ Command) |
+| `--raw-ctrl` | send Ctrl as Control (by default Ctrl acts as ⌘ Command; see **Keyboard** in Settings) |
 | `--no-clipboard` | do not share the clipboard |
 | `--renderer gdi` | draw without the GPU (for troubleshooting) |
 
@@ -138,6 +156,10 @@ Command-line options (for shortcuts and scripts):
    7471 and connects straight to it. No relay or internet is needed.
 2. **Otherwise** it goes through the relay. Both sides connect out to it, so neither needs an
    open port.
+   - **With an address typed in**, it connects straight to that address instead (TCP 7471, or
+     the port given) and never uses the relay. This is for a Mac reachable over a VPN, a
+     routed network or a forwarded port. The connection is encrypted the same way; there is
+     no unencrypted fallback.
 3. Either way, the two sides then run an **encrypted handshake** that proves the password
    without sending it. A wrong password is refused by the Mac. Five wrong ones in a row lock it
    for a minute.
@@ -148,13 +170,25 @@ The stats overlay (Ctrl+Alt+Shift+S) shows which path is in use.
 
 **If the connection drops** (Wi-Fi lost, a cable pulled, the network changing), both sides
 notice within about 10 seconds. The Mac goes back to waiting for a viewer and keeps your apps
-open. The Windows app connects again by itself for up to two minutes, then reopens the apps
-you had open.
+open. A banner at the top of the screen says the connection was lost and shows each step of
+the new attempt; the Windows app connects again by itself for up to two minutes, then reopens
+the apps you had open and the banner says "Connected again". Clicking the banner hides it
+(connecting goes on).
+
+**Features** are agreed when connecting: each side lists what it can do (sound, opening
+files, Desktop Fusion, …) and only what both have is used. A Mac with an older MacBridge
+still works, without the newer features.
 
 ## 5. Working with Mac apps
 
 - **Each Mac window is a Windows window**, with its own taskbar button. While connected, the
   Mac's apps also appear in the Start menu and Windows Search.
+- **Opening an app** shows a loading window like the Mac's own: the app's icon and name
+  with a spinner, over a blur of the app's main colour. It turns into the app's window when
+  that appears.
+- **MacBridge Search** (**Ctrl+Alt+Space**, or **Open an App…** in the navigation ball's
+  menu): type part of a Mac app's name, then Enter to open it, or to switch to it when it is
+  already open. Arrow keys move, Escape closes.
 - **Menus**: the app's menu bar is under the title bar. Shortcuts are translated (Ctrl acts as
   ⌘ by default).
 - **Fullscreen**: the green light or **F11**. The Mac app is sized exactly to your monitor.
@@ -162,27 +196,83 @@ you had open.
   closes only that window.
 - **Files**: in an app's Open dialog you can pick a file from this PC, and it is uploaded to
   the Mac (into `~/Downloads/RemoteMac Uploads`).
+- **Drag and drop**: drop files from Explorer onto a Mac app's window to open them in that
+  app, or onto the launcher or Mac Desktop to open them in the Mac's default app for them.
+  They are uploaded first. Files that run code (`.app`, `.command`, `.sh`, `.pkg`, scripts
+  and other executables) are refused on both sides.
+- **Apps opened on the Mac**: an app opened from the Mac Desktop (a document in Finder, a
+  link, the Dock) shortly after your click or key press becomes its own Windows window, the
+  same as one opened from the launcher.
 - **Clipboard**: text and images go both ways.
 - **Mac Desktop** shows the whole Mac screen, in fullscreen. A small round **navigation
   ball** floats over it:
   - drag it anywhere; it settles at the nearest side;
-  - click it for the menu: exit fullscreen, minimize, show this PC's pointer, settings,
-    disconnect.
+  - click it for the menu: exit fullscreen, minimize, open an app (MacBridge Search), show
+    this PC's pointer, sound on or off, settings, disconnect.
 
-## 6. Settings and shortcuts
+## 6. Sound
+
+The Mac's sound plays on this PC (on by default; **Sound** and **Volume** in Settings,
+**Ctrl+Alt+Shift+M** to mute and unmute).
+
+- Only the apps you opened from Windows are heard; with **Mac Desktop** open, every app is.
+  MacBridge's own sound is never sent back.
+- It plays on Windows' default output device and follows it when you switch (headphones
+  plugged in, a Bluetooth headset).
+- It is sent as plain PCM (48 kHz stereo), encrypted like everything else, in small packets
+  with a short buffer of about 40 ms that grows by itself on an uneven network. A lost
+  packet fades out instead of clicking. When the Mac is silent nothing is sent.
+- macOS gives sound to the same **Screen Recording** permission as the picture.
+
+## 7. Desktop Fusion (experimental)
+
+**Desktop Fusion** (Settings, off by default) puts the Mac's own Dock on this PC's desktop:
+
+- While it is on, the Mac's desktop picture is set to the same picture as the PC's, and the
+  Mac's real Dock is streamed as a window of its own along the bottom of the PC's screen. It
+  slides in when the pointer rests at the bottom edge and away when the pointer leaves, so
+  it looks like a Dock over the PC's own wallpaper.
+- Clicking an icon in it works as on the Mac: apps it opens become Windows windows, and its
+  menus show over it.
+- Only the Dock and the desktop picture are captured for it; app windows behind it never
+  show.
+- The Mac's own desktop picture is saved first and put back when Desktop Fusion is turned
+  off, when you disconnect, on `./macbridge --stop`, and at the next start of MacBridge if it
+  ever stopped without doing so.
+- If the Mac's Dock hides itself (automatic hiding), MacBridge leaves that setting alone and
+  shows a Dock of the apps opened from Windows instead.
+- The Windows taskbar and Explorer are never changed or replaced.
+
+It is experimental: Dock folders (stacks) and some right-click menus may not show yet, and
+a dynamic or video desktop picture may come back as a still picture.
+
+## 8. Settings and shortcuts
 
 Open **Settings** from the launcher, the navigation ball, or **Ctrl+Alt+Shift+P**. It holds the
-frame rate, bitrate, sharpness, the Mac screen size, pixel-for-pixel mode and the pointer.
+frame rate, bitrate, sharpness, the Mac screen size, pixel-for-pixel mode and the pointer, and:
+
+| Setting | |
+|---|---|
+| **Sound**, **Volume** | the Mac's sound on this PC (see [Sound](#6-sound)) |
+| **Keyboard** | **Windows**: Ctrl acts as ⌘ Command (the default). **Mac**: keys as on a Mac keyboard (Ctrl is Control, the Windows key is ⌘). **Fusion**: as Windows, plus Windows' text keys: Home/End go to the start/end of the line, Ctrl+Home/End to the start/end of the document, Ctrl+arrows move by word, Ctrl+Backspace/Delete delete a word, Ctrl+Y redoes. |
+| **Glass** | how MacBridge's own menus and panels are drawn: Liquid Glass, frosted (blur only), or solid (least GPU). Windows' "transparency effects" setting off also turns the glass solid. |
+| **Animations** | as Windows is set (Settings → Accessibility → Visual effects → Animation effects), reduced, or full. Reduced keeps fades but drops movement and springs. |
+| **Desktop Fusion** | see [Desktop Fusion](#7-desktop-fusion-experimental) |
+
+Keys still held down when a window loses the focus are let go on the Mac, so none stays
+stuck.
 
 | Shortcut | Action |
 |---|---|
 | F11 | fullscreen on / off |
+| Ctrl+Alt+Space | MacBridge Search |
 | Ctrl+Alt+Shift+P | Settings |
+| Ctrl+Alt+Shift+M | the Mac's sound off / on |
 | Ctrl+Alt+Shift+S | stream statistics overlay |
 | Ctrl+Alt+Shift+C | show this PC's pointer over the picture |
 | Alt+F4 | close the window |
 
-## 7. Logs
+## 9. Logs
 
 Neither app writes a log unless asked to:
 
@@ -195,7 +285,7 @@ Neither app writes a log unless asked to:
 Logs never contain the password or the keys. When you share one in a bug report, remove the ID
 and any relay key.
 
-## 8. Troubleshooting
+## 10. Troubleshooting
 
 | Message or symptom | What to do |
 |---|---|
@@ -209,11 +299,16 @@ and any relay key.
 | Clicks and keys do nothing | Allow Accessibility for the terminal app, then restart MacBridge on the Mac. |
 | Choppy video; the stats show TCP | UDP is blocked between the machines or to the relay. Open UDP 7470 on the relay (and UDP/TCP 7471 on the Mac's firewall for the local network). |
 | "MacBridge is already running in the background" | Stop it first with `./macbridge --stop`. |
+| No connection to a typed address | Check the address the Mac prints, that the Mac's firewall lets TCP and UDP 7471 in (or the `--port` used), and that a VPN or router passes them. |
+| No sound | Check **Sound** in Settings and the Windows volume mixer; the Mac needs Screen Recording; only apps opened from Windows are heard unless Mac Desktop is open. |
+| A dropped file is not opened | Files that run code are refused. Files must be regular documents. |
+| The Mac's desktop picture did not come back | Start MacBridge again on the Mac (it puts it back at start), or run `./macbridge --stop`. |
+| `macbridge.sh` says a permission is missing | Allow the terminal app it names under Privacy & Security, quit that app completely, open it again. |
 
-## 9. Updating and uninstalling
+## 11. Updating and uninstalling
 
-**Update:** stop the Mac app (`./macbridge --stop`), replace `macbridge` and `MacBridge.exe`
-with the new versions, and start again. The ID is kept.
+**Update:** stop the Mac app (`./macbridge --stop`), replace `macbridge`, `macbridge.sh` and
+`MacBridge.exe` with the new versions, and start again. The ID is kept.
 
 **Uninstall on the Mac:**
 

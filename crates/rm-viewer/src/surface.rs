@@ -239,15 +239,26 @@ pub fn text(c: &mut Canvas, s: &str, x: f32, y: f32, w: f32, px: i32, weight: i3
     c.fill_mask(&mask, mw, left.round() as isize, y.round() as isize, color);
 }
 
-/// Windows uses dark mode for apps.
-pub fn dark_mode() -> bool {
+/// A value of Windows' personalization settings (None when it is not set).
+fn personalize(name: &str) -> Option<u32> {
     use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
-    let mut v: u32 = 1;
+    let mut v: u32 = 0;
     let mut n = 4u32;
     let r = unsafe {
-        RegGetValueW(HKEY_CURRENT_USER, &HSTRING::from("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), &HSTRING::from("AppsUseLightTheme"), RRF_RT_REG_DWORD, None, Some(&mut v as *mut u32 as *mut c_void), Some(&mut n))
+        RegGetValueW(HKEY_CURRENT_USER, &HSTRING::from("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), &HSTRING::from(name), RRF_RT_REG_DWORD, None, Some(&mut v as *mut u32 as *mut c_void), Some(&mut n))
     };
-    r.is_ok() && v == 0
+    r.is_ok().then_some(v)
+}
+
+/// Windows uses dark mode for apps.
+pub fn dark_mode() -> bool {
+    personalize("AppsUseLightTheme") == Some(0)
+}
+
+/// Windows' "Transparency effects" are off (Settings > Personalization > Colors, or
+/// Accessibility > Visual effects): glass is drawn solid then.
+pub fn transparency_off() -> bool {
+    personalize("EnableTransparency") == Some(0)
 }
 
 /// The user's accent colour (Windows settings), else system blue.
@@ -283,7 +294,8 @@ pub fn work_area_at(x: i32, y: i32) -> RECT {
 
 /// The look of glass surfaces now: (dark, accent, level).
 pub fn glass_look() -> (bool, Rgba, crate::glass::Level) {
-    (dark_mode(), accent(), crate::glass::Level::from_setting(crate::settings::Settings::load().glass))
+    let level = if transparency_off() { crate::glass::Level::Off } else { crate::glass::Level::from_setting(crate::settings::Settings::load().glass) };
+    (dark_mode(), accent(), level)
 }
 
 /// A glass panel for the screen rectangle (x, y, w, h) (device px) of corner `radius`: the
