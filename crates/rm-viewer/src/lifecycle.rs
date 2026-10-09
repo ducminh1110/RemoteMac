@@ -71,6 +71,8 @@ impl Phase {
 struct Current {
     phase: Phase,
     since: Instant,
+    /// when the attempt in progress started (Connecting or Reconnecting), for its duration
+    attempt: Option<Instant>,
 }
 
 static CURRENT: Mutex<Option<Current>> = Mutex::new(None);
@@ -87,10 +89,21 @@ pub fn set(to: Phase) -> bool {
         eprintln!("connection: {from:?} -> {to:?} ignored (out of order)");
         return false;
     }
-    if !matches!(to, Phase::Error(_)) {
-        eprintln!("connection: {}", to.label());
+    // the log says how long each step took (measured here, nothing estimated)
+    let now = Instant::now();
+    let took = c.as_ref().map_or(0, |c| now.duration_since(c.since).as_millis());
+    let attempt = match to {
+        Phase::Connecting if from != Phase::Reconnecting => Some(now),
+        Phase::Reconnecting => Some(now),
+        _ => c.as_ref().and_then(|c| c.attempt),
+    };
+    match &to {
+        Phase::Error(_) => eprintln!("connection: {from:?} failed after {took} ms"),
+        Phase::Connected => eprintln!("connection: Connected ({from:?} took {took} ms; {} ms in all)", attempt.map_or(0, |a| now.duration_since(a).as_millis())),
+        _ if from == Phase::Idle => eprintln!("connection: {}", to.label()),
+        _ => eprintln!("connection: {} ({from:?} took {took} ms)", to.label()),
     }
-    *c = Some(Current { phase: to, since: Instant::now() });
+    *c = Some(Current { phase: to, since: now, attempt });
     true
 }
 

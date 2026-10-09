@@ -2,6 +2,8 @@
 //! gets the recorded capabilities and app list, and launching an app plays back what that app's
 //! windows showed (real H.264 video, titles, menu bar, icon) with the recorded timing. Windows
 //! stay open after the playback with their last picture, until closed or the app is terminated.
+//! A recorded `dock` segment (the Mac's Dock, as Desktop Fusion streams it) is played when the
+//! client asks for the Dock.
 
 use rm_protocol::recording::{self, Record};
 use rm_protocol::*;
@@ -13,6 +15,8 @@ use std::time::{Duration, Instant};
 
 /// Gaps longer than this in the recording are shortened (an idle app sends nothing).
 const MAX_GAP: Duration = Duration::from_secs(2);
+/// The recorded Mac Dock (see rm-client's recorder).
+const DOCK: &str = "dock";
 
 type Writer<W> = Arc<Mutex<W>>;
 
@@ -65,7 +69,8 @@ pub fn serve_replay<S: Read + Write + Send + 'static>(mut reader: S, writer: S, 
         Some(Message::ClientHello(_)) => {}
         _ => return Ok(()),
     }
-    send(&w, &Message::ServerHello(Hello::ours("rm-replay (recorded Mac session)", &["h264"], &["control", "video"])))?;
+    let features: &[&str] = if rec.apps.contains_key(DOCK) { &["control", "video", "fusion"] } else { &["control", "video"] };
+    send(&w, &Message::ServerHello(Hello::ours("rm-replay (recorded Mac session)", &["h264"], features)))?;
     let caps = rec.session.iter().find_map(|m| if let Message::CapabilityReport(c) = m { Some(c.clone()) } else { None });
     send(&w, &Message::CapabilityReport(caps.unwrap_or_else(|| CapabilityReport::unknown("replay"))))?;
     // per app: stop flag of its playback, windows it opened
@@ -120,6 +125,22 @@ pub fn serve_replay<S: Read + Write + Send + 'static>(mut reader: S, writer: S, 
                     send(&w, &Message::WindowDestroyed { window_id: id })?;
                 }
                 send(&w, &Message::AppExited { application_id, code: Some(0) })?;
+            }
+            Message::DockStream { enabled } => {
+                let Some(records) = rec.apps.get(DOCK).cloned() else {
+                    send(&w, &Message::DockStatus { available: false, window_id: 0, bounds: Rect { x: 0, y: 0, w: 0, h: 0 }, edge: String::new(), reason: Some("the Dock was not recorded".into()) })?;
+                    continue;
+                };
+                let running = playing.lock().unwrap().remove(DOCK);
+                if let Some(stop) = running {
+                    stop.store(true, Ordering::SeqCst);
+                }
+                if enabled {
+                    let stop = Arc::new(AtomicBool::new(false));
+                    playing.lock().unwrap().insert(DOCK.to_string(), stop.clone());
+                    let (w, open, closed) = (w.clone(), open.clone(), closed.clone());
+                    std::thread::spawn(move || play(&w, DOCK, &records, &stop, &open, &closed));
+                }
             }
             Message::Ping { nonce } => send(&w, &Message::Pong { nonce })?,
             _ => {} // input, focus, resize: the recording cannot react
@@ -222,5 +243,27 @@ mod tests {
         write_message(&mut c, &Message::AppTerminate { application_id: "xcode".into() }).unwrap();
         assert!(matches!(read_message(&mut c).unwrap(), Some(Message::WindowDestroyed { window_id: 9 })));
         assert!(matches!(read_message(&mut c).unwrap(), Some(Message::AppExited { .. })));
+    }
+
+    #[test]
+    fn replays_the_recorded_dock_when_asked_for() {
+        let id = 0x7FFF_0002u64;
+        let status = Message::DockStatus { available: true, window_id: id, bounds: Rect { x: 25, y: 700, w: 974, h: 64 }, edge: "bottom".into(), reason: None };
+        let video = VideoFrame { window_id: id, pts_us: 0, keyframe: true, codec: CODEC_H264, width: 974, height: 64, data: vec![0, 0, 0, 1, 0x65] };
+        let records = vec![rec(recording::SESSION, 0, &Message::Apps { apps: vec![] }), rec(DOCK, 5, &status), Record { app: DOCK.into(), t_ms: 9, frame: encode_video(&video).unwrap() }];
+        let rec = Arc::new(Recording::from_records(records));
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let b = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let a = l.accept().unwrap().0;
+        let a2 = a.try_clone().unwrap();
+        std::thread::spawn(move || serve_replay(a, a2, rec));
+        let mut c = b;
+        write_message(&mut c, &Message::ClientHello(Hello::ours("t", &["h264"], &["control", "fusion"]))).unwrap();
+        let Some(Message::ServerHello(h)) = read_message(&mut c).unwrap() else { panic!() };
+        assert!(h.features.iter().any(|f| f == "fusion"), "a recording with the Dock offers Fusion: {:?}", h.features);
+        assert!(matches!(read_message(&mut c).unwrap(), Some(Message::CapabilityReport(_))));
+        write_message(&mut c, &Message::DockStream { enabled: true }).unwrap();
+        assert!(matches!(read_frame(&mut c).unwrap(), Some(Frame::Msg(m)) if m == status));
+        assert!(matches!(read_frame(&mut c).unwrap(), Some(Frame::Video(v)) if v == video));
     }
 }

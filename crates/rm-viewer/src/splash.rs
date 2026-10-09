@@ -188,6 +188,7 @@ pub fn arrive(app: &str, r: RECT) {
             return;
         }
         card.arrived = true;
+        eprintln!("{app}: its window came {} ms after opening", card.since.elapsed().as_millis());
         let (d, c) = (tokens::pick(tokens::WINDOW, 0.8), Curve::ARRIVE);
         card.x.retarget(r.left as f32, d, c);
         card.y.retarget(r.top as f32, d, c);
@@ -203,6 +204,7 @@ pub fn done(app: &str) {
         if card.close_at.is_some() {
             return;
         }
+        eprintln!("{app}: its first picture came {} ms after opening", card.since.elapsed().as_millis());
         set_status(card, "Ready".into());
         card.close_at = Some(Instant::now() + Duration::from_millis(if card.arrived { 120 } else { 250 }));
     });

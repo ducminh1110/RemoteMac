@@ -1,6 +1,7 @@
 //! Records a real agent session for replay elsewhere: opens each application in turn, asks for
 //! its menu bar and icon once its first window is up, and stores everything the agent sends for
-//! that app (windows, titles, menus, icons, H.264 video) in an `.rmrec` file.
+//! that app (windows, titles, menus, icons, H.264 video) in an `.rmrec` file. The name `dock`
+//! records the Mac's Dock as Desktop Fusion streams it instead (its status and video).
 
 use crate::Session;
 use rm_protocol::recording::{self, Record};
@@ -8,6 +9,11 @@ use rm_protocol::{encode, encode_video, Frame, Message, ProtocolError, WindowRol
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
+
+/// The pseudo-app that records the Mac's Dock (Desktop Fusion), and the window id the Mac
+/// streams it as.
+pub const DOCK: &str = "dock";
+const DOCK_WINDOW: u64 = 0x7FFF_0002;
 
 pub struct Plan {
     pub apps: Vec<String>,
@@ -56,7 +62,12 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
     }
     for app in plan.apps.clone() {
         let start = Instant::now();
-        sess.send(&Message::AppLaunch { application_id: app.clone(), arguments: vec![], working_directory: None, environment: Default::default() })?;
+        if app == DOCK {
+            owner.insert(DOCK_WINDOW, app.clone()); // its first frame may come before its status
+            sess.send(&Message::DockStream { enabled: true })?;
+        } else {
+            sess.send(&Message::AppLaunch { application_id: app.clone(), arguments: vec![], working_directory: None, environment: Default::default() })?;
+        }
         let (mut windows, mut frames, mut bytes, mut first, mut asked) = (0usize, 0usize, 0usize, None::<Instant>, false);
         loop {
             let done = match first {
@@ -87,6 +98,14 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
                     Some(application_id.clone())
                 }
                 Frame::Msg(Message::WindowDestroyed { window_id } | Message::WindowMoved { window_id, .. } | Message::WindowTitleChanged { window_id, .. }) => owner.get(window_id).cloned(),
+                Frame::Msg(Message::DockStatus { available, window_id, .. }) if app == DOCK => {
+                    owner.insert(*window_id, app.clone());
+                    if *available && first.is_none() {
+                        windows += 1;
+                        first = Some(Instant::now());
+                    }
+                    Some(app.clone())
+                }
                 Frame::Msg(Message::AppLaunched { application_id, .. } | Message::AppExited { application_id, .. } | Message::AppIcon { application_id, .. } | Message::MenuBar { application_id, .. }) => Some(application_id.clone()),
                 Frame::Msg(_) => None,
             };
@@ -103,7 +122,7 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
                 Frame::Audio(a) => rm_protocol::encode_audio(a)?,
             };
             put(out, &app, start, wire)?;
-            if first.is_some() && !asked {
+            if first.is_some() && !asked && app != DOCK {
                 asked = true;
                 sess.send(&Message::GetMenuBar { application_id: app.clone() })?;
                 sess.send(&Message::GetAppIcon { application_id: app.clone() })?;
@@ -113,6 +132,10 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
         summary.apps.push((app.clone(), windows, frames, bytes, first.map(|f| (f - start).as_secs_f64())));
         eprintln!("recorded {app}: windows={windows} videoFrames={frames} bytes={bytes} firstWindowAfter={:?}", first.map(|f| f - start));
         // close it before the next app (not recorded: the replay keeps the windows open)
+        if app == DOCK {
+            sess.send(&Message::DockStream { enabled: false })?;
+            continue;
+        }
         sess.send(&Message::AppTerminate { application_id: app.clone() })?;
         let until = Instant::now() + Duration::from_secs(4);
         while Instant::now() < until {

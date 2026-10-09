@@ -792,8 +792,10 @@ fn fusion_reset() {
 fn fusion_tick() {
     let s = crate::settings::Settings::load_cached();
     let connected = !MAC_GONE.load(std::sync::atomic::Ordering::Acquire);
-    let headless = with_app(|a| a.smoke.is_some() || a.showcase.is_some()).unwrap_or(true);
-    let want = s.dock && connected && !headless;
+    // RM_FUSION=1: on whatever Settings say, also in a showcase (screenshots, tests)
+    let forced = std::env::var_os("RM_FUSION").is_some_and(|v| v != "0");
+    let headless = !forced && with_app(|a| a.smoke.is_some() || a.showcase.is_some()).unwrap_or(true);
+    let want = (s.dock || forced) && connected && !headless;
     let supported = net::mac_has("fusion");
     let started = FUSION.with(|f| f.borrow().started);
     if !want || !supported {
@@ -3680,6 +3682,30 @@ fn gallery_tick(dir: &std::path::Path) -> bool {
                 }
             } else if since.elapsed() > Duration::from_millis(1000) {
                 ask("13-reconnect-banner", crate::banner::rect());
+            }
+        }
+        4 => {
+            // Desktop Fusion (RM_FUSION=1, a Mac that streams its Dock): the pointer resting at
+            // the bottom edge, the Mac's Dock slid in over this PC's desktop
+            // (the Mac Desktop has the Dock in its picture: closed first, as the user would)
+            if fresh {
+                let desktop = with_app(|a| a.remotes.iter().find(|(_, r)| r.app == DESKTOP_APP).map(|(k, _)| *k)).flatten();
+                if let Some(k) = desktop {
+                    unsafe {
+                        let _ = PostMessageW(Some(hwnd_of(k)), WM_CLOSE, WPARAM(0), LPARAM(0));
+                    }
+                }
+            }
+            let frame = FUSION.with(|f| f.borrow().dock.as_ref().map(|d| hwnd_of(d.0)));
+            if let Some((shown, _)) = frame.and_then(dock_rect) {
+                if since.elapsed() > Duration::from_millis(1000) && since.elapsed() < Duration::from_millis(2500) {
+                    unsafe {
+                        let _ = SetCursorPos((shown.left + shown.right) / 2, shown.bottom - 1);
+                    }
+                } else if since.elapsed() > Duration::from_millis(3000) {
+                    let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+                    ask("14-fusion-dock", Some(RECT { left: 0, top: (shown.top - 220).max(0), right: sw, bottom: sh }));
+                }
             }
         }
         _ => return false,
