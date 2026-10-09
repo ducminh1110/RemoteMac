@@ -380,6 +380,15 @@ pub enum Message {
     Key { window_id: u64, physical_key: String, modifiers: Vec<Modifier>, down: bool },
     TextInput { window_id: u64, text: String },
 
+    /// Client -> agent (feature "open_file"): open this document on the Mac (a file uploaded
+    /// from this PC, or one in the user's own folders), with the listed app `application_id` or
+    /// its default app. Apps, installers, scripts and executables are refused (`error`
+    /// "open_rejected"); the app that opens it is then shown like a launched one.
+    OpenFile {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        application_id: Option<String>,
+    },
     /// Client -> agent (feature "audio"): send the sound of the session's apps (`enabled`), or
     /// stop. The Mac sends nothing on the Audio channel before this.
     AudioControl { enabled: bool },
@@ -547,6 +556,22 @@ pub fn sanitize_upload_name(name: &str) -> String {
         out = "upload".into();
     }
     out
+}
+
+/// Extensions of files that run something or change the system when opened: never opened from
+/// the viewer (`Message::OpenFile`). The Mac checks this list too (agent/macos/Open.swift), and
+/// more (what the file really is, where it is).
+pub const RUNS_CODE: &[&str] = &[
+    "app", "pkg", "mpkg", "dmg", "command", "tool", "sh", "zsh", "bash", "csh", "ksh", "fish", "terminal", "workflow", "action",
+    "scpt", "scptd", "applescript", "jar", "py", "rb", "pl", "php", "js", "jxa", "webloc", "inetloc", "fileloc", "url",
+    "prefpane", "kext", "mobileconfig", "saver", "plugin", "bundle", "osax", "qlgenerator", "xpc", "systemextension", "appex",
+    "exe", "msi", "bat", "cmd", "ps1", "vbs", "lnk", "scr", "com",
+];
+
+/// Whether a file of this name would be refused by `OpenFile` for its type.
+pub fn runs_code(name: &str) -> bool {
+    let ext = name.rsplit_once('.').map(|x| x.1.to_ascii_lowercase()).unwrap_or_default();
+    RUNS_CODE.contains(&ext.as_str())
 }
 
 // ---------------------------------------------------------------- video frames
@@ -890,6 +915,12 @@ mod tests {
         let c = Message::FileUploadChunk { transfer_id: 1, offset: 0, data_base64: base64_encode(&vec![7u8; UPLOAD_CHUNK]) };
         assert_eq!(c.channel(), Channel::Files);
         assert!(encode(&c).is_ok());
+    }
+
+    #[test]
+    fn documents_that_run_code_are_recognised() {
+        assert!(runs_code("setup.PKG") && runs_code("x.command") && runs_code("a.b.sh") && runs_code("Tool.app"));
+        assert!(!runs_code("notes.txt") && !runs_code("photo.jpeg") && !runs_code("README") && !runs_code("report.pdf"));
     }
 
     #[test]

@@ -85,6 +85,10 @@ struct Ctx<'a, S: Read + Write> {
     audio_peak: i16,
     audio_seq: Option<u32>,
     audio_gaps: usize,
+    /// (window, application) of every WindowCreated
+    created_apps: Vec<(u64, String)>,
+    /// the app under test
+    app: String,
 }
 
 fn is_timeout(e: &ProtocolError) -> bool {
@@ -145,8 +149,12 @@ impl<S: Read + Write> Ctx<'_, S> {
             Frame::Msg(Message::WindowCreated { window_id, bounds, application_id, .. }) if application_id == "desktop" => {
                 self.desktop = Some((window_id, bounds));
             }
-            Frame::Msg(Message::WindowCreated { window_id, bounds, title, role, parent_id, .. }) => {
+            Frame::Msg(Message::WindowCreated { window_id, bounds, title, role, parent_id, application_id }) => {
                 self.created.push((window_id, role, parent_id));
+                self.created_apps.push((window_id, application_id.clone()));
+                if application_id != self.app {
+                    return; // another app (a document opened from the session)
+                }
                 if role == rm_protocol::WindowRole::Window && self.r.window.is_none() {
                     self.main_rect = Some(bounds);
                 }
@@ -235,7 +243,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let caps_dump = serde_json::to_string(&sess.capabilities).unwrap_or_default();
     let mut c = Ctx { sess, r: Report::default(), started: Instant::now(), first_video: None, last_title: String::new(),
         destroyed: false, exited: false, launched_pid: None, errors: vec![], non_annexb: 0,
-        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None, main_rect: None, desktop: None, desktop_frames: 0, desktop_video: None, gs_tunnel: None, gs_out: None, audio_status: None, audio_packets: 0, audio_bad: 0, audio_peak: 0, audio_seq: None, audio_gaps: 0 };
+        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None, main_rect: None, desktop: None, desktop_frames: 0, desktop_video: None, gs_tunnel: None, gs_out: None, audio_status: None, audio_packets: 0, audio_bad: 0, audio_peak: 0, audio_seq: None, audio_gaps: 0, created_apps: vec![], app: app.to_string() };
 
     c.r.check("agent reports capture+input+GUI", caps_ok, caps_dump);
 
@@ -402,6 +410,8 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
         c.r.check("panel opens the uploaded file in the app", ok, c.last_title.clone());
     }
 
+    documents(&mut c, wid);
+
     // ---- a virtual display the size of the client's monitor; fullscreen fills it exactly
     c.send(Message::DisplayConfigure { width: 1280, height: 720, scale: 1 });
     let got = c.pump(15, |c| c.display.is_some());
@@ -449,6 +459,64 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let ok = c.pump(10, |c| c.destroyed && c.exited);
     c.r.check("terminate -> WindowDestroyed + AppExited", ok, format!("destroyed={} exited={}", c.destroyed, c.exited));
     c.r
+}
+
+/// Upload `bytes` as `name`; the path on the Mac.
+fn upload<S: Read + Write>(c: &mut Ctx<S>, tid: u64, name: &str, bytes: &[u8]) -> Option<String> {
+    c.uploaded = None;
+    c.send(Message::FileUploadBegin { transfer_id: tid, name: name.into(), size: bytes.len() as u64 });
+    c.send(Message::FileUploadChunk { transfer_id: tid, offset: 0, data_base64: rm_protocol::base64_encode(bytes) });
+    c.send(Message::FileUploadEnd { transfer_id: tid });
+    c.pump(10, |c| c.uploaded.is_some());
+    c.uploaded.clone()
+}
+
+/// Documents from Windows (a file dropped on the launcher or an app's window): uploaded, opened
+/// by its Mac app, and that app shown like a launched one. What could run code is refused. An
+/// app another app opens right after a click or key in the session (Finder opening a document)
+/// is shown too.
+fn documents<S: Read + Write>(c: &mut Ctx<S>, wid: u64) {
+    let refused = |c: &mut Ctx<S>, path: String, what: &str| {
+        let before = c.errors.len();
+        c.send(Message::OpenFile { path, application_id: None });
+        let ok = c.pump(5, |c| c.errors[before..].iter().any(|e| e.starts_with("open_rejected")));
+        c.r.check(&format!("opening {what} is refused"), ok, format!("{:?}", &c.errors[before..]));
+    };
+    refused(c, "/bin/ls".into(), "a system executable");
+    if let Some(p) = upload(c, 21, "rm e2e.command", b"#!/bin/sh\necho hi\n") {
+        refused(c, p, "an uploaded script");
+    }
+    let Some(note) = upload(c, 22, "rm e2e note.txt", b"MacBridge e2e note\n") else {
+        c.r.check("a document from Windows opens in its Mac app (TextEdit), shown on Windows", false, "upload failed");
+        return;
+    };
+    c.send(Message::OpenFile { path: note.clone(), application_id: None });
+    let opened = c.pump(15, |c| c.created_apps.iter().any(|(_, a)| a == "textedit"));
+    c.r.check("a document from Windows opens in its Mac app (TextEdit), shown on Windows", opened, format!("created={:?} errors={:?}", c.created_apps, c.errors));
+    let close_textedit = |c: &mut Ctx<S>| {
+        let ids: Vec<u64> = c.created_apps.iter().filter(|(_, a)| a == "textedit").map(|(w, _)| *w).collect();
+        c.send(Message::AppTerminate { application_id: "textedit".into() });
+        c.pump(10, |c| ids.iter().all(|w| c.destroyed_ids.contains(w)))
+    };
+    if opened {
+        let closed = close_textedit(c);
+        c.r.check("the opened app quits from Windows", closed, format!("destroyed={:?}", c.destroyed_ids));
+    }
+    // Finder's way: a click in the session, then Launch Services opens a document's app
+    #[cfg(target_os = "macos")]
+    {
+        c.created_apps.retain(|(_, a)| a != "textedit");
+        c.send(Message::MouseButton { window_id: wid, button: MouseButton::Left, down: true, x: 30.0, y: 30.0 });
+        c.send(Message::MouseButton { window_id: wid, button: MouseButton::Left, down: false, x: 30.0, y: 30.0 });
+        c.pump(1, |_| false);
+        let _ = std::process::Command::new("open").args(["-a", "TextEdit", &note]).status();
+        let shown = c.pump(15, |c| c.created_apps.iter().any(|(_, a)| a == "textedit"));
+        c.r.check("an app opened right after a click in the session (as Finder opens a document) is shown on Windows", shown, format!("created={:?}", c.created_apps));
+        if shown {
+            close_textedit(c);
+        }
+    }
+    let _ = wid;
 }
 
 /// Sound while the Mac Desktop is open (every app is heard): asked for, received as valid PCM

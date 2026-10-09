@@ -65,6 +65,8 @@ impl Launcher {
             SendMessageW(list, LVM_SETEXTENDEDLISTVIEWSTYLE, Some(WPARAM(ex as usize)), Some(LPARAM(ex)));
             let _ = windows::Win32::UI::Controls::SetWindowTheme(list, w!("Explorer"), PCWSTR::null());
             let settings = CreateWindowExW(WINDOW_EX_STYLE(0), w!("BUTTON"), w!("⚙  Settings"), WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0), 0, 0, 110, 30, Some(hwnd), Some(HMENU(ID_SETTINGS as *mut c_void)), Some(hinst), None).ok()?;
+            // files dropped here open on the Mac with their default app
+            windows::Win32::UI::Shell::DragAcceptFiles(hwnd, true);
             SendMessageW(settings, WM_SETFONT, Some(WPARAM(ui.0 as usize)), Some(LPARAM(1)));
             let l = Self { hwnd, list, settings, images, ids: vec![], footer: String::new(), _font: ui };
             let mut l = l;

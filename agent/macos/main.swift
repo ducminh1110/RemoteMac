@@ -369,6 +369,9 @@ tracker.onMoved = { w in
     }
 }
 tracker.onTitle = { w in send(["type": "window_title_changed", "window_id": Int(w.id), "title": w.title]) }
+tracker.onAdopted = { id, pid in
+    send(["type": "app_launched", "application_id": id, "pid": Int(pid)])
+}
 tracker.onAppExited = { id, code in
     log("app exited on its own id=\(id) code=\(code)")
     send(["type": "app_exited", "application_id": id, "code": Int(code)])
@@ -782,7 +785,26 @@ func handle(_ m: [String: Any]) {
         }
     case "p2p_offer":
         sender.udp?.peerOffer(secret: m["secret"] as? String ?? "", candidates: m["candidates"] as? [String] ?? [])
+    case "open_file":
+        // a document from the viewer (dropped on an app's window, or on the launcher)
+        let path = m["path"] as? String ?? ""
+        let appID = m["application_id"] as? String
+        if let why = openRejection(path, uploads: uploads.dir) { send(["type": "error", "code": "open_rejected", "message": why]); break }
+        var bundle: String?
+        if let id = appID, id != desktopAppID {
+            guard let b = apps.bundle(of: id) else { send(["type": "error", "code": "open_rejected", "message": "unknown application '\(id)'"]); break }
+            bundle = b
+        }
+        tracker.noteInput() // the app that opens it is shown on Windows
+        log("opening a document\(appID.map { " with \($0)" } ?? "")")
+        openDocument(path, appBundle: bundle) { err in
+            if let e = err { send(["type": "error", "code": "open_failed", "message": e]) }
+        }
     case _ where inputTypes.contains(type):
+        // a click or key in an app window: an app it opens is shown on Windows too
+        if CGWindowID(int(m["window_id"])) != desktopWindowID && (type == "key" || type == "text_input" || (type == "mouse_button" && m["down"] as? Bool == true)) {
+            tracker.noteInput()
+        }
         if let err = injector.handle(m) { send(["type": "error", "code": "input_failed", "message": err]) }
     default:
         send(["type": "error", "code": "unexpected", "message": "message '\(type)' not valid for agent"])

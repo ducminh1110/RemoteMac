@@ -35,6 +35,13 @@ func scanApplications() -> [AppDescriptor] {
     return out.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
 }
 
+/// System UI and helpers that are never shown as an app of their own (Finder is a companion).
+let neverAdopted: Set<String> = [
+    "com.apple.finder", "com.apple.dock", "com.apple.controlcenter", "com.apple.notificationcenterui", "com.apple.Spotlight",
+    "com.apple.loginwindow", "com.apple.systemuiserver", "com.apple.WindowManager", "com.apple.SecurityAgent", "com.apple.UserNotificationCenter",
+    "com.apple.screencaptureui", "com.apple.ScreenContinuity",
+]
+
 /// An app we started: through LaunchServices (as the Dock and Finder open apps), or for a bare
 /// executable (the test app) as a child process.
 enum Launched {
@@ -52,6 +59,8 @@ final class AppManager {
     private var adopted: [String: pid_t] = [:]
     private let lock = NSLock()
     private let testapp: AppDescriptor
+    /// Apps opened from the session that are not in the application folders (kept across rescans).
+    private var extras: [AppDescriptor] = []
 
     init() {
         let cwd = FileManager.default.currentDirectoryPath
@@ -65,7 +74,7 @@ final class AppManager {
     func rescan() {
         var list = scanApplications()
         if FileManager.default.isExecutableFile(atPath: testapp.executable) { list.insert(testapp, at: 0) }
-        lock.lock(); apps = list; lock.unlock()
+        lock.lock(); apps = list + extras.filter { e in !list.contains { $0.id == e.id } }; lock.unlock()
     }
 
     func list() -> [[String: Any]] {
@@ -180,11 +189,34 @@ final class AppManager {
         return out
     }
 
+    /// An app the user opened from the session (a document double-clicked in Finder, a link
+    /// opened from an app): it is shown on Windows like one launched from there. Only regular
+    /// apps (with a Dock icon); never the system's own UI. Returns its id, nil when it is not one
+    /// to show (or already is).
+    func adoptOpened(pid: pid_t) -> String? {
+        guard pid != getpid(), let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated,
+              app.activationPolicy == .regular, let bid = app.bundleIdentifier, !neverAdopted.contains(bid) else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        var d = apps.first { $0.bundleID == bid }
+        if d == nil, let exe = app.executableURL?.path {
+            let nd = AppDescriptor(id: knownIDs[bid] ?? bid.lowercased(), name: app.localizedName ?? bid, executable: exe, maxArgs: 0, bundleID: bid)
+            extras.append(nd); apps.append(nd); d = nd
+        }
+        guard let desc = d else { return nil }
+        if let r = running[desc.id], r.isRunning { return nil }
+        if let p = adopted[desc.id], p == pid { return nil }
+        adopted[desc.id] = pid
+        return desc.id
+    }
+
     /// Started by us (not an app that was already open on the Mac).
     func launchedByUs(_ id: String) -> Bool { lock.lock(); defer { lock.unlock() }; return running[id] != nil }
 
     /// The app is gone: forget it.
     func forget(_ id: String) { lock.lock(); running.removeValue(forKey: id); adopted.removeValue(forKey: id); lock.unlock() }
+
+    /// The .app bundle of a listed app.
+    func bundle(of id: String) -> String? { descriptor(id).flatMap { bundlePath($0.executable) } }
 
     /// The .app bundle an executable belongs to (…/X.app/Contents/MacOS/X), if any.
     private func bundlePath(_ exe: String) -> String? {

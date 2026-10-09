@@ -143,6 +143,9 @@ struct App {
     panels: HashMap<u64, Option<u64>>,
     /// Upload transfer id -> panel id waiting for the uploaded file.
     uploads: HashMap<u64, u64>,
+    /// uploads of files dropped on a window or the launcher: opened on the Mac once there
+    /// (with this app; None: its default app)
+    open_uploads: HashMap<u64, Option<String>>,
     next_transfer: u64,
     redirect_panels: bool,
     /// Start-menu folder for this Mac's app shortcuts; they exist only while the Mac is connected.
@@ -349,7 +352,7 @@ pub fn run(opts: Options) -> i32 {
         APP.with(|a| {
             *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, smoke, showcase, exit: None, hinst: hinst.0 as isize, gs_key: None, controller: ctl,
                 icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_applied_image: None, clip_seq: 0, d3d: opts.d3d, comp: use_comp,
-                launcher, panels: HashMap::new(), uploads: HashMap::new(), next_transfer: 1, redirect_panels: opts.windows_file_picker,
+                launcher, panels: HashMap::new(), uploads: HashMap::new(), open_uploads: HashMap::new(), next_transfer: 1, redirect_panels: opts.windows_file_picker,
                 shortcut_dir, app_names: vec![], icon_rgba: HashMap::new(), menus: HashMap::new(), display_req: None, display: None, stats: Stats::default(),
                 pending: HashMap::new(), vsync: None, overlay: std::env::var_os("RM_STATS").is_some(), overlay_lines: vec![], stats_logged: Instant::now() - Duration::from_secs(4) })
         });
@@ -609,6 +612,10 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
 
 unsafe extern "system" fn launcher_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
+        WM_DROPFILES => {
+            drop_files(hwnd, windows::Win32::UI::Shell::HDROP(wp.0 as *mut c_void));
+            LRESULT(0)
+        }
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
@@ -798,6 +805,48 @@ fn pick_file_for_panel(panel: u64) {
             link.send(&Message::PanelCancel { window_id: panel });
         }
     });
+}
+
+/// Files dropped from Explorer on a Mac app's window (opened with that app) or on the launcher
+/// or the Mac Desktop (opened with their default app): uploaded, then opened on the Mac.
+fn drop_files(target: HWND, hdrop: windows::Win32::UI::Shell::HDROP) {
+    use windows::Win32::UI::Shell::{DragFinish, DragQueryFileW};
+    let mut paths = vec![];
+    unsafe {
+        let n = DragQueryFileW(hdrop, u32::MAX, None);
+        for i in 0..n.min(20) {
+            let len = DragQueryFileW(hdrop, i, None) as usize;
+            let mut buf = vec![0u16; len + 1];
+            DragQueryFileW(hdrop, i, Some(&mut buf));
+            paths.push(std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len])));
+        }
+        DragFinish(hdrop);
+    }
+    if !net::mac_has("open_file") {
+        eprintln!("files dropped, but this Mac's MacBridge cannot open them (update it)");
+        return;
+    }
+    // the app of the window it landed on (the Mac Desktop and the launcher: the default app)
+    let frame = unsafe { GetAncestor(target, GA_ROOT) };
+    let app = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.app.clone())).flatten().filter(|x| x != DESKTOP_APP);
+    for path in paths.into_iter().filter(|p| p.is_file()) {
+        if rm_protocol::runs_code(&path.to_string_lossy()) {
+            eprintln!("{} is not opened on the Mac: files that run code are refused", path.display());
+            continue;
+        }
+        let Some((link, tid)) = with_app(|a| {
+            let tid = a.next_transfer;
+            a.next_transfer += 1;
+            a.open_uploads.insert(tid, app.clone());
+            (a.link.clone(), tid)
+        }) else { return };
+        eprintln!("uploading {} to open it on the Mac", path.display());
+        std::thread::spawn(move || {
+            if let Err(e) = net::upload_file(&link, tid, &path) {
+                eprintln!("upload failed: {e}");
+            }
+        });
+    }
 }
 
 /// Digest of a .bmp file's picture (its DIB: the file header is rebuilt on each side).
@@ -1117,6 +1166,10 @@ fn handle_event(ev: UiEvent) {
         }
         UiEvent::Uploaded { transfer_id, remote_path } => {
             with_app(|a| {
+                if let Some(app) = a.open_uploads.remove(&transfer_id) {
+                    eprintln!("opening the dropped file on the Mac{}", app.as_ref().map(|x| format!(" with {x}")).unwrap_or_default());
+                    a.link.send(&Message::OpenFile { path: remote_path.clone(), application_id: app });
+                }
                 if let Some(panel) = a.uploads.remove(&transfer_id) {
                     a.panels.remove(&panel);
                     a.link.send(&Message::PanelChooseFile { window_id: panel, remote_path });
@@ -1126,6 +1179,7 @@ fn handle_event(ev: UiEvent) {
         UiEvent::UploadFailed { transfer_id, reason } => {
             eprintln!("upload {transfer_id} failed on the Mac: {reason}");
             with_app(|a| {
+                a.open_uploads.remove(&transfer_id);
                 if let Some(panel) = a.uploads.remove(&transfer_id) {
                     a.panels.remove(&panel);
                     a.link.send(&Message::PanelCancel { window_id: panel });
@@ -1293,6 +1347,11 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
             let _ = DestroyWindow(hwnd);
             return;
         };
+        if !popup {
+            // files dropped from Explorer open in this app on the Mac
+            windows::Win32::UI::Shell::DragAcceptFiles(hwnd, true);
+            windows::Win32::UI::Shell::DragAcceptFiles(content, true);
+        }
         if use_comp {
             // the composition clip makes the (larger, anti-aliased) rounded corners; DWM's own
             // rounding would add its 1px highlight in the transparent corner
@@ -1950,6 +2009,10 @@ fn light_action(frame: HWND, l: chrome::Light) {
 /// Top-level window of a remote window: Mac chrome, window management, focus.
 unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
+        WM_DROPFILES => {
+            drop_files(hwnd, windows::Win32::UI::Shell::HDROP(wp.0 as *mut c_void));
+            LRESULT(0)
+        }
         WM_NCCALCSIZE if wp.0 != 0 => {
             // Keep the left/right/bottom resize borders; the top belongs to our title bar.
             let p = &mut *(lp.0 as *mut NCCALCSIZE_PARAMS);
@@ -2177,6 +2240,10 @@ fn local_cursor() -> &'static std::sync::atomic::AtomicBool {
 unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let frame = GetParent(hwnd).unwrap_or_default();
     match msg {
+        WM_DROPFILES => {
+            drop_files(frame, windows::Win32::UI::Shell::HDROP(wp.0 as *mut c_void));
+            LRESULT(0)
+        }
         // over the picture the Mac's pointer (in the video) is the pointer
         WM_SETCURSOR if (lp.0 & 0xffff) as u32 == HTCLIENT && !local_cursor().load(std::sync::atomic::Ordering::Relaxed) => {
             SetCursor(None);
@@ -2948,10 +3015,10 @@ fn smoke_tick() {
                 return;
             };
             let found: Vec<(String, Option<String>)> = shortcuts::list(&dir).iter().filter_map(|p| shortcuts::read(p)).collect();
-            let want = [("--app desktop".to_string(), Some("RemoteMac.desktop".to_string())), ("--app testapp".to_string(), Some("RemoteMac.testapp".to_string())), ("--app notes".to_string(), Some("RemoteMac.notes".to_string()))];
+            let want = [("--app desktop".to_string(), Some("RemoteMac.desktop".to_string())), ("--app testapp".to_string(), Some("RemoteMac.testapp".to_string())), ("--app notes".to_string(), Some("RemoteMac.notes".to_string())), ("--app textedit".to_string(), Some("RemoteMac.textedit".to_string()))];
             let icons = dir.join("icons").read_dir().map(|d| d.count()).unwrap_or(0);
-            if want.iter().all(|w| found.contains(w)) && icons >= 3 {
-                finish("each Mac app is in the Start menu / Windows Search (shortcut + icon + AUMID)", found.len() == 3, format!("{found:?} icons={icons}"), 38);
+            if want.iter().all(|w| found.contains(w)) && icons >= want.len() {
+                finish("each Mac app is in the Start menu / Windows Search (shortcut + icon + AUMID)", found.len() == want.len(), format!("{found:?} icons={icons}"), 38);
             }
         }
         (38, _) => {

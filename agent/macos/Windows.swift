@@ -188,6 +188,19 @@ final class WindowTracker {
     var onMoved: ((WinInfo) -> Void)?       // position/size changed
     var onTitle: ((WinInfo) -> Void)?
     var onAppExited: ((String, Int32) -> Void)?
+    /// An app opened from the session is now shown (its id, pid).
+    var onAdopted: ((String, pid_t) -> Void)?
+    /// When the viewer last clicked or typed in an app window (not the Mac Desktop).
+    private var inputAt: CFAbsoluteTime = 0
+    /// Windows of apps not shown on Windows, and when each was first seen.
+    private var strangers: [CGWindowID: CFAbsoluteTime] = [:]
+    /// Processes found not to be apps to show (system UI, helpers).
+    private var notAdoptable: Set<pid_t> = []
+
+    /// The viewer clicked or typed in a window of the session: a window that another app opens
+    /// in the next few seconds (a document double-clicked in Finder opens in Preview) is the
+    /// user's doing, and that app is shown on Windows too.
+    func noteInput() { queue.async { self.inputAt = CFAbsoluteTimeGetCurrent() } }
 
     init(apps: AppManager) {
         self.apps = apps
@@ -260,10 +273,31 @@ final class WindowTracker {
 
     private func tick() {
         ticks += 1
-        let launched = Set(apps.pids)
+        var launched = Set(apps.pids)
         if ticks % 5 == 1 { refreshHelpers(anyLaunched: !launched.isEmpty) }
         let windows = onscreen()
         if !started { preexisting = Set(windows.map { $0.0 }); started = true }
+        if ticks % 600 == 0 { notAdoptable.removeAll() } // pids are reused
+        // a window of another app that appeared just after the viewer's click or key: that app
+        // was opened from the session (Finder opening a document, an app opening a link)
+        let now = CFAbsoluteTimeGetCurrent()
+        for (id, pid, _, _, layer) in windows where layer == 0 && !preexisting.contains(id) && !ignored.contains(id) && known[id] == nil
+            && !launched.contains(pid) && !servicePids.contains(pid) && companions[pid] == nil {
+            let first = strangers[id] ?? now
+            strangers[id] = first
+            guard now - inputAt < 5, first >= inputAt - 0.5, !notAdoptable.contains(pid) else { continue }
+            if let appID = apps.adoptOpened(pid: pid) {
+                log("\(appID) (pid \(pid)) was opened from the session: shown on Windows too")
+                launched.insert(pid)
+                // shown as an app launched from Windows is: all of its windows
+                for w in windows where w.1 == pid { preexisting.remove(w.0); ignored.remove(w.0) }
+                onAdopted?(appID, pid)
+            } else if apps.appID(forPid: pid) == nil {
+                notAdoptable.insert(pid)
+            }
+        }
+        let visible = Set(windows.map { $0.0 })
+        strangers = strangers.filter { visible.contains($0.key) }
 
         var seen = Set<CGWindowID>()
         ignored.formIntersection(windows.map { $0.0 })

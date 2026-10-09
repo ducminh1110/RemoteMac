@@ -315,6 +315,7 @@ pub fn connect_with(relay: Option<&str>, session: &str, token: &str, app: Option
     // the user's settings (frame rate, bitrate, sharpness)
     let settings = crate::settings::Settings::load();
     link.send(&settings.message(display_scale(), screen_px()));
+    *MAC_FEATURES.lock().unwrap() = sess.negotiated.features.clone();
     // the Mac's sound, unless muted (a Mac without the feature is never asked)
     let audio = crate::audio::audio();
     audio.reset();
@@ -333,6 +334,13 @@ pub fn connect_with(relay: Option<&str>, session: &str, token: &str, app: Option
 }
 
 static GS_VIDEO: Mutex<Option<Arc<Video>>> = Mutex::new(None);
+
+/// What the connected Mac supports beyond the basics ("audio", "open_file"), from its hello.
+static MAC_FEATURES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+pub fn mac_has(feature: &str) -> bool {
+    MAC_FEATURES.lock().unwrap().iter().any(|f| f == feature)
+}
 
 /// Start the Mac Desktop in full GameStream mode for window `id` (see gsdesktop.rs): the tunnel
 /// rides this connection, decoded pictures take the usual path.
@@ -683,6 +691,38 @@ mod tests {
         }
         let st = sound.stats();
         assert!(heard >= 50 && st.received >= 40 && st.lost == 0, "tone played {heard} times: {st:?}");
+    }
+
+    /// A file uploaded from this PC opens on the Mac with the app asked for; a path that was not
+    /// uploaded is refused.
+    #[test]
+    fn dropped_file_opens_on_the_mac() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        std::thread::spawn(move || rm_relay::serve(l, Default::default()));
+        let (a, tok) = (addr.clone(), "viewer-open-token-0123456789");
+        std::thread::spawn(move || { let _ = rm_fakeagent::serve_via_relay(&a, "v-open", tok); });
+        std::thread::sleep(Duration::from_millis(150));
+        let (link, rx) = connect(Some(&addr), "v-open", tok, None, || {}).unwrap();
+        assert!(mac_has("open_file"));
+        link.send(&Message::OpenFile { path: "/etc/passwd".into(), application_id: None });
+        let file = std::env::temp_dir().join(format!("rm-drop-{}.txt", std::process::id()));
+        std::fs::write(&file, b"hello mac").unwrap();
+        upload_file(&link, 9, &file).unwrap();
+        let (mut refused, mut opened) = (false, None);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline && !(refused && opened.is_some()) {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(UiEvent::Notice(n)) if n.starts_with("open_rejected") => refused = true,
+                Ok(UiEvent::Uploaded { transfer_id: 9, remote_path }) => link.send(&Message::OpenFile { path: remote_path, application_id: Some("testapp".into()) }),
+                Ok(UiEvent::Title { title, .. }) if title.contains("[opened rm-drop") => opened = Some(title),
+                _ => {}
+            }
+        }
+        let _ = std::fs::remove_file(&file);
+        assert!(refused, "a file that was not uploaded is refused");
+        let t = opened.expect("the uploaded file opens");
+        assert!(t.starts_with("RM Test App") && t.ends_with("9 bytes]"), "{t}");
     }
 
     /// Video moves to UDP once the path works, and FEC carries it through a lossy relay.

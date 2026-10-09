@@ -25,7 +25,7 @@ pub const UPLOAD_DIR: &str = "/Users/runner/Downloads/RemoteMac Uploads";
 
 /// "desktop" is the whole Mac (one window showing the screen); input on it goes to the window
 /// under the pointer, like on the real agent.
-const APPS: [(&str, &str); 3] = [("desktop", "Mac Desktop"), ("testapp", "RM Test App"), ("notes", "Notes Test")];
+const APPS: [(&str, &str); 4] = [("desktop", "Mac Desktop"), ("testapp", "RM Test App"), ("notes", "Notes Test"), ("textedit", "TextEdit")];
 
 fn caps() -> CapabilityReport {
     let ok = || Capability::Available { detail: "fake agent".into() };
@@ -226,7 +226,7 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
         Some(Message::ClientHello(_)) => {}
         _ => return Ok(()),
     }
-    send(&writer, &Message::ServerHello(Hello::ours("rm-fakeagent", &["h264"], &["control", "video", "files", "audio"])))?;
+    send(&writer, &Message::ServerHello(Hello::ours("rm-fakeagent", &["h264"], &["control", "video", "files", "audio", "open_file"])))?;
     send(&writer, &Message::CapabilityReport(caps()))?;
     // TCP messages and input that came over UDP (the direct path) go through one loop
     let (tx, rx) = std::sync::mpsc::channel::<Result<Option<Message>, ProtocolError>>();
@@ -428,6 +428,22 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
                 }
             }
             Message::PanelCancel { window_id } => close_window(&writer, &st, window_id)?,
+            // a dropped file, uploaded: it opens in a window of the app asked for (default: notes),
+            // whose title says what it opened; anything not uploaded this session is refused
+            Message::OpenFile { path, application_id } => {
+                let size = st.lock().unwrap().files.get(&path).copied().filter(|_| !rm_protocol::runs_code(&path));
+                // the default app: TextEdit for text, else the notes app
+                let app = application_id.unwrap_or_else(|| if path.ends_with(".txt") { "textedit" } else { "notes" }.into());
+                match (size, APPS.iter().find(|(id, _)| *id == app)) {
+                    (Some(size), Some((id, name))) => {
+                        let file = path.rsplit('/').next().unwrap_or("").to_string();
+                        let w = open_window(&writer, &st, id, name, WindowRole::Window, None)?;
+                        send(&writer, &Message::AppLaunched { application_id: (*id).into(), pid: 4242 })?;
+                        send(&writer, &Message::WindowTitleChanged { window_id: w, title: format!("{name} [opened {file} {size} bytes]") })?;
+                    }
+                    _ => send(&writer, &Message::Error { code: "open_rejected".into(), message: path })?,
+                }
+            }
             Message::WindowResizeRequest { window_id, width, height } => {
                 st.lock().unwrap().sizes.insert(window_id, (width, height));
                 st.lock().unwrap().rects.insert(window_id, Rect { x: 200, y: 216, w: width, h: height });
