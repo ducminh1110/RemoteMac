@@ -17,10 +17,11 @@ func log(_ s: String) { if logsEnabled { FileHandle.standardError.write(Data("[a
 func fail(_ s: String) -> Never { FileHandle.standardError.write(Data("macbridge: \(s)\n".utf8)); exit(1) }
 
 let usage = """
-usage: macbridge [--password SECRET] [--id 123456789] [--relay HOST:PORT] [--foreground] [--logs-enabled]
+usage: macbridge [--password SECRET] [--id 123456789] [--relay HOST:PORT] [--port N] [--foreground] [--logs-enabled]
        macbridge --stop
        RM_SESSION_TOKEN=.. macbridge --relay HOST:PORT --session NAME
   --relay HOST:PORT  reachable from anywhere through this relay (it also gives this Mac its ID)
+  --port N           the TCP port viewers on this network, or typing this Mac's address, join on (7471)
   --foreground       stay in the terminal instead of going to the background
   --logs-enabled     write a log (stderr; in the background ~/Library/Logs/MacBridge/macbridge.log)
   --stop             stop the MacBridge running in the background
@@ -34,6 +35,9 @@ while let a = argv.next() {
     case "--session": sessionArg = argv.next()
     case "--password": passwordArg = argv.next()
     case "--id": idArg = argv.next()?.filter(\.isNumber)
+    case "--port":
+        guard let p = argv.next().flatMap({ UInt16($0) }), p > 0 else { fail("--port takes a TCP port number (1-65535)") }
+        directPort = p; setenv("RM_PORT", "\(p)", 1) // kept for the restart for the next client
     case "--foreground": foreground = true
     case "--logs-enabled": break
     case "--stop": exit(stopBackground() ? 0 : 1)
@@ -85,6 +89,9 @@ if let s = sessionArg {
             print("    Reachable on this network directly, and from anywhere through the relay \(r)")
         } else {
             print("    Reachable on this network only (from anywhere: start with --relay HOST:PORT)")
+        }
+        if let ip = lanAddresses().first {
+            print("    Or type this Mac's address in the viewer: \(ip)\(directPort == lanPort ? "" : ":\(directPort)")")
         }
         print("    Connections are end-to-end encrypted.")
         for w in permissionWarnings() { print("  ! \(w)") }

@@ -4,6 +4,7 @@ pub mod audio;
 pub mod chrome;
 pub mod ico;
 pub mod keymap;
+pub mod lifecycle;
 pub mod menu;
 pub mod gsdesktop;
 pub mod settings;

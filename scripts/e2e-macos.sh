@@ -70,6 +70,24 @@ else
 fi
 kill $VANISH 2>/dev/null
 
+# a viewer that typed the Mac's address (IPv4 or IPv6, any network): no discovery, no relay,
+# the same end-to-end handshake; a wrong password is refused the same way
+for ADDR in 127.0.0.1:7471 "[::1]:7471"; do
+  sleep 3
+  if ./target/release/remote-mac --direct "$ADDR" --id $ID --password "$PASS" >out/client-direct.log 2>&1 \
+     && grep -q "straight to" out/client-direct.log && grep -q "end-to-end encrypted" out/client-direct.log; then
+    echo "connected by the typed address $ADDR: ok"
+  else
+    echo "no connection by the typed address $ADDR: $(tail -3 out/client-direct.log)"; [[ $RC == 0 ]] && RC=1
+  fi
+done
+sleep 3
+if ./target/release/remote-mac --direct 127.0.0.1:7471 --id $ID --password wrong-password >out/client-direct-wrong.log 2>&1; then
+  echo "wrong password was accepted (typed address)"; [[ $RC == 0 ]] && RC=1
+fi
+grep -q "wrong password" out/client-direct-wrong.log || { echo "wrong password (typed address): unexpected reply: $(cat out/client-direct-wrong.log)"; [[ $RC == 0 ]] && RC=1; }
+grep -q "Or type this Mac's address" out/agent-banner.txt || { echo "the banner does not show the Mac's address"; [[ $RC == 0 ]] && RC=1; }
+
 # far, lossy link: a relay limited to 6 Mbit/s that drops 5% of UDP packets; FEC rebuilds them
 # and the agent adapts its bitrate instead of queueing video (informational, not gating)
 # (RM_NO_P2P, RM_NO_LAN: this one must go through the throttled relay)

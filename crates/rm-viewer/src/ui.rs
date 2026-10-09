@@ -305,9 +305,18 @@ pub fn run(opts: Options) -> i32 {
             // ID + password window; it connects in the background and shows why an attempt failed
             let app = opts.app.clone();
             let id = crate::connect::last_id();
-            let got = crate::connect::connect_window(id.as_deref(), None, |typed, password, relay| {
+            let got = crate::connect::connect_window(id.as_deref(), None, |typed, password, via| {
                 let (session, token) = (rm_protocol::session::relay_session(typed), rm_protocol::session::token(typed, password));
-                let relay = Some(relay).filter(|r| !r.trim().is_empty());
+                let relay = match via {
+                    crate::connect::Via::Id(r) => {
+                        net::set_direct(None);
+                        Some(r.as_str()).filter(|r| !r.trim().is_empty())
+                    }
+                    crate::connect::Via::Address(a) => {
+                        net::set_direct(Some(a.clone()));
+                        None
+                    }
+                };
                 net::connect_with(relay, &session, &token, app.as_deref(), false, wake)
                     .map(|x| {
                         remember_session(relay, &session, &token);

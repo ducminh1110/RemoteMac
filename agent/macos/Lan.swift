@@ -1,10 +1,13 @@
 // Reachable on the local network without a relay (crates/rm-relay/src/lan.rs is the viewer's
 // side): a broadcast "RMLAN?<session>" on UDP 7471 is answered with "RMLAN!<session> <tcp port>",
 // and that TCP port takes the same join line a relay does. After "READY" the end-to-end
-// handshake proves the password, as through a relay.
+// handshake proves the password, as through a relay. The same TCP port takes a viewer that
+// typed this Mac's address (IPv4 or IPv6, any network that reaches it): `--port` fixes it.
 import Foundation
 
 let lanPort: UInt16 = 7471
+/// The TCP port viewers join on (`--port`, RM_PORT; 7471 by default, any free one if taken).
+var directPort: UInt16 = UInt16(ProcessInfo.processInfo.environment["RM_PORT"] ?? "") ?? lanPort
 
 final class LanListener {
     private let session: String
@@ -29,17 +32,38 @@ final class LanListener {
             a.sin_family = sa_family_t(AF_INET); a.sin_port = port.bigEndian; a.sin_addr.s_addr = INADDR_ANY
             return withUnsafePointer(to: &a) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } } == 0
         }
-        let u = sock(SOCK_DGRAM), t = sock(SOCK_STREAM)
-        func giveUp() { if u >= 0 { Darwin.close(u) }; if t >= 0 { Darwin.close(t) } }
-        guard u >= 0, t >= 0, bindTo(u, lanPort) else {
+        /// TCP on IPv6 and IPv4 at once (a viewer may type either address); IPv4 only when the
+        /// Mac has no IPv6
+        func bindDual(_ fd: Int32, _ port: UInt16) -> Bool {
+            var off: Int32 = 0
+            setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, socklen_t(MemoryLayout<Int32>.size))
+            var a = sockaddr_in6()
+            a.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+            a.sin6_family = sa_family_t(AF_INET6); a.sin6_port = port.bigEndian; a.sin6_addr = in6addr_any
+            return withUnsafePointer(to: &a) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in6>.size)) } } == 0
+        }
+        let u = sock(SOCK_DGRAM)
+        var t: Int32 = -1
+        var dual = false
+        let t6 = socket(AF_INET6, SOCK_STREAM, 0)
+        if t6 >= 0 {
+            var one: Int32 = 1
+            setsockopt(t6, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
+            _ = fcntl(t6, F_SETFD, FD_CLOEXEC)
+            if bindDual(t6, directPort) || bindDual(t6, 0) { t = t6; dual = true } else { Darwin.close(t6) }
+        }
+        if t < 0 { t = sock(SOCK_STREAM); if t >= 0 && !(bindTo(t, directPort) || bindTo(t, 0)) { Darwin.close(t); t = -1 } }
+        let tt = t
+        func giveUp() { if u >= 0 { Darwin.close(u) }; if tt >= 0 { Darwin.close(tt) } }
+        guard u >= 0, tt >= 0, bindTo(u, lanPort) else {
             log("LAN: discovery port \(lanPort) unavailable; this Mac is reached through the relay only"); giveUp(); return nil
         }
-        // the TCP port: 7471 as well when free, else any
-        guard bindTo(t, lanPort) || bindTo(t, 0), listen(t, 4) == 0 else { giveUp(); return nil }
-        var a = sockaddr_in(); var len = socklen_t(MemoryLayout<sockaddr_in>.size)
-        _ = withUnsafeMutablePointer(to: &a) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(t, $0, &len) } }
-        udp = u; tcp = t
-        tcpPort = UInt16(bigEndian: a.sin_port)
+        guard listen(tt, 4) == 0 else { giveUp(); return nil }
+        var ss = sockaddr_storage(); var len = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        _ = withUnsafeMutablePointer(to: &ss) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(tt, $0, &len) } }
+        udp = u; tcp = tt
+        tcpPort = UInt16(Int(addrKey(ss)?.split(separator: ":").last ?? "") ?? 0)
+        log("LAN: TCP port \(tcpPort) (\(dual ? "IPv4 and IPv6" : "IPv4"))")
         Thread { [self] in answerQueries() }.start()
     }
 

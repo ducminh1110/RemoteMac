@@ -114,19 +114,89 @@ pub fn join_direct(addr: SocketAddr, session: &str, token: &str) -> std::io::Res
 pub enum Route {
     /// Straight to the Mac on this network.
     Lan(SocketAddr),
+    /// Straight to the address the user typed (an IP or a host name, any network).
+    Direct(SocketAddr),
     /// Through this relay.
     Relay(String),
 }
 
 impl Route {
-    /// Where the UDP path registers: the relay, or (on the LAN, where the direct path is set up
-    /// from the Mac's offer) a port of the Mac that ignores it.
+    /// Where the UDP path registers: the relay, or (straight to the Mac, where the direct path
+    /// is set up from the Mac's offer) a port of the Mac that ignores it.
     pub fn udp_relay(&self) -> String {
         match self {
-            Route::Lan(a) => SocketAddr::new(a.ip(), 9).to_string(),
+            Route::Lan(a) | Route::Direct(a) => SocketAddr::new(a.ip(), 9).to_string(),
             Route::Relay(r) => r.clone(),
         }
     }
+
+    /// Straight to the Mac (no relay in between).
+    pub fn is_direct(&self) -> bool {
+        !matches!(self, Route::Relay(_))
+    }
+}
+
+/// "host", "host:port", "1.2.3.4:7471", "[fe80::1]:7471" or a bare IPv6 address, checked:
+/// (host, port), the port 7471 when none is given.
+pub fn parse_address(s: &str) -> Result<(String, u16), String> {
+    let s = s.trim();
+    let bad = |why: &str| Err(format!("\"{s}\" is not a Mac address: {why}"));
+    if s.is_empty() || s.len() > 260 {
+        return bad("type an IP address or a host name, with :port if it is not 7471");
+    }
+    if s.chars().any(|c| c.is_whitespace() || c.is_control() || "/\\@?#".contains(c)) {
+        return bad("no spaces, slashes or URLs");
+    }
+    let (host, port) = if let Some(rest) = s.strip_prefix('[') {
+        let Some((h, after)) = rest.split_once(']') else { return bad("a ] is missing") };
+        match after {
+            "" => (h.to_string(), None),
+            p if p.starts_with(':') => (h.to_string(), Some(&p[1..])),
+            _ => return bad("unexpected text after ]"),
+        }
+    } else if s.matches(':').count() > 1 {
+        (s.to_string(), None) // a bare IPv6 address
+    } else if let Some((h, p)) = s.rsplit_once(':') {
+        (h.to_string(), Some(p))
+    } else {
+        (s.to_string(), None)
+    };
+    let port = match port {
+        None => PORT,
+        Some(p) => match p.parse::<u16>() {
+            Ok(p) if p > 0 => p,
+            _ => return bad("the port must be a number from 1 to 65535"),
+        },
+    };
+    if host.parse::<IpAddr>().is_err() {
+        let label_ok = |l: &str| !l.is_empty() && l.len() <= 63 && !l.starts_with('-') && !l.ends_with('-') && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+        if host.is_empty() || host.len() > 253 || !host.trim_end_matches('.').split('.').all(label_ok) {
+            return bad("not an IP address or host name");
+        }
+    }
+    Ok((host, port))
+}
+
+/// Connect straight to the Mac at `address` (typed by the user: an IP address or a host name,
+/// IPv4 or IPv6, with :port when it is not 7471), any network. The Mac takes the same join line
+/// as on the local network, and the end-to-end handshake follows as always: there is no
+/// unencrypted way in. Every address the name resolves to is tried in turn.
+pub fn connect_direct(address: &str, session: &str, token: &str) -> Result<(TcpStream, Route), String> {
+    use std::net::ToSocketAddrs;
+    let (host, port) = parse_address(address)?;
+    let addrs: Vec<SocketAddr> = (host.as_str(), port).to_socket_addrs().map_err(|e| format!("{host}: the name could not be resolved ({e})"))?.collect();
+    if addrs.is_empty() {
+        return Err(format!("{host}: no address found"));
+    }
+    let mut errors = vec![];
+    for a in addrs {
+        match join_direct(a, session, token) {
+            Ok(s) => return Ok((s, Route::Direct(a))),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Err(format!("the Mac refused: {e}")),
+            Err(e) => errors.push(format!("{a}: {e}")),
+        }
+    }
+    Err(format!("The Mac did not answer at {}. Check the address, that MacBridge runs there, and that TCP port {port} is open. ({})", address.trim(), errors.join("; ")))
 }
 
 /// Reach the Mac of `session` (token from ID and password): on this network if it answers there
@@ -153,6 +223,54 @@ mod tests {
     use super::*;
     use std::io::BufRead;
     use std::net::TcpListener;
+
+    #[test]
+    fn addresses_are_checked() {
+        assert_eq!(parse_address("192.168.1.20").unwrap(), ("192.168.1.20".into(), 7471));
+        assert_eq!(parse_address(" mac.example.com:9000 ").unwrap(), ("mac.example.com".into(), 9000));
+        assert_eq!(parse_address("[fe80::1]:7000").unwrap(), ("fe80::1".into(), 7000));
+        assert_eq!(parse_address("[::1]").unwrap(), ("::1".into(), 7471));
+        assert_eq!(parse_address("2001:db8::5").unwrap(), ("2001:db8::5".into(), 7471));
+        assert_eq!(parse_address("my-mac.local").unwrap(), ("my-mac.local".into(), 7471));
+        for bad in ["", "host:0", "host:70000", "host:abc", "http://mac", "a b", "-bad.com", "[::1", "[::1]x", "user@mac", "x".repeat(300).as_str()] {
+            assert!(parse_address(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// A Mac that takes the join line on a TCP port, reached by IPv4, by IPv6 and by name.
+    #[test]
+    fn connects_straight_to_a_typed_address() {
+        let serve = |l: TcpListener| {
+            std::thread::spawn(move || {
+                for s in l.incoming() {
+                    let Ok(mut s) = s else { continue };
+                    let mut line = String::new();
+                    std::io::BufReader::new(s.try_clone().unwrap()).read_line(&mut line).unwrap();
+                    let j: Join = serde_json::from_str(line.trim()).unwrap();
+                    let _ = s.write_all(if j.token == "good" { b"READY\n" } else { b"ERR no such session\n" });
+                }
+            })
+        };
+        let v4 = TcpListener::bind("127.0.0.1:0").unwrap();
+        let p4 = v4.local_addr().unwrap().port();
+        serve(v4);
+        let (_, route) = connect_direct(&format!("127.0.0.1:{p4}"), "rm-1", "good").unwrap();
+        assert_eq!(route, Route::Direct(format!("127.0.0.1:{p4}").parse().unwrap()));
+        assert!(route.is_direct() && route.udp_relay() == "127.0.0.1:9");
+        assert!(connect_direct(&format!("localhost:{p4}"), "rm-1", "good").is_ok(), "by name");
+        assert!(connect_direct(&format!("127.0.0.1:{p4}"), "rm-1", "bad").unwrap_err().contains("refused"));
+        if let Ok(v6) = TcpListener::bind("[::1]:0") {
+            let p6 = v6.local_addr().unwrap().port();
+            serve(v6);
+            let (_, r) = connect_direct(&format!("[::1]:{p6}"), "rm-1", "good").unwrap();
+            assert!(matches!(r, Route::Direct(a) if a.is_ipv6()));
+        }
+        // nothing listening: a clear error, quickly
+        let closed = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let t = Instant::now();
+        assert!(connect_direct(&format!("127.0.0.1:{closed}"), "rm-1", "good").unwrap_err().contains("did not answer"));
+        assert!(t.elapsed() < Duration::from_secs(6));
+    }
 
     #[test]
     fn messages() {

@@ -1,7 +1,7 @@
 use rm_client::Session;
 
 fn usage() -> ! {
-    eprintln!("usage: remote-mac [--relay HOST:PORT] (--id ID --password PASS | --session NAME) [--launch APP_ID | --e2e APP_ID | --record FILE --apps a,b [--settle SECS] [--shots DIR]]\n       --session takes its token from $RM_SESSION_TOKEN; a Mac on this network is found by its ID; otherwise the relay is --relay, $RM_RELAY or the one built in");
+    eprintln!("usage: remote-mac [--relay HOST:PORT | --direct HOST[:PORT]] (--id ID --password PASS | --session NAME) [--launch APP_ID | --e2e APP_ID | --record FILE --apps a,b [--settle SECS] [--shots DIR]]\n       --session takes its token from $RM_SESSION_TOKEN; a Mac on this network is found by its ID; otherwise the relay is --relay, $RM_RELAY or the one built in");
     std::process::exit(2)
 }
 
@@ -9,11 +9,14 @@ fn main() {
     let (mut relay, mut session, mut launch, mut e2e) = (None, None, None, None);
     let (mut record, mut apps, mut settle, mut shots) = (None, None, None, None);
     let mut vanish = false;
+    let mut direct: Option<String> = None;
     let (mut id, mut password) = (None, std::env::var("RM_PASSWORD").ok());
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--relay" => relay = args.next(),
+            // straight to the Mac at this address (IP or name, IPv4 or IPv6), any network
+            "--direct" => direct = args.next(),
             "--session" => session = args.next(),
             "--id" => id = args.next(),
             "--password" => password = args.next(),
@@ -39,8 +42,17 @@ fn main() {
         }
         _ => usage(),
     };
-    let (stream, route) = rm_relay::lan::connect(relay.as_deref(), &session, &rm_protocol::session::relay_token(&session), wait).unwrap_or_else(|e| fail("connect", e));
-    eprintln!("connected {}", match &route { rm_relay::lan::Route::Lan(a) => format!("on this network ({a})"), rm_relay::lan::Route::Relay(r) => format!("through the relay {r}") });
+    let rt = rm_protocol::session::relay_token(&session);
+    let (stream, route) = match &direct {
+        Some(d) => rm_relay::lan::connect_direct(d, &session, &rt),
+        None => rm_relay::lan::connect(relay.as_deref(), &session, &rt, wait),
+    }
+    .unwrap_or_else(|e| fail("connect", e));
+    eprintln!("connected {}", match &route {
+        rm_relay::lan::Route::Lan(a) => format!("on this network ({a})"),
+        rm_relay::lan::Route::Direct(a) => format!("straight to {a}"),
+        rm_relay::lan::Route::Relay(r) => format!("through the relay {r}"),
+    });
     // the password proved and the keys agreed end to end: everything after this is encrypted
     let (stream, keys) = rm_protocol::secure::client_tcp(stream, &session, &token).unwrap_or_else(|e| fail("secure handshake", e));
     eprintln!("end-to-end encrypted (ChaCha20-Poly1305)");
