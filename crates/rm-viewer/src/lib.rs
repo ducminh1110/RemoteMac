@@ -1,15 +1,20 @@
 //! Windows viewer for remote Mac applications. `keymap` and `net` are portable and unit-tested
 //! everywhere; `ui` (Win32 windows + GDI presentation) only exists on Windows.
 pub mod audio;
+#[cfg(windows)]
+pub mod banner;
 pub mod chrome;
+pub mod dock;
 pub mod ico;
 pub mod keymap;
 pub mod lifecycle;
 pub mod loadview;
 pub mod motion;
 pub mod paint;
+pub mod palette;
 pub mod menu;
 pub mod glass;
+pub mod glassmenu;
 pub mod gsdesktop;
 pub mod settings;
 pub mod net;

@@ -274,6 +274,41 @@ pub fn work_area_at(x: i32, y: i32) -> RECT {
     }
 }
 
+/// The look of glass surfaces now: (dark, accent, level).
+pub fn glass_look() -> (bool, Rgba, crate::glass::Level) {
+    (dark_mode(), accent(), crate::glass::Level::from_setting(crate::settings::Settings::load().glass))
+}
+
+/// A glass panel for the screen rectangle (x, y, w, h) (device px) of corner `radius`: the
+/// material over what is behind it now (captured), with its shadow around it. Returns the canvas
+/// (larger than the panel by `margin` on each side) and that margin.
+pub fn glass_panel(x: i32, y: i32, w: usize, h: usize, radius: f32, kind: crate::glass::Kind, scale: f32) -> (Canvas, usize) {
+    use crate::glass::{self, Level, Material};
+    let (dark, accent, level) = glass_look();
+    let m = Material::for_kind(kind, dark, accent);
+    let reach = glass::margin(&m, scale, level, w, h, radius);
+    let backdrop = if level == Level::Off { None } else { capture(x - reach as i32, y - reach as i32, w + 2 * reach, h + 2 * reach) };
+    let body = glass::render(backdrop.as_ref(), reach, w, h, radius, &m, level, scale);
+    let margin = (28.0 * scale).ceil() as usize;
+    let mut c = Canvas::new(w + 2 * margin, h + 2 * margin);
+    if m.shadow_alpha > 0.0 {
+        let (mf, wf, hf) = (margin as f32, w as f32, h as f32);
+        c.shadow(mf, mf, wf, hf, radius, 18.0 * scale, 6.0 * scale, Rgba::BLACK.alpha(0.22 * m.shadow_alpha));
+        c.shadow(mf, mf, wf, hf, radius, 2.0 * scale, 1.0 * scale, Rgba::BLACK.alpha(0.10 * m.shadow_alpha));
+    }
+    c.composite(&body, margin as isize, margin as isize, 1.0);
+    (c, margin)
+}
+
+/// The colours of text on glass: (primary, secondary).
+pub fn glass_text(dark: bool) -> (Rgba, Rgba) {
+    if dark {
+        (Rgba::rgba(255, 255, 255, 235), Rgba::rgba(235, 235, 245, 150))
+    } else {
+        (Rgba::rgba(0, 0, 0, 222), Rgba::rgba(60, 60, 67, 153))
+    }
+}
+
 /// Register a window class for surfaces with `proc`.
 pub fn register(hinst: HINSTANCE, class: PCWSTR, proc: WNDPROC, cursor: PCWSTR) {
     unsafe {

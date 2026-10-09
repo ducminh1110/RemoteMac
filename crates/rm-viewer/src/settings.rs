@@ -88,6 +88,21 @@ impl Settings {
         s
     }
 
+    /// The settings, read from the file at most once a second (for timers).
+    pub fn load_cached() -> Self {
+        use std::sync::Mutex;
+        static CACHE: Mutex<Option<(std::time::Instant, Settings)>> = Mutex::new(None);
+        let mut c = CACHE.lock().unwrap();
+        if let Some((t, s)) = c.as_ref() {
+            if t.elapsed() < std::time::Duration::from_secs(1) {
+                return *s;
+            }
+        }
+        let s = Self::load();
+        *c = Some((std::time::Instant::now(), s));
+        s
+    }
+
     pub fn save(&self) -> std::io::Result<()> {
         let v = serde_json::json!({
             "fps": self.fps, "bitrate_mbps": self.bitrate_mbps, "sharpness": self.quality,

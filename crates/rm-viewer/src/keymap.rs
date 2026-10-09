@@ -49,6 +49,56 @@ pub fn map_modifiers(m: Mods, ctrl_as_command: bool) -> Vec<Modifier> {
     out
 }
 
+/// How Windows keys become Mac keys (Settings > Keyboard).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyMode {
+    /// Ctrl acts as ⌘ (Ctrl+C copies), Win as Control, Alt as Option
+    Windows,
+    /// keys as on a Mac keyboard: Ctrl is Control, Win is ⌘
+    Mac,
+    /// as Windows, and Windows' text keys do what they do on Windows: Home/End go to the start
+    /// and end of the line, Ctrl+arrows jump words, Ctrl+Backspace deletes a word, Ctrl+Y redoes
+    Fusion,
+}
+
+impl KeyMode {
+    pub fn from_setting(v: u8) -> KeyMode {
+        match v {
+            1 => KeyMode::Mac,
+            2 => KeyMode::Fusion,
+            _ => KeyMode::Windows,
+        }
+    }
+
+    pub fn ctrl_as_command(self) -> bool {
+        self != KeyMode::Mac
+    }
+}
+
+/// A key press as the Mac gets it in `mode`: (physical key, modifiers).
+pub fn map_key(vk: u32, m: Mods, mode: KeyMode) -> Option<(&'static str, Vec<Modifier>)> {
+    let name = vk_to_physical(vk)?;
+    if mode == KeyMode::Fusion && !m.alt && !m.win {
+        let with = |key: &'static str, mut mods: Vec<Modifier>| {
+            if m.shift {
+                mods.push(Modifier::Shift); // with Shift it selects, as on both systems
+            }
+            Some((key, mods))
+        };
+        match (vk, m.ctrl) {
+            (0x24, false) => return with("ArrowLeft", vec![Modifier::Command]), // Home: line start
+            (0x23, false) => return with("ArrowRight", vec![Modifier::Command]), // End: line end
+            (0x24, true) => return with("ArrowUp", vec![Modifier::Command]),    // Ctrl+Home: top
+            (0x23, true) => return with("ArrowDown", vec![Modifier::Command]),  // Ctrl+End: bottom
+            (0x25..=0x28, true) => return with(name, vec![Modifier::Option]), // words, paragraphs
+            (0x08 | 0x2E, true) => return with(name, vec![Modifier::Option]),   // delete a word
+            (0x59, true) if !m.shift => return Some(("KeyZ", vec![Modifier::Command, Modifier::Shift])), // Ctrl+Y: redo
+            _ => {}
+        }
+    }
+    Some((name, map_modifiers(m, mode.ctrl_as_command())))
+}
+
 /// Keys that produce text are delivered as Unicode `TextInput` (from WM_CHAR, so the Windows
 /// layout/IME decides the character); everything else, and anything with Ctrl/Alt/Win held,
 /// is delivered as a physical `Key` event. This avoids typing a character twice.
@@ -120,6 +170,31 @@ mod tests {
         let w = Mods { win: true, alt: true, ..Default::default() };
         assert_eq!(map_modifiers(w, true), vec![Modifier::Control, Modifier::Option]);
         assert_eq!(map_modifiers(w, false), vec![Modifier::Command, Modifier::Option]);
+    }
+
+    #[test]
+    fn keyboard_modes() {
+        use Modifier::*;
+        let none = Mods::default();
+        let ctrl = Mods { ctrl: true, ..none };
+        let ctrl_shift = Mods { ctrl: true, shift: true, ..none };
+        // Windows: Ctrl acts as Command, Home is Home
+        assert_eq!(map_key(0x43, ctrl, KeyMode::Windows), Some(("KeyC", vec![Command])));
+        assert_eq!(map_key(0x24, none, KeyMode::Windows), Some(("Home", vec![])));
+        // Mac: Ctrl is Control, Win is Command
+        assert_eq!(map_key(0x43, ctrl, KeyMode::Mac), Some(("KeyC", vec![Control])));
+        assert_eq!(map_key(0x43, Mods { win: true, ..none }, KeyMode::Mac), Some(("KeyC", vec![Command])));
+        // Fusion: Windows text keys
+        assert_eq!(map_key(0x24, none, KeyMode::Fusion), Some(("ArrowLeft", vec![Command])));
+        assert_eq!(map_key(0x23, Mods { shift: true, ..none }, KeyMode::Fusion), Some(("ArrowRight", vec![Command, Shift])));
+        assert_eq!(map_key(0x24, ctrl, KeyMode::Fusion), Some(("ArrowUp", vec![Command])));
+        assert_eq!(map_key(0x25, ctrl_shift, KeyMode::Fusion), Some(("ArrowLeft", vec![Option, Shift])));
+        assert_eq!(map_key(0x08, ctrl, KeyMode::Fusion), Some(("Backspace", vec![Option])));
+        assert_eq!(map_key(0x59, ctrl, KeyMode::Fusion), Some(("KeyZ", vec![Command, Shift])));
+        assert_eq!(map_key(0x43, ctrl, KeyMode::Fusion), Some(("KeyC", vec![Command])), "shortcuts stay as in Windows mode");
+        assert_eq!(map_key(0x25, Mods { alt: true, ..none }, KeyMode::Fusion), Some(("ArrowLeft", vec![Option])), "Alt keys untouched");
+        assert_eq!(KeyMode::from_setting(1), KeyMode::Mac);
+        assert!(KeyMode::Fusion.ctrl_as_command() && !KeyMode::Mac.ctrl_as_command());
     }
 
     #[test]

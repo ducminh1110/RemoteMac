@@ -119,6 +119,11 @@ struct App {
     remotes: HashMap<isize, Remote>,
     by_id: HashMap<u64, isize>,
     ctrl_as_command: bool,
+    /// how keys map (Settings > Keyboard; --raw-ctrl: Mac)
+    key_mode: KeyMode,
+    /// keys sent down and not up yet, per window: released when the window loses the focus
+    /// (a key up that Windows gives another window must not leave a key held on the Mac)
+    keys_down: HashMap<isize, Vec<&'static str>>,
     smoke: Option<Smoke>,
     showcase: Option<Showcase>,
     exit: Option<i32>,
@@ -272,6 +277,10 @@ pub fn run(opts: Options) -> i32 {
             }
         }
         crate::splash::register(hinst);
+        crate::glassmenu::register(hinst);
+        crate::palette::register(hinst);
+        crate::banner::register(hinst);
+        crate::dock::register(hinst);
         crate::settings_ui::register(hinst);
         crate::navball::register(hinst, ball_menu);
         let controller = match CreateWindowExW(WINDOW_EX_STYLE(0), w!("RmController"), w!("rm-controller"), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(hinst), None) {
@@ -282,10 +291,16 @@ pub fn run(opts: Options) -> i32 {
             }
         };
         let ctl = controller.0 as isize;
+        // Ctrl+Alt+Space anywhere: MacBridge Search (another app may own it: then the ball and
+        // the launcher still open it)
+        if RegisterHotKey(Some(controller), HOTKEY_SEARCH, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_SPACE.0 as u32).is_err() {
+            eprintln!("Ctrl+Alt+Space is taken by another app: open the search from the launcher or the navigation ball");
+        }
         let wake = move || {
             let _ = PostMessageW(Some(hwnd_of(ctl)), WM_UI_EVENT, WPARAM(0), LPARAM(0));
         };
         native::load_fonts();
+        crate::motion::set_preference(crate::settings::Settings::load().motion);
         // decided before any window exists: composition windows, and with them GPU pictures
         let use_comp = opts.d3d && comp::available();
         net::set_decoder(choose_decoder(use_comp));
@@ -359,7 +374,7 @@ pub fn run(opts: Options) -> i32 {
         eprintln!("window surfaces: {}", if use_comp { "DirectComposition (rounded corners)" } else if opts.d3d { "Direct3D 11" } else { "GDI" });
         let showcase = opts.showcase.map(Showcase::new);
         APP.with(|a| {
-            *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, smoke, showcase, exit: None, hinst: hinst.0 as isize, gs_key: None, controller: ctl,
+            *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, key_mode: if opts.ctrl_as_command { KeyMode::from_setting(crate::settings::Settings::load().keyboard) } else { KeyMode::Mac }, keys_down: HashMap::new(), smoke, showcase, exit: None, hinst: hinst.0 as isize, gs_key: None, controller: ctl,
                 icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_applied_image: None, clip_seq: 0, d3d: opts.d3d, comp: use_comp,
                 launcher, panels: HashMap::new(), uploads: HashMap::new(), open_uploads: HashMap::new(), next_transfer: 1, redirect_panels: opts.windows_file_picker,
                 shortcut_dir, app_names: vec![], icon_rgba: HashMap::new(), menus: HashMap::new(), display_req: None, display: None, stats: Stats::default(),
@@ -464,6 +479,15 @@ fn start_reconnect() -> bool {
     }
     *REOPEN.lock().unwrap() = open_apps;
     on_mac_gone();
+    crate::lifecycle::set(crate::lifecycle::Phase::Reconnecting);
+    // the glass banner at the top of the screen says what is happening
+    let mut at = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut at);
+    }
+    if let Some(hinst) = with_app(|a| a.hinst) {
+        crate::banner::show(HINSTANCE(hinst as *mut c_void), at.x, at.y);
+    }
     if let Some(l) = with_app(|a| a.launcher.as_ref().map(|l| l.hwnd.0 as isize)).flatten() {
         unsafe {
             let _ = SetWindowTextW(hwnd_of(l), w!("MacBridge — connection lost, connecting again…"));
@@ -501,6 +525,7 @@ fn take_reconnected() {
     match result {
         Ok((link, rx)) => {
             eprintln!("connected again");
+            crate::banner::connected();
             MAC_GONE.store(false, std::sync::atomic::Ordering::Release);
             let launcher = with_app(|a| {
                 a.link = link;
@@ -522,6 +547,8 @@ fn take_reconnected() {
             }
         }
         Err(why) => {
+            crate::banner::hide();
+            crate::lifecycle::set(crate::lifecycle::Phase::Disconnected);
             native::message_box("MacBridge", &format!("The connection to the Mac was lost and could not be made again.\n\n{}\n\n{}", net::friendly_error(&why), crate::log_hint()));
             quit(0);
         }
@@ -581,7 +608,9 @@ fn shortcuts_tick() {
 }
 
 fn quit(code: i32) {
+    crate::lifecycle::set(crate::lifecycle::Phase::Disconnecting);
     on_mac_gone();
+    crate::lifecycle::set(crate::lifecycle::Phase::Disconnected);
     with_app(|a| a.exit = Some(code));
     unsafe { PostQuitMessage(code) };
 }
@@ -601,6 +630,7 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
         WM_TIMER => {
             stats_tick();
             shortcuts_tick();
+            dock_tick();
             smoke_tick();
             showcase_tick();
             LRESULT(0)
@@ -611,6 +641,10 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
         }
         WM_PICK_FILE => {
             pick_file_for_panel(wp.0 as u64);
+            LRESULT(0)
+        }
+        WM_HOTKEY if wp.0 as i32 == HOTKEY_SEARCH => {
+            open_palette();
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
@@ -685,6 +719,13 @@ fn open_settings(owner: Option<HWND>) {
         local_cursor().store(s.local_cursor, std::sync::atomic::Ordering::Relaxed);
         PIXEL_FOR_PIXEL.store(s.pixel_for_pixel(), std::sync::atomic::Ordering::Relaxed);
         with_app(|a| a.link.send(&s.message(net::display_scale(), net::screen_px())));
+        // keys: the mode at once (the menus' shortcut labels follow when they are rebuilt)
+        with_app(|a| {
+            if a.ctrl_as_command {
+                a.key_mode = KeyMode::from_setting(s.keyboard);
+            }
+        });
+        crate::motion::set_preference(s.motion);
         // sound: volume at once; muting also stops the Mac sending it
         let sound = crate::audio::audio();
         sound.set_volume(s.volume as f32 / 100.0);
@@ -692,6 +733,80 @@ fn open_settings(owner: Option<HWND>) {
             with_app(|a| crate::audio::set_muted(Some(&a.link), !s.audio));
         }
         eprintln!("settings: {s:?}");
+    });
+}
+
+/// Desktop Fusion's Dock (Settings): the open Mac apps, the Mac Desktop and Search.
+fn dock_tick() {
+    let on = crate::settings::Settings::load_cached().dock && !MAC_GONE.load(std::sync::atomic::Ordering::Acquire);
+    if !on {
+        crate::dock::close();
+        return;
+    }
+    let Some((hinst, items, icons)) = with_app(|a| {
+        if a.smoke.is_some() || a.showcase.is_some() {
+            return None;
+        }
+        let mut items = vec![crate::dock::DockItem { id: DESKTOP_APP.into(), name: "Mac Desktop".into(), running: a.remotes.values().any(|r| r.app == DESKTOP_APP) }];
+        let mut seen = std::collections::HashSet::new();
+        for r in a.remotes.values().filter(|r| r.role == WindowRole::Window && r.parent.is_none() && r.app != DESKTOP_APP) {
+            if seen.insert(r.app.clone()) {
+                let name = a.app_names.iter().find(|(id, _)| *id == r.app).map_or(r.app.clone(), |(_, n)| n.clone());
+                items.push(crate::dock::DockItem { id: r.app.clone(), name, running: true });
+            }
+        }
+        items.push(crate::dock::DockItem { id: "\u{1}search".into(), name: "Open an App…".into(), running: false });
+        Some((a.hinst, items, a.icon_rgba.clone()))
+    })
+    .flatten() else { return };
+    crate::dock::sync(HINSTANCE(hinst as *mut c_void), items, &icons, |id| {
+        if id == "\u{1}search" {
+            open_palette();
+            return;
+        }
+        let window = with_app(|a| a.remotes.iter().find(|(_, r)| r.app == id && r.role == WindowRole::Window).map(|(k, _)| *k)).flatten();
+        match window {
+            Some(h) => unsafe {
+                let h = hwnd_of(h);
+                if IsIconic(h).as_bool() {
+                    let _ = ShowWindow(h, SW_RESTORE);
+                }
+                let _ = SetForegroundWindow(h);
+            },
+            None => launch_app(&id),
+        }
+    });
+}
+
+/// The id of the Ctrl+Alt+Space hot key.
+const HOTKEY_SEARCH: i32 = 1;
+
+/// MacBridge Search: type to open a Mac app or switch to one already open.
+fn open_palette() {
+    let Some((hinst, entries, icons)) = with_app(|a| {
+        let running: std::collections::HashSet<&str> = a.remotes.values().filter(|r| r.role == WindowRole::Window).map(|r| r.app.as_str()).collect();
+        let mut entries: Vec<crate::palette::Entry> = a.app_names.iter().map(|(id, name)| crate::palette::Entry { id: id.clone(), name: name.clone(), running: running.contains(id.as_str()) }).collect();
+        if !entries.iter().any(|e| e.id == DESKTOP_APP) {
+            entries.push(crate::palette::Entry { id: DESKTOP_APP.into(), name: "Mac Desktop".into(), running: running.contains(DESKTOP_APP) });
+        }
+        (a.hinst, entries, a.icon_rgba.clone())
+    }) else { return };
+    if MAC_GONE.load(std::sync::atomic::Ordering::Acquire) || entries.is_empty() {
+        return;
+    }
+    crate::palette::show(HINSTANCE(hinst as *mut c_void), entries, icons, |id| {
+        // open already: its window comes forward; else it opens
+        let window = with_app(|a| a.remotes.iter().find(|(_, r)| r.app == id && r.role == WindowRole::Window).map(|(k, _)| *k)).flatten();
+        match window {
+            Some(h) => unsafe {
+                let h = hwnd_of(h);
+                if IsIconic(h).as_bool() {
+                    let _ = ShowWindow(h, SW_RESTORE);
+                }
+                let _ = SetForegroundWindow(h);
+            },
+            None => launch_app(&id),
+        }
     });
 }
 
@@ -1592,37 +1707,43 @@ fn toggle_fullscreen(frame: HWND) {
 
 /// The navigation ball's menu (Mac Desktop in fullscreen), opened beside the ball at `at`.
 fn ball_menu(frame: HWND, at: POINT) {
+    use crate::glassmenu::Item;
     const EXIT: u32 = 1;
     const MINIMIZE: u32 = 2;
     const SETTINGS: u32 = 3;
     const POINTER: u32 = 4;
     const CLOSE: u32 = 5;
     const SOUND: u32 = 6;
+    const SEARCH: u32 = 7;
+    let pointer = local_cursor().load(std::sync::atomic::Ordering::Relaxed);
+    let sound = !crate::audio::audio().muted();
+    let mut items = vec![
+        Item::action(EXIT, "Exit Full Screen").with_shortcut("F11"),
+        Item::action(MINIMIZE, "Minimize"),
+        Item::Separator,
+        Item::action(SEARCH, "Open an App…").with_shortcut("Ctrl+Alt+Space"),
+        Item::action(POINTER, "Show This PC's Pointer").with_shortcut("Ctrl+Alt+Shift+C").checked(pointer),
+    ];
+    if crate::audio::audio().supported() {
+        items.push(Item::action(SOUND, "Sound").with_shortcut("Ctrl+Alt+Shift+M").checked(sound));
+    }
+    items.extend([Item::action(SETTINGS, "Settings…").with_shortcut("Ctrl+Alt+Shift+P"), Item::Separator, Item::action(CLOSE, "Disconnect Mac Desktop")]);
+    let hinst = with_app(|a| a.hinst).unwrap_or(0);
+    let left = crate::navball::opens_left(frame, at);
+    let cmd = crate::glassmenu::show(HINSTANCE(hinst as *mut c_void), frame, at, left, items);
     unsafe {
-        let Ok(m) = CreatePopupMenu() else { return };
-        let pointer = local_cursor().load(std::sync::atomic::Ordering::Relaxed);
-        let sound = !crate::audio::audio().muted();
-        let _ = AppendMenuW(m, MF_STRING, EXIT as usize, w!("Exit full screen\tF11"));
-        let _ = AppendMenuW(m, MF_STRING, MINIMIZE as usize, w!("Minimize"));
-        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
-        let _ = AppendMenuW(m, MF_STRING | if pointer { MF_CHECKED } else { MF_UNCHECKED }, POINTER as usize, w!("Show this PC's pointer\tCtrl+Alt+Shift+C"));
-        if crate::audio::audio().supported() {
-            let _ = AppendMenuW(m, MF_STRING | if sound { MF_CHECKED } else { MF_UNCHECKED }, SOUND as usize, w!("Sound\tCtrl+Alt+Shift+M"));
-        }
-        let _ = AppendMenuW(m, MF_STRING, SETTINGS as usize, w!("Settings…\tCtrl+Alt+Shift+P"));
-        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
-        let _ = AppendMenuW(m, MF_STRING, CLOSE as usize, w!("Disconnect Mac Desktop"));
-        let side = if crate::navball::opens_left(frame, at) { TPM_RIGHTALIGN } else { TPM_LEFTALIGN };
-        let _ = SetForegroundWindow(frame);
-        let cmd = TrackPopupMenuEx(m, (side | TPM_TOPALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON).0, at.x, at.y, frame, None).0 as u32;
-        let _ = DestroyMenu(m);
         match cmd {
-            EXIT => toggle_fullscreen(frame),
-            MINIMIZE => { let _ = ShowWindow(frame, SW_MINIMIZE); }
-            SETTINGS => open_settings(Some(frame)),
-            POINTER => set_local_pointer(!pointer),
-            SOUND => toggle_mute(),
-            CLOSE => { let _ = PostMessageW(Some(frame), WM_CLOSE, WPARAM(0), LPARAM(0)); }
+            Some(EXIT) => toggle_fullscreen(frame),
+            Some(MINIMIZE) => {
+                let _ = ShowWindow(frame, SW_MINIMIZE);
+            }
+            Some(SETTINGS) => open_settings(Some(frame)),
+            Some(POINTER) => set_local_pointer(!pointer),
+            Some(SOUND) => toggle_mute(),
+            Some(SEARCH) => open_palette(),
+            Some(CLOSE) => {
+                let _ = PostMessageW(Some(frame), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
             _ => {}
         }
     }
@@ -1738,7 +1859,7 @@ fn build_popup(nodes: &[MenuNode], cc: bool, ids: &mut std::vec::IntoIter<(u16, 
 /// Give a top-level window the Mac app's menu bar (drawn in the strip under the title bar,
 /// each title opening a native popup menu), keeping the picture size.
 fn set_window_menu(frame: HWND, menus: &[MenuNode]) {
-    let cc = with_app(|a| a.ctrl_as_command).unwrap_or(true);
+    let cc = with_app(|a| a.key_mode.ctrl_as_command()).unwrap_or(true);
     let table = menu::commands(menus);
     unsafe {
         let content = content_of(frame).map(client_size).unwrap_or((0, 0));
@@ -1805,10 +1926,18 @@ fn open_menu_popup(frame: HWND, i: usize) {
 
 // ------------------------------------------------------------------ remote windows
 
+/// The window lost the focus: every key still held there is let go on the Mac.
+fn release_keys(frame: HWND) {
+    let held = with_app(|a| a.keys_down.remove(&(frame.0 as isize))).flatten().unwrap_or_default();
+    for name in held {
+        send_for(frame, |r, _| Some(Message::Key { window_id: r.id, physical_key: name.into(), modifiers: vec![], down: false }));
+    }
+}
+
 fn send_for(frame: HWND, f: impl FnOnce(&Remote, bool) -> Option<Message>) {
     with_app(|a| {
         if let Some(r) = a.remotes.get(&(frame.0 as isize)) {
-            if let Some(m) = f(r, a.ctrl_as_command) {
+            if let Some(m) = f(r, a.key_mode.ctrl_as_command()) {
                 a.link.send(&m);
             }
         }
@@ -2198,6 +2327,8 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_ACTIVATE => {
             if (wp.0 & 0xffff) as u32 != WA_INACTIVE {
                 send_for(hwnd, |r, _| Some(Message::WindowFocus { window_id: r.id }));
+            } else {
+                release_keys(hwnd);
             }
             DefWindowProcW(hwnd, msg, wp, lp)
         }
@@ -2385,8 +2516,16 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             if sends_as_text(vk, mods) {
                 return LRESULT(0); // WM_CHAR delivers the character, layout-correct
             }
-            if let Some(name) = vk_to_physical(vk) {
-                send_for(frame, |r, cc| Some(Message::Key { window_id: r.id, physical_key: name.into(), modifiers: map_modifiers(mods, cc), down }));
+            let mode = with_app(|a| a.key_mode).unwrap_or(KeyMode::Windows);
+            if let Some((name, modifiers)) = map_key(vk, mods, mode) {
+                with_app(|a| {
+                    let held = a.keys_down.entry(frame.0 as isize).or_default();
+                    held.retain(|k| *k != name);
+                    if down {
+                        held.push(name);
+                    }
+                });
+                send_for(frame, |r, _| Some(Message::Key { window_id: r.id, physical_key: name.into(), modifiers, down }));
             }
             LRESULT(0)
         }
@@ -2448,7 +2587,7 @@ fn find_window(app: &str, role: WindowRole) -> Option<(HWND, u64)> {
 
 fn send_key(window_id: u64, key: &str, ctrl: bool) {
     with_app(|a| {
-        let mods = map_modifiers(Mods { ctrl, ..Default::default() }, a.ctrl_as_command);
+        let mods = map_modifiers(Mods { ctrl, ..Default::default() }, a.key_mode.ctrl_as_command());
         for down in [true, false] {
             a.link.send(&Message::Key { window_id, physical_key: key.into(), modifiers: mods.clone(), down });
         }
