@@ -232,7 +232,7 @@ do {
     guard cmin <= 1 && cmax >= 1 else {
         try conn.send(["type": "error", "code": "version_mismatch", "message": "agent speaks protocol 1, client \(cmin)...\(cmax)"]); exit(1)
     }
-    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video"],
+    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file"],
                    "max_surface": [3840, 2160], "agent": "macbridge \(appVersion) \(ProcessInfo.processInfo.operatingSystemVersionString)"])
     try conn.send(probeCapabilities())
 } catch { fail("handshake: \(error)") }
@@ -379,6 +379,15 @@ let clipboard = ClipboardSync()
 clipboard.onLocalChange = { seq, text in send(["type": "clipboard_set", "seq": Int(seq), "text": text]) }
 clipboard.onLocalImage = { seq, bmp in send(["type": "clipboard_image", "seq": Int(seq), "bmp_base64": bmp.base64EncodedString()]) }
 clipboard.start()
+
+// the Mac's sound, once the viewer asks for it: the session's apps, or every app while the Mac
+// Desktop is open
+let audioCap = AudioCapture { payload in sender.sendAudio(payload) }
+audioCap.onStatus = { state, why in
+    var m: [String: Any] = ["type": "audio_status", "state": state]
+    if let w = why { m["reason"] = w }
+    send(m)
+}
 
 let uploads = UploadStore(send: send)
 uploads.cleanup() // leftovers of a session that ended without cleaning (crash, power loss)
@@ -552,6 +561,7 @@ func handle(_ m: [String: Any]) {
         }
         inputQueue.async { injector.resetDesktopClicks() }
         send(desktop.start(display: fitted))
+        audioCap.update(everything: true, pids: Set(apps.pids)) // the whole Mac is heard
         // full GameStream mode: the client's Moonlight core gets the desktop through a host session
         if let gs = (m["arguments"] as? [String])?.first(where: { $0.hasPrefix("gamestream=") }) {
             if !gsStart(keyHex: String(gs.dropFirst(11))) { log("Mac Desktop: GameStream host session failed; streaming the usual way") }
@@ -572,6 +582,7 @@ func handle(_ m: [String: Any]) {
          "window_close" where CGWindowID(int(m["window_id"])) == desktopWindowID:
         guard desktop.isActive else { break }
         desktop.stop()
+        audioCap.update(everything: false, pids: Set(apps.pids))
         displays.desktopClosed() // a fullscreen app window gets the whole display again
         gsStop()
         // the app windows get their own layout back (HiDPI, Ultra sharpness), or the Mac's own
@@ -749,6 +760,10 @@ func handle(_ m: [String: Any]) {
                 }
             }
         }
+    case "audio_control":
+        let on = m["enabled"] as? Bool ?? false
+        log("sound \(on ? "asked for" : "no longer wanted") by the viewer")
+        audioCap.setWanted(on, everything: desktop.isActive, pids: Set(apps.pids))
     case "ping":
         viewerSendsHeartbeats = true
         send(["type": "pong", "nonce": m["nonce"] ?? 0])
@@ -785,8 +800,12 @@ var heardOverTCP = CFAbsoluteTimeGetCurrent()
 /// The session ended because the viewer went silent, not because it closed.
 var connectionLost = false
 Thread {
+    var ticks = 0
     while true {
         sleep(1)
+        // the sound follows the session's apps (one launched, one quit)
+        ticks += 1
+        if ticks % 2 == 0 { audioCap.update(everything: desktop.isActive, pids: Set(apps.pids)) }
         let heard = max(heardOverTCP, sender.udp?.lastHeard ?? 0)
         let silent = CFAbsoluteTimeGetCurrent() - heard
         if viewerSendsHeartbeats && silent > 10 {

@@ -36,7 +36,7 @@ impl<S: Read + Write> Session<S> {
     /// Runs the handshake. Only returns once the agent has sent ServerHello
     /// AND its capability report; `state` is then `Ready`, never earlier.
     pub fn handshake(mut stream: S) -> Result<Self, ClientError> {
-        let ours = Hello::ours(&format!("remote-mac {}", env!("CARGO_PKG_VERSION")), &["h264"], &["control"]);
+        let ours = Hello::ours(&format!("remote-mac {}", env!("CARGO_PKG_VERSION")), &["h264"], &["control", "audio", "open_file"]);
         write_message(&mut stream, &Message::ClientHello(ours.clone()))?;
         let theirs = match next(&mut stream)? {
             Message::ServerHello(h) => h,
@@ -126,6 +126,7 @@ impl<S: Read + Write> Session<S> {
         while let Some(o) = self.udp.as_ref().and_then(|(_, rx)| rx.try_recv().ok()) {
             match o {
                 rm_protocol::udp::Out::Frame(v) => return Ok(Some(Frame::Video(v))),
+                rm_protocol::udp::Out::Audio(a) => return Ok(Some(Frame::Audio(a))),
                 // a frame lost even with FEC: ask for a keyframe and carry on
                 rm_protocol::udp::Out::Lost(id) => write_message(&mut self.stream, &Message::RequestKeyframe { window_id: id })?,
             }

@@ -206,6 +206,10 @@ impl AgentUdp {
         let _ = self.sock.send_to(&d, self.dest());
     }
 
+    pub fn send_audio(&self, p: &rm_protocol::audio::AudioPacket) {
+        let _ = self.sock.send_to(&p.datagram(), self.dest());
+    }
+
     pub fn send(&self, v: &VideoFrame) {
         let packets = {
             let mut s = self.seq.lock().unwrap();

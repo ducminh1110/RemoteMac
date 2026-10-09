@@ -90,6 +90,8 @@ struct State {
     /// the viewer shows GameStream's pictures: the desktop goes only that way (until then also
     /// the usual way, as the Mac app does)
     gs_ready: bool,
+    /// sound is being sent (a 440 Hz tone): set to stop it
+    audio: Option<Arc<AtomicBool>>,
 }
 
 type Writer<W> = Arc<Mutex<W>>;
@@ -224,7 +226,7 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
         Some(Message::ClientHello(_)) => {}
         _ => return Ok(()),
     }
-    send(&writer, &Message::ServerHello(Hello::ours("rm-fakeagent", &["h264"], &["control", "video", "files"])))?;
+    send(&writer, &Message::ServerHello(Hello::ours("rm-fakeagent", &["h264"], &["control", "video", "files", "audio"])))?;
     send(&writer, &Message::CapabilityReport(caps()))?;
     // TCP messages and input that came over UDP (the direct path) go through one loop
     let (tx, rx) = std::sync::mpsc::channel::<Result<Option<Message>, ProtocolError>>();
@@ -479,6 +481,20 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
                 }
             }
             Message::Ping { nonce } => send(&writer, &Message::Pong { nonce })?,
+            Message::AudioControl { enabled } => {
+                let mut s = st.lock().unwrap();
+                if let Some(stop) = s.audio.take() {
+                    stop.store(true, Ordering::SeqCst);
+                }
+                if enabled {
+                    let stop = Arc::new(AtomicBool::new(false));
+                    s.audio = Some(stop.clone());
+                    let (w, st2) = (writer.clone(), st.clone());
+                    std::thread::spawn(move || audio_loop(w, st2, stop));
+                }
+                drop(s);
+                send(&writer, &Message::AudioStatus { state: if enabled { "playing" } else { "stopped" }.into(), reason: None })?;
+            }
             Message::RequestKeyframe { window_id } => {
                 st.lock().unwrap().key_requests.insert(window_id);
             }
@@ -495,6 +511,37 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
         }
     }
     Ok(())
+}
+
+/// A 440 Hz tone in 5 ms packets, over UDP while it is alive, else on the Audio channel.
+fn audio_loop<W: Write>(w: Writer<W>, st: Arc<Mutex<State>>, stop: Arc<AtomicBool>) {
+    use rm_protocol::audio::{AudioPacket, PACKET_FRAMES, SAMPLE_RATE};
+    let start = std::time::Instant::now();
+    let (mut seq, mut phase) = (0u32, 0f64);
+    while !stop.load(Ordering::SeqCst) {
+        let mut samples = Vec::with_capacity(PACKET_FRAMES * 2);
+        for _ in 0..PACKET_FRAMES {
+            let v = (phase.sin() * 8000.0) as i16;
+            samples.extend([v, v]);
+            phase += std::f64::consts::TAU * 440.0 / SAMPLE_RATE as f64;
+        }
+        let p = AudioPacket { seq, pts_us: udp_agent::clock_us(), channels: 2, samples };
+        seq = seq.wrapping_add(1);
+        let udp = st.lock().unwrap().udp.clone().filter(|u| u.alive());
+        if let Some(u) = udp {
+            u.send_audio(&p);
+        } else {
+            let Ok(bytes) = rm_protocol::encode_audio(&p) else { return };
+            if w.lock().unwrap().write_all(&bytes).is_err() {
+                return;
+            }
+        }
+        // paced by the clock, as a sound card is
+        let due = start + Duration::from_micros(seq as u64 * 5_000);
+        if let Some(d) = due.checked_duration_since(std::time::Instant::now()) {
+            std::thread::sleep(d);
+        }
+    }
 }
 
 fn video_loop<W: Write>(w: Writer<W>, st: Arc<Mutex<State>>, id: u64, width: usize, height: usize, hue: u8, stop: Arc<AtomicBool>) {

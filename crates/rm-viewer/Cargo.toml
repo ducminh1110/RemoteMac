@@ -47,6 +47,8 @@ features = [
   "Win32_Graphics_DirectComposition",
   "Win32_Media",
   "Win32_Media_MediaFoundation",
+  "Win32_Media_Audio",
+  "Win32_Security",
   "Win32_System_Console",
   "Win32_System_Threading",
 ]

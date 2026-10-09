@@ -78,6 +78,13 @@ struct Ctx<'a, S: Read + Write> {
     /// Mac Desktop over full GameStream: the client tunnel and the messages it wants sent
     gs_tunnel: Option<std::sync::Arc<rm_gamestream::tunnel::ClientTunnel>>,
     gs_out: Option<std::sync::mpsc::Receiver<Message>>,
+    /// sound: the Mac's last audio_status, packets seen, bad packets, loudest sample, last seq
+    audio_status: Option<(String, Option<String>)>,
+    audio_packets: usize,
+    audio_bad: usize,
+    audio_peak: i16,
+    audio_seq: Option<u32>,
+    audio_gaps: usize,
 }
 
 fn is_timeout(e: &ProtocolError) -> bool {
@@ -87,6 +94,18 @@ fn is_timeout(e: &ProtocolError) -> bool {
 impl<S: Read + Write> Ctx<'_, S> {
     fn absorb(&mut self, f: Frame) {
         match f {
+            Frame::Audio(a) => {
+                self.audio_packets += 1;
+                if a.channels != 2 || a.frames() != rm_protocol::audio::PACKET_FRAMES {
+                    self.audio_bad += 1;
+                }
+                if self.audio_seq.is_some_and(|s| a.seq != s.wrapping_add(1)) {
+                    self.audio_gaps += 1;
+                }
+                self.audio_seq = Some(a.seq);
+                self.audio_peak = self.audio_peak.max(a.samples.iter().map(|s| s.saturating_abs()).max().unwrap_or(0));
+            }
+            Frame::Msg(Message::AudioStatus { state, reason }) => self.audio_status = Some((state, reason)),
             Frame::Video(v) if self.desktop.map(|d| d.0) == Some(v.window_id) => {
                 self.desktop_frames += 1;
                 self.desktop_video = Some((v.width, v.height));
@@ -216,7 +235,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let caps_dump = serde_json::to_string(&sess.capabilities).unwrap_or_default();
     let mut c = Ctx { sess, r: Report::default(), started: Instant::now(), first_video: None, last_title: String::new(),
         destroyed: false, exited: false, launched_pid: None, errors: vec![], non_annexb: 0,
-        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None, main_rect: None, desktop: None, desktop_frames: 0, desktop_video: None, gs_tunnel: None, gs_out: None };
+        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None, main_rect: None, desktop: None, desktop_frames: 0, desktop_video: None, gs_tunnel: None, gs_out: None, audio_status: None, audio_packets: 0, audio_bad: 0, audio_peak: 0, audio_seq: None, audio_gaps: 0 };
 
     c.r.check("agent reports capture+input+GUI", caps_ok, caps_dump);
 
@@ -413,6 +432,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
         c.send(Message::TextInput { window_id: did, text: "d".into() });
         let ok = c.pump(10, |c| c.last_title != before && c.last_title.contains("chars]"));
         c.r.check("input on the desktop reaches the app under the pointer", ok, format!("before={before:?} after={:?} click=({x},{y})", c.last_title));
+        sound(&mut c);
         c.send(Message::AppTerminate { application_id: "desktop".into() });
         let gone = c.pump(8, |c| c.destroyed_ids.contains(&did));
         c.r.check("closing the Mac Desktop stops its stream", gone, format!("destroyed={:?}", c.destroyed_ids));
@@ -429,6 +449,37 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let ok = c.pump(10, |c| c.destroyed && c.exited);
     c.r.check("terminate -> WindowDestroyed + AppExited", ok, format!("destroyed={} exited={}", c.destroyed, c.exited));
     c.r
+}
+
+/// Sound while the Mac Desktop is open (every app is heard): asked for, received as valid PCM
+/// packets, stopped when asked. A runner without an audio device may have nothing to capture:
+/// then the Mac must say so (`unavailable` with a reason) instead of staying silent.
+fn sound<S: Read + Write>(c: &mut Ctx<S>) {
+    c.send(Message::AudioControl { enabled: true });
+    // something to hear (the Mac's own alert sound)
+    #[cfg(target_os = "macos")]
+    let player = std::process::Command::new("afplay").args(["-v", "0.3", "/System/Library/Sounds/Submarine.aiff"]).spawn().ok();
+    let answered = c.pump(8, |c| c.audio_status.is_some() && (c.audio_packets >= 40 || c.audio_status.as_ref().is_some_and(|s| s.0 != "playing")));
+    let status = c.audio_status.clone();
+    let ok = answered && status.as_ref().is_some_and(|(s, r)| s == "playing" || (s == "unavailable" && r.as_ref().is_some_and(|r| !r.is_empty())));
+    c.r.check("sound: the Mac answers the request (playing, or unavailable with a reason)", ok, format!("{status:?}"));
+    eprintln!("[INFO] sound packets: {} (peak {}, gaps {}, malformed {})", c.audio_packets, c.audio_peak, c.audio_gaps, c.audio_bad);
+    if c.audio_packets > 0 {
+        c.r.check("sound packets are 48 kHz stereo PCM in 5 ms packets", c.audio_bad == 0, format!("packets={} malformed={}", c.audio_packets, c.audio_bad));
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(mut p) = player {
+        let _ = p.kill();
+        let _ = p.wait();
+    }
+    if status.is_some_and(|s| s.0 == "playing") {
+        c.send(Message::AudioControl { enabled: false });
+        let stopped = c.pump(5, |c| c.audio_status.as_ref().is_some_and(|s| s.0 == "stopped"));
+        c.pump(1, |_| false);
+        let before = c.audio_packets;
+        c.pump(1, |_| false);
+        c.r.check("sound stops when the viewer asks", stopped && c.audio_packets <= before + 2, format!("status={:?} packets in the last second={}", c.audio_status, c.audio_packets - before));
+    }
 }
 
 fn gamestream_desktop<S: Read + Write>(c: &mut Ctx<S>) {

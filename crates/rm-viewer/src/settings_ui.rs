@@ -1,7 +1,7 @@
 //! The Settings window (launcher button, or Ctrl+Alt+Shift+P in any remote window): frame
 //! rate, bitrate, sharpness, decoder, frame pacing, pointer — as Moonlight's settings page.
 
-use crate::settings::{Settings, BITRATES, DECODERS, DESKTOP_SCALES, FPS, QUALITY, WORKSPACES};
+use crate::settings::{Settings, BITRATES, DECODERS, DESKTOP_SCALES, FPS, GLASS_LEVELS, KEYBOARD_MODES, MOTION_LEVELS, QUALITY, WORKSPACES};
 use std::cell::RefCell;
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::*;
@@ -22,6 +22,12 @@ struct Ui {
     decoder: HWND,
     pacing: HWND,
     cursor: HWND,
+    audio: HWND,
+    volume: HWND,
+    keyboard: HWND,
+    glass: HWND,
+    motion: HWND,
+    dock: HWND,
     font: HFONT,
     on_save: Box<dyn Fn(Settings)>,
 }
@@ -122,6 +128,29 @@ pub fn show(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: i
         let cursor = button(hwnd, hinst, lx, y, px(450), "Use the Windows pointer instead of the Mac's (Ctrl+Alt+Shift+C)", 201, BS_AUTOCHECKBOX as u32, font);
         SendMessageW(cursor, BM_SETCHECK, Some(WPARAM(current.local_cursor as usize)), None);
         y += px(34);
+        let audio = button(hwnd, hinst, lx, y, px(450), "Play the Mac's sound on this PC (Ctrl+Alt+Shift+M mutes)", 202, BS_AUTOCHECKBOX as u32, font);
+        SendMessageW(audio, BM_SETCHECK, Some(WPARAM(current.audio as usize)), None);
+        y += px(32);
+        label(hwnd, hinst, lx, y + px(3), px(140), px(22), "Volume", font);
+        let volume = CreateWindowExW(WINDOW_EX_STYLE(0), w!("msctls_trackbar32"), w!(""), WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0), cx, y, cw, px(28), Some(hwnd), None, Some(hinst), None).unwrap_or_default();
+        SendMessageW(volume, windows::Win32::UI::Controls::TBM_SETRANGE, Some(WPARAM(1)), Some(LPARAM((100 << 16) as isize)));
+        SendMessageW(volume, windows::Win32::UI::Controls::TBM_SETPOS, Some(WPARAM(1)), Some(LPARAM(current.volume as isize)));
+        y += row;
+        label(hwnd, hinst, lx, y + px(3), px(140), px(22), "Keyboard", font);
+        let k_items: Vec<String> = KEYBOARD_MODES.iter().map(|x| x.to_string()).collect();
+        let keyboard = combo(hwnd, hinst, cx, y, cw, &k_items, current.keyboard as usize, font);
+        y += row;
+        label(hwnd, hinst, lx, y + px(3), px(140), px(22), "Glass", font);
+        let g_items: Vec<String> = GLASS_LEVELS.iter().map(|x| x.to_string()).collect();
+        let glass = combo(hwnd, hinst, cx, y, cw, &g_items, current.glass as usize, font);
+        y += row;
+        label(hwnd, hinst, lx, y + px(3), px(140), px(22), "Animations", font);
+        let m_items: Vec<String> = MOTION_LEVELS.iter().map(|x| x.to_string()).collect();
+        let motion = combo(hwnd, hinst, cx, y, cw, &m_items, current.motion as usize, font);
+        y += row;
+        let dock = button(hwnd, hinst, lx, y, px(450), "Desktop Fusion: show the Mac Dock while connected (experimental)", 203, BS_AUTOCHECKBOX as u32, font);
+        SendMessageW(dock, BM_SETCHECK, Some(WPARAM(current.dock as usize)), None);
+        y += px(34);
         label(hwnd, hinst, lx, y, px(445), px(44), "Decoder, frame pacing and Mac Desktop scale apply to windows opened from now on.", font);
         y += px(52);
         button(hwnd, hinst, px(270), y, px(90), "Save", ID_SAVE, BS_DEFPUSHBUTTON as u32, font);
@@ -130,7 +159,7 @@ pub fn show(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: i
         let mut r = RECT { left: 0, top: 0, right: px(480), bottom: y + px(26) + px(18) };
         let _ = AdjustWindowRectEx(&mut r, WS_POPUP | WS_CAPTION | WS_SYSMENU, false, WS_EX_DLGMODALFRAME);
         let _ = SetWindowPos(hwnd, None, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
-        UI.with(|u| *u.borrow_mut() = Some(Ui { hwnd, fps, bitrate, quality, desktop, workspace, decoder, pacing, cursor, font, on_save: Box::new(on_save) }));
+        UI.with(|u| *u.borrow_mut() = Some(Ui { hwnd, fps, bitrate, quality, desktop, workspace, decoder, pacing, cursor, audio, volume, keyboard, glass, motion, dock, font, on_save: Box::new(on_save) }));
     }
 }
 
@@ -147,6 +176,12 @@ fn read(u: &Ui) -> Settings {
             workspace: sel(u.workspace).min(WORKSPACES - 1) as u8,
             pacing: checked(u.pacing),
             local_cursor: checked(u.cursor),
+            audio: checked(u.audio),
+            volume: SendMessageW(u.volume, WM_USER, None, None).0.clamp(0, 100) as u8,
+            keyboard: sel(u.keyboard).min(KEYBOARD_MODES.len() - 1) as u8,
+            glass: sel(u.glass).min(GLASS_LEVELS.len() - 1) as u8,
+            motion: sel(u.motion).min(MOTION_LEVELS.len() - 1) as u8,
+            dock: checked(u.dock),
         }
     }
 }

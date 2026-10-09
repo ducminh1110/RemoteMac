@@ -313,7 +313,15 @@ pub fn connect_with(relay: Option<&str>, session: &str, token: &str, app: Option
     let kind = decoder_kind();
     link.send(&Message::VideoDecoder { high_profile: kind != DecoderKind::Software, hardware: kind == DecoderKind::Hardware, scale: Some(display_scale()), screen: screen_fit() });
     // the user's settings (frame rate, bitrate, sharpness)
-    link.send(&crate::settings::Settings::load().message(display_scale(), screen_px()));
+    let settings = crate::settings::Settings::load();
+    link.send(&settings.message(display_scale(), screen_px()));
+    // the Mac's sound, unless muted (a Mac without the feature is never asked)
+    let audio = crate::audio::audio();
+    audio.reset();
+    audio.set_supported(sess.negotiated.features.iter().any(|f| f == "audio"));
+    if audio.supported() && settings.audio {
+        link.send(&Message::AudioControl { enabled: true });
+    }
     if let Some(app) = app {
         link.send(&Message::AppLaunch { application_id: app.into(), arguments: vec![], working_directory: None, environment: Default::default() });
     }
@@ -378,6 +386,7 @@ impl Video {
             rm_protocol::udp::Out::Frame(_) => {}
             // lost even with FEC: the decoder needs a fresh keyframe
             rm_protocol::udp::Out::Lost(id) => self.link().send(&Message::RequestKeyframe { window_id: id }),
+            rm_protocol::udp::Out::Audio(a) => crate::audio::audio().push(&a),
         }
     }
 
@@ -532,6 +541,7 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
             // the Mac Desktop's picture comes the usual way until GameStream has it
             Ok(Some(Frame::Video(v))) if !crate::gsdesktop::owns(v.window_id) => video.push(v, false),
             Ok(Some(Frame::Video(_))) => {}
+            Ok(Some(Frame::Audio(a))) => crate::audio::audio().push(&a),
             Ok(Some(Frame::Msg(m))) => match m {
                 Message::WindowCreated { window_id, application_id, title, bounds, parent_id, role } => emit(UiEvent::WindowCreated { id: window_id, app: application_id, title, x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, parent: parent_id, role }),
                 Message::Apps { apps } => emit(UiEvent::Apps(apps)),
@@ -562,6 +572,7 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
                 }
                 Message::AppExited { application_id, .. } => emit(UiEvent::AppExited(application_id)),
                 Message::AppLaunched { application_id, .. } => emit(UiEvent::Launched(application_id)),
+                Message::AudioStatus { state, reason } => crate::audio::audio().set_mac_status(&state, reason.as_deref()),
                 Message::Error { code, message } => emit(UiEvent::Notice(format!("{code}: {message}"))),
                 Message::CapabilityUnavailable { capability, reason } => emit(UiEvent::Notice(format!("{capability} unavailable: {reason}"))),
                 Message::P2pOffer { secret, candidates } => {
@@ -648,6 +659,30 @@ mod tests {
             if let Ok(UiEvent::Destroyed { .. }) = rx.recv_timeout(Duration::from_millis(300)) { destroyed = true }
         }
         assert!(destroyed);
+    }
+
+    /// The Mac's sound reaches the jitter buffer (over TCP first, then UDP) and plays in order.
+    #[test]
+    fn sound_reaches_the_jitter_buffer() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        std::thread::spawn(move || rm_relay::serve(l, Default::default()));
+        let (a, tok) = (addr.clone(), "viewer-audio-token-0123456789");
+        std::thread::spawn(move || { let _ = rm_fakeagent::serve_via_relay(&a, "v-audio", tok); });
+        std::thread::sleep(Duration::from_millis(150));
+        let (_link, _rx) = connect(Some(&addr), "v-audio", tok, None, || {}).unwrap();
+        let sound = crate::audio::audio();
+        assert!(sound.supported(), "the fake Mac offers sound");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut out = vec![0i16; 480];
+        let mut heard = 0;
+        while std::time::Instant::now() < deadline && heard < 50 {
+            std::thread::sleep(Duration::from_millis(5));
+            sound.pull(&mut out);
+            heard += out.iter().any(|&s| s.abs() > 1000) as usize;
+        }
+        let st = sound.stats();
+        assert!(heard >= 50 && st.received >= 40 && st.lost == 0, "tone played {heard} times: {st:?}");
     }
 
     /// Video moves to UDP once the path works, and FEC carries it through a lossy relay.

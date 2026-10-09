@@ -47,6 +47,8 @@ pub enum Channel {
     Clipboard = 4,
     Files = 5,
     Telemetry = 6,
+    /// Binary: sound from the Mac ([`audio::AudioPacket`]), only after the viewer asked for it.
+    Audio = 7,
 }
 
 impl Channel {
@@ -62,6 +64,7 @@ impl Channel {
             4 => Channel::Clipboard,
             5 => Channel::Files,
             6 => Channel::Telemetry,
+            7 => Channel::Audio,
             n => return Err(ProtocolError::UnknownChannel(n)),
         })
     }
@@ -377,6 +380,17 @@ pub enum Message {
     Key { window_id: u64, physical_key: String, modifiers: Vec<Modifier>, down: bool },
     TextInput { window_id: u64, text: String },
 
+    /// Client -> agent (feature "audio"): send the sound of the session's apps (`enabled`), or
+    /// stop. The Mac sends nothing on the Audio channel before this.
+    AudioControl { enabled: bool },
+    /// Agent -> client: what became of the sound: `state` "playing", "stopped" or
+    /// "unavailable" (then `reason` says why, e.g. Screen Recording not allowed).
+    AudioStatus {
+        state: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+
     Error { code: String, message: String },
     Ping { nonce: u64 },
     Pong { nonce: u64 },
@@ -612,11 +626,16 @@ pub fn encode_video(f: &VideoFrame) -> Result<Vec<u8>, ProtocolError> {
     encode_raw(Channel::Video, &f.encode_payload())
 }
 
+pub fn encode_audio(p: &audio::AudioPacket) -> Result<Vec<u8>, ProtocolError> {
+    encode_raw(Channel::Audio, &p.encode_payload())
+}
+
 /// Anything that can arrive on the wire.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
     Msg(Message),
     Video(VideoFrame),
+    Audio(audio::AudioPacket),
 }
 
 /// `read_exact` that rides out read timeouts: once a frame has started it is read to its end
@@ -659,6 +678,8 @@ pub fn read_frame<R: Read>(r: &mut R) -> Result<Option<Frame>, ProtocolError> {
     read_full(r, &mut payload)?;
     if channel == Channel::Video {
         VideoFrame::decode_payload(&payload).map(|v| Some(Frame::Video(v)))
+    } else if channel == Channel::Audio {
+        audio::AudioPacket::decode_payload(&payload).map(|a| Some(Frame::Audio(a)))
     } else {
         serde_json::from_slice(&payload).map(|m| Some(Frame::Msg(m))).map_err(|e| ProtocolError::Malformed(e.to_string()))
     }
@@ -808,6 +829,20 @@ mod tests {
     }
 
     #[test]
+    fn audio_rides_its_own_channel_between_other_frames() {
+        let a = audio::AudioPacket { seq: 3, pts_us: 9, channels: 2, samples: vec![1, -1, 2, -2] };
+        let mut wire = encode(&Message::AudioControl { enabled: true }).unwrap();
+        wire.extend(encode_audio(&a).unwrap());
+        wire.extend(encode(&Message::AudioStatus { state: "playing".into(), reason: None }).unwrap());
+        let mut cur = std::io::Cursor::new(wire);
+        assert_eq!(read_frame(&mut cur).unwrap().unwrap(), Frame::Msg(Message::AudioControl { enabled: true }));
+        assert_eq!(read_frame(&mut cur).unwrap().unwrap(), Frame::Audio(a));
+        assert!(matches!(read_frame(&mut cur).unwrap().unwrap(), Frame::Msg(Message::AudioStatus { .. })));
+        let j = serde_json::to_string(&Message::AudioStatus { state: "unavailable".into(), reason: Some("x".into()) }).unwrap();
+        assert_eq!(j, r#"{"type":"audio_status","state":"unavailable","reason":"x"}"#);
+    }
+
+    #[test]
     fn video_rejects_truncated_header_and_bad_flag() {
         assert!(VideoFrame::decode_payload(&[0u8; VIDEO_HEADER_LEN - 1]).is_err());
         let mut p = vec![0u8; VIDEO_HEADER_LEN];
@@ -884,6 +919,7 @@ mod tests {
 /// Recordings of an agent session (`.rmrec`): what the agent sent, frame by frame, tagged with
 /// the application it belongs to and its time from the start of that application's segment.
 /// Lets a real Mac session be replayed to a viewer elsewhere (`rm-fakeagent --replay`).
+pub mod audio;
 pub mod fec;
 pub mod secure;
 pub mod udp;

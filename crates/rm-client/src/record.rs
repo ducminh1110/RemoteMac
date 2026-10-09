@@ -75,6 +75,7 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
             // which app a frame belongs to
             let tag = match &f {
                 Frame::Video(v) => owner.get(&v.window_id).cloned(),
+                Frame::Audio(_) => None,
                 Frame::Msg(Message::WindowCreated { window_id, application_id, role, .. }) => {
                     owner.insert(*window_id, application_id.clone());
                     if *application_id == app {
@@ -99,6 +100,7 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
                     encode_video(v)?
                 }
                 Frame::Msg(m) => encode(m)?,
+                Frame::Audio(a) => rm_protocol::encode_audio(a)?,
             };
             put(out, &app, start, wire)?;
             if first.is_some() && !asked {

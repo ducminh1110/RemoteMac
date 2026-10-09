@@ -232,6 +232,7 @@ impl Stats {
         }
         v.push(format!("Latency capture->shown {}  (->received {}, decode {:.1} ms)", avg(self.shown_ms, self.shown_n), avg(self.recv_ms, self.recv_n), self.decode_us as f64 / self.shown.max(1) as f64 / 1000.0));
         v.push(format!("Decoder {:?}  pacing {}  frames skipped {}", net::decoder_kind(), if pacing { "vsync" } else { "off" }, self.skipped));
+        v.push(crate::audio::audio().summary());
         v
     }
 }
@@ -668,8 +669,21 @@ fn open_settings(owner: Option<HWND>) {
         local_cursor().store(s.local_cursor, std::sync::atomic::Ordering::Relaxed);
         PIXEL_FOR_PIXEL.store(s.pixel_for_pixel(), std::sync::atomic::Ordering::Relaxed);
         with_app(|a| a.link.send(&s.message(net::display_scale(), net::screen_px())));
+        // sound: volume at once; muting also stops the Mac sending it
+        let sound = crate::audio::audio();
+        sound.set_volume(s.volume as f32 / 100.0);
+        if sound.muted() == s.audio {
+            with_app(|a| crate::audio::set_muted(Some(&a.link), !s.audio));
+        }
         eprintln!("settings: {s:?}");
     });
+}
+
+/// The Mac's sound off or on (shortcut, navigation ball).
+fn toggle_mute() {
+    let muted = !crate::audio::audio().muted();
+    with_app(|a| crate::audio::set_muted(Some(&a.link), muted));
+    eprintln!("sound {}", if muted { "muted" } else { "on" });
 }
 
 /// "fit=W,H,S" for the Mac Desktop: the monitor the launcher is on, in points as on this PC,
@@ -1506,13 +1520,18 @@ fn ball_menu(frame: HWND, at: POINT) {
     const SETTINGS: u32 = 3;
     const POINTER: u32 = 4;
     const CLOSE: u32 = 5;
+    const SOUND: u32 = 6;
     unsafe {
         let Ok(m) = CreatePopupMenu() else { return };
         let pointer = local_cursor().load(std::sync::atomic::Ordering::Relaxed);
+        let sound = !crate::audio::audio().muted();
         let _ = AppendMenuW(m, MF_STRING, EXIT as usize, w!("Exit full screen\tF11"));
         let _ = AppendMenuW(m, MF_STRING, MINIMIZE as usize, w!("Minimize"));
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(m, MF_STRING | if pointer { MF_CHECKED } else { MF_UNCHECKED }, POINTER as usize, w!("Show this PC's pointer\tCtrl+Alt+Shift+C"));
+        if crate::audio::audio().supported() {
+            let _ = AppendMenuW(m, MF_STRING | if sound { MF_CHECKED } else { MF_UNCHECKED }, SOUND as usize, w!("Sound\tCtrl+Alt+Shift+M"));
+        }
         let _ = AppendMenuW(m, MF_STRING, SETTINGS as usize, w!("Settings…\tCtrl+Alt+Shift+P"));
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(m, MF_STRING, CLOSE as usize, w!("Disconnect Mac Desktop"));
@@ -1525,6 +1544,7 @@ fn ball_menu(frame: HWND, at: POINT) {
             MINIMIZE => { let _ = ShowWindow(frame, SW_MINIMIZE); }
             SETTINGS => open_settings(Some(frame)),
             POINTER => set_local_pointer(!pointer),
+            SOUND => toggle_mute(),
             CLOSE => { let _ = PostMessageW(Some(frame), WM_CLOSE, WPARAM(0), LPARAM(0)); }
             _ => {}
         }
@@ -2255,6 +2275,13 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             if vk == 'C' as u32 && mods.ctrl && mods.alt && mods.shift {
                 if down {
                     set_local_pointer(!local_cursor().load(std::sync::atomic::Ordering::Relaxed));
+                }
+                return LRESULT(0);
+            }
+            // Ctrl+Alt+Shift+M: the Mac's sound off / on
+            if vk == 'M' as u32 && mods.ctrl && mods.alt && mods.shift {
+                if down {
+                    toggle_mute();
                 }
                 return LRESULT(0);
             }

@@ -97,6 +97,13 @@ final class UdpLink {
     /// a datagram of the Mac Desktop's full GameStream session (flow, bytes)
     var onTunnel: ((UInt8, Data) -> Void)?
 
+    /// A packet of sound to the client (`"RM" 26 0` + payload, encrypted).
+    func sendAudio(_ payload: Data) {
+        var d = Data([0x52, 0x4D, 26, 0])
+        d.append(payload)
+        raw(d)
+    }
+
     /// A GameStream datagram to the client's tunnel (`"RM" 25 flow`).
     func sendTunnel(_ flow: UInt8, _ data: Data) {
         var d = Data([0x52, 0x4D, 25, flow])

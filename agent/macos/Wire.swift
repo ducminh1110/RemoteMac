@@ -4,7 +4,7 @@
 import Foundation
 import CryptoKit
 
-enum Chan: UInt8 { case input = 0, control = 1, windowMetadata = 2, video = 3, clipboard = 4, files = 5, telemetry = 6 }
+enum Chan: UInt8 { case input = 0, control = 1, windowMetadata = 2, video = 3, clipboard = 4, files = 5, telemetry = 6, audio = 7 }
 
 func channel(forType t: String) -> Chan {
     switch t {
@@ -198,6 +198,8 @@ final class Sender {
     /// big, unhurried replies (app icons): after control, taking turns with video
     private var bulk: [Data] = []
     private var bulkTurn = false
+    /// sound on the stream (UDP not alive): right after control, at most 100 ms of it queued
+    private var audio: [Data] = []
     private var video: [(data: Data, window: UInt64, key: Bool, queued: CFAbsoluteTime)] = []
     private var waitingForKey: Set<UInt64> = []
     private var maxDelay: Double = 0
@@ -248,6 +250,17 @@ final class Sender {
     /// UDP video path; used while it is alive, TCP otherwise.
     var udp: UdpLink?
 
+    /// A packet of sound (its payload, Audio.swift): UDP while alive, else the Audio channel.
+    func sendAudio(_ payload: Data) {
+        if let u = udp, u.alive { u.sendAudio(payload); return }
+        let d = conn.frame(.audio, payload)
+        cond.lock()
+        audio.append(d)
+        if audio.count > 20 { audio.removeFirst(audio.count - 20) } // late sound is useless: the newest wins
+        cond.signal()
+        cond.unlock()
+    }
+
     func sendVideo(_ p: VideoPacket) {
         if let u = udp, u.alive { u.sendVideo(p); return }
         var ask: UInt64?
@@ -277,9 +290,10 @@ final class Sender {
     private func run() {
         while true {
             cond.lock()
-            while control.isEmpty && video.isEmpty && bulk.isEmpty { cond.wait() }
+            while control.isEmpty && video.isEmpty && bulk.isEmpty && audio.isEmpty { cond.wait() }
             let item: (Data, CFAbsoluteTime?)
             if !control.isEmpty { item = (control.removeFirst(), nil) }
+            else if !audio.isEmpty { item = (audio.removeFirst(), nil) }
             else if !bulk.isEmpty && (video.isEmpty || bulkTurn) { item = (bulk.removeFirst(), nil); bulkTurn = false }
             else { let v = video.removeFirst(); item = (v.data, v.queued); bulkTurn = true }
             cond.unlock()
