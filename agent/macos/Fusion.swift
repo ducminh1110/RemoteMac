@@ -79,6 +79,10 @@ final class DockMirror {
         CGGetDisplaysWithPoint(CGPoint(x: r.midX, y: r.midY), 4, &ids, &n)
         if n > 0 { r = r.intersection(CGDisplayBounds(ids[0])) }
         r = r.integral
+        // even sizes: the video encoder pads an odd one with a row or column of nothing, which
+        // showed as a green line along the Dock (taken from the margin, on the inner side)
+        if Int(r.width) % 2 == 1 { if orientation == "right" { r.origin.x += 1 }; r.size.width -= 1 }
+        if Int(r.height) % 2 == 1 { if orientation != "left" && orientation != "right" { r.origin.y += 1 }; r.size.height -= 1 }
         guard r.width > 8, r.height > 8 else { return .failure(WireError(description: "the Dock is off the screen")) }
         return .success((r, orientation, app.processIdentifier))
     }

@@ -34,8 +34,17 @@ impl Item {
 const ROW: f32 = 28.0;
 const SEP: f32 = 11.0;
 const PAD: f32 = 6.0;
+/// the narrowest a menu is; wider when a row needs it
 #[cfg_attr(not(windows), allow(dead_code))]
 const WIDTH: f32 = 290.0;
+/// where a row's label starts (room for the check mark), the least room between it and its
+/// shortcut, and the room right of the shortcut
+#[cfg_attr(not(windows), allow(dead_code))]
+const LABEL_X: f32 = 34.0;
+#[cfg_attr(not(windows), allow(dead_code))]
+const GAP: f32 = 28.0;
+#[cfg_attr(not(windows), allow(dead_code))]
+const RIGHT: f32 = 14.0;
 
 /// The rows' tops and heights (logical px, from the top of the menu).
 pub fn layout(items: &[Item]) -> (Vec<(f32, f32)>, f32) {
@@ -124,8 +133,21 @@ mod win {
     pub fn show(hinst: HINSTANCE, owner: HWND, at: POINT, left: bool, items: Vec<Item>) -> Option<u32> {
         let scale = surface::scale_at(at.x, at.y);
         let (_, total) = layout(&items);
-        let (w, h) = ((WIDTH * scale).round() as usize, (total * scale).round() as usize);
+        // each row's label and shortcut, drawn once; the menu as wide as its longest row needs
+        let texts: Vec<Option<(Mask, Option<Mask>)>> = items
+            .iter()
+            .map(|it| match it {
+                Item::Action { label, shortcut, .. } => {
+                    let l = surface::text_mask(label, (13.0 * scale).round() as i32, 400, (WIDTH * 1.4 * scale) as usize);
+                    let s = shortcut.as_ref().map(|s| surface::text_mask(s, (12.0 * scale).round() as i32, 400, (WIDTH * 0.8 * scale) as usize));
+                    Some((l, s))
+                }
+                Item::Separator => None,
+            })
+            .collect();
         let wa = surface::work_area_at(at.x, at.y);
+        let need = texts.iter().flatten().map(|(l, s)| LABEL_X * scale + l.1 as f32 + s.as_ref().map_or(0.0, |s| GAP * scale + s.1 as f32) + RIGHT * scale).fold(WIDTH * scale, f32::max);
+        let (w, h) = (need.min((wa.right - wa.left - 8) as f32).round() as usize, (total * scale).round() as usize);
         let mut x = if left { at.x - w as i32 } else { at.x };
         let mut y = at.y;
         x = x.clamp(wa.left + 4, (wa.right - w as i32 - 4).max(wa.left));
@@ -137,17 +159,6 @@ mod win {
         let (base, margin) = surface::glass_panel(x, y, w, h, 12.0 * scale, crate::glass::Kind::Sheet, scale);
         let (dark, accent, _) = surface::glass_look();
         let surf = Surface::new(hinst, CLASS, "Menu", Some(owner), true, true)?;
-        let texts = items
-            .iter()
-            .map(|it| match it {
-                Item::Action { label, shortcut, .. } => {
-                    let l = surface::text_mask(label, (13.0 * scale).round() as i32, 400, (WIDTH * 0.62 * scale) as usize);
-                    let s = shortcut.as_ref().map(|s| surface::text_mask(s, (12.0 * scale).round() as i32, 400, (WIDTH * 0.4 * scale) as usize));
-                    Some((l, s))
-                }
-                Item::Separator => None,
-            })
-            .collect();
         let hwnd = surf.hwnd;
         OPEN.with(|o| {
             *o.borrow_mut() = Some(Open {
@@ -225,9 +236,9 @@ mod win {
                         }
                         if let Some(Some((label, short))) = m.texts.get(i) {
                             let (mask, mw, mh) = label;
-                            c.fill_mask(mask, *mw, (mx + 34.0 * s) as isize, (top + (h - *mh as f32) / 2.0).round() as isize, col);
+                            c.fill_mask(mask, *mw, (mx + LABEL_X * s) as isize, (top + (h - *mh as f32) / 2.0).round() as isize, col);
                             if let Some((mask, sw, sh)) = short {
-                                let x = mx + w - 14.0 * s - *sw as f32;
+                                let x = mx + w - RIGHT * s - *sw as f32;
                                 c.fill_mask(mask, *sw, x.round() as isize, (top + (h - *sh as f32) / 2.0).round() as isize, if lit { Rgba::WHITE.alpha(0.85) } else { fg2 });
                             }
                         }

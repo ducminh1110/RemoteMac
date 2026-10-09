@@ -487,9 +487,10 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
 /// taken at the Dock; the PC's wallpaper set on the Mac and the Mac's own put back.
 fn fusion<S: Read + Write>(c: &mut Ctx<S>) {
     c.send(Message::DockStream { enabled: true });
-    let ok = c.pump(12, |c| c.dock.as_ref().is_some_and(|d| !d.0 || c.dock_frames >= 3));
+    // a still Dock sends few frames (the Mac only captures what changes): one decoded is enough
+    let ok = c.pump(12, |c| c.dock.as_ref().is_some_and(|d| !d.0 || c.dock_picture.is_some()));
     let d = c.dock.clone();
-    let shown = d.as_ref().is_some_and(|d| d.0 && d.2 > 8 && d.3 > 8);
+    let shown = d.as_ref().is_some_and(|d| d.0 && d.2 > 8 && d.3 > 8) && c.dock_picture.is_some();
     c.r.check("Fusion: the Mac's Dock is streamed as a window of its own", ok && shown, format!("status={d:?} frames={} video={:?}", c.dock_frames, c.dock_video));
     if let Some((true, id, w, h, _)) = d {
         let before = c.errors.len();

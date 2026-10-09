@@ -196,9 +196,13 @@ pub fn arrive(app: &str, r: RECT) {
     });
 }
 
-/// The app's first picture is on the screen: fade out.
+/// The app's first picture is on the screen: fade out. Called for every picture while the
+/// window shows, so only the first call counts (a later one would put the fade off for good).
 pub fn done(app: &str) {
     with_card(app, |card| {
+        if card.close_at.is_some() {
+            return;
+        }
         set_status(card, "Ready".into());
         card.close_at = Some(Instant::now() + Duration::from_millis(if card.arrived { 120 } else { 250 }));
     });
