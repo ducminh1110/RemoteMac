@@ -763,10 +763,10 @@ fn launch_app(app: &str) {
                 arguments.push(format!("gamestream={hex}"));
                 with_app(|a| a.gs_key = Some(key));
             }
-            // the "opening" card: icon, name, what is happening and how far along
+            // the loading window: the app's icon and name, a spinner, what is happening
             if let Some((hinst, name, icon, smoke)) = with_app(|a| {
                 let name = a.app_names.iter().find(|(id, _)| id == app).map(|(_, n)| n.clone()).unwrap_or_else(|| if app == DESKTOP_APP { "Mac Desktop".into() } else { app.to_string() });
-                (a.hinst, name, a.icons.get(app).map(|i| HICON(*i as *mut c_void)), a.smoke.is_some())
+                (a.hinst, name, a.icon_rgba.get(app).cloned(), a.smoke.is_some())
             }) {
                 if !smoke {
                     crate::splash::show(HINSTANCE(hinst as *mut c_void), app, &name, icon);
@@ -1134,6 +1134,14 @@ fn handle_event(ev: UiEvent) {
                 }
                 if parent.is_none() {
                     crate::splash::step(&app, 4); // the window is there: waiting for its first picture
+                    // the loading window moves onto it
+                    if let Some(h) = with_app(|a| a.by_id.get(&id).copied()).flatten() {
+                        let mut r = RECT::default();
+                        unsafe {
+                            let _ = GetWindowRect(hwnd_of(h), &mut r);
+                        }
+                        crate::splash::arrive(&app, r);
+                    }
                 }
             }
         }
@@ -1196,6 +1204,7 @@ fn handle_event(ev: UiEvent) {
             });
         }
         UiEvent::Icon { app, size, rgba } => {
+            crate::splash::set_icon(&app, size, &rgba);
             let Some(icon) = native::make_icon(size, &rgba) else { return };
             let known = with_app(|a| {
                 a.icon_rgba.insert(app.clone(), (size, rgba.clone()));
@@ -2780,7 +2789,7 @@ fn smoke_tick() {
         }
         (30, Some(_)) => {
             let ids = with_app(|a| a.launcher.as_ref().map(|l| (l.count(), l.ids.clone()))).flatten();
-            if let Some((3, ids)) = ids {
+            if let Some((4, ids)) = ids {
                 finish("launcher lists the Mac's applications", true, format!("{ids:?}"), 31);
                 launch_app("notes"); // same path as a double-click on the "Notes Test" icon
             }

@@ -5,7 +5,11 @@ pub mod chrome;
 pub mod ico;
 pub mod keymap;
 pub mod lifecycle;
+pub mod loadview;
+pub mod motion;
+pub mod paint;
 pub mod menu;
+pub mod glass;
 pub mod gsdesktop;
 pub mod settings;
 pub mod net;
@@ -33,6 +37,8 @@ pub mod shortcuts;
 pub mod settings_ui;
 #[cfg(windows)]
 pub mod splash;
+#[cfg(windows)]
+pub mod surface;
 #[cfg(windows)]
 pub mod ui;
 
