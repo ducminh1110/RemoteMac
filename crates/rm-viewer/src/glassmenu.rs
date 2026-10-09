@@ -69,7 +69,7 @@ pub fn step(items: &[Item], from: Option<usize>, dir: i32) -> Option<usize> {
 }
 
 #[cfg(windows)]
-pub use win::{register, show};
+pub use win::{cancel, rect, register, show};
 
 #[cfg(windows)]
 mod win {
@@ -251,6 +251,16 @@ mod win {
             m.surf.present(&shown, x, y, 255, None);
             let _ = m.since;
         });
+    }
+
+    /// Close the open menu without a choice.
+    pub fn cancel() {
+        finish(None);
+    }
+
+    /// Where the open menu is (for screenshots).
+    pub fn rect() -> Option<RECT> {
+        OPEN.with(|o| o.borrow().as_ref().and_then(|m| surface::window_rect(m.surf.hwnd)))
     }
 
     fn finish(choice: Option<u32>) {

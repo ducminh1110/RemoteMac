@@ -162,6 +162,11 @@ pub fn step(app: &str, step: u32) {
     });
 }
 
+/// Where `app`'s loading window is (for screenshots).
+pub fn rect(app: &str) -> Option<RECT> {
+    CARDS.with(|c| c.borrow().get(app).and_then(|k| surface::window_rect(k.surf.hwnd)))
+}
+
 pub fn showing(app: &str) -> bool {
     CARDS.with(|c| c.borrow().contains_key(app))
 }

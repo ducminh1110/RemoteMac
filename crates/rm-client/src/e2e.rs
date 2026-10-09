@@ -89,6 +89,15 @@ struct Ctx<'a, S: Read + Write> {
     created_apps: Vec<(u64, String)>,
     /// the app under test
     app: String,
+    /// Desktop Fusion: the Dock's status (available, window, w, h, reason), its frames and
+    /// last video size, the wallpaper's last status
+    dock: Option<(bool, u64, u32, u32, Option<String>)>,
+    dock_frames: usize,
+    dock_video: Option<(u16, u16)>,
+    wallpaper: Option<(bool, Option<String>)>,
+    /// the Dock's last picture (to look at: printed with the report)
+    dock_decoder: Option<rm_decode::H264Decoder>,
+    dock_picture: Option<rm_decode::Picture>,
 }
 
 fn is_timeout(e: &ProtocolError) -> bool {
@@ -110,6 +119,18 @@ impl<S: Read + Write> Ctx<'_, S> {
                 self.audio_peak = self.audio_peak.max(a.samples.iter().map(|s| s.saturating_abs()).max().unwrap_or(0));
             }
             Frame::Msg(Message::AudioStatus { state, reason }) => self.audio_status = Some((state, reason)),
+            Frame::Msg(Message::DockStatus { available, window_id, bounds, reason, .. }) => self.dock = Some((available, window_id, bounds.w, bounds.h, reason)),
+            Frame::Msg(Message::WallpaperStatus { applied, reason }) => self.wallpaper = Some((applied, reason)),
+            Frame::Video(v) if self.dock.as_ref().is_some_and(|d| d.0 && d.1 == v.window_id) => {
+                self.dock_frames += 1;
+                self.dock_video = Some((v.width, v.height));
+                if self.dock_decoder.is_none() {
+                    self.dock_decoder = rm_decode::H264Decoder::new().ok();
+                }
+                if let Some(Ok(Some(p))) = self.dock_decoder.as_mut().map(|d| d.decode(&v.data)) {
+                    self.dock_picture = Some(p);
+                }
+            }
             Frame::Video(v) if self.desktop.map(|d| d.0) == Some(v.window_id) => {
                 self.desktop_frames += 1;
                 self.desktop_video = Some((v.width, v.height));
@@ -243,7 +264,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let caps_dump = serde_json::to_string(&sess.capabilities).unwrap_or_default();
     let mut c = Ctx { sess, r: Report::default(), started: Instant::now(), first_video: None, last_title: String::new(),
         destroyed: false, exited: false, launched_pid: None, errors: vec![], non_annexb: 0,
-        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None, main_rect: None, desktop: None, desktop_frames: 0, desktop_video: None, gs_tunnel: None, gs_out: None, audio_status: None, audio_packets: 0, audio_bad: 0, audio_peak: 0, audio_seq: None, audio_gaps: 0, created_apps: vec![], app: app.to_string() };
+        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None, main_rect: None, desktop: None, desktop_frames: 0, desktop_video: None, gs_tunnel: None, gs_out: None, audio_status: None, audio_packets: 0, audio_bad: 0, audio_peak: 0, audio_seq: None, audio_gaps: 0, created_apps: vec![], app: app.to_string(), dock: None, dock_frames: 0, dock_video: None, wallpaper: None, dock_decoder: None, dock_picture: None };
 
     c.r.check("agent reports capture+input+GUI", caps_ok, caps_dump);
 
@@ -411,6 +432,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     }
 
     documents(&mut c, wid);
+    fusion(&mut c);
 
     // ---- a virtual display the size of the client's monitor; fullscreen fills it exactly
     c.send(Message::DisplayConfigure { width: 1280, height: 720, scale: 1 });
@@ -459,6 +481,90 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let ok = c.pump(10, |c| c.destroyed && c.exited);
     c.r.check("terminate -> WindowDestroyed + AppExited", ok, format!("destroyed={} exited={}", c.destroyed, c.exited));
     c.r
+}
+
+/// Desktop Fusion: the Mac's own Dock streamed (only the Dock and the desktop picture), input
+/// taken at the Dock; the PC's wallpaper set on the Mac and the Mac's own put back.
+fn fusion<S: Read + Write>(c: &mut Ctx<S>) {
+    c.send(Message::DockStream { enabled: true });
+    let ok = c.pump(12, |c| c.dock.as_ref().is_some_and(|d| !d.0 || c.dock_frames >= 3));
+    let d = c.dock.clone();
+    let shown = d.as_ref().is_some_and(|d| d.0 && d.2 > 8 && d.3 > 8);
+    c.r.check("Fusion: the Mac's Dock is streamed as a window of its own", ok && shown, format!("status={d:?} frames={} video={:?}", c.dock_frames, c.dock_video));
+    if let Some((true, id, w, h, _)) = d {
+        let before = c.errors.len();
+        c.send(Message::MouseMove { window_id: id, x: (w / 2) as f64, y: (h / 2) as f64 });
+        c.pump(1, |_| false);
+        c.r.check("Fusion: the pointer over the Dock reaches it on the Mac", !c.errors[before..].iter().any(|e| e.starts_with("input_failed")), format!("{:?}", &c.errors[before..]));
+    }
+    // what the Dock looks like as streamed (a .bmp, base64, between markers in the log)
+    if let Some(p) = c.dock_picture.take() {
+        eprintln!("[INFO] the Mac's Dock as streamed: {}x{} px, {} colours", p.width, p.height, p.distinct_colors());
+        print_picture("DOCK", &p);
+    }
+    c.send(Message::DockStream { enabled: false });
+    let before = c.dock_frames;
+    c.pump(2, |_| false);
+    let after = c.dock_frames;
+    c.pump(1, |_| false);
+    c.r.check("Fusion: the Dock's stream stops when asked", c.dock_frames <= after + 1, format!("frames: {before} -> {after} -> {}", c.dock_frames));
+    // the wallpaper: a picture from the PC (a 1x1 PNG), set, then the Mac's own put back
+    let png = rm_protocol::base64_decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==").unwrap_or_default();
+    let Some(path) = upload(c, 31, "pc-wallpaper.png", &png) else {
+        c.r.check("Fusion: the PC's wallpaper is set on the Mac", false, "upload failed");
+        return;
+    };
+    c.wallpaper = None;
+    c.send(Message::SetWallpaper { path: Some(path), style: "fill".into(), color: "#203040".into() });
+    c.pump(10, |c| c.wallpaper.is_some());
+    let set = c.wallpaper.clone();
+    #[cfg(target_os = "macos")]
+    let saved = std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join("Library/Application Support/RemoteMac/wallpaper-restore.json").exists());
+    #[cfg(not(target_os = "macos"))]
+    let saved: Option<bool> = Some(true);
+    c.r.check("Fusion: the PC's wallpaper is set on the Mac, the Mac's own kept", set.as_ref().is_some_and(|s| s.0) && saved == Some(true), format!("status={set:?} kept={saved:?}"));
+    c.wallpaper = None;
+    c.send(Message::RestoreWallpaper);
+    c.pump(10, |c| c.wallpaper.is_some());
+    #[cfg(target_os = "macos")]
+    let gone = std::env::var_os("HOME").map(|h| !std::path::Path::new(&h).join("Library/Application Support/RemoteMac/wallpaper-restore.json").exists());
+    #[cfg(not(target_os = "macos"))]
+    let gone: Option<bool> = Some(true);
+    c.r.check("Fusion: the Mac's own wallpaper is put back", c.wallpaper.as_ref().is_some_and(|s| !s.0) && gone == Some(true), format!("status={:?} restore pending={:?}", c.wallpaper, gone.map(|g| !g)));
+    c.wallpaper = None;
+    c.send(Message::SetWallpaper { path: Some("/etc/hosts".into()), style: "fill".into(), color: "#000000".into() });
+    c.pump(5, |c| c.wallpaper.is_some());
+    c.r.check("Fusion: a file that was not sent from the PC is not used as wallpaper", c.wallpaper.as_ref().is_some_and(|s| !s.0 && s.1.is_some()), format!("{:?}", c.wallpaper));
+}
+
+/// A picture as a 24-bit .bmp, base64 in lines between `<tag>-PICTURE-BEGIN` and `-END`
+/// (CI logs are where it can be looked at).
+pub fn print_picture(tag: &str, p: &rm_decode::Picture) {
+    let (w, h) = (p.width, p.height);
+    let row = (w * 3).div_ceil(4) * 4;
+    let size = 54 + row * h;
+    let mut b = Vec::with_capacity(size);
+    b.extend_from_slice(b"BM");
+    b.extend_from_slice(&(size as u32).to_le_bytes());
+    b.extend_from_slice(&[0, 0, 0, 0, 54, 0, 0, 0, 40, 0, 0, 0]);
+    b.extend_from_slice(&(w as i32).to_le_bytes());
+    b.extend_from_slice(&(-(h as i32)).to_le_bytes());
+    b.extend_from_slice(&[1, 0, 24, 0, 0, 0, 0, 0]);
+    b.extend_from_slice(&((row * h) as u32).to_le_bytes());
+    b.extend_from_slice(&[0; 16]);
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            b.extend_from_slice(&p.bgra[i..i + 3]);
+        }
+        b.extend(std::iter::repeat_n(0u8, row - w * 3));
+    }
+    let s = rm_protocol::base64_encode(&b);
+    eprintln!("{tag}-PICTURE-BEGIN {w}x{h}");
+    for chunk in s.as_bytes().chunks(4000) {
+        eprintln!("{}", String::from_utf8_lossy(chunk));
+    }
+    eprintln!("{tag}-PICTURE-END");
 }
 
 /// Upload `bytes` as `name`; the path on the Mac.

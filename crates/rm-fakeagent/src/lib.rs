@@ -25,6 +25,10 @@ pub const UPLOAD_DIR: &str = "/Users/runner/Downloads/RemoteMac Uploads";
 
 /// "desktop" is the whole Mac (one window showing the screen); input on it goes to the window
 /// under the pointer, like on the real agent.
+/// The Dock's window id and size (as the Mac's: Fusion.swift).
+const DOCK_ID: u64 = 0x7FFF_0002;
+const DOCK: (usize, usize) = (480, 64);
+
 const APPS: [(&str, &str); 4] = [("desktop", "Mac Desktop"), ("testapp", "RM Test App"), ("notes", "Notes Test"), ("textedit", "TextEdit")];
 
 fn caps() -> CapabilityReport {
@@ -92,6 +96,10 @@ struct State {
     gs_ready: bool,
     /// sound is being sent (a 440 Hz tone): set to stop it
     audio: Option<Arc<AtomicBool>>,
+    /// the Dock is streamed: set to stop it
+    dock: Option<Arc<AtomicBool>>,
+    /// the wallpaper set from the PC (path or colour), if any
+    wallpaper: Option<String>,
 }
 
 type Writer<W> = Arc<Mutex<W>>;
@@ -226,7 +234,7 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
         Some(Message::ClientHello(_)) => {}
         _ => return Ok(()),
     }
-    send(&writer, &Message::ServerHello(Hello::ours("rm-fakeagent", &["h264"], &["control", "video", "files", "audio", "open_file"])))?;
+    send(&writer, &Message::ServerHello(Hello::ours("rm-fakeagent", &["h264"], &["control", "video", "files", "audio", "open_file", "fusion"])))?;
     send(&writer, &Message::CapabilityReport(caps()))?;
     // TCP messages and input that came over UDP (the direct path) go through one loop
     let (tx, rx) = std::sync::mpsc::channel::<Result<Option<Message>, ProtocolError>>();
@@ -497,6 +505,34 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
                 }
             }
             Message::Ping { nonce } => send(&writer, &Message::Pong { nonce })?,
+            // Desktop Fusion: a strip streamed as the Dock, the wallpaper kept (scripted)
+            Message::DockStream { enabled } => {
+                let mut s = st.lock().unwrap();
+                if let Some(stop) = s.dock.take() {
+                    stop.store(true, Ordering::SeqCst);
+                }
+                if enabled {
+                    let stop = Arc::new(AtomicBool::new(false));
+                    s.dock = Some(stop.clone());
+                    drop(s);
+                    send(&writer, &Message::DockStatus { available: true, window_id: DOCK_ID, bounds: Rect { x: 220, y: 1000, w: DOCK.0 as u32, h: DOCK.1 as u32 }, edge: "bottom".into(), reason: None })?;
+                    let (wr, st2) = (writer.clone(), st.clone());
+                    std::thread::spawn(move || video_loop(wr, st2, DOCK_ID, DOCK.0, DOCK.1, 200, stop));
+                }
+            }
+            Message::SetWallpaper { path, style: _, color } => {
+                let known = path.as_ref().is_none_or(|p| st.lock().unwrap().files.contains_key(p));
+                if known {
+                    st.lock().unwrap().wallpaper = Some(path.unwrap_or(color));
+                    send(&writer, &Message::WallpaperStatus { applied: true, reason: None })?;
+                } else {
+                    send(&writer, &Message::WallpaperStatus { applied: false, reason: Some("only an image sent from Windows is used".into()) })?;
+                }
+            }
+            Message::RestoreWallpaper => {
+                st.lock().unwrap().wallpaper = None;
+                send(&writer, &Message::WallpaperStatus { applied: false, reason: None })?;
+            }
             Message::AudioControl { enabled } => {
                 let mut s = st.lock().unwrap();
                 if let Some(stop) = s.audio.take() {

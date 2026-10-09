@@ -137,6 +137,13 @@ impl Drop for Surface {
     }
 }
 
+/// A window's rectangle on the screen (for screenshots of surfaces).
+pub fn window_rect(hwnd: HWND) -> Option<RECT> {
+    let mut r = RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut r).ok()? };
+    (r.right > r.left).then_some(r)
+}
+
 /// What the screen shows at (x, y, w, h) (screen pixels): the backdrop of a glass surface,
 /// taken before the surface shows. None when the screen cannot be read (a secure desktop).
 pub fn capture(x: i32, y: i32, w: usize, h: usize) -> Option<Canvas> {

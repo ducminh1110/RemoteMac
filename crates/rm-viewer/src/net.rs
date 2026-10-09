@@ -190,6 +190,9 @@ pub enum UiEvent {
     AppExited(String),
     /// The Mac started the app (the launch card moves on).
     Launched(String),
+    /// The Mac's own Dock (Desktop Fusion): streamed as window `id` from this region of the
+    /// Mac's screen (points), at `edge`; or why it cannot be shown.
+    Dock { available: bool, id: u64, x: i32, y: i32, w: u32, h: u32, edge: String, reason: Option<String> },
     Notice(String),
     Disconnected(String),
 }
@@ -616,6 +619,8 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
                 Message::AppExited { application_id, .. } => emit(UiEvent::AppExited(application_id)),
                 Message::AppLaunched { application_id, .. } => emit(UiEvent::Launched(application_id)),
                 Message::AudioStatus { state, reason } => crate::audio::audio().set_mac_status(&state, reason.as_deref()),
+                Message::DockStatus { available, window_id, bounds, edge, reason } => emit(UiEvent::Dock { available, id: window_id, x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, edge, reason }),
+                Message::WallpaperStatus { applied, reason } => eprintln!("wallpaper on the Mac: {}", if applied { "this PC's".to_string() } else { reason.unwrap_or_else(|| "the Mac's own".into()) }),
                 Message::Error { code, message } => emit(UiEvent::Notice(format!("{code}: {message}"))),
                 Message::CapabilityUnavailable { capability, reason } => emit(UiEvent::Notice(format!("{capability} unavailable: {reason}"))),
                 Message::P2pOffer { secret, candidates } => {
@@ -635,17 +640,15 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
     }
 }
 
-/// Send a local file to the agent in protocol-sized chunks. Runs on the caller's thread
-/// (the UI spawns one); the agent answers with `FileUploaded` / `FileUploadFailed`.
-pub fn upload_file(link: &Link, transfer_id: u64, path: &std::path::Path) -> Result<u64, String> {
+/// [`upload_file`] under another name on the Mac.
+pub fn upload_file_as(link: &Link, transfer_id: u64, path: &std::path::Path, name: &str) -> Result<u64, String> {
     use std::io::Read;
     let mut f = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let size = f.metadata().map_err(|e| e.to_string())?.len();
     if size > rm_protocol::MAX_UPLOAD {
         return Err(format!("{} is larger than the {} byte limit", path.display(), rm_protocol::MAX_UPLOAD));
     }
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "upload".into());
-    link.send(&Message::FileUploadBegin { transfer_id, name, size });
+    link.send(&Message::FileUploadBegin { transfer_id, name: name.into(), size });
     let mut buf = vec![0u8; rm_protocol::UPLOAD_CHUNK];
     let mut offset = 0u64;
     loop {
@@ -658,6 +661,13 @@ pub fn upload_file(link: &Link, transfer_id: u64, path: &std::path::Path) -> Res
     }
     link.send(&Message::FileUploadEnd { transfer_id });
     Ok(offset)
+}
+
+/// Send a local file to the agent in protocol-sized chunks. Runs on the caller's thread
+/// (the UI spawns one); the agent answers with `FileUploaded` / `FileUploadFailed`.
+pub fn upload_file(link: &Link, transfer_id: u64, path: &std::path::Path) -> Result<u64, String> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "upload".into());
+    upload_file_as(link, transfer_id, path, &name)
 }
 
 #[cfg(test)]

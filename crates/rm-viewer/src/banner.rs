@@ -96,6 +96,11 @@ pub fn connected() {
     });
 }
 
+/// Where it is (for screenshots).
+pub fn rect() -> Option<RECT> {
+    BANNER.with(|b| b.borrow().as_ref().and_then(|m| surface::window_rect(m.surf.hwnd)))
+}
+
 /// Gone at once (connecting again failed: a message says why).
 pub fn hide() {
     let b = BANNER.with(|b| b.borrow_mut().take());

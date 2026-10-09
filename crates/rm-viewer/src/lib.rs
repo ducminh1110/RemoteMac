@@ -45,6 +45,8 @@ pub mod splash;
 #[cfg(windows)]
 pub mod surface;
 #[cfg(windows)]
+pub mod wallpaper;
+#[cfg(windows)]
 pub mod ui;
 
 /// Whether the viewer keeps a log: only when started with `--logs-enabled` (or RM_LOGS=1).

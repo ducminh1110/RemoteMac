@@ -198,6 +198,9 @@ final class WindowStream: NSObject, SCStreamOutput {
     /// A pop-up menu or popover: ScreenCaptureKit does not capture those as a window of their own
     /// (it gave the whole display), so its rectangle of the display is captured instead.
     var popup = false
+    /// A region of a display with only some apps' windows in it (the Mac's Dock over the
+    /// desktop picture: Fusion.swift): (display, region in screen points, those apps).
+    var region: (CGDirectDisplayID, CGRect, Set<pid_t>)?
     private var config: SCStreamConfiguration?
 
     /// The Mac's pointer in the picture or not (the viewer shows its own instead), live.
@@ -213,6 +216,24 @@ final class WindowStream: NSObject, SCStreamOutput {
 
     func start() async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        if let rg = region {
+            let (did, r, pids) = rg
+            guard let d = content.displays.first(where: { $0.displayID == did }) else { throw WireError(description: "display \(did) not shareable") }
+            let cfg = SCStreamConfiguration()
+            cfg.sourceRect = CGRect(x: r.minX - d.frame.minX, y: r.minY - d.frame.minY, width: r.width, height: r.height)
+            (cfg.width, cfg.height) = capturePixels(r.width, r.height, backing: backingScale(of: r))
+            cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
+            cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2
+            cfg.queueDepth = 6; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true
+            let apps = content.applications.filter { pids.contains($0.processID) }
+            let s = SCStream(filter: SCContentFilter(display: d, including: apps, exceptingWindows: []), configuration: cfg, delegate: nil)
+            try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
+            t0 = CFAbsoluteTimeGetCurrent()
+            config = cfg
+            try await s.startCapture()
+            scStream = s
+            return
+        }
         if let did = display {
             guard let d = content.displays.first(where: { $0.displayID == did }) else { throw WireError(description: "display \(did) not shareable") }
             let cfg = SCStreamConfiguration()
@@ -340,7 +361,7 @@ final class WindowStream: NSObject, SCStreamOutput {
         let capUs = cap.isFinite && cap > 0 ? UInt64(cap * 1_000_000) : nowUs
         let ptsUs = (capUs <= nowUs && nowUs - capUs < 1_000_000) ? capUs : nowUs
         // (not a popup: its first row is not window buttons, filling it hid the item there)
-        if display == nil && !popup && pointsWide > 0 {
+        if display == nil && region == nil && !popup && pointsWide > 0 {
             polish(pb, scale: CGFloat(w) / pointsWide, hideButtons: inset == 0)
         }
         lock.lock(); lastPB = pb; lock.unlock()

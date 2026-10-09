@@ -389,6 +389,40 @@ pub enum Message {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         application_id: Option<String>,
     },
+    /// Client -> agent (feature "fusion"): show the Mac's own Dock on this PC (`enabled`), or
+    /// stop. The agent answers with `DockStatus` and streams the Dock as the window
+    /// `window_id`: only the Dock and the desktop picture behind it are captured (with the
+    /// wallpapers matched, the strip reads as the Dock over this PC's own desktop).
+    DockStream { enabled: bool },
+    /// Agent -> client: the Mac's Dock (`bounds` in Mac points, on its screen; `edge` "bottom",
+    /// "left" or "right"), or why it cannot be shown (`available` false: it hides itself…).
+    DockStatus {
+        available: bool,
+        window_id: u64,
+        bounds: Rect,
+        #[serde(default)]
+        edge: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// Client -> agent (feature "fusion"): use this PC's wallpaper on the Mac: `path` an image
+    /// uploaded this session (None: the plain colour), `style` "fill", "fit", "stretch",
+    /// "center" or "tile", `color` "#RRGGBB" around a fitted picture. The Mac keeps its own
+    /// wallpaper and puts it back when the session ends (or at the next start after a crash).
+    SetWallpaper {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        style: String,
+        color: String,
+    },
+    /// Client -> agent: put the Mac's own wallpaper back now.
+    RestoreWallpaper,
+    /// Agent -> client: whether this PC's wallpaper is on the Mac now, or why not.
+    WallpaperStatus {
+        applied: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     /// Client -> agent (feature "audio"): send the sound of the session's apps (`enabled`), or
     /// stop. The Mac sends nothing on the Audio channel before this.
     AudioControl { enabled: bool },
@@ -851,6 +885,24 @@ mod tests {
         assert_eq!(read_frame(&mut cur).unwrap().unwrap(), Frame::Video(f));
         assert_eq!(read_frame(&mut cur).unwrap().unwrap(), Frame::Msg(Message::Ping { nonce: 5 }));
         assert!(read_frame(&mut cur).unwrap().is_none());
+    }
+
+    #[test]
+    fn fusion_messages() {
+        for m in [
+            Message::DockStream { enabled: true },
+            Message::DockStatus { available: true, window_id: 9, bounds: Rect { x: 300, y: 1000, w: 900, h: 80 }, edge: "bottom".into(), reason: None },
+            Message::SetWallpaper { path: Some("/Users/me/Downloads/RemoteMac Uploads/w.jpg".into()), style: "fill".into(), color: "#1E1E1E".into() },
+            Message::SetWallpaper { path: None, style: "fill".into(), color: "#003366".into() },
+            Message::RestoreWallpaper,
+            Message::WallpaperStatus { applied: false, reason: Some("x".into()) },
+        ] {
+            let b = encode(&m).unwrap();
+            assert_eq!(decode(&b).unwrap().unwrap().0, m);
+        }
+        // an older agent's status without an edge still reads
+        let j = r#"{"type":"dock_status","available":false,"window_id":0,"bounds":{"x":0,"y":0,"w":0,"h":0},"reason":"hidden"}"#;
+        assert!(matches!(serde_json::from_str::<Message>(j).unwrap(), Message::DockStatus { available: false, .. }));
     }
 
     #[test]

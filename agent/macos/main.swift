@@ -55,6 +55,9 @@ if goBackground, let pid = runningInBackground() {
     print("MacBridge is already running in the background (pid \(pid)). Stop it with: \(CommandLine.arguments[0]) --stop")
     exit(1)
 }
+// a session that ended without a word (a crash, power lost) may have left the PC's wallpaper
+// (not while another MacBridge runs: it may be showing it)
+if runningInBackground() == nil { Wallpaper.restore() }
 // no relay: reachable from this network only (the viewer finds the Mac by its ID there)
 let relayAddr: String? = [relayArg, env["RM_RELAY"], defaultRelay].compactMap { $0?.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty }
 let sessionID: String, token: String
@@ -239,7 +242,7 @@ do {
     guard cmin <= 1 && cmax >= 1 else {
         try conn.send(["type": "error", "code": "version_mismatch", "message": "agent speaks protocol 1, client \(cmin)...\(cmax)"]); exit(1)
     }
-    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file"],
+    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "fusion"],
                    "max_surface": [3840, 2160], "agent": "macbridge \(appVersion) \(ProcessInfo.processInfo.operatingSystemVersionString)"])
     try conn.send(probeCapabilities())
 } catch { fail("handshake: \(error)") }
@@ -253,6 +256,7 @@ let apps = AppManager()
 let tracker = WindowTracker(apps: apps)
 let desktop = DesktopSession()
 let injector = InputInjector(tracker: tracker, desktop: desktop)
+injector.dockRect = { dockMirror.rect }
 let streamsLock = NSLock()
 var streams: [CGWindowID: WindowStream] = [:]
 var lastSize: [CGWindowID: CGSize] = [:]
@@ -287,6 +291,7 @@ sender.onBitrate = { b in
     log("bitrate -> \(b / 1000) kbit/s (dropped frames so far: \(sender.dropped + (sender.udp?.dropped ?? 0)))")
     streamsLock.lock(); let all = Array(streams.values); streamsLock.unlock()
     for ws in all { ws.setBitrate(b) }
+    dockMirror.setBitrate(b)
 }
 // video over UDP + FEC beside the TCP connection (RM_NO_UDP=1: TCP only)
 // (with the client on this network, or no relay, a port that ignores it stands in for the
@@ -398,6 +403,12 @@ audioCap.onStatus = { state, why in
     if let w = why { m["reason"] = w }
     send(m)
 }
+
+// Desktop Fusion: the Mac's own Dock streamed to Windows, over the PC's wallpaper
+let dockMirror = DockMirror()
+dockMirror.onPacket = { pkt in sender.sendVideo(pkt) }
+dockMirror.onStatus = { m in send(m) }
+dockMirror.onShown = { d in tracker.setDock(d) }
 
 let uploads = UploadStore(send: send)
 uploads.cleanup() // leftovers of a session that ended without cleaning (crash, power loss)
@@ -725,6 +736,8 @@ func handle(_ m: [String: Any]) {
         clipboard.apply(t)
     case "clipboard_image":
         if let d = Data(base64Encoded: m["bmp_base64"] as? String ?? "") { clipboard.applyImage(d) }
+    case "request_keyframe" where CGWindowID(int(m["window_id"])) == dockWindowID:
+        dockMirror.requestKeyframe()
     case "request_keyframe":
         let wid = CGWindowID(int(m["window_id"]))
         streamsLock.lock(); let ws = streams[wid]; streamsLock.unlock()
@@ -769,6 +782,28 @@ func handle(_ m: [String: Any]) {
                     stopStream(id); startStream(id, inset: w.inset, popup: w.role == .popup)
                 }
             }
+        }
+    case "dock_stream":
+        let on = m["enabled"] as? Bool ?? false
+        log("Mac Dock on Windows: \(on ? "asked for" : "no longer wanted")")
+        if on { dockMirror.start() } else { dockMirror.stop() }
+    case "set_wallpaper":
+        let path = m["path"] as? String
+        if let p = path, let why = Wallpaper.rejection(p, uploads: uploads.dir) {
+            send(["type": "wallpaper_status", "applied": false, "reason": why]); break
+        }
+        let (style, color) = (m["style"] as? String ?? "fill", m["color"] as? String ?? "#000000")
+        DispatchQueue.global().async {
+            if let why = Wallpaper.apply(path: path, style: style, color: color) {
+                send(["type": "wallpaper_status", "applied": false, "reason": why])
+            } else {
+                send(["type": "wallpaper_status", "applied": true])
+            }
+        }
+    case "restore_wallpaper":
+        DispatchQueue.global().async {
+            Wallpaper.restore()
+            send(["type": "wallpaper_status", "applied": false])
         }
     case "audio_control":
         let on = m["enabled"] as? Bool ?? false
@@ -835,6 +870,7 @@ Thread {
         // the sound follows the session's apps (one launched, one quit)
         ticks += 1
         if ticks % 2 == 0 { audioCap.update(everything: desktop.isActive, pids: Set(apps.pids)) }
+        if ticks % 2 == 1 { dockMirror.refresh() } // the Dock grew, moved, or restarted
         let heard = max(heardOverTCP, sender.udp?.lastHeard ?? 0)
         let silent = CFAbsoluteTimeGetCurrent() - heard
         if viewerSendsHeartbeats && silent > 10 {
@@ -860,6 +896,7 @@ let reader = Thread {
     // viewer finds them again when it connects back
     if connectionLost { log("the apps stay open for the viewer to come back to") } else { apps.terminateAll() }
     displays.setChromeHidden(false) // the menu bar and Dock as the user had them
+    Wallpaper.restore()              // and the wallpaper
     displays.unmirrorDesktop()
     uploads.cleanup()   // the session's uploaded files go with it
     // ready for the next connection (same ID and password)

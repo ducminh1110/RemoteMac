@@ -197,6 +197,11 @@ final class WindowTracker {
     /// Processes found not to be apps to show (system UI, helpers).
     private var notAdoptable: Set<pid_t> = []
 
+    /// The Mac's Dock shown on Windows (Fusion.swift): its pid and region. Its menus and stacks
+    /// are popups over it there.
+    private var dockShown: (pid: pid_t, rect: CGRect)?
+    func setDock(_ d: (pid_t, CGRect)?) { queue.async { self.dockShown = d.map { (pid: $0.0, rect: $0.1) } } }
+
     /// The viewer clicked or typed in a window of the session: a window that another app opens
     /// in the next few seconds (a document double-clicked in Finder opens in Preview) is the
     /// user's doing, and that app is shown on Windows too.
@@ -305,7 +310,9 @@ final class WindowTracker {
         sheets = sheets.filter { onScreen.contains($0.key) }
         for (id, pid, title, rect, layer) in windows where !preexisting.contains(id) && !ignored.contains(id) {
             let fromService = servicePids.contains(pid)
-            guard launched.contains(pid) || fromService || companions[pid] != nil else { continue }
+            // a menu or stack of the Mac's Dock shown on Windows (not the Dock itself)
+            let dockPopup = dockShown.map { pid == $0.pid && !rect.contains(CGPoint(x: $0.rect.midX, y: $0.rect.midY)) && layer > 0 } ?? false
+            guard launched.contains(pid) || fromService || companions[pid] != nil || dockPopup else { continue }
             seen.insert(id)
             if var old = known[id] {
                 if old.rect != rect {
@@ -328,6 +335,12 @@ final class WindowTracker {
             // (a pop-up menu is drawn at once: shown without the wait)
             if age < (layer == popUpMenuLayer ? 1 : 3) { continue }
             pending.removeValue(forKey: id)
+            if dockPopup {
+                let w = WinInfo(id: id, pid: pid, title: title, rect: rect, appID: "dock", role: .popup, parent: dockWindowID)
+                known[id] = w
+                onCreated?(w)
+                continue
+            }
             guard let appID = apps.appID(forPid: pid) ?? companions[pid] ?? (fromService ? frontLaunchedApp() : nil) else { continue }
             let first = !known.values.contains { $0.appID == appID && $0.role == .window }
             // a menu, popover or completion list over a window the app already shows is a popup

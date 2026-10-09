@@ -6,7 +6,7 @@ import Foundation
 import ApplicationServices
 import CoreGraphics
 
-private var supportDirectory: URL {
+var supportDirectory: URL {
     FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/RemoteMac", isDirectory: true)
 }
 private var pidFile: URL { supportDirectory.appendingPathComponent("macbridge.pid") }
@@ -65,6 +65,7 @@ func stopBackground() -> Bool {
     for _ in 0..<30 where kill(pid, 0) == 0 { usleep(100_000) }
     if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
     try? FileManager.default.removeItem(at: pidFile)
+    Wallpaper.restore() // the Mac's own wallpaper, if a session had changed it
     print("MacBridge stopped (pid \(pid)).")
     return true
 }

@@ -115,7 +115,7 @@ impl Field {
 }
 
 #[cfg(windows)]
-pub use win::{close, register, show, showing};
+pub use win::{close, rect, register, show, showing, type_text};
 
 #[cfg(windows)]
 mod win {
@@ -233,6 +233,17 @@ mod win {
             let _ = SetFocus(Some(hwnd));
             SetTimer(Some(hwnd), TIMER, 16, None);
         }
+    }
+
+    /// Where it is (for screenshots).
+    pub fn rect() -> Option<RECT> {
+        OPEN.with(|o| o.borrow().as_ref().and_then(|m| surface::window_rect(m.surf.hwnd)))
+    }
+
+    /// Type into the field (as the keyboard does).
+    pub fn type_text(s: &str) {
+        OPEN.with(|o| o.borrow_mut().as_mut().map(|m| m.field.insert(s)));
+        refilter();
     }
 
     /// Close (fading out).

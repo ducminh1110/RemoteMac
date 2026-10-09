@@ -148,7 +148,7 @@ pub fn show(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: i
         let m_items: Vec<String> = MOTION_LEVELS.iter().map(|x| x.to_string()).collect();
         let motion = combo(hwnd, hinst, cx, y, cw, &m_items, current.motion as usize, font);
         y += row;
-        let dock = button(hwnd, hinst, lx, y, px(450), "Desktop Fusion: show the Mac Dock while connected (experimental)", 203, BS_AUTOCHECKBOX as u32, font);
+        let dock = button(hwnd, hinst, lx, y, px(450), "Desktop Fusion: the Mac's Dock on this PC's wallpaper (experimental)", 203, BS_AUTOCHECKBOX as u32, font);
         SendMessageW(dock, BM_SETCHECK, Some(WPARAM(current.dock as usize)), None);
         y += px(34);
         label(hwnd, hinst, lx, y, px(445), px(44), "Decoder, frame pacing and Mac Desktop scale apply to windows opened from now on.", font);
