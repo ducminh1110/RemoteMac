@@ -70,6 +70,20 @@ func stopBackground() -> Bool {
     return true
 }
 
+/// `--check-permissions`: what macOS allows this program (through the app it runs in), without
+/// asking for anything. 0 when all is there, 3 when something is missing.
+func checkPermissions() -> Int32 {
+    let screen = CGPreflightScreenCaptureAccess()
+    let ax = AXIsProcessTrusted()
+    let gui = CGSessionCopyCurrentDictionary() != nil
+    func line(_ ok: Bool, _ what: String, _ why: String) -> String { "  \(ok ? "ok     " : "MISSING") \(what)\(ok ? "" : ": \(why)")" }
+    print("MacBridge permissions:")
+    print(line(gui, "logged-in desktop session", "run MacBridge from a logged-in user's desktop (not over SSH alone)"))
+    print(line(screen, "Screen Recording", "System Settings > Privacy & Security > Screen Recording"))
+    print(line(ax, "Accessibility", "System Settings > Privacy & Security > Accessibility"))
+    return gui && screen && ax ? 0 : 3
+}
+
 /// What macOS still has to allow (asked for here, so the system's prompt opens now).
 func permissionWarnings() -> [String] {
     var w: [String] = []

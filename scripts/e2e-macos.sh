@@ -88,6 +88,20 @@ fi
 grep -q "wrong password" out/client-direct-wrong.log || { echo "wrong password (typed address): unexpected reply: $(cat out/client-direct-wrong.log)"; [[ $RC == 0 ]] && RC=1; }
 grep -q "Or type this Mac's address" out/agent-banner.txt || { echo "the banner does not show the Mac's address"; [[ $RC == 0 ]] && RC=1; }
 
+# the launcher users start (./macbridge.sh): it passes options on, says when the program is
+# missing, and reports the privacy permissions (granted or not depends on this runner)
+L=out/launcher; rm -rf $L; mkdir -p $L
+cp agent/macos/macbridge.sh $L/
+"$L/macbridge.sh" --version >/dev/null 2>out/launcher-missing.txt; LRC=$?
+[[ $LRC == 2 ]] && grep -q "not next to this script" out/launcher-missing.txt \
+  || { echo "launcher without the program: exit $LRC, $(cat out/launcher-missing.txt)"; [[ $RC == 0 ]] && RC=1; }
+cp out/remote-agent-mac $L/macbridge
+[[ "$("$L/macbridge.sh" --version)" == "macbridge "* ]] || { echo "the launcher does not pass --version on"; [[ $RC == 0 ]] && RC=1; }
+"$L/macbridge.sh" --check >out/launcher-check.txt 2>&1; LRC=$?
+echo "=== launcher --check (exit $LRC)"; cat out/launcher-check.txt
+{ [[ $LRC == 0 || $LRC == 3 ]] && grep -q "MacBridge permissions:" out/launcher-check.txt; } \
+  || { echo "the launcher's permission check failed"; [[ $RC == 0 ]] && RC=1; }
+
 # far, lossy link: a relay limited to 6 Mbit/s that drops 5% of UDP packets; FEC rebuilds them
 # and the agent adapts its bitrate instead of queueing video (informational, not gating)
 # (RM_NO_P2P, RM_NO_LAN: this one must go through the throttled relay)

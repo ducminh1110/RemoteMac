@@ -49,11 +49,16 @@ jobs:
           codesign --force -s - dist/MacBridge/macbridge
           lipo -info dist/MacBridge/macbridge
           dist/MacBridge/macbridge --help
+          install -m 0755 agent/macos/macbridge.sh dist/MacBridge/macbridge.sh
           cat > dist/MacBridge/README.txt <<'TXT'
           MacBridge for macOS (14 or later, Apple silicon and Intel)
 
             xattr -d com.apple.quarantine macbridge 2>/dev/null; chmod +x macbridge
-            ./macbridge --password YOUR-PASSWORD
+            ./macbridge.sh --password YOUR-PASSWORD
+
+          macbridge.sh checks the program, macOS and the permissions first, says what is
+          missing and how to allow it, then starts macbridge (./macbridge works as well;
+          ./macbridge.sh --check only checks).
 
           It prints the ID and the password, then keeps running in the background
           (also after the terminal is closed). Type both into MacBridge.exe on Windows.

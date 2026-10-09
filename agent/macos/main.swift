@@ -25,6 +25,7 @@ usage: macbridge [--password SECRET] [--id 123456789] [--relay HOST:PORT] [--por
   --foreground       stay in the terminal instead of going to the background
   --logs-enabled     write a log (stderr; in the background ~/Library/Logs/MacBridge/macbridge.log)
   --stop             stop the MacBridge running in the background
+  --check-permissions  say which macOS permissions are missing (exit 3 when one is)
   --version          show the version
 """
 var relayArg: String?, sessionArg: String?, passwordArg: String?, idArg: String?, foreground = false
@@ -43,6 +44,7 @@ while let a = argv.next() {
     case "--stop": exit(stopBackground() ? 0 : 1)
     case "-h", "--help": print(usage); exit(0)
     case "--version": print("macbridge \(appVersion)"); exit(0)
+    case "--check-permissions": exit(checkPermissions())
     default: fail(usage)
     }
 }
