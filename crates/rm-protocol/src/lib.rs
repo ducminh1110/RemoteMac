@@ -47,6 +47,8 @@ pub enum Channel {
     Clipboard = 4,
     Files = 5,
     Telemetry = 6,
+    /// Binary: sound from the Mac ([`audio::AudioPacket`]), only after the viewer asked for it.
+    Audio = 7,
 }
 
 impl Channel {
@@ -62,6 +64,7 @@ impl Channel {
             4 => Channel::Clipboard,
             5 => Channel::Files,
             6 => Channel::Telemetry,
+            7 => Channel::Audio,
             n => return Err(ProtocolError::UnknownChannel(n)),
         })
     }
@@ -377,6 +380,108 @@ pub enum Message {
     Key { window_id: u64, physical_key: String, modifiers: Vec<Modifier>, down: bool },
     TextInput { window_id: u64, text: String },
 
+    /// Client -> agent (feature "open_file"): open this document on the Mac (a file uploaded
+    /// from this PC, or one in the user's own folders), with the listed app `application_id` or
+    /// its default app. Apps, installers, scripts and executables are refused (`error`
+    /// "open_rejected"); the app that opens it is then shown like a launched one.
+    OpenFile {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        application_id: Option<String>,
+    },
+    /// Client -> agent (feature "fusion"): show the Mac's own Dock on this PC (`enabled`), or
+    /// stop. The agent answers with `DockStatus` and streams the Dock as the window
+    /// `window_id`: only the Dock and the desktop picture behind it are captured (with the
+    /// wallpapers matched, the strip reads as the Dock over this PC's own desktop).
+    DockStream { enabled: bool },
+    /// Agent -> client: the Mac's Dock (`bounds` in Mac points, on its screen; `edge` "bottom",
+    /// "left" or "right"), or why it cannot be shown (`available` false: it hides itself…).
+    DockStatus {
+        available: bool,
+        window_id: u64,
+        bounds: Rect,
+        #[serde(default)]
+        edge: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// Client -> agent (feature "fusion"): use this PC's wallpaper on the Mac: `path` an image
+    /// uploaded this session (None: the plain colour), `style` "fill", "fit", "stretch",
+    /// "center" or "tile", `color` "#RRGGBB" around a fitted picture. The Mac keeps its own
+    /// wallpaper and puts it back when the session ends (or at the next start after a crash).
+    SetWallpaper {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        style: String,
+        color: String,
+    },
+    /// Client -> agent: put the Mac's own wallpaper back now.
+    RestoreWallpaper,
+    /// Agent -> client: whether this PC's wallpaper is on the Mac now, or why not.
+    WallpaperStatus {
+        applied: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// Agent -> client (feature "mask"): how opaque each pixel of window `window_id`'s picture
+    /// is (`width`x`height`, the picture's own size): its rounded corners, a menu's or the
+    /// Dock's shape, as the Mac draws them. Where it is 0 the window is not there and what is
+    /// behind it on this PC shows (the video, which has no transparency, is black there; at the
+    /// edges it is the window's colour already mixed with black, so it is used as premultiplied).
+    /// `rle`: base64 of [`mask`] runs; empty: fully opaque. Sent when a stream starts (after
+    /// each size change); a mask whose size is not the picture's is not used.
+    WindowMask {
+        window_id: u64,
+        width: u32,
+        height: u32,
+        #[serde(default)]
+        rle: String,
+    },
+    /// Client -> agent (feature "exact"): show windows as the Mac draws them, title bar and its
+    /// buttons included (`exact`), or with the title bar cut off for the viewer's own (false,
+    /// the default). Applies to the streams started after it (send it before launching).
+    WindowStyle { exact: bool },
+    /// Agent -> client (feature "exact"): the title bar of window `window_id` (an exact
+    /// window), in points from the top-left of its picture: `title_height` the band it is
+    /// dragged by; `close`, `minimize`, `zoom` its buttons; `controls` what else in that band
+    /// takes clicks (toolbar items, tabs, fields): those go to the Mac, the rest of the band
+    /// moves the window here.
+    WindowChrome {
+        window_id: u64,
+        title_height: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        close: Option<Rect>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        minimize: Option<Rect>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        zoom: Option<Rect>,
+        #[serde(default)]
+        controls: Vec<Rect>,
+    },
+    /// Client -> agent (feature "menubar"): stream the Mac's own menu bar (`enabled`), or stop.
+    /// The agent answers with `MenuBarStatus` and streams the bar as the window `window_id`;
+    /// the menus that open from it come as popups of that window.
+    MenuBarStream { enabled: bool },
+    /// Agent -> client: the Mac's menu bar (`bounds` in Mac points: its screen's top strip), or
+    /// why it cannot be shown (`available` false: it hides itself…).
+    MenuBarStatus {
+        available: bool,
+        window_id: u64,
+        bounds: Rect,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// Client -> agent (feature "audio"): send the sound of the session's apps (`enabled`), or
+    /// stop. The Mac sends nothing on the Audio channel before this.
+    AudioControl { enabled: bool },
+    /// Agent -> client: what became of the sound: `state` "playing", "stopped" or
+    /// "unavailable" (then `reason` says why, e.g. Screen Recording not allowed).
+    AudioStatus {
+        state: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+
     Error { code: String, message: String },
     Ping { nonce: u64 },
     Pong { nonce: u64 },
@@ -387,7 +492,7 @@ impl Message {
         use Message::*;
         match self {
             MouseMove { .. } | MouseButton { .. } | Scroll { .. } | Key { .. } | TextInput { .. } => Channel::Input,
-            WindowCreated { .. } | WindowDestroyed { .. } | WindowMoved { .. } | WindowTitleChanged { .. } => {
+            WindowCreated { .. } | WindowDestroyed { .. } | WindowMoved { .. } | WindowTitleChanged { .. } | WindowMask { .. } | WindowChrome { .. } => {
                 Channel::WindowMetadata
             }
             Ping { .. } | Pong { .. } => Channel::Telemetry,
@@ -535,6 +640,22 @@ pub fn sanitize_upload_name(name: &str) -> String {
     out
 }
 
+/// Extensions of files that run something or change the system when opened: never opened from
+/// the viewer (`Message::OpenFile`). The Mac checks this list too (agent/macos/Open.swift), and
+/// more (what the file really is, where it is).
+pub const RUNS_CODE: &[&str] = &[
+    "app", "pkg", "mpkg", "dmg", "command", "tool", "sh", "zsh", "bash", "csh", "ksh", "fish", "terminal", "workflow", "action",
+    "scpt", "scptd", "applescript", "jar", "py", "rb", "pl", "php", "js", "jxa", "webloc", "inetloc", "fileloc", "url",
+    "prefpane", "kext", "mobileconfig", "saver", "plugin", "bundle", "osax", "qlgenerator", "xpc", "systemextension", "appex",
+    "exe", "msi", "bat", "cmd", "ps1", "vbs", "lnk", "scr", "com",
+];
+
+/// Whether a file of this name would be refused by `OpenFile` for its type.
+pub fn runs_code(name: &str) -> bool {
+    let ext = name.rsplit_once('.').map(|x| x.1.to_ascii_lowercase()).unwrap_or_default();
+    RUNS_CODE.contains(&ext.as_str())
+}
+
 // ---------------------------------------------------------------- video frames
 
 pub const CODEC_H264: u8 = 1;
@@ -612,11 +733,16 @@ pub fn encode_video(f: &VideoFrame) -> Result<Vec<u8>, ProtocolError> {
     encode_raw(Channel::Video, &f.encode_payload())
 }
 
+pub fn encode_audio(p: &audio::AudioPacket) -> Result<Vec<u8>, ProtocolError> {
+    encode_raw(Channel::Audio, &p.encode_payload())
+}
+
 /// Anything that can arrive on the wire.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
     Msg(Message),
     Video(VideoFrame),
+    Audio(audio::AudioPacket),
 }
 
 /// `read_exact` that rides out read timeouts: once a frame has started it is read to its end
@@ -659,6 +785,8 @@ pub fn read_frame<R: Read>(r: &mut R) -> Result<Option<Frame>, ProtocolError> {
     read_full(r, &mut payload)?;
     if channel == Channel::Video {
         VideoFrame::decode_payload(&payload).map(|v| Some(Frame::Video(v)))
+    } else if channel == Channel::Audio {
+        audio::AudioPacket::decode_payload(&payload).map(|a| Some(Frame::Audio(a)))
     } else {
         serde_json::from_slice(&payload).map(|m| Some(Frame::Msg(m))).map_err(|e| ProtocolError::Malformed(e.to_string()))
     }
@@ -808,6 +936,50 @@ mod tests {
     }
 
     #[test]
+    fn fusion_messages() {
+        for m in [
+            Message::DockStream { enabled: true },
+            Message::DockStatus { available: true, window_id: 9, bounds: Rect { x: 300, y: 1000, w: 900, h: 80 }, edge: "bottom".into(), reason: None },
+            Message::SetWallpaper { path: Some("/Users/me/Downloads/RemoteMac Uploads/w.jpg".into()), style: "fill".into(), color: "#1E1E1E".into() },
+            Message::SetWallpaper { path: None, style: "fill".into(), color: "#003366".into() },
+            Message::RestoreWallpaper,
+            Message::WallpaperStatus { applied: false, reason: Some("x".into()) },
+        ] {
+            let b = encode(&m).unwrap();
+            assert_eq!(decode(&b).unwrap().unwrap().0, m);
+        }
+        // the window shape and exact-window messages
+        for m in [
+            Message::WindowMask { window_id: 7, width: 4, height: 2, rle: base64_encode(&mask::encode(&[0, 255, 255, 0, 255, 255, 255, 255])) },
+            Message::WindowStyle { exact: true },
+            Message::WindowChrome { window_id: 7, title_height: 52, close: Some(Rect { x: 20, y: 20, w: 14, h: 14 }), minimize: None, zoom: None, controls: vec![Rect { x: 300, y: 12, w: 28, h: 28 }] },
+            Message::MenuBarStream { enabled: true },
+            Message::MenuBarStatus { available: true, window_id: 0x7FFF_0003, bounds: Rect { x: 0, y: 0, w: 1512, h: 33 }, reason: None },
+        ] {
+            let b = encode(&m).unwrap();
+            assert_eq!(decode(&b).unwrap().unwrap().0, m);
+        }
+        assert_eq!(Message::WindowMask { window_id: 1, width: 1, height: 1, rle: String::new() }.channel(), Channel::WindowMetadata);
+        // an older agent's status without an edge still reads
+        let j = r#"{"type":"dock_status","available":false,"window_id":0,"bounds":{"x":0,"y":0,"w":0,"h":0},"reason":"hidden"}"#;
+        assert!(matches!(serde_json::from_str::<Message>(j).unwrap(), Message::DockStatus { available: false, .. }));
+    }
+
+    #[test]
+    fn audio_rides_its_own_channel_between_other_frames() {
+        let a = audio::AudioPacket { seq: 3, pts_us: 9, channels: 2, samples: vec![1, -1, 2, -2] };
+        let mut wire = encode(&Message::AudioControl { enabled: true }).unwrap();
+        wire.extend(encode_audio(&a).unwrap());
+        wire.extend(encode(&Message::AudioStatus { state: "playing".into(), reason: None }).unwrap());
+        let mut cur = std::io::Cursor::new(wire);
+        assert_eq!(read_frame(&mut cur).unwrap().unwrap(), Frame::Msg(Message::AudioControl { enabled: true }));
+        assert_eq!(read_frame(&mut cur).unwrap().unwrap(), Frame::Audio(a));
+        assert!(matches!(read_frame(&mut cur).unwrap().unwrap(), Frame::Msg(Message::AudioStatus { .. })));
+        let j = serde_json::to_string(&Message::AudioStatus { state: "unavailable".into(), reason: Some("x".into()) }).unwrap();
+        assert_eq!(j, r#"{"type":"audio_status","state":"unavailable","reason":"x"}"#);
+    }
+
+    #[test]
     fn video_rejects_truncated_header_and_bad_flag() {
         assert!(VideoFrame::decode_payload(&[0u8; VIDEO_HEADER_LEN - 1]).is_err());
         let mut p = vec![0u8; VIDEO_HEADER_LEN];
@@ -858,6 +1030,12 @@ mod tests {
     }
 
     #[test]
+    fn documents_that_run_code_are_recognised() {
+        assert!(runs_code("setup.PKG") && runs_code("x.command") && runs_code("a.b.sh") && runs_code("Tool.app"));
+        assert!(!runs_code("notes.txt") && !runs_code("photo.jpeg") && !runs_code("README") && !runs_code("report.pdf"));
+    }
+
+    #[test]
     fn upload_names_cannot_escape_the_folder() {
         assert_eq!(sanitize_upload_name("report.pdf"), "report.pdf");
         assert_eq!(sanitize_upload_name("../../etc/passwd"), "passwd");
@@ -884,7 +1062,9 @@ mod tests {
 /// Recordings of an agent session (`.rmrec`): what the agent sent, frame by frame, tagged with
 /// the application it belongs to and its time from the start of that application's segment.
 /// Lets a real Mac session be replayed to a viewer elsewhere (`rm-fakeagent --replay`).
+pub mod audio;
 pub mod fec;
+pub mod mask;
 pub mod secure;
 pub mod udp;
 
@@ -1029,6 +1209,16 @@ pub mod session {
         h.iter().map(|b| format!("{b:02x}")).collect::<String>()[..48].to_string()
     }
 
+    /// The session a viewer joins when it goes straight to the Mac at an address it typed (as
+    /// Moonlight to Sunshine): no ID there, no relay; the password alone is its secret.
+    pub const DIRECT: &str = "direct";
+
+    /// The secret of the direct session (48 hex chars), from the password alone.
+    pub fn direct_token(password: &str) -> String {
+        let h = Sha256::digest(format!("remotemac/v1/direct:{password}").as_bytes());
+        h.iter().map(|b| format!("{b:02x}")).collect::<String>()[..48].to_string()
+    }
+
     /// The session secret (48 hex chars) from ID and password: the input of the end-to-end
     /// handshake, never sent anywhere.
     pub fn token(id: &str, password: &str) -> String {
@@ -1049,6 +1239,10 @@ pub mod session {
             assert_eq!(relay_session("123456789"), "rm-123456789");
             // shared vector with the Swift agent (scripts/e2e-macos.sh connects both with it)
             assert_eq!(token("123456789", "s3cret"), "3a6365467c85f122da38bf3b7192b081049bbf94ace2a9e0");
+            // the direct session: the password alone (the Swift agent checks the same vector)
+            assert_eq!(direct_token("s3cret"), "5ac160a7467369b58d0ac10dc876745f4d9163fc3fdb4815");
+            assert_ne!(direct_token("s3cret"), direct_token("s3cret!"));
+            assert_ne!(direct_token("s3cret"), token("123456789", "s3cret"));
         }
     }
 }

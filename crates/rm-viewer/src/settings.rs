@@ -24,11 +24,27 @@ pub struct Settings {
     /// How large the Mac's screen is in points: 0 as this laptop, each step 1/8 more room
     /// (macOS's "More Space" steps): 1920x1200 at 150 % gives 1280x800, 1440x900, 1600x1000...
     pub workspace: u8,
+    /// the Mac's sound played here (off: muted, and the Mac sends none)
+    pub audio: bool,
+    /// 0..=100
+    pub volume: u8,
+    /// how keys map ([`KEYBOARD_MODES`]): 0 Windows (Ctrl acts as ⌘), 1 Mac (keys as on a Mac
+    /// keyboard), 2 Fusion (Windows' text-editing keys too)
+    pub keyboard: u8,
+    /// Liquid Glass surfaces: 0 full (refraction and light), 1 frosted (blur only), 2 off (solid)
+    pub glass: u8,
+    /// animations: 0 as Windows says, 1 reduced, 2 full
+    pub motion: u8,
+    /// the RemoteMac Dock at the bottom of the screen while connected (experimental)
+    pub dock: bool,
+    /// how Mac windows look ([`WINDOW_FRAMES`]): 0 as the Mac draws them (title bar, buttons;
+    /// the Mac's menu bar at the top of the screen), 1 with MacBridge's own title bar and menus
+    pub frame: u8,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { fps: 60, bitrate_mbps: 0, quality: 0, decoder: 0, pacing: false, local_cursor: false, desktop_2x: true, workspace: 1 }
+        Self { fps: 60, bitrate_mbps: 0, quality: 0, decoder: 0, pacing: false, local_cursor: false, desktop_2x: true, workspace: 1, audio: true, volume: 100, keyboard: 0, glass: 0, motion: 0, dock: false, frame: 0 }
     }
 }
 
@@ -42,6 +58,10 @@ pub const WORKSPACES: usize = 5;
 /// windows are then shown at one pixel per Mac point.
 pub const PIXEL_FOR_PIXEL: u8 = WORKSPACES as u8 - 1;
 pub const DECODERS: [&str; 3] = ["Auto (GPU when it works)", "GPU (hardware)", "CPU (software)"];
+pub const KEYBOARD_MODES: [&str; 3] = ["Windows — Ctrl acts as ⌘ Command", "Mac — keys as on a Mac keyboard (Win = ⌘)", "Fusion — Windows shortcuts and text keys"];
+pub const GLASS_LEVELS: [&str; 3] = ["Liquid Glass (refraction and light)", "Frosted (blur only)", "Off (solid, least GPU)"];
+pub const MOTION_LEVELS: [&str; 3] = ["As Windows is set", "Reduced", "Full"];
+pub const WINDOW_FRAMES: [&str; 2] = ["As the Mac draws them (its menu bar at the top)", "With MacBridge's title bar and menus"];
 
 fn path() -> std::path::PathBuf {
     crate::log_path().with_file_name("settings.json")
@@ -62,7 +82,29 @@ impl Settings {
             s.local_cursor = b("local_cursor").unwrap_or(s.local_cursor);
             s.desktop_2x = b("desktop_2x").unwrap_or(s.desktop_2x);
             s.workspace = n("workspace").map_or(s.workspace, |x| x.min(WORKSPACES as u64 - 1) as u8);
+            s.audio = b("audio").unwrap_or(s.audio);
+            s.volume = n("volume").map_or(s.volume, |x| x.min(100) as u8);
+            s.keyboard = n("keyboard").map_or(s.keyboard, |x| x.min(2) as u8);
+            s.glass = n("glass").map_or(s.glass, |x| x.min(2) as u8);
+            s.motion = n("motion").map_or(s.motion, |x| x.min(2) as u8);
+            s.dock = b("dock").unwrap_or(s.dock);
+            s.frame = n("frame").map_or(s.frame, |x| x.min(1) as u8);
         }
+        s
+    }
+
+    /// The settings, read from the file at most once a second (for timers).
+    pub fn load_cached() -> Self {
+        use std::sync::Mutex;
+        static CACHE: Mutex<Option<(std::time::Instant, Settings)>> = Mutex::new(None);
+        let mut c = CACHE.lock().unwrap();
+        if let Some((t, s)) = c.as_ref() {
+            if t.elapsed() < std::time::Duration::from_secs(1) {
+                return *s;
+            }
+        }
+        let s = Self::load();
+        *c = Some((std::time::Instant::now(), s));
         s
     }
 
@@ -70,6 +112,7 @@ impl Settings {
         let v = serde_json::json!({
             "fps": self.fps, "bitrate_mbps": self.bitrate_mbps, "sharpness": self.quality,
             "decoder": self.decoder, "pacing": self.pacing, "local_cursor": self.local_cursor, "desktop_2x": self.desktop_2x, "workspace": self.workspace,
+            "audio": self.audio, "volume": self.volume, "keyboard": self.keyboard, "glass": self.glass, "motion": self.motion, "dock": self.dock, "frame": self.frame,
         });
         if let Some(d) = path().parent() {
             std::fs::create_dir_all(d)?;

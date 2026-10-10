@@ -54,6 +54,56 @@ grep -q "path=direct:" out/e2e.txt || { echo "no direct path between client and 
 grep -q "direct path to the client" out/agent.log || { echo "agent never saw a direct path"; [[ $RC == 0 ]] && RC=1; }
 grep -q "client connected (on this network)" out/agent.log || { echo "the client did not come straight over the local network"; [[ $RC == 0 ]] && RC=1; }
 
+# a viewer whose network vanishes without a word: the Mac notices (heartbeat) and takes the next
+# connection; the apps of the lost session stay open
+sleep 3
+./target/release/remote-mac --id $ID --password "$PASS" --vanish 2>out/client-vanish.log &
+VANISH=$!
+for _ in $(seq 1 30); do grep -q "nothing from the viewer" out/agent.log && break; sleep 1; done
+grep -q "nothing from the viewer" out/agent.log || { echo "the Mac did not notice a viewer gone silent"; [[ $RC == 0 ]] && RC=1; }
+grep -q "the apps stay open" out/agent.log || { echo "the Mac did not keep the apps for a lost connection"; [[ $RC == 0 ]] && RC=1; }
+sleep 3
+if ./target/release/remote-mac --id $ID --password "$PASS" >out/client-after.log 2>&1; then
+  echo "a new connection after the lost one: ok"
+else
+  echo "no new connection after a lost one: $(tail -3 out/client-after.log)"; [[ $RC == 0 ]] && RC=1
+fi
+kill $VANISH 2>/dev/null
+
+# a viewer that typed the Mac's address (IPv4 or IPv6, any network): straight to the Mac, as
+# Moonlight to Sunshine: only the address and the password (no ID, no discovery, no relay), the
+# same end-to-end handshake; a wrong password is refused the same way
+for ADDR in 127.0.0.1:7471 "[::1]:7471"; do
+  sleep 3
+  if ./target/release/remote-mac --direct "$ADDR" --password "$PASS" >out/client-direct.log 2>&1 \
+     && grep -q "straight to" out/client-direct.log && grep -q "end-to-end encrypted" out/client-direct.log; then
+    echo "connected by the typed address $ADDR: ok"
+  else
+    echo "no connection by the typed address $ADDR: $(tail -3 out/client-direct.log)"; [[ $RC == 0 ]] && RC=1
+  fi
+done
+sleep 3
+grep -q "straight to this Mac's address" out/agent.log || { echo "the agent did not take the direct session"; [[ $RC == 0 ]] && RC=1; }
+if ./target/release/remote-mac --direct 127.0.0.1:7471 --password wrong-password >out/client-direct-wrong.log 2>&1; then
+  echo "wrong password was accepted (typed address)"; [[ $RC == 0 ]] && RC=1
+fi
+grep -q "wrong password" out/client-direct-wrong.log || { echo "wrong password (typed address): unexpected reply: $(cat out/client-direct-wrong.log)"; [[ $RC == 0 ]] && RC=1; }
+grep -q "Or type this Mac's address" out/agent-banner.txt || { echo "the banner does not show the Mac's address"; [[ $RC == 0 ]] && RC=1; }
+
+# the launcher users start (./macbridge.sh): it passes options on, says when the program is
+# missing, and reports the privacy permissions (granted or not depends on this runner)
+L=out/launcher; rm -rf $L; mkdir -p $L
+cp agent/macos/macbridge.sh $L/
+"$L/macbridge.sh" --version >/dev/null 2>out/launcher-missing.txt; LRC=$?
+[[ $LRC == 2 ]] && grep -q "not next to this script" out/launcher-missing.txt \
+  || { echo "launcher without the program: exit $LRC, $(cat out/launcher-missing.txt)"; [[ $RC == 0 ]] && RC=1; }
+cp out/remote-agent-mac $L/macbridge
+[[ "$("$L/macbridge.sh" --version)" == "macbridge "* ]] || { echo "the launcher does not pass --version on"; [[ $RC == 0 ]] && RC=1; }
+"$L/macbridge.sh" --check >out/launcher-check.txt 2>&1; LRC=$?
+echo "=== launcher --check (exit $LRC)"; cat out/launcher-check.txt
+{ [[ $LRC == 0 || $LRC == 3 ]] && grep -q "MacBridge permissions:" out/launcher-check.txt; } \
+  || { echo "the launcher's permission check failed"; [[ $RC == 0 ]] && RC=1; }
+
 # far, lossy link: a relay limited to 6 Mbit/s that drops 5% of UDP packets; FEC rebuilds them
 # and the agent adapts its bitrate instead of queueing video (informational, not gating)
 # (RM_NO_P2P, RM_NO_LAN: this one must go through the throttled relay)

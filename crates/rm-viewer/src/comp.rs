@@ -9,6 +9,10 @@
 //!
 //! The top-level window is created with WS_EX_NOREDIRECTIONBITMAP: the corners outside the
 //! clip are truly transparent. Child windows (input / focus) stay, they just do not draw.
+//!
+//! With the window's shape from the Mac (`window_mask`) the picture itself is drawn through it,
+//! premultiplied: its corners, a menu's outline or the Dock's are exactly the Mac's, with no black
+//! where the video has none of the window (the clip then only rounds what the Mac does not draw).
 
 use rm_decode::Picture;
 use windows::core::Interface;
@@ -19,12 +23,29 @@ use windows::Win32::Graphics::DirectComposition::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
 
+/// The window's shape: alpha per picture pixel, and its texture once made.
+struct Mask {
+    w: u32,
+    h: u32,
+    alpha: std::sync::Arc<Vec<u8>>,
+    view: Option<ID3D11ShaderResourceView>,
+}
+
 pub struct Comp {
     device: IDCompositionDevice,
     _target: IDCompositionTarget,
     root: IDCompositionVisual,
     clip: IDCompositionRectangleClip,
+    /// shown until the first picture; under a shaped picture it would show in its clear corners
+    bg: IDCompositionVisual,
+    bg_surface: IDCompositionSurface,
+    bg_shown: bool,
     bg_scale: IDCompositionScaleTransform,
+    mask: Option<Mask>,
+    /// the clip's corner radii for a picture without its shape, and with it (the shape makes
+    /// the picture's own corners), and which is set
+    radii: ([f32; 4], [f32; 4]),
+    radii_shaped: Option<bool>,
     video: IDCompositionVisual,
     video_scale: IDCompositionScaleTransform,
     chrome: IDCompositionVisual,
@@ -107,25 +128,92 @@ impl Comp {
             root.AddVisual(&overlay, true, &chrome).ok()?;
             target.SetRoot(&root).ok()?;
             device.Commit().ok()?;
-            Some(Self { device, _target: target, root, clip, bg_scale, video, video_scale, chrome, chrome_surface: None, overlay, overlay_surface: None, d3d, ctx, swap: None, swap_size: (0, 0), area: (0, 0, 1, 1), kind, last_error: "" })
+            Some(Self { device, _target: target, root, clip, bg, bg_surface, bg_shown: true, bg_scale, mask: None, radii: ([0.0; 4], [0.0; 4]), radii_shaped: None, video, video_scale, chrome, chrome_surface: None, overlay, overlay_surface: None, d3d, ctx, swap: None, swap_size: (0, 0), area: (0, 0, 1, 1), kind, last_error: "" })
         }
     }
 
-    /// Window `w`x`h`, chrome `bar` pixels high (picture below it), corner `radius` (0: square).
-    pub fn layout(&mut self, w: i32, h: i32, bar: i32, radius: f32) {
+    /// The window's shape (alpha per picture pixel, `w`x`h`), or none: used for pictures of that
+    /// size only (a resized window's new picture waits for its new shape).
+    pub fn set_mask(&mut self, mask: Option<(u32, u32, std::sync::Arc<Vec<u8>>)>) {
+        self.mask = mask.filter(|(w, h, a)| a.len() == (*w * *h) as usize).map(|(w, h, alpha)| Mask { w, h, alpha, view: None });
+        if self.mask.is_none() {
+            self.show_bg(true);
+        }
+    }
+
+    /// Whether a shape for pictures of this size is known.
+    pub fn shaped(&self, w: u32, h: u32) -> bool {
+        self.mask.as_ref().is_some_and(|m| (m.w, m.h) == (w, h))
+    }
+
+    /// The picture shown now is drawn through its shape (`on`) or not: background and clip to match.
+    fn show_bg(&mut self, on: bool) {
+        self.set_radii(!on);
+        if self.bg_shown == on {
+            return;
+        }
+        self.bg_shown = on;
+        unsafe {
+            let _ = if on { self.bg.SetContent(&self.bg_surface) } else { self.bg.SetContent(None::<&windows::core::IUnknown>) };
+            let _ = self.device.Commit();
+        }
+    }
+
+    /// The shape's texture for a picture `w`x`h`, made on first use.
+    fn mask_view(&mut self, w: u32, h: u32) -> Option<ID3D11ShaderResourceView> {
+        let m = self.mask.as_mut().filter(|m| (m.w, m.h) == (w, h))?;
+        if m.view.is_none() {
+            let d = D3D11_TEXTURE2D_DESC {
+                Width: w,
+                Height: h,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_R8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_IMMUTABLE,
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let init = D3D11_SUBRESOURCE_DATA { pSysMem: m.alpha.as_ptr() as *const _, SysMemPitch: w, SysMemSlicePitch: 0 };
+            unsafe {
+                let mut t = None;
+                self.d3d.CreateTexture2D(&d, Some(&init), Some(&mut t)).ok()?;
+                let mut v = None;
+                self.d3d.CreateShaderResourceView(&t?, None, Some(&mut v)).ok()?;
+                m.view = v;
+            }
+        }
+        m.view.clone()
+    }
+
+    fn set_radii(&mut self, shaped: bool) {
+        if self.radii_shaped == Some(shaped) {
+            return;
+        }
+        self.radii_shaped = Some(shaped);
+        unsafe {
+            let [tl, tr, br, bl] = if shaped { self.radii.1 } else { self.radii.0 };
+            let c = &self.clip;
+            let _ = (c.SetTopLeftRadiusX2(tl), c.SetTopLeftRadiusY2(tl), c.SetTopRightRadiusX2(tr), c.SetTopRightRadiusY2(tr));
+            let _ = (c.SetBottomRightRadiusX2(br), c.SetBottomRightRadiusY2(br), c.SetBottomLeftRadiusX2(bl), c.SetBottomLeftRadiusY2(bl));
+            let _ = self.device.Commit();
+        }
+    }
+
+    /// Window `w`x`h`, chrome `bar` pixels high (picture below it), corner radii (top-left,
+    /// top-right, bottom-right, bottom-left; 0: square) for a picture without its shape
+    /// (`plain`) and with it (`shaped`).
+    pub fn layout(&mut self, w: i32, h: i32, bar: i32, plain: [f32; 4], shaped: [f32; 4]) {
+        self.radii = (plain, shaped);
+        let now = self.radii_shaped.unwrap_or(false);
+        self.radii_shaped = None;
+        self.set_radii(now);
         unsafe {
             let _ = self.clip.SetLeft2(0.0);
             let _ = self.clip.SetTop2(0.0);
             let _ = self.clip.SetRight2(w as f32);
             let _ = self.clip.SetBottom2(h as f32);
-            for set in [
-                IDCompositionRectangleClip::SetTopLeftRadiusX2, IDCompositionRectangleClip::SetTopLeftRadiusY2,
-                IDCompositionRectangleClip::SetTopRightRadiusX2, IDCompositionRectangleClip::SetTopRightRadiusY2,
-                IDCompositionRectangleClip::SetBottomLeftRadiusX2, IDCompositionRectangleClip::SetBottomLeftRadiusY2,
-                IDCompositionRectangleClip::SetBottomRightRadiusX2, IDCompositionRectangleClip::SetBottomRightRadiusY2,
-            ] {
-                let _ = set(&self.clip, radius);
-            }
             let _ = self.bg_scale.SetScaleX2(w as f32);
             let _ = self.bg_scale.SetScaleY2(h as f32);
             let _ = self.chrome.SetOffsetY2(0.0);
@@ -228,7 +316,8 @@ impl Comp {
                         BufferCount: 2,
                         Scaling: DXGI_SCALING_STRETCH,
                         SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-                        AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+                        // premultiplied: a shaped picture is clear outside the window
+                        AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
                         ..Default::default()
                     };
                     let Ok(sc) = factory.CreateSwapChainForComposition(&self.d3d, &desc, None) else { return false };
@@ -251,10 +340,15 @@ impl Comp {
         if !self.ensure_swap(w, h) {
             return false;
         }
+        // premultiplied: alpha from the shape (or opaque), colour never above it
+        let shaped = self.mask.as_ref().filter(|m| (m.w, m.h) == (w, h)).map(|m| m.alpha.clone());
+        let mut px = p.bgra.clone();
+        apply_alpha(&mut px, shaped.as_deref().map(|v| v.as_slice()));
+        self.show_bg(shaped.is_none());
         unsafe {
             let Some(sc) = self.swap.as_ref() else { return false };
             let Ok(back) = sc.GetBuffer::<ID3D11Texture2D>(0) else { return false };
-            self.ctx.UpdateSubresource(&back, 0, None, p.bgra.as_ptr() as *const _, w * 4, 0);
+            self.ctx.UpdateSubresource(&back, 0, None, px.as_ptr() as *const _, w * 4, 0);
             sc.Present(0, DXGI_PRESENT(0)).is_ok()
         }
     }
@@ -275,6 +369,8 @@ impl Comp {
     fn present_gpu_inner(&mut self, p: &crate::gpu::GpuPic) -> Result<(), &'static str> {
         let (w, h) = (p.width, p.height);
         let r = crate::nv12::shared().ok_or("no GPU colour conversion")?;
+        let mask = self.mask_view(w, h);
+        self.show_bg(mask.is_none());
         // the picture at the size it is shown, resampled here with a sharp cubic filter (the
         // compositor's bilinear scaling softens every glyph); 1:1 when it already fits
         let (_, _, fw, fh) = crate::keymap::fit_rect((self.area.2, self.area.3), (w, h));
@@ -285,8 +381,43 @@ impl Comp {
         unsafe {
             let sc = self.swap.as_ref().ok_or("swap chain")?;
             let back = sc.GetBuffer::<ID3D11Texture2D>(0).map_err(|_| "back buffer")?;
-            r.draw(&self.d3d, &self.ctx, &p.tex, (w, h), &back, out)?;
+            r.draw(&self.d3d, &self.ctx, &p.tex, (w, h), &back, out, mask.as_ref())?;
             sc.Present(0, DXGI_PRESENT(0)).ok().map_err(|_| "present")
         }
+    }
+}
+
+/// A BGRA picture as premultiplied pixels: alpha from `mask` (one byte per pixel) or opaque, no
+/// colour above its alpha (the video's colour at a window's edge is already mixed with black).
+pub fn apply_alpha(bgra: &mut [u8], mask: Option<&[u8]>) {
+    match mask {
+        Some(m) if m.len() * 4 == bgra.len() => {
+            for (px, a) in bgra.chunks_exact_mut(4).zip(m) {
+                px[0] = px[0].min(*a);
+                px[1] = px[1].min(*a);
+                px[2] = px[2].min(*a);
+                px[3] = *a;
+            }
+        }
+        _ => bgra.chunks_exact_mut(4).for_each(|px| px[3] = 255),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn pictures_become_premultiplied_through_their_shape() {
+        // two pixels: one outside the window (black in the video), one at its edge (its colour
+        // already mixed with black by half), and opaque ones without a shape
+        let mut px = vec![0, 0, 0, 0, 120, 60, 200, 0];
+        super::apply_alpha(&mut px, Some(&[0, 128]));
+        assert_eq!(px, vec![0, 0, 0, 0, 120, 60, 128, 128]);
+        let mut px = vec![1, 2, 3, 0, 4, 5, 6, 7];
+        super::apply_alpha(&mut px, None);
+        assert_eq!(px, vec![1, 2, 3, 255, 4, 5, 6, 255]);
+        // a shape of another size is not used
+        let mut px = vec![9, 9, 9, 0];
+        super::apply_alpha(&mut px, Some(&[0, 0]));
+        assert_eq!(px, vec![9, 9, 9, 255]);
     }
 }

@@ -1,53 +1,39 @@
 //! "Connect to your Mac" window: the Mac prints an ID and a password, the user types them here.
 //! A Mac on the same network is found by its ID; for one elsewhere the relay server is used (the
-//! one built into this build, or one the user types; it is remembered).
-//! A plain Win32 window (Inter, light Mac-like colours) with its own small message loop; it
-//! returns once the user presses Connect (or closes it).
+//! one built into this build, or one the user types; it is remembered). Or the user types the
+//! Mac's address (an IP or a host name, any network that reaches it). While it connects, the
+//! steps show as they happen (finding the Mac, checking the password, setting up, video).
+//! It looks like the sign-in of Apple's Screen Sharing (connectui.rs draws it; its fields are
+//! MacBridge's own). It has its own small message loop and returns once the user connects (or
+//! closes it).
 
+use crate::connectui::{Act, ConnectView, Key};
 use std::ffi::c_void;
-use windows::core::{w, HSTRING, PCWSTR};
+use std::time::Instant;
+use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+pub use crate::connectui::Via;
+
 const CLASS: PCWSTR = w!("RmConnect");
-const ID_EDIT: i32 = 101;
-const PW_EDIT: i32 = 102;
-const RELAY_EDIT: i32 = 103;
-const BG: (u8, u8, u8) = (247, 247, 248);
-const W: i32 = 420;
-const H: i32 = 400;
+const TIMER: usize = 1;
+const WM_MOUSE_LEAVE: u32 = 0x02A3;
 
-struct State {
-    id: HWND,
-    pw: HWND,
-    relay: HWND,
-    error: HWND,
-    done: Option<Option<(String, String, String)>>,
-    heading: HFONT,
-    body: HFONT,
-    bg: HBRUSH,
+struct Shell {
+    view: ConnectView,
+    done: Option<Option<(String, String, Via)>>,
 }
 
-thread_local! { static STATE: std::cell::RefCell<Option<State>> = const { std::cell::RefCell::new(None) }; }
+thread_local! { static STATE: std::cell::RefCell<Option<Shell>> = const { std::cell::RefCell::new(None) }; }
 
-fn rgb((r, g, b): (u8, u8, u8)) -> COLORREF {
-    COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
-}
-
-fn font(face: &str, px: i32, weight: i32) -> HFONT {
-    unsafe { CreateFontW(-px, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, &HSTRING::from(face)) }
-}
-
-fn text_of(h: HWND) -> String {
-    unsafe {
-        let mut buf = [0u16; 128];
-        let n = GetWindowTextW(h, &mut buf);
-        String::from_utf16_lossy(&buf[..n.max(0) as usize]).trim().to_string()
-    }
+/// The window's state (None while it is in use further up: a message sent from inside).
+fn with<R>(f: impl FnOnce(&mut Shell) -> R) -> Option<R> {
+    STATE.with(|st| st.try_borrow_mut().ok().and_then(|mut g| g.as_mut().map(f)))
 }
 
 /// Last ID used on this PC (so next time only the password is typed).
@@ -78,6 +64,38 @@ pub fn remember_relay(relay: &str) {
     }
 }
 
+/// The Mac address typed last (blank when none was), and whether it was used last.
+fn last_address_path() -> Option<std::path::PathBuf> {
+    last_id_path().map(|p| p.with_file_name("last-address"))
+}
+
+pub fn remember_via(via: &Via) {
+    let Some(p) = last_address_path() else { return };
+    let _ = std::fs::create_dir_all(p.parent().unwrap());
+    match via {
+        Via::Id(relay) => {
+            remember_relay(relay);
+            // the address stays remembered, but the ID mode is the one used now
+            if let Ok(a) = std::fs::read_to_string(&p) {
+                let _ = std::fs::write(&p, a.trim_start_matches('*'));
+            }
+        }
+        Via::Address(a) => {
+            let _ = std::fs::write(&p, format!("*{}", a.trim()));
+        }
+    }
+}
+
+/// (address typed last, used last)
+pub fn last_address() -> (String, bool) {
+    let s = last_address_path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    let s = s.trim();
+    match s.strip_prefix('*') {
+        Some(a) => (a.to_string(), true),
+        None => (s.to_string(), false),
+    }
+}
+
 /// What the relay field starts with: what was typed last, else the relay built into this build.
 pub fn last_relay() -> String {
     last_relay_path()
@@ -88,87 +106,83 @@ pub fn last_relay() -> String {
         .unwrap_or_default()
 }
 
-/// Show the window and connect from it: `try_connect(id, password, relay)` runs on a background
-/// thread while the window stays responsive ("Connecting…"); a failure is shown in red and the
-/// user can try again. `id` prefills the ID, `error` starts with a message (a lost connection).
-/// Returns what `try_connect` returned, or None if the user closed the window.
-pub fn connect_window<T: Send>(id: Option<&str>, error: Option<&str>, try_connect: impl Fn(&str, &str, &str) -> Result<T, String> + Sync) -> Option<T> {
+/// Show the window and connect from it: `try_connect(id, password, via)` runs on a background
+/// thread while the window stays responsive (the steps with a spinner); a failure is shown in
+/// red and the user can try again. `id` prefills the ID, `error` starts with a message (a lost
+/// connection). Returns what `try_connect` returned, or None if the user closed the window.
+pub fn connect_window<T: Send>(id: Option<&str>, error: Option<&str>, try_connect: impl Fn(&str, &str, &Via) -> Result<T, String> + Sync) -> Option<T> {
     unsafe {
         let hinst: HINSTANCE = GetModuleHandleW(None).ok()?.into();
-        let wc = WNDCLASSW { lpfnWndProc: Some(proc), hInstance: hinst, lpszClassName: CLASS, hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), ..Default::default() };
+        let wc = WNDCLASSW { style: CS_DBLCLKS, lpfnWndProc: Some(proc), hInstance: hinst, lpszClassName: CLASS, hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), ..Default::default() };
         RegisterClassW(&wc); // a second call fails harmlessly (already registered)
-        let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
-        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("MacBridge"), style, CW_USEDEFAULT, CW_USEDEFAULT, W, H, None, None, Some(hinst), None).ok()?;
-        let s = GetDpiForWindow(hwnd).max(96) as f64 / 96.0;
-        let px = |v: i32| (v as f64 * s).round() as i32;
-        // size the client area, centre on the screen
-        let mut r = RECT { left: 0, top: 0, right: px(W), bottom: px(H) };
-        let _ = AdjustWindowRectEx(&mut r, style, false, WINDOW_EX_STYLE(0));
-        let (ww, wh) = (r.right - r.left, r.bottom - r.top);
+        let style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME;
+        let (address, by_address) = last_address();
+        let mut view = ConnectView::new(id.unwrap_or(""), &last_relay(), &address, by_address);
+        if let Some(e) = error {
+            view.set_error(e);
+        }
+        STATE.with(|st| *st.borrow_mut() = Some(Shell { view, done: None }));
+        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("MacBridge"), style, CW_USEDEFAULT, CW_USEDEFAULT, 460, 572, None, None, Some(hinst), None).ok()?;
+        crate::frame::adopt(hwnd);
+        // its size at this scale, a little above the middle of the screen
+        let s = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
+        let (ww, wh) = ((crate::connectui::W * s).round() as i32, (crate::connectui::H * s).round() as i32);
         let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
         let _ = SetWindowPos(hwnd, None, (sw - ww) / 2, (sh - wh) / 3, ww, wh, SWP_NOZORDER);
-
-        let body = font(crate::native::ui_face(400), px(14), 400);
-        let heading = font(crate::native::ui_face(600), px(22), 600);
-        let mono = font(crate::native::mono_face(), px(16), 400);
-        let child = |class: PCWSTR, text: &str, style: u32, ex: u32, x: i32, y: i32, w: i32, h: i32, id: i32, f: HFONT| {
-            let c = CreateWindowExW(WINDOW_EX_STYLE(ex), class, &HSTRING::from(text), WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | style), px(x), px(y), px(w), px(h),
-                Some(hwnd), Some(HMENU(id as isize as *mut c_void)), Some(hinst), None).unwrap_or_default();
-            SendMessageW(c, WM_SETFONT, Some(WPARAM(f.0 as usize)), Some(LPARAM(1)));
-            c
-        };
-        let edit_style = WS_TABSTOP.0 | WS_BORDER.0 | ES_AUTOHSCROLL as u32;
-        child(w!("STATIC"), "ID", 0, 0, 32, 92, 356, 18, 0, body);
-        let id_edit = child(w!("EDIT"), id.unwrap_or(""), edit_style, 0, 32, 112, 356, 30, ID_EDIT, mono);
-        child(w!("STATIC"), "Password", 0, 0, 32, 152, 356, 18, 0, body);
-        let pw_edit = child(w!("EDIT"), "", edit_style | ES_PASSWORD as u32, 0, 32, 172, 356, 30, PW_EDIT, mono);
-        child(w!("STATIC"), "Relay server (only for a Mac on another network)", 0, 0, 32, 214, 356, 18, 0, body);
-        let relay_edit = child(w!("EDIT"), &last_relay(), edit_style, 0, 32, 234, 356, 30, RELAY_EDIT, mono);
-        let error_label = child(w!("STATIC"), error.unwrap_or(""), 0, 0, 32, 274, 356, 56, 0, body);
-        child(w!("BUTTON"), "Connect", WS_TABSTOP.0 | BS_DEFPUSHBUTTON as u32, 0, 268, 340, 120, 34, IDOK.0, body);
-        STATE.with(|st| {
-            *st.borrow_mut() = Some(State { id: id_edit, pw: pw_edit, relay: relay_edit, error: error_label, done: None, heading, body, bg: CreateSolidBrush(rgb(BG)) });
-        });
+        restyle(hwnd);
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
-        let _ = SetFocus(Some(if id.is_some() { pw_edit } else { id_edit }));
+        let _ = SetFocus(Some(hwnd));
+        schedule(hwnd);
 
-        let button = GetDlgItem(Some(hwnd), IDOK.0).unwrap_or_default();
         let mut msg = MSG::default();
         let result = std::thread::scope(|scope| {
-            // (ID, relay) of the attempt running, and its thread
-            type Attempt<'s, T> = ((String, String), std::thread::ScopedJoinHandle<'s, Result<T, String>>);
+            type Attempt<'s, T> = ((String, Via), std::thread::ScopedJoinHandle<'s, Result<T, String>>);
             let mut attempt: Option<Attempt<'_, T>> = None;
             loop {
-                // a connection attempt finished?
-                if attempt.as_ref().is_some_and(|(_, h)| h.is_finished()) {
-                    let ((typed, relay), h) = attempt.take().unwrap();
-                    match h.join().unwrap_or_else(|_| Err("internal error while connecting".into())) {
-                        Ok(t) => {
-                            remember_id(&typed);
-                            remember_relay(&relay);
-                            break Some(t);
-                        }
-                        Err(e) => {
-                            set_text(error_of(), &e);
-                            let _ = EnableWindow(button, true);
-                            let _ = EnableWindow(edit_of(true), true);
-                            let _ = EnableWindow(edit_of(false), true);
-                            let _ = EnableWindow(relay_of(), true);
-                            let _ = SetFocus(Some(edit_of(false)));
+                // the step the attempt is at
+                if attempt.is_some() {
+                    let p = crate::lifecycle::current();
+                    if p.busy() {
+                        let label = p.label();
+                        let changed = with(|sh| {
+                            let now = matches!(sh.view.status(), crate::connectui::Status::Busy(l) if *l == label);
+                            if !now {
+                                sh.view.set_step(&label);
+                            }
+                            !now
+                        });
+                        if changed == Some(true) {
+                            redraw(hwnd);
                         }
                     }
                 }
-                match STATE.with(|st| st.borrow_mut().as_mut().and_then(|s| s.done.take())) {
+                // a connection attempt finished?
+                if attempt.as_ref().is_some_and(|(_, h)| h.is_finished()) {
+                    let ((typed, via), h) = attempt.take().unwrap();
+                    match h.join().unwrap_or_else(|_| Err("internal error while connecting".into())) {
+                        Ok(t) => {
+                            // (by address no ID was typed: the one remembered stays)
+                            if !typed.is_empty() {
+                                remember_id(&typed);
+                            }
+                            remember_via(&via);
+                            break Some(t);
+                        }
+                        Err(e) => {
+                            with(|sh| sh.view.fail(&e));
+                            redraw(hwnd);
+                            schedule(hwnd);
+                        }
+                    }
+                }
+                match with(|sh| sh.done.take()).flatten() {
                     Some(None) => break None,
-                    Some(Some((typed, pw, relay))) if attempt.is_none() => {
-                        let _ = EnableWindow(button, false);
-                        let _ = EnableWindow(edit_of(true), false);
-                        let _ = EnableWindow(edit_of(false), false);
-                        let _ = EnableWindow(relay_of(), false);
+                    Some(Some((typed, pw, via))) if attempt.is_none() => {
                         let f = &try_connect;
-                        let (t2, r2) = (typed.clone(), relay.clone());
-                        attempt = Some(((typed, relay), scope.spawn(move || f(&t2, &pw, &r2))));
+                        let (t2, v2) = (typed.clone(), via.clone());
+                        attempt = Some(((typed, via), scope.spawn(move || f(&t2, &pw, &v2))));
+                        schedule(hwnd);
                     }
                     _ => {}
                 }
@@ -184,120 +198,218 @@ pub fn connect_window<T: Send>(id: Option<&str>, error: Option<&str>, try_connec
                 } else if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
                     break None;
                 }
-                // Tab between fields, Enter = Connect
-                if !IsDialogMessageW(hwnd, &msg).as_bool() {
-                    let _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
             }
         });
         let _ = DestroyWindow(hwnd);
-        if let Some(s) = STATE.with(|st| st.borrow_mut().take()) {
-            let _ = DeleteObject(s.heading.into());
-            let _ = DeleteObject(s.body.into());
-            let _ = DeleteObject(s.bg.into());
-        }
-        let _ = DeleteObject(mono.into());
+        STATE.with(|st| st.borrow_mut().take());
         result
     }
 }
 
-fn set_text(h: HWND, t: &str) {
+fn redraw(hwnd: HWND) {
     unsafe {
-        let _ = SetWindowTextW(h, &HSTRING::from(t));
+        let _ = InvalidateRect(Some(hwnd), None, false);
     }
 }
 
-fn error_of() -> HWND {
-    STATE.with(|st| st.borrow().as_ref().map(|s| s.error)).unwrap_or_default()
+/// The next frame when something moves (or the caret blinks); none while nothing does.
+fn schedule(hwnd: HWND) {
+    let next = with(|sh| sh.view.next_frame(Instant::now())).flatten();
+    unsafe {
+        match next {
+            Some(d) => {
+                SetTimer(Some(hwnd), TIMER, (d.as_millis() as u32).clamp(10, 1000), None);
+            }
+            None => {
+                let _ = KillTimer(Some(hwnd), TIMER);
+            }
+        }
+    }
 }
 
-fn relay_of() -> HWND {
-    STATE.with(|st| st.borrow().as_ref().map(|s| s.relay)).unwrap_or_default()
+/// The size, scale and appearance, to the view.
+fn restyle(hwnd: HWND) {
+    let (dark, _, level) = crate::surface::glass_look();
+    crate::frame::appearance(hwnd, dark);
+    let mut rc = RECT::default();
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut rc);
+    }
+    let s = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
+    with(|sh| sh.view.set_window(rc.right.max(1) as usize, rc.bottom.max(1) as usize, s, dark, level));
+    redraw(hwnd);
 }
 
-fn edit_of(id: bool) -> HWND {
-    STATE.with(|st| st.borrow().as_ref().map(|s| if id { s.id } else { s.pw })).unwrap_or_default()
+fn paint(hdc: HDC) {
+    let Some(c) = with(|sh| sh.view.render(Instant::now())) else { return };
+    let bi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: c.w as i32, biHeight: -(c.h as i32), biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
+        ..Default::default()
+    };
+    unsafe {
+        StretchDIBits(hdc, 0, 0, c.w as i32, c.h as i32, 0, 0, c.w as i32, c.h as i32, Some(c.px.as_ptr() as *const c_void), &bi, DIB_RGB_COLORS, SRCCOPY);
+    }
+}
+
+/// What a click or a key asked for.
+fn act(hwnd: HWND, a: Option<Act>) {
+    match a {
+        Some(Act::Connect { id, password, via }) => {
+            with(|sh| sh.done = Some(Some((id, password, via))));
+            unsafe {
+                let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+            }
+        }
+        Some(Act::Cancel) => unsafe {
+            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+        },
+        Some(Act::Window(l)) => crate::frame::press(hwnd, l),
+        Some(Act::Copy(s)) => {
+            crate::native::set_clipboard_text(hwnd, &s);
+        }
+        None => {}
+    }
+    redraw(hwnd);
+    schedule(hwnd);
+}
+
+fn xy(lp: LPARAM) -> (f32, f32) {
+    ((lp.0 & 0xffff) as i16 as f32, ((lp.0 >> 16) & 0xffff) as i16 as f32)
+}
+
+fn down(vk: VIRTUAL_KEY) -> bool {
+    unsafe { GetKeyState(vk.0 as i32) < 0 }
 }
 
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
+        // no Windows title bar: the window is drawn whole, as a Mac window (frame.rs)
+        WM_NCCALCSIZE => crate::frame::calc_size(hwnd, wp, lp),
+        WM_NCHITTEST => with(|sh| crate::frame::hit_test(hwnd, lp, false, |x, y| sh.view.is_caption(x, y))).unwrap_or_else(|| DefWindowProcW(hwnd, msg, wp, lp)),
+        WM_NCACTIVATE => {
+            with(|sh| sh.view.set_active(wp.0 != 0));
+            redraw(hwnd);
+            schedule(hwnd);
+            DefWindowProcW(hwnd, msg, wp, LPARAM(-1))
+        }
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
-            let mut rc = RECT::default();
-            let _ = GetClientRect(hwnd, &mut rc);
-            let s = GetDpiForWindow(hwnd).max(96) as f64 / 96.0;
-            let px = |v: i32| (v as f64 * s).round() as i32;
-            STATE.with(|st| {
-                if let Some(st) = st.borrow().as_ref() {
-                    FillRect(hdc, &rc, st.bg);
-                    SetBkMode(hdc, TRANSPARENT);
-                    let old = SelectObject(hdc, st.heading.into());
-                    SetTextColor(hdc, rgb((28, 28, 30)));
-                    let mut t = RECT { left: px(32), top: px(26), right: rc.right - px(32), bottom: px(56) };
-                    let mut h: Vec<u16> = "Connect to your Mac".encode_utf16().collect();
-                    DrawTextW(hdc, &mut h, &mut t, DT_LEFT | DT_SINGLELINE);
-                    SelectObject(hdc, st.body.into());
-                    SetTextColor(hdc, rgb((110, 110, 115)));
-                    let mut t = RECT { left: px(32), top: px(58), right: rc.right - px(32), bottom: px(80) };
-                    let mut h: Vec<u16> = "Open MacBridge on the Mac, then type its ID and password.".encode_utf16().collect();
-                    DrawTextW(hdc, &mut h, &mut t, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-                    SelectObject(hdc, old);
-                }
-            });
+            paint(hdc);
             let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
         }
-        WM_ERASEBKGND => LRESULT(1),
-        WM_CTLCOLORSTATIC => {
-            let hdc = HDC(wp.0 as *mut c_void);
-            let ctl = HWND(lp.0 as *mut c_void);
-            STATE.with(|st| match st.borrow().as_ref() {
-                Some(st) => {
-                    SetBkColor(hdc, rgb(BG));
-                    SetTextColor(hdc, if ctl == st.error { rgb((200, 40, 40)) } else { rgb((60, 60, 64)) });
-                    LRESULT(st.bg.0 as isize)
-                }
-                None => DefWindowProcW(hwnd, msg, wp, lp),
-            })
+        WM_PRINTCLIENT => {
+            paint(HDC(wp.0 as *mut c_void));
+            LRESULT(0)
         }
-        WM_COMMAND if (wp.0 & 0xFFFF) as i32 == IDOK.0 => {
-            // read under a short borrow; every Win32 call below may re-enter this procedure
-            let Some((id_h, pw_h, relay_h, err_h)) = STATE.with(|st| st.borrow().as_ref().map(|s| (s.id, s.pw, s.relay, s.error))) else { return LRESULT(0) };
-            let (id, pw, relay) = (text_of(id_h), text_of(pw_h), text_of(relay_h));
-            match rm_protocol::session::normalize_id(&id) {
-                None => {
-                    set_text(err_h, "The ID is the 9 digits shown on the Mac.");
-                    let _ = SetFocus(Some(id_h));
+        WM_ERASEBKGND => LRESULT(1),
+        WM_SIZE => {
+            restyle(hwnd);
+            LRESULT(0)
+        }
+        WM_DPICHANGED => {
+            let r = &*(lp.0 as *const RECT);
+            let _ = SetWindowPos(hwnd, None, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            restyle(hwnd);
+            LRESULT(0)
+        }
+        WM_SETTINGCHANGE | WM_THEMECHANGED => {
+            restyle(hwnd);
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+        WM_TIMER if wp.0 == TIMER => {
+            redraw(hwnd);
+            schedule(hwnd);
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            let (x, y) = xy(lp);
+            with(|sh| sh.view.mouse_move(x, y));
+            let mut tme = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+            let _ = TrackMouseEvent(&mut tme);
+            redraw(hwnd);
+            LRESULT(0)
+        }
+        WM_MOUSE_LEAVE => {
+            with(|sh| sh.view.mouse_leave());
+            redraw(hwnd);
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            let (x, y) = xy(lp);
+            SetCapture(hwnd);
+            let _ = SetFocus(Some(hwnd));
+            let shift = wp.0 & 0x0004 != 0; // MK_SHIFT
+            with(|sh| sh.view.mouse_down(x, y, shift));
+            act(hwnd, None);
+            LRESULT(0)
+        }
+        WM_LBUTTONDBLCLK => {
+            let (x, y) = xy(lp);
+            with(|sh| sh.view.double_click(x, y));
+            act(hwnd, None);
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            let (x, y) = xy(lp);
+            let _ = ReleaseCapture();
+            let a = with(|sh| sh.view.mouse_up(x, y)).flatten();
+            act(hwnd, a);
+            LRESULT(0)
+        }
+        WM_KEYDOWN => {
+            let (shift, ctrl) = (down(VK_SHIFT), down(VK_CONTROL));
+            let vk = VIRTUAL_KEY(wp.0 as u16);
+            if ctrl && vk == VIRTUAL_KEY(b'V' as u16) {
+                if let Some(t) = crate::native::clipboard_text(hwnd) {
+                    with(|sh| sh.view.paste(&t));
                 }
-                Some(_) if pw.is_empty() => {
-                    set_text(err_h, "Type the password shown on the Mac.");
-                    let _ = SetFocus(Some(pw_h));
+                act(hwnd, None);
+                return LRESULT(0);
+            }
+            let k = match vk {
+                VK_TAB => Some(Key::Tab),
+                VK_RETURN => Some(Key::Enter),
+                VK_ESCAPE => Some(Key::Escape),
+                VK_SPACE => Some(Key::Space),
+                VK_LEFT => Some(Key::Left),
+                VK_RIGHT => Some(Key::Right),
+                VK_UP => Some(Key::Up),
+                VK_DOWN => Some(Key::Down),
+                VK_HOME => Some(Key::Home),
+                VK_END => Some(Key::End),
+                VK_BACK => Some(Key::Backspace),
+                VK_DELETE => Some(Key::Delete),
+                v if ctrl && v == VIRTUAL_KEY(b'A' as u16) => Some(Key::SelectAll),
+                v if ctrl && v == VIRTUAL_KEY(b'C' as u16) => Some(Key::Copy),
+                v if ctrl && v == VIRTUAL_KEY(b'X' as u16) => Some(Key::Cut),
+                _ => None,
+            };
+            if let Some(k) = k {
+                // Space types a space in a field (WM_CHAR); elsewhere it presses
+                let in_field = with(|sh| matches!(sh.view.focus(), crate::connectui::Focus::Field(_))).unwrap_or(false);
+                if !(k == Key::Space && in_field) {
+                    let a = with(|sh| sh.view.key(k, shift, ctrl)).flatten();
+                    act(hwnd, a);
                 }
-                Some(id) => {
-                    set_text(err_h, "Looking for the Mac on this network…");
-                    STATE.with(|st| {
-                        if let Some(s) = st.borrow_mut().as_mut() {
-                            s.done = Some(Some((id, pw, relay)));
-                        }
-                    });
-                    let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+            }
+            LRESULT(0)
+        }
+        WM_CHAR => {
+            if let Some(c) = char::from_u32(wp.0 as u32) {
+                if !c.is_control() {
+                    with(|sh| sh.view.char(c));
+                    act(hwnd, None);
                 }
             }
             LRESULT(0)
         }
         WM_CLOSE => {
-            STATE.with(|st| {
-                if let Some(st) = st.borrow_mut().as_mut() {
-                    st.done = Some(None);
-                }
-            });
+            with(|sh| sh.done = Some(None));
             let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
-            LRESULT(0)
-        }
-        WM_COMMAND if (wp.0 & 0xFFFF) as i32 == IDCANCEL.0 => {
-            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),

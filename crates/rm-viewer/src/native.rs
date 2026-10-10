@@ -289,6 +289,8 @@ static FONTS_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 
 /// Bundled Inter (UI) and JetBrains Mono (technical details), private to this process.
 pub fn load_fonts() {
+    // the scale most of MacBridge's own text is drawn at (its optical size and tracking)
+    crate::text::set_scale_hint(unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem() } as f32 / 96.0);
     const FONTS: [&[u8]; 5] = [
         include_bytes!("../fonts/Inter-Regular.ttf"),
         include_bytes!("../fonts/Inter-Medium.ttf"),

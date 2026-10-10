@@ -5,7 +5,7 @@ import Foundation
 import CryptoKit
 
 /// MacBridge's version (the same as the Windows app's, Cargo.toml).
-let appVersion = "1.0.1"
+let appVersion = "1.2.0-beta.1"
 
 /// The relay used when none is given: built in by release builds, none from source.
 let defaultRelay: String? = builtinRelay.trimmingCharacters(in: .whitespaces).isEmpty ? nil : builtinRelay
@@ -16,6 +16,16 @@ func sessionToken(id: String, password: String) -> String {
 }
 
 func relaySession(id: String) -> String { "rm-\(id)" }
+
+/// The session of a viewer that typed this Mac's address and came straight to its port (as
+/// Moonlight to Sunshine): no ID, no relay; its secret is the password alone (rm-protocol's
+/// `session::direct_token`, same test vector).
+let directSession = "direct"
+
+func directToken(password: String) -> String {
+    let digest = SHA256.hash(data: Data("remotemac/v1/direct:\(password)".utf8))
+    return String(digest.map { String(format: "%02x", $0) }.joined().prefix(48))
+}
 
 func displayID(_ id: String) -> String {
     stride(from: 0, to: id.count, by: 3).map { i -> String in

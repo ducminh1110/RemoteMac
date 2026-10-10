@@ -9,7 +9,7 @@ on:
     inputs:
       apps:
         description: Mac apps to record and open on Windows (comma separated ids)
-        default: xcode,textedit,testapp,desktop
+        default: xcode,textedit,testapp,desktop,dock,menubar
   push:
     branches: [claude/inspiring-einstein-er2d37]
     paths: [crates/**, agent/**, probe/macos/testapp.swift, scripts/mac-record.sh, scripts/windows-showcase.ps1, .github/workflows/mac-to-windows.yml]
@@ -18,7 +18,7 @@ permissions:
   contents: read
 
 env:
-  APPS: ${{ github.event.inputs.apps || 'xcode,textedit,testapp,desktop' }}
+  APPS: ${{ github.event.inputs.apps || 'xcode,textedit,testapp,desktop,dock,menubar' }}
 
 jobs:
   mac:
@@ -66,7 +66,10 @@ jobs:
           Start-Sleep -Seconds 1
           $agent = Start-Process -PassThru -NoNewWindow -FilePath target\release\rm-fakeagent.exe -ArgumentList "--relay 127.0.0.1:47961 --session replay --replay mac-recording\recording\session.rmrec" -RedirectStandardError out\replay.log
           Start-Sleep -Seconds 1
-          & ./scripts/windows-showcase.ps1 -Relay 127.0.0.1:47961 -Session replay -Apps $env:APPS -Out out\showcase -Settle 8 -TimeoutSec 600
+          # "dock" and "menubar" are the recorded Mac Dock and menu bar, not apps to open
+          $apps = ($env:APPS -split ',' | Where-Object { $_ -ne 'dock' -and $_ -ne 'menubar' }) -join ','
+          $env:RM_UI_GALLERY = "1"; $env:RM_FUSION = "1"
+          & ./scripts/windows-showcase.ps1 -Relay 127.0.0.1:47961 -Session replay -Apps $apps -Out out\showcase -Settle 8 -TimeoutSec 600
           $code = $LASTEXITCODE
           foreach ($p in @($agent, $relay)) { if (-not $p.HasExited) { $p.Kill() } }
           Write-Host "=== replay agent log"; Get-Content out\replay.log -ErrorAction SilentlyContinue

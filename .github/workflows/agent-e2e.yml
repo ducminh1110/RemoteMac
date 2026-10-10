@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
   push:
     branches: [claude/inspiring-einstein-er2d37]
-    paths: [agent/**, crates/**, probe/macos/testapp.swift, scripts/e2e-macos.sh, .github/workflows/agent-e2e.yml, Cargo.*]
+    paths: [agent/**, crates/**, probe/macos/testapp.swift, probe/macos/sharing.swift, scripts/e2e-macos.sh, .github/workflows/agent-e2e.yml, Cargo.*]
 
 permissions:
   contents: read
@@ -23,6 +23,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run end-to-end
         run: ./scripts/e2e-macos.sh
+      - name: Probe the window sharing indicator
+        if: always()
+        timeout-minutes: 4
+        run: |
+          mkdir -p out
+          open -a TextEdit; sleep 3
+          osascript -e 'tell application "TextEdit" to make new document' -e 'tell application "TextEdit" to activate' || true
+          sleep 2
+          swiftc -O probe/macos/sharing.swift -o out/sharing-probe && out/sharing-probe || echo "probe failed: $?"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

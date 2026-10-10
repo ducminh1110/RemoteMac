@@ -103,7 +103,7 @@ final class WindowStream: NSObject, SCStreamOutput {
     ///  - a window whose title bar is part of its content (toolbar windows) carries the Mac's
     ///    own window buttons and macOS's purple "being captured" pill top-left: the viewer
     ///    draws its own buttons, so that area takes the colour beside it.
-    private func polish(_ pb: CVPixelBuffer, scale: CGFloat, hideButtons: Bool) {
+    private func polish(_ pb: CVPixelBuffer, scale: CGFloat, hideButtons: Bool, fillTop: Bool, fillBottom: Bool) {
         guard CVPixelBufferGetPlaneCount(pb) == 2, CVPixelBufferLockBaseAddress(pb, []) == kCVReturnSuccess else { return }
         defer { CVPixelBufferUnlockBaseAddress(pb, []) }
         guard let yb = CVPixelBufferGetBaseAddressOfPlane(pb, 0), let cb = CVPixelBufferGetBaseAddressOfPlane(pb, 1) else { return }
@@ -122,8 +122,9 @@ final class WindowStream: NSObject, SCStreamOutput {
             return Y[y * ys + x] <= 24 && abs(Int(C[c]) - 128) < 12 && abs(Int(C[c + 1]) - 128) < 12
         }
         // corners: transparent (black) pixels outside a circle of radius r take the colour of
-        // the pixel diagonally inside the rounding
-        for (left, top) in [(true, true), (false, true), (true, false), (false, false)] {
+        // the pixel diagonally inside the rounding (not when the viewer has the window's shape:
+        // it shows the corners as clear, and the edge as the Mac draws it)
+        for (left, top) in [(true, true), (false, true), (true, false), (false, false)] where top ? fillTop : fillBottom {
             let sx = left ? r : w - 1 - r, sy = top ? r : h - 1 - r
             for dy in 0..<r {
                 for dx in 0..<r {
@@ -145,9 +146,115 @@ final class WindowStream: NSObject, SCStreamOutput {
     }
     /// next encoded frame is an IDR (client asked, or frames were dropped)
     private var forceKey = true
+    /// the first picture was sent again (see the frame handler)
+    private var repeated = false
+    /// The window's three buttons as the Mac lays them out (window points), and whether it is the
+    /// active window: drawn back over macOS's "being shared" capsule (exact windows)
+    private var lights: [CGRect] = []
+    private var lightsActive = false
+    private var lastScale: CGFloat = 1
+
+    func setLights(_ rects: [CGRect]) { lock.lock(); lights = rects.count == 3 ? rects : []; lock.unlock() }
+
+    /// The window became the active one, or stopped being it: its buttons take their colour (or
+    /// grey) at once, even when nothing else in it changes.
+    func setLightsActive(_ active: Bool) {
+        lock.lock(); let changed = lightsActive != active && !lights.isEmpty; lightsActive = active; lock.unlock()
+        guard changed else { return }
+        q.async { [weak self] in
+            guard let self = self else { return }
+            self.lock.lock(); let pb = self.lastPB; let s = self.lastScale; self.lock.unlock()
+            guard let pb = pb else { return }
+            self.drawLights(pb, scale: s)
+            self.encode(pb, pts: CMClockGetTime(CMClockGetHostTimeClock()), ptsUs: agentClockUs(), key: true)
+        }
+    }
+
+    /// macOS puts a "being shared" capsule where a captured window's buttons are (on the Mac's
+    /// screen and in the capture alike). The window is shown on Windows as the Mac draws it, so
+    /// its three buttons are drawn back where the Mac lays them out: the capsule's area takes the
+    /// title bar's colour beside it, then red, yellow and green (grey when the window is not the
+    /// active one), as macOS draws them.
+    private func drawLights(_ pb: CVPixelBuffer, scale: CGFloat) {
+        lock.lock(); let rects = lights; let active = lightsActive; lock.unlock()
+        guard rects.count == 3, CVPixelBufferGetPlaneCount(pb) == 2, CVPixelBufferLockBaseAddress(pb, []) == kCVReturnSuccess else { return }
+        defer { CVPixelBufferUnlockBaseAddress(pb, []) }
+        guard let yb = CVPixelBufferGetBaseAddressOfPlane(pb, 0), let cb = CVPixelBufferGetBaseAddressOfPlane(pb, 1) else { return }
+        let Y = yb.assumingMemoryBound(to: UInt8.self), C = cb.assumingMemoryBound(to: UInt8.self)
+        let w = CVPixelBufferGetWidthOfPlane(pb, 0), h = CVPixelBufferGetHeightOfPlane(pb, 0)
+        let ys = CVPixelBufferGetBytesPerRowOfPlane(pb, 0), cs = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
+        let s = Double(scale)
+        let all = rects.dropFirst().reduce(rects[0]) { $0.union($1) }
+        let px = { (v: CGFloat) -> Int in Int((Double(v) * s).rounded()) }
+        // the capsule's area: each row takes the colour just left of it (or right, at the edge)
+        let x0 = max(2, px(all.minX - 9)), x1 = min(w, px(all.maxX + 9))
+        let y0 = max(0, px(all.minY - 6)), y1 = min(h, px(all.maxY + 6))
+        guard x1 > x0, y1 > y0 else { return }
+        let sx = x0 >= 3 ? x0 - 2 : min(w - 1, x1 + 1)
+        for y in y0..<y1 {
+            let src = Y[y * ys + sx], co = (y / 2) * cs + (sx / 2) * 2
+            let (u, v) = (C[co], C[co + 1])
+            for x in x0..<x1 {
+                Y[y * ys + x] = src
+                let ct = (y / 2) * cs + (x / 2) * 2
+                C[ct] = u; C[ct + 1] = v
+            }
+        }
+        // the buttons: video-range BT.709, a darker rim, edges smoothed
+        let dark = UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
+        typealias RGB = (Double, Double, Double)
+        let grey: (RGB, RGB) = dark ? ((77, 77, 82), (94, 94, 99)) : ((221, 221, 223), (204, 204, 208))
+        let colours: [(RGB, RGB)] = active ? [((255, 95, 87), (226, 70, 63)), ((254, 188, 46), (225, 161, 22)), ((40, 200, 64), (20, 174, 44))] : [grey, grey, grey]
+        func yuv(_ c: RGB) -> RGB {
+            let (r, g, b) = (c.0 / 255, c.1 / 255, c.2 / 255)
+            let l = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            return (16 + 219 * l, 128 + 224 * (b - l) / 1.8556, 128 + 224 * (r - l) / 1.5748)
+        }
+        func mix(_ a: UInt8, _ b: Double, _ k: Double) -> UInt8 { UInt8(max(0, min(255, (Double(a) * (1 - k) + b * k).rounded()))) }
+        for (i, f) in rects.enumerated() {
+            let cx = Double(f.midX) * s, cy = Double(f.midY) * s
+            let rad = max(4, Double(min(f.width, f.height)) / 2 - 1) * s
+            let rimW = max(0.6, 0.5 * s)
+            let (fill, rim) = (yuv(colours[i].0), yuv(colours[i].1))
+            let bx0 = max(0, Int(cx - rad) - 2), bx1 = min(w - 1, Int(cx + rad) + 2)
+            let by0 = max(0, Int(cy - rad) - 2), by1 = min(h - 1, Int(cy + rad) + 2)
+            guard bx1 > bx0, by1 > by0 else { continue }
+            func shade(_ x: Double, _ y: Double) -> (cov: Double, col: RGB) {
+                let d = ((x - cx) * (x - cx) + (y - cy) * (y - cy)).squareRoot()
+                let cov = max(0, min(1, rad + 0.5 - d))
+                let inner = max(0, min(1, rad - rimW + 0.5 - d))
+                return (cov, (rim.0 + (fill.0 - rim.0) * inner, rim.1 + (fill.1 - rim.1) * inner, rim.2 + (fill.2 - rim.2) * inner))
+            }
+            for y in by0...by1 {
+                for x in bx0...bx1 {
+                    let (cov, col) = shade(Double(x) + 0.5, Double(y) + 0.5)
+                    if cov > 0 { Y[y * ys + x] = mix(Y[y * ys + x], col.0, cov) }
+                }
+            }
+            for y in stride(from: by0 & ~1, through: by1, by: 2) {
+                for x in stride(from: bx0 & ~1, through: bx1, by: 2) {
+                    let (cov, col) = shade(Double(x) + 1, Double(y) + 1)
+                    guard cov > 0 else { continue }
+                    let ci = (y / 2) * cs + (x / 2) * 2
+                    C[ci] = mix(C[ci], col.1, cov); C[ci + 1] = mix(C[ci + 1], col.2, cov)
+                }
+            }
+        }
+    }
     private var bitrate = 20_000_000
 
-    func requestKeyframe() { lock.lock(); forceKey = true; lock.unlock() }
+    func requestKeyframe() {
+        lock.lock(); forceKey = true; let pb = lastPB; lock.unlock()
+        // a picture that does not change brings no next frame to make the keyframe of (a dialog,
+        // the menu bar): the last one goes again as a keyframe, unless a new frame took it first
+        // (a moving window's next frame comes within a few ms: it is the keyframe then, nothing more)
+        guard let last = pb else { return }
+        q.asyncAfter(deadline: .now() + 0.06) { [weak self] in
+            guard let self = self else { return }
+            self.lock.lock(); let still = self.forceKey; self.forceKey = false; self.lock.unlock()
+            if still { self.encode(last, pts: CMClockGetTime(CMClockGetHostTimeClock()), ptsUs: agentClockUs(), key: true) }
+        }
+    }
 
     /// Sharp when still (what remote desktops call refinement): while the picture moves the
     /// bitrate keeps it fluid; once it has been still for a moment one keyframe with the whole
@@ -198,6 +305,22 @@ final class WindowStream: NSObject, SCStreamOutput {
     /// A pop-up menu or popover: ScreenCaptureKit does not capture those as a window of their own
     /// (it gave the whole display), so its rectangle of the display is captured instead.
     var popup = false
+    /// The window's own buttons stay in the picture (exact windows: the viewer draws none).
+    var keepButtons = false
+    /// Gets the alpha of the picture (its shape) once the stream runs: (width, height, alpha).
+    var onShape: ((Int, Int, [UInt8]) -> Void)?
+    /// For a region (the Dock): the apps whose windows make its shape (not the desktop picture).
+    var shapeApps: Set<pid_t>?
+
+    /// The shape of what this stream shows, measured once in the background.
+    private func measureShape(_ filter: SCContentFilter, _ cfg: SCStreamConfiguration, source: CGRect?) {
+        guard let done = onShape else { return }
+        let (w, h) = (cfg.width, cfg.height)
+        Task { if let a = await Shape.alpha(filter: filter, width: w, height: h, source: source) { done(w, h, a) } }
+    }
+    /// A region of a display with only some apps' windows in it (the Mac's Dock over the
+    /// desktop picture: Fusion.swift): (display, region in screen points, those apps).
+    var region: (CGDirectDisplayID, CGRect, Set<pid_t>)?
     private var config: SCStreamConfiguration?
 
     /// The Mac's pointer in the picture or not (the viewer shows its own instead), live.
@@ -213,6 +336,30 @@ final class WindowStream: NSObject, SCStreamOutput {
 
     func start() async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        if let rg = region {
+            let (did, r, pids) = rg
+            guard let d = content.displays.first(where: { $0.displayID == did }) else { throw WireError(description: "display \(did) not shareable") }
+            let cfg = SCStreamConfiguration()
+            cfg.sourceRect = CGRect(x: r.minX - d.frame.minX, y: r.minY - d.frame.minY, width: r.width, height: r.height)
+            (cfg.width, cfg.height) = capturePixels(r.width, r.height, backing: backingScale(of: r))
+            cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
+            cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2
+            cfg.queueDepth = 6; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true
+            // only those apps' windows (the Dock and the desktop picture), or everything there (no
+            // apps given: the menu bar's strip, which no window covers)
+            let apps = content.applications.filter { pids.contains($0.processID) }
+            let filter = pids.isEmpty ? SCContentFilter(display: d, excludingWindows: []) : SCContentFilter(display: d, including: apps, exceptingWindows: [])
+            let s = SCStream(filter: filter, configuration: cfg, delegate: nil)
+            try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
+            t0 = CFAbsoluteTimeGetCurrent()
+            config = cfg
+            try await s.startCapture()
+            scStream = s
+            if let own = shapeApps {
+                measureShape(SCContentFilter(display: d, including: content.applications.filter { own.contains($0.processID) }, exceptingWindows: []), cfg, source: cfg.sourceRect)
+            }
+            return
+        }
         if let did = display {
             guard let d = content.displays.first(where: { $0.displayID == did }) else { throw WireError(description: "display \(did) not shareable") }
             let cfg = SCStreamConfiguration()
@@ -260,6 +407,8 @@ final class WindowStream: NSObject, SCStreamOutput {
             config = cfg
             try await s.startCapture()
             scStream = s
+            // its outline: the popup window alone, at the same size
+            measureShape(SCContentFilter(desktopIndependentWindow: w), cfg, source: nil)
             return
         }
         let cfg = SCStreamConfiguration()
@@ -271,12 +420,14 @@ final class WindowStream: NSObject, SCStreamOutput {
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
         cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
         cfg.queueDepth = 6; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true // fill the output at any capture density (never a corner of it, never cropped)
-        let s = SCStream(filter: SCContentFilter(desktopIndependentWindow: w), configuration: cfg, delegate: nil)
+        let filter = SCContentFilter(desktopIndependentWindow: w)
+        let s = SCStream(filter: filter, configuration: cfg, delegate: nil)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
         t0 = CFAbsoluteTimeGetCurrent()
         config = cfg
         try await s.startCapture()
         scStream = s
+        measureShape(filter, cfg, source: cut > 0 ? cfg.sourceRect : nil)
     }
 
     func stop() async {
@@ -340,11 +491,26 @@ final class WindowStream: NSObject, SCStreamOutput {
         let capUs = cap.isFinite && cap > 0 ? UInt64(cap * 1_000_000) : nowUs
         let ptsUs = (capUs <= nowUs && nowUs - capUs < 1_000_000) ? capUs : nowUs
         // (not a popup: its first row is not window buttons, filling it hid the item there)
-        if display == nil && !popup && pointsWide > 0 {
-            polish(pb, scale: CGFloat(w) / pointsWide, hideButtons: inset == 0)
+        if display == nil && region == nil && !popup && pointsWide > 0 {
+            // (the top corners sit under the viewer's own title bar unless the window is exact)
+            polish(pb, scale: CGFloat(w) / pointsWide, hideButtons: inset == 0 && !keepButtons, fillTop: onShape == nil || !keepButtons, fillBottom: onShape == nil)
+            if keepButtons {
+                lock.lock(); lastScale = CGFloat(w) / pointsWide; lock.unlock()
+                drawLights(pb, scale: CGFloat(w) / pointsWide)
+            }
         }
-        lock.lock(); lastPB = pb; lock.unlock()
+        lock.lock(); lastPB = pb; let first = !repeated; repeated = true; lock.unlock()
         encode(pb, pts: CMSampleBufferGetPresentationTimeStamp(sb), ptsUs: ptsUs, key: key)
+        // a moment after the stream starts its picture goes once more as a keyframe: a viewer that
+        // learned of this window after its first frame (that came first, over UDP) still gets a
+        // picture of what never changes (the menu bar, the Dock, a still window)
+        if first {
+            q.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                guard let self = self else { return }
+                self.lock.lock(); let last = self.lastPB; self.lock.unlock()
+                if let last = last { self.encode(last, pts: CMClockGetTime(CMClockGetHostTimeClock()), ptsUs: agentClockUs(), key: true) }
+            }
+        }
     }
 
     private func encode(_ pb: CVPixelBuffer, pts: CMTime, ptsUs: UInt64, key: Bool) {

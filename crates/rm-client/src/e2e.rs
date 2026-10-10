@@ -78,6 +78,35 @@ struct Ctx<'a, S: Read + Write> {
     /// Mac Desktop over full GameStream: the client tunnel and the messages it wants sent
     gs_tunnel: Option<std::sync::Arc<rm_gamestream::tunnel::ClientTunnel>>,
     gs_out: Option<std::sync::mpsc::Receiver<Message>>,
+    /// sound: the Mac's last audio_status, packets seen, bad packets, loudest sample, last seq
+    audio_status: Option<(String, Option<String>)>,
+    audio_packets: usize,
+    audio_bad: usize,
+    audio_peak: i16,
+    audio_seq: Option<u32>,
+    audio_gaps: usize,
+    /// (window, application) of every WindowCreated
+    created_apps: Vec<(u64, String)>,
+    /// the app under test
+    app: String,
+    /// Desktop Fusion: the Dock's status (available, window, w, h, reason), its frames and
+    /// last video size, the wallpaper's last status
+    dock: Option<(bool, u64, u32, u32, Option<String>)>,
+    dock_frames: usize,
+    dock_video: Option<(u16, u16)>,
+    wallpaper: Option<(bool, Option<String>)>,
+    /// the Dock's last picture (to look at: printed with the report)
+    dock_decoder: Option<rm_decode::H264Decoder>,
+    dock_picture: Option<rm_decode::Picture>,
+    /// window shapes received: id -> (width, height, mask; None when opaque)
+    masks: std::collections::HashMap<u64, (u32, u32, Option<Vec<u8>>)>,
+    /// exact windows' title bars: id -> (band height, has its close button, controls in it)
+    chromes: std::collections::HashMap<u64, (u32, bool, usize)>,
+    /// the Mac's menu bar streamed: (available, window id, w, h, reason), its frames and picture
+    menubar: Option<(bool, u64, u32, u32, Option<String>)>,
+    menubar_frames: usize,
+    menubar_decoder: Option<rm_decode::H264Decoder>,
+    menubar_picture: Option<rm_decode::Picture>,
 }
 
 fn is_timeout(e: &ProtocolError) -> bool {
@@ -87,6 +116,46 @@ fn is_timeout(e: &ProtocolError) -> bool {
 impl<S: Read + Write> Ctx<'_, S> {
     fn absorb(&mut self, f: Frame) {
         match f {
+            Frame::Audio(a) => {
+                self.audio_packets += 1;
+                if a.channels != 2 || a.frames() != rm_protocol::audio::PACKET_FRAMES {
+                    self.audio_bad += 1;
+                }
+                if self.audio_seq.is_some_and(|s| a.seq != s.wrapping_add(1)) {
+                    self.audio_gaps += 1;
+                }
+                self.audio_seq = Some(a.seq);
+                self.audio_peak = self.audio_peak.max(a.samples.iter().map(|s| s.saturating_abs()).max().unwrap_or(0));
+            }
+            Frame::Msg(Message::AudioStatus { state, reason }) => self.audio_status = Some((state, reason)),
+            Frame::Msg(Message::DockStatus { available, window_id, bounds, reason, .. }) => self.dock = Some((available, window_id, bounds.w, bounds.h, reason)),
+            Frame::Msg(Message::WallpaperStatus { applied, reason }) => self.wallpaper = Some((applied, reason)),
+            Frame::Msg(Message::MenuBarStatus { available, window_id, bounds, reason }) => self.menubar = Some((available, window_id, bounds.w, bounds.h, reason)),
+            Frame::Video(v) if self.menubar.as_ref().is_some_and(|d| d.0 && d.1 == v.window_id) => {
+                self.menubar_frames += 1;
+                if self.menubar_decoder.is_none() {
+                    self.menubar_decoder = rm_decode::H264Decoder::new().ok();
+                }
+                if let Some(Ok(Some(p))) = self.menubar_decoder.as_mut().map(|d| d.decode(&v.data)) {
+                    self.menubar_picture = Some(p);
+                }
+            }
+            Frame::Msg(Message::WindowChrome { window_id, title_height, close, controls, .. }) => {
+                self.chromes.insert(window_id, (title_height, close.is_some(), controls.len()));
+            }
+            Frame::Msg(Message::WindowMask { window_id, width, height, rle }) => {
+                self.masks.insert(window_id, (width, height, rm_protocol::mask::from_message(width, height, &rle)));
+            }
+            Frame::Video(v) if self.dock.as_ref().is_some_and(|d| d.0 && d.1 == v.window_id) => {
+                self.dock_frames += 1;
+                self.dock_video = Some((v.width, v.height));
+                if self.dock_decoder.is_none() {
+                    self.dock_decoder = rm_decode::H264Decoder::new().ok();
+                }
+                if let Some(Ok(Some(p))) = self.dock_decoder.as_mut().map(|d| d.decode(&v.data)) {
+                    self.dock_picture = Some(p);
+                }
+            }
             Frame::Video(v) if self.desktop.map(|d| d.0) == Some(v.window_id) => {
                 self.desktop_frames += 1;
                 self.desktop_video = Some((v.width, v.height));
@@ -126,8 +195,15 @@ impl<S: Read + Write> Ctx<'_, S> {
             Frame::Msg(Message::WindowCreated { window_id, bounds, application_id, .. }) if application_id == "desktop" => {
                 self.desktop = Some((window_id, bounds));
             }
-            Frame::Msg(Message::WindowCreated { window_id, bounds, title, role, parent_id, .. }) => {
+            Frame::Msg(Message::WindowCreated { window_id, bounds, title, role, parent_id, application_id }) => {
+                // its first picture may have come before this (over UDP): ask for one, as the
+                // viewer does
+                self.send(Message::RequestKeyframe { window_id });
                 self.created.push((window_id, role, parent_id));
+                self.created_apps.push((window_id, application_id.clone()));
+                if application_id != self.app {
+                    return; // another app (a document opened from the session)
+                }
                 if role == rm_protocol::WindowRole::Window && self.r.window.is_none() {
                     self.main_rect = Some(bounds);
                 }
@@ -216,7 +292,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let caps_dump = serde_json::to_string(&sess.capabilities).unwrap_or_default();
     let mut c = Ctx { sess, r: Report::default(), started: Instant::now(), first_video: None, last_title: String::new(),
         destroyed: false, exited: false, launched_pid: None, errors: vec![], non_annexb: 0,
-        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None, main_rect: None, desktop: None, desktop_frames: 0, desktop_video: None, gs_tunnel: None, gs_out: None };
+        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None, main_rect: None, desktop: None, desktop_frames: 0, desktop_video: None, gs_tunnel: None, gs_out: None, audio_status: None, audio_packets: 0, audio_bad: 0, audio_peak: 0, audio_seq: None, audio_gaps: 0, created_apps: vec![], app: app.to_string(), dock: None, dock_frames: 0, dock_video: None, wallpaper: None, dock_decoder: None, dock_picture: None, masks: Default::default(), chromes: Default::default(), menubar: None, menubar_frames: 0, menubar_decoder: None, menubar_picture: None };
 
     c.r.check("agent reports capture+input+GUI", caps_ok, caps_dump);
 
@@ -263,6 +339,14 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let pic_ok = matches!((pic, want), (Some((w, h, colors)), Some((ww, wh))) if (w, h) == (ww, wh) && colors > 8);
     c.r.check("frames decode to window-sized, non-blank pictures", dec >= 30 && pic_ok,
         format!("decoded={dec} decodeErrors={errs} lastPicture(w,h,colors)={pic:?} windowBounds={want:?}"));
+
+    // ---- its shape: the corners outside the Mac's rounding are not the window (clear on
+    // Windows instead of black), sent at the size of its pictures
+    c.pump(6, |c| c.masks.contains_key(&wid));
+    let shape = c.masks.get(&wid).map(|(w, h, m)| (*w, *h, m.as_ref().map(|m| (rm_protocol::mask::corner_radius(m, *w as usize, *h as usize, false, true), m.iter().filter(|a| **a == 0).count()))));
+    let size = pic.map(|(w, h, _)| (w as u32, h as u32));
+    let shaped = matches!(shape, Some((w, h, Some((r, clear)))) if Some((w, h)) == size && r >= 4.0 && clear > 0);
+    c.r.check("window shape: its rounded corners come clear, at its pictures' size", shaped, format!("shape(w,h,(radius,clear px))={shape:?} picture={size:?}"));
 
     // ---- keyboard: unicode text
     c.send(Message::TextInput { window_id: wid, text: "hello".into() });
@@ -383,6 +467,11 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
         c.r.check("panel opens the uploaded file in the app", ok, c.last_title.clone());
     }
 
+    documents(&mut c, wid);
+    exact_windows(&mut c);
+    menu_bar(&mut c);
+    fusion(&mut c);
+
     // ---- a virtual display the size of the client's monitor; fullscreen fills it exactly
     c.send(Message::DisplayConfigure { width: 1280, height: 720, scale: 1 });
     let got = c.pump(15, |c| c.display.is_some());
@@ -413,6 +502,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
         c.send(Message::TextInput { window_id: did, text: "d".into() });
         let ok = c.pump(10, |c| c.last_title != before && c.last_title.contains("chars]"));
         c.r.check("input on the desktop reaches the app under the pointer", ok, format!("before={before:?} after={:?} click=({x},{y})", c.last_title));
+        sound(&mut c);
         c.send(Message::AppTerminate { application_id: "desktop".into() });
         let gone = c.pump(8, |c| c.destroyed_ids.contains(&did));
         c.r.check("closing the Mac Desktop stops its stream", gone, format!("destroyed={:?}", c.destroyed_ids));
@@ -429,6 +519,245 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let ok = c.pump(10, |c| c.destroyed && c.exited);
     c.r.check("terminate -> WindowDestroyed + AppExited", ok, format!("destroyed={} exited={}", c.destroyed, c.exited));
     c.r
+}
+
+/// Desktop Fusion: the Mac's own Dock streamed (only the Dock and the desktop picture), input
+/// taken at the Dock; the PC's wallpaper set on the Mac and the Mac's own put back.
+fn fusion<S: Read + Write>(c: &mut Ctx<S>) {
+    c.send(Message::DockStream { enabled: true });
+    // a still Dock sends few frames (the Mac only captures what changes): one decoded is enough
+    let ok = c.pump(12, |c| c.dock.as_ref().is_some_and(|d| !d.0 || c.dock_picture.is_some()));
+    let d = c.dock.clone();
+    let shown = d.as_ref().is_some_and(|d| d.0 && d.2 > 8 && d.3 > 8) && c.dock_picture.is_some();
+    c.r.check("Fusion: the Mac's Dock is streamed as a window of its own", ok && shown, format!("status={d:?} frames={} video={:?}", c.dock_frames, c.dock_video));
+    if let Some((true, id, w, h, _)) = d {
+        let before = c.errors.len();
+        c.send(Message::MouseMove { window_id: id, x: (w / 2) as f64, y: (h / 2) as f64 });
+        c.pump(1, |_| false);
+        c.r.check("Fusion: the pointer over the Dock reaches it on the Mac", !c.errors[before..].iter().any(|e| e.starts_with("input_failed")), format!("{:?}", &c.errors[before..]));
+    }
+    // what the Dock looks like as streamed (a .bmp, base64, between markers in the log)
+    if let Some(p) = c.dock_picture.take() {
+        eprintln!("[INFO] the Mac's Dock as streamed: {}x{} px, {} colours", p.width, p.height, p.distinct_colors());
+        print_picture("DOCK", &p);
+    }
+    c.send(Message::DockStream { enabled: false });
+    let before = c.dock_frames;
+    c.pump(2, |_| false);
+    let after = c.dock_frames;
+    c.pump(1, |_| false);
+    c.r.check("Fusion: the Dock's stream stops when asked", c.dock_frames <= after + 1, format!("frames: {before} -> {after} -> {}", c.dock_frames));
+    // the wallpaper: a picture from the PC (a 1x1 PNG), set, then the Mac's own put back
+    let png = rm_protocol::base64_decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==").unwrap_or_default();
+    let Some(path) = upload(c, 31, "pc-wallpaper.png", &png) else {
+        c.r.check("Fusion: the PC's wallpaper is set on the Mac", false, "upload failed");
+        return;
+    };
+    c.wallpaper = None;
+    c.send(Message::SetWallpaper { path: Some(path), style: "fill".into(), color: "#203040".into() });
+    c.pump(10, |c| c.wallpaper.is_some());
+    let set = c.wallpaper.clone();
+    #[cfg(target_os = "macos")]
+    let saved = std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join("Library/Application Support/RemoteMac/wallpaper-restore.json").exists());
+    #[cfg(not(target_os = "macos"))]
+    let saved: Option<bool> = Some(true);
+    c.r.check("Fusion: the PC's wallpaper is set on the Mac, the Mac's own kept", set.as_ref().is_some_and(|s| s.0) && saved == Some(true), format!("status={set:?} kept={saved:?}"));
+    c.wallpaper = None;
+    c.send(Message::RestoreWallpaper);
+    c.pump(10, |c| c.wallpaper.is_some());
+    #[cfg(target_os = "macos")]
+    let gone = std::env::var_os("HOME").map(|h| !std::path::Path::new(&h).join("Library/Application Support/RemoteMac/wallpaper-restore.json").exists());
+    #[cfg(not(target_os = "macos"))]
+    let gone: Option<bool> = Some(true);
+    c.r.check("Fusion: the Mac's own wallpaper is put back", c.wallpaper.as_ref().is_some_and(|s| !s.0) && gone == Some(true), format!("status={:?} restore pending={:?}", c.wallpaper, gone.map(|g| !g)));
+    c.wallpaper = None;
+    c.send(Message::SetWallpaper { path: Some("/etc/hosts".into()), style: "fill".into(), color: "#000000".into() });
+    c.pump(5, |c| c.wallpaper.is_some());
+    c.r.check("Fusion: a file that was not sent from the PC is not used as wallpaper", c.wallpaper.as_ref().is_some_and(|s| !s.0 && s.1.is_some()), format!("{:?}", c.wallpaper));
+}
+
+/// A picture as a 24-bit .bmp, base64 in lines between `<tag>-PICTURE-BEGIN` and `-END`
+/// (CI logs are where it can be looked at).
+pub fn print_picture(tag: &str, p: &rm_decode::Picture) {
+    let (w, h) = (p.width, p.height);
+    let row = (w * 3).div_ceil(4) * 4;
+    let size = 54 + row * h;
+    let mut b = Vec::with_capacity(size);
+    b.extend_from_slice(b"BM");
+    b.extend_from_slice(&(size as u32).to_le_bytes());
+    b.extend_from_slice(&[0, 0, 0, 0, 54, 0, 0, 0, 40, 0, 0, 0]);
+    b.extend_from_slice(&(w as i32).to_le_bytes());
+    b.extend_from_slice(&(-(h as i32)).to_le_bytes());
+    b.extend_from_slice(&[1, 0, 24, 0, 0, 0, 0, 0]);
+    b.extend_from_slice(&((row * h) as u32).to_le_bytes());
+    b.extend_from_slice(&[0; 16]);
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            b.extend_from_slice(&p.bgra[i..i + 3]);
+        }
+        b.extend(std::iter::repeat_n(0u8, row - w * 3));
+    }
+    let s = rm_protocol::base64_encode(&b);
+    eprintln!("{tag}-PICTURE-BEGIN {w}x{h}");
+    for chunk in s.as_bytes().chunks(4000) {
+        eprintln!("{}", String::from_utf8_lossy(chunk));
+    }
+    eprintln!("{tag}-PICTURE-END");
+}
+
+/// Upload `bytes` as `name`; the path on the Mac.
+fn upload<S: Read + Write>(c: &mut Ctx<S>, tid: u64, name: &str, bytes: &[u8]) -> Option<String> {
+    c.uploaded = None;
+    c.send(Message::FileUploadBegin { transfer_id: tid, name: name.into(), size: bytes.len() as u64 });
+    c.send(Message::FileUploadChunk { transfer_id: tid, offset: 0, data_base64: rm_protocol::base64_encode(bytes) });
+    c.send(Message::FileUploadEnd { transfer_id: tid });
+    c.pump(10, |c| c.uploaded.is_some());
+    c.uploaded.clone()
+}
+
+/// Documents from Windows (a file dropped on the launcher or an app's window): uploaded, opened
+/// by its Mac app, and that app shown like a launched one. What could run code is refused. An
+/// app another app opens right after a click or key in the session (Finder opening a document)
+/// is shown too.
+fn documents<S: Read + Write>(c: &mut Ctx<S>, wid: u64) {
+    let refused = |c: &mut Ctx<S>, path: String, what: &str| {
+        let before = c.errors.len();
+        c.send(Message::OpenFile { path, application_id: None });
+        let ok = c.pump(5, |c| c.errors[before..].iter().any(|e| e.starts_with("open_rejected")));
+        c.r.check(&format!("opening {what} is refused"), ok, format!("{:?}", &c.errors[before..]));
+    };
+    refused(c, "/bin/ls".into(), "a system executable");
+    if let Some(p) = upload(c, 21, "rm e2e.command", b"#!/bin/sh\necho hi\n") {
+        refused(c, p, "an uploaded script");
+    }
+    let Some(note) = upload(c, 22, "rm e2e note.txt", b"MacBridge e2e note\n") else {
+        c.r.check("a document from Windows opens in its Mac app (TextEdit), shown on Windows", false, "upload failed");
+        return;
+    };
+    c.send(Message::OpenFile { path: note.clone(), application_id: None });
+    let opened = c.pump(15, |c| c.created_apps.iter().any(|(_, a)| a == "textedit"));
+    c.r.check("a document from Windows opens in its Mac app (TextEdit), shown on Windows", opened, format!("created={:?} errors={:?}", c.created_apps, c.errors));
+    let close_textedit = |c: &mut Ctx<S>| {
+        let ids: Vec<u64> = c.created_apps.iter().filter(|(_, a)| a == "textedit").map(|(w, _)| *w).collect();
+        c.send(Message::AppTerminate { application_id: "textedit".into() });
+        c.pump(10, |c| ids.iter().all(|w| c.destroyed_ids.contains(w)))
+    };
+    if opened {
+        let closed = close_textedit(c);
+        c.r.check("the opened app quits from Windows", closed, format!("destroyed={:?}", c.destroyed_ids));
+    }
+    // Finder's way: a click in the session, then Launch Services opens a document's app
+    #[cfg(target_os = "macos")]
+    {
+        c.created_apps.retain(|(_, a)| a != "textedit");
+        c.send(Message::MouseButton { window_id: wid, button: MouseButton::Left, down: true, x: 30.0, y: 30.0 });
+        c.send(Message::MouseButton { window_id: wid, button: MouseButton::Left, down: false, x: 30.0, y: 30.0 });
+        c.pump(1, |_| false);
+        let _ = std::process::Command::new("open").args(["-a", "TextEdit", &note]).status();
+        let shown = c.pump(15, |c| c.created_apps.iter().any(|(_, a)| a == "textedit"));
+        c.r.check("an app opened right after a click in the session (as Finder opens a document) is shown on Windows", shown, format!("created={:?}", c.created_apps));
+        if shown {
+            close_textedit(c);
+        }
+    }
+    let _ = wid;
+}
+
+/// Exact windows ("window_style"): a window opened then comes whole, its own title bar and
+/// buttons in the picture, with that title bar described (to move it by) and all four corners
+/// in its shape; back to MacBridge's frame afterwards.
+fn exact_windows<S: Read + Write>(c: &mut Ctx<S>) {
+    let Some(note) = upload(c, 23, "rm e2e exact.txt", b"MacBridge exact window\n") else {
+        c.r.check("exact window: shown as the Mac draws it", false, "upload failed");
+        return;
+    };
+    c.send(Message::WindowStyle { exact: true });
+    c.created_apps.retain(|(_, a)| a != "textedit");
+    c.send(Message::OpenFile { path: note, application_id: None });
+    let opened = c.pump(15, |c| c.created_apps.iter().any(|(_, a)| a == "textedit"));
+    let id = c.created_apps.iter().find(|(_, a)| a == "textedit").map(|(w, _)| *w);
+    let got = opened && c.pump(8, |c| id.is_some_and(|w| c.chromes.contains_key(&w) && c.masks.contains_key(&w)));
+    let chrome = id.and_then(|w| c.chromes.get(&w).copied());
+    let shape = id.and_then(|w| c.masks.get(&w)).map(|(w, h, m)| m.as_ref().map(|m| {
+        let r = |top, left| rm_protocol::mask::corner_radius(m, *w as usize, *h as usize, top, left);
+        (r(true, true), r(true, false), r(false, false), r(false, true))
+    }));
+    let ok = got && matches!(chrome, Some((t, true, _)) if (20..=90).contains(&t)) && matches!(shape, Some(Some((a, b, cc, d))) if a >= 4.0 && b >= 4.0 && cc >= 4.0 && d >= 4.0);
+    c.r.check("exact window: whole, its title bar described (band, buttons) and all four corners in its shape", ok, format!("chrome(band,close,controls)={chrome:?} corners={shape:?} opened={opened}"));
+    if let Some(w) = id {
+        c.send(Message::AppTerminate { application_id: "textedit".into() });
+        c.pump(10, |c| c.destroyed_ids.contains(&w));
+    }
+    c.send(Message::WindowStyle { exact: false });
+    c.created_apps.retain(|(_, a)| a != "textedit");
+}
+
+/// The Mac's menu bar ("menu_bar_stream"): streamed as a window of its own (the main screen's
+/// top strip), its menus shown as popups of it; a click on the Apple menu opens it.
+fn menu_bar<S: Read + Write>(c: &mut Ctx<S>) {
+    c.send(Message::MenuBarStream { enabled: true });
+    // its first picture may come before its status (video over UDP, the status over TCP), and the
+    // menu bar hardly changes: ask for one once the status is in, as the viewer does
+    c.pump(4, |c| c.menubar.is_some());
+    if let Some((true, id, ..)) = c.menubar.clone() {
+        c.send(Message::RequestKeyframe { window_id: id });
+    }
+    let ok = c.pump(12, |c| c.menubar.as_ref().is_some_and(|d| !d.0 || c.menubar_picture.is_some()));
+    let d = c.menubar.clone();
+    let shown = ok && d.as_ref().is_some_and(|d| d.0 && d.2 > 300 && (16..=80).contains(&d.3)) && c.menubar_picture.is_some();
+    c.r.check("menu bar: the Mac's own menu bar is streamed as a window of its own", shown, format!("status={d:?} frames={}", c.menubar_frames));
+    if let Some(p) = c.menubar_picture.take() {
+        eprintln!("[INFO] the Mac's menu bar as streamed: {}x{} px, {} colours", p.width, p.height, p.distinct_colors());
+        print_picture("MENUBAR", &p);
+    }
+    if let Some((true, id, _, h, _)) = d {
+        // the Apple menu, at the bar's left end: it opens as a popup of the bar
+        let before = c.created.len();
+        let (x, y) = (24.0, h as f64 / 2.0);
+        c.send(Message::MouseMove { window_id: id, x, y });
+        c.pump(1, |_| false);
+        c.send(Message::MouseButton { window_id: id, button: MouseButton::Left, down: true, x, y });
+        c.send(Message::MouseButton { window_id: id, button: MouseButton::Left, down: false, x, y });
+        let opened = c.pump(6, |c| c.created[before..].iter().any(|(_, r, p)| *r == rm_protocol::WindowRole::Popup && *p == Some(id)));
+        c.r.check("menu bar: a menu opened from it is shown as a popup of it", opened, format!("created={:?}", &c.created[before..]));
+        c.send(Message::Key { window_id: id, physical_key: "Escape".into(), modifiers: vec![], down: true });
+        c.send(Message::Key { window_id: id, physical_key: "Escape".into(), modifiers: vec![], down: false });
+        c.pump(1, |_| false);
+    }
+    c.send(Message::MenuBarStream { enabled: false });
+    c.pump(1, |_| false);
+}
+
+/// Sound while the Mac Desktop is open (every app is heard): asked for, received as valid PCM
+/// packets, stopped when asked. A runner without an audio device may have nothing to capture:
+/// then the Mac must say so (`unavailable` with a reason) instead of staying silent.
+fn sound<S: Read + Write>(c: &mut Ctx<S>) {
+    c.send(Message::AudioControl { enabled: true });
+    // something to hear (the Mac's own alert sound)
+    #[cfg(target_os = "macos")]
+    let player = std::process::Command::new("afplay").args(["-v", "0.3", "/System/Library/Sounds/Submarine.aiff"]).spawn().ok();
+    let answered = c.pump(8, |c| c.audio_status.is_some() && (c.audio_packets >= 40 || c.audio_status.as_ref().is_some_and(|s| s.0 != "playing")));
+    let status = c.audio_status.clone();
+    let ok = answered && status.as_ref().is_some_and(|(s, r)| s == "playing" || (s == "unavailable" && r.as_ref().is_some_and(|r| !r.is_empty())));
+    c.r.check("sound: the Mac answers the request (playing, or unavailable with a reason)", ok, format!("{status:?}"));
+    eprintln!("[INFO] sound packets: {} (peak {}, gaps {}, malformed {})", c.audio_packets, c.audio_peak, c.audio_gaps, c.audio_bad);
+    if c.audio_packets > 0 {
+        c.r.check("sound packets are 48 kHz stereo PCM in 5 ms packets", c.audio_bad == 0, format!("packets={} malformed={}", c.audio_packets, c.audio_bad));
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(mut p) = player {
+        let _ = p.kill();
+        let _ = p.wait();
+    }
+    if status.is_some_and(|s| s.0 == "playing") {
+        c.send(Message::AudioControl { enabled: false });
+        let stopped = c.pump(5, |c| c.audio_status.as_ref().is_some_and(|s| s.0 == "stopped"));
+        c.pump(1, |_| false);
+        let before = c.audio_packets;
+        c.pump(1, |_| false);
+        c.r.check("sound stops when the viewer asks", stopped && c.audio_packets <= before + 2, format!("status={:?} packets in the last second={}", c.audio_status, c.audio_packets - before));
+    }
 }
 
 fn gamestream_desktop<S: Read + Write>(c: &mut Ctx<S>) {

@@ -57,6 +57,64 @@ func axWindowMatching(pid: pid_t, rect: CGRect) -> AXUIElement? {
     return nil
 }
 
+private func wFrame(_ el: AXUIElement) -> CGRect? {
+    var p = CGPoint.zero, s = CGSize.zero
+    guard let pv = wAX(el, kAXPositionAttribute as String), let sv = wAX(el, kAXSizeAttribute as String),
+          AXValueGetValue(pv as! AXValue, .cgPoint, &p), AXValueGetValue(sv as! AXValue, .cgSize, &s) else { return nil }
+    return CGRect(origin: p, size: s)
+}
+
+/// The title bar of an exact window, for the viewer ("window_chrome"), in points from the
+/// window's top-left: the band it is moved by (a toolbar that shares the title bar included),
+/// its three buttons, and what else in that band takes clicks (toolbar items, tabs, fields):
+/// those go to the Mac, the rest of the band moves the window on Windows.
+func windowChrome(id: CGWindowID, pid: pid_t, rect: CGRect) -> [String: Any]? {
+    guard let w = axWindowMatching(pid: pid, rect: rect) else { return nil }
+    func rel(_ r: CGRect) -> [String: Any] { rectJSON(r.offsetBy(dx: -rect.minX, dy: -rect.minY).integral) }
+    var out: [String: Any] = ["type": "window_chrome", "window_id": Int(id)]
+    var lights: [CGRect] = []
+    for (key, attr) in [("close", kAXCloseButtonAttribute), ("minimize", kAXMinimizeButtonAttribute), ("zoom", kAXZoomButtonAttribute)] {
+        if let b = wAX(w, attr as String), CFGetTypeID(b) == AXUIElementGetTypeID(), let f = wFrame(b as! AXUIElement), f.width > 0 {
+            out[key] = rel(f); lights.append(f)
+        }
+    }
+    let kids = wAX(w, kAXChildrenAttribute as String) as? [AXUIElement] ?? []
+    // the band: down to the bottom of a toolbar at the window's top, else the title bar (as far
+    // below the buttons as they are below the top), else nothing to move it by
+    var band: CGFloat = 0
+    if let tb = kids.first(where: { wAXString($0, kAXRoleAttribute as String) == (kAXToolbarRole as String) }), let f = wFrame(tb), f.minY - rect.minY < 8 {
+        band = f.maxY - rect.minY
+    } else if let l = lights.first {
+        band = ((l.minY - rect.minY) * 2 + l.height).rounded()
+    }
+    band = min(max(0, band), rect.height / 2)
+    // what takes clicks in the band (bounded walk: toolbars nest their items in groups)
+    let lightRoles: Set<String> = [kAXCloseButtonSubrole as String, kAXMinimizeButtonSubrole as String, kAXZoomButtonSubrole as String, kAXFullScreenButtonSubrole as String]
+    let inputs: Set<String> = [kAXTextFieldRole as String, kAXComboBoxRole as String, kAXSliderRole as String, kAXIncrementorRole as String,
+                               kAXPopUpButtonRole as String, kAXMenuButtonRole as String, kAXCheckBoxRole as String, kAXRadioButtonRole as String,
+                               kAXButtonRole as String, kAXDisclosureTriangleRole as String, "AXLink", "AXSegmentedControl"]
+    var controls: [[String: Any]] = []
+    var stack = kids.map { ($0, 0) }, visited = 0
+    while let (el, depth) = stack.popLast(), visited < 240, controls.count < 64 {
+        visited += 1
+        let f = wFrame(el)
+        if let f = f, f.minY - rect.minY >= band { continue } // below the band: nothing in it
+        let role = wAXString(el, kAXRoleAttribute as String) ?? ""
+        let sub = wAXString(el, kAXSubroleAttribute as String) ?? ""
+        var actions: CFArray?
+        let names: [String] = AXUIElementCopyActionNames(el, &actions) == .success ? (actions.map { ($0 as NSArray) as? [String] ?? [] } ?? []) : []
+        let presses = names.contains(kAXPressAction as String)
+        if let f = f, !lightRoles.contains(sub), inputs.contains(role) || (presses && role != (kAXGroupRole as String) && role != (kAXToolbarRole as String)), f.width > 0, f.height > 0 {
+            controls.append(rel(f))
+            continue
+        }
+        if depth < 5, let more = wAX(el, kAXChildrenAttribute as String) as? [AXUIElement] { for k in more { stack.append((k, depth + 1)) } }
+    }
+    out["title_height"] = Int(band.rounded())
+    out["controls"] = controls
+    return out
+}
+
 /// Titles of buttons inside an AX element (bounded search: panels nest their buttons in groups).
 private func buttonTitles(_ root: AXUIElement) -> Set<String> {
     var out = Set<String>(), stack = [(root, 0)], visited = 0
@@ -121,6 +179,8 @@ func isWholeDisplay(_ rect: CGRect) -> Bool {
 /// Height of a plain title bar (traffic lights + title, nothing else in it), else 0. Windows whose
 /// toolbar shares the title bar (Xcode, Finder) or whose content runs under it keep it.
 func titleBarInset(pid: pid_t, rect: CGRect) -> CGFloat {
+    // exact windows: the viewer shows the Mac's own title bar
+    if exactWindows { return 0 }
     guard let w = axWindowMatching(pid: pid, rect: rect),
           wAXString(w, kAXSubroleAttribute as String) == (kAXStandardWindowSubrole as String) else { return 0 }
     let kids = wAX(w, kAXChildrenAttribute as String) as? [AXUIElement] ?? []
@@ -188,6 +248,27 @@ final class WindowTracker {
     var onMoved: ((WinInfo) -> Void)?       // position/size changed
     var onTitle: ((WinInfo) -> Void)?
     var onAppExited: ((String, Int32) -> Void)?
+    /// An app opened from the session is now shown (its id, pid).
+    var onAdopted: ((String, pid_t) -> Void)?
+    /// When the viewer last clicked or typed in an app window (not the Mac Desktop).
+    private var inputAt: CFAbsoluteTime = 0
+    /// Windows of apps not shown on Windows, and when each was first seen.
+    private var strangers: [CGWindowID: CFAbsoluteTime] = [:]
+    /// Processes found not to be apps to show (system UI, helpers).
+    private var notAdoptable: Set<pid_t> = []
+
+    /// The Mac's Dock shown on Windows (Fusion.swift): its pid and region. Its menus and stacks
+    /// are popups over it there.
+    private var dockShown: (pid: pid_t, rect: CGRect)?
+    func setDock(_ d: (pid_t, CGRect)?) { queue.async { self.dockShown = d.map { (pid: $0.0, rect: $0.1) } } }
+    /// The Mac's menu bar is shown on Windows (MenuStrip.swift): its menus are popups of it.
+    private var menuBarShown: CGRect?
+    func setMenuBar(_ r: CGRect?) { queue.async { self.menuBarShown = r } }
+
+    /// The viewer clicked or typed in a window of the session: a window that another app opens
+    /// in the next few seconds (a document double-clicked in Finder opens in Preview) is the
+    /// user's doing, and that app is shown on Windows too.
+    func noteInput() { queue.async { self.inputAt = CFAbsoluteTimeGetCurrent() } }
 
     init(apps: AppManager) {
         self.apps = apps
@@ -260,10 +341,31 @@ final class WindowTracker {
 
     private func tick() {
         ticks += 1
-        let launched = Set(apps.pids)
+        var launched = Set(apps.pids)
         if ticks % 5 == 1 { refreshHelpers(anyLaunched: !launched.isEmpty) }
         let windows = onscreen()
         if !started { preexisting = Set(windows.map { $0.0 }); started = true }
+        if ticks % 600 == 0 { notAdoptable.removeAll() } // pids are reused
+        // a window of another app that appeared just after the viewer's click or key: that app
+        // was opened from the session (Finder opening a document, an app opening a link)
+        let now = CFAbsoluteTimeGetCurrent()
+        for (id, pid, _, _, layer) in windows where layer == 0 && !preexisting.contains(id) && !ignored.contains(id) && known[id] == nil
+            && !launched.contains(pid) && !servicePids.contains(pid) && companions[pid] == nil {
+            let first = strangers[id] ?? now
+            strangers[id] = first
+            guard now - inputAt < 5, first >= inputAt - 0.5, !notAdoptable.contains(pid) else { continue }
+            if let appID = apps.adoptOpened(pid: pid) {
+                log("\(appID) (pid \(pid)) was opened from the session: shown on Windows too")
+                launched.insert(pid)
+                // shown as an app launched from Windows is: all of its windows
+                for w in windows where w.1 == pid { preexisting.remove(w.0); ignored.remove(w.0) }
+                onAdopted?(appID, pid)
+            } else if apps.appID(forPid: pid) == nil {
+                notAdoptable.insert(pid)
+            }
+        }
+        let visible = Set(windows.map { $0.0 })
+        strangers = strangers.filter { visible.contains($0.key) }
 
         var seen = Set<CGWindowID>()
         ignored.formIntersection(windows.map { $0.0 })
@@ -271,7 +373,12 @@ final class WindowTracker {
         sheets = sheets.filter { onScreen.contains($0.key) }
         for (id, pid, title, rect, layer) in windows where !preexisting.contains(id) && !ignored.contains(id) {
             let fromService = servicePids.contains(pid)
-            guard launched.contains(pid) || fromService || companions[pid] != nil else { continue }
+            // a menu or stack of the Mac's Dock shown on Windows (not the Dock itself)
+            let dockPopup = dockShown.map { pid == $0.pid && !rect.contains(CGPoint(x: $0.rect.midX, y: $0.rect.midY)) && layer > 0 } ?? false
+            // a menu that drops from the Mac's menu bar shown on Windows (an app's, the Apple
+            // menu, a status item's: whoever draws it), not the bar itself
+            let menuPopup = menuBarShown.map { layer > 0 && rect.minY >= $0.minY - 1 && rect.minY <= $0.maxY + 6 && rect.maxY > $0.maxY + 2 } ?? false
+            guard launched.contains(pid) || fromService || companions[pid] != nil || dockPopup || menuPopup else { continue }
             seen.insert(id)
             if var old = known[id] {
                 if old.rect != rect {
@@ -294,6 +401,18 @@ final class WindowTracker {
             // (a pop-up menu is drawn at once: shown without the wait)
             if age < (layer == popUpMenuLayer ? 1 : 3) { continue }
             pending.removeValue(forKey: id)
+            if menuPopup {
+                let w = WinInfo(id: id, pid: pid, title: title, rect: rect, appID: apps.appID(forPid: pid) ?? "menubar", role: .popup, parent: menuBarWindowID)
+                known[id] = w
+                onCreated?(w)
+                continue
+            }
+            if dockPopup {
+                let w = WinInfo(id: id, pid: pid, title: title, rect: rect, appID: "dock", role: .popup, parent: dockWindowID)
+                known[id] = w
+                onCreated?(w)
+                continue
+            }
             guard let appID = apps.appID(forPid: pid) ?? companions[pid] ?? (fromService ? frontLaunchedApp() : nil) else { continue }
             let first = !known.values.contains { $0.appID == appID && $0.role == .window }
             // a menu, popover or completion list over a window the app already shows is a popup

@@ -97,6 +97,13 @@ final class UdpLink {
     /// a datagram of the Mac Desktop's full GameStream session (flow, bytes)
     var onTunnel: ((UInt8, Data) -> Void)?
 
+    /// A packet of sound to the client (`"RM" 26 0` + payload, encrypted).
+    func sendAudio(_ payload: Data) {
+        var d = Data([0x52, 0x4D, 26, 0])
+        d.append(payload)
+        raw(d)
+    }
+
     /// A GameStream datagram to the client's tunnel (`"RM" 25 flow`).
     func sendTunnel(_ flow: UInt8, _ data: Data) {
         var d = Data([0x52, 0x4D, 25, flow])
@@ -158,6 +165,10 @@ final class UdpLink {
         let st = Thread { [weak self] in self?.pace() }
         st.name = "rm.udp.send"; st.qualityOfService = .userInteractive; st.start()
     }
+
+    /// When the client was last heard over UDP (any of its datagrams).
+    var lastHeard: CFAbsoluteTime { cond.lock(); defer { cond.unlock() }; return heardAt }
+    private var heardAt: CFAbsoluteTime = 0
 
     /// The client's reports are coming in: video may go this way.
     var alive: Bool { cond.lock(); defer { cond.unlock() }; return CFAbsoluteTimeGetCurrent() - lastReport < 1.5 }
@@ -263,6 +274,7 @@ final class UdpLink {
             }
             cond.lock(); let known = from == relayKey || verified.contains(from); if known && from != relayKey { lastDirect = now }; cond.unlock()
             guard known else { continue }
+            if buf[2] >= 16 { cond.lock(); heardAt = now; cond.unlock() } // the client's own datagrams, not the relay's
             func be32(_ o: Int) -> UInt32 { var v: UInt32 = 0; for i in o..<(o + 4) { v = (v << 8) | UInt32(buf[i]) }; return v }
             func be64(_ o: Int) -> UInt64 { var v: UInt64 = 0; for i in o..<(o + 8) { v = (v << 8) | UInt64(buf[i]) }; return v }
             switch buf[2] {

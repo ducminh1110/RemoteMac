@@ -4,7 +4,7 @@
 import Foundation
 import CryptoKit
 
-enum Chan: UInt8 { case input = 0, control = 1, windowMetadata = 2, video = 3, clipboard = 4, files = 5, telemetry = 6 }
+enum Chan: UInt8 { case input = 0, control = 1, windowMetadata = 2, video = 3, clipboard = 4, files = 5, telemetry = 6, audio = 7 }
 
 func channel(forType t: String) -> Chan {
     switch t {
@@ -47,6 +47,14 @@ final class Conn {
                     // sender sees a slow link at once instead of filling seconds of buffers
                     var lowat: Int32 = 128 * 1024
                     setsockopt(fd, IPPROTO_TCP, 0x201 /* TCP_NOTSENT_LOWAT */, &lowat, socklen_t(MemoryLayout<Int32>.size))
+                    // a connection that died without a word (the Mac slept, a router forgot it, the
+                    // relay restarted) is noticed within about 40 s instead of never: the Mac then
+                    // waits under its ID again instead of looking offline
+                    var on: Int32 = 1, idle: Int32 = 20, intvl: Int32 = 5, cnt: Int32 = 4
+                    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, socklen_t(MemoryLayout<Int32>.size))
+                    setsockopt(fd, IPPROTO_TCP, 0x10 /* TCP_KEEPALIVE: idle seconds */, &idle, socklen_t(MemoryLayout<Int32>.size))
+                    setsockopt(fd, IPPROTO_TCP, 0x101 /* TCP_KEEPINTVL */, &intvl, socklen_t(MemoryLayout<Int32>.size))
+                    setsockopt(fd, IPPROTO_TCP, 0x102 /* TCP_KEEPCNT */, &cnt, socklen_t(MemoryLayout<Int32>.size))
                     return Conn(fd: fd)
                 }
                 close(fd)
@@ -181,7 +189,14 @@ func joinRelay(_ conn: Conn, session: String) throws {
     if let key = relayKey() { join["key"] = key }
     let line = try JSONSerialization.data(withJSONObject: join)
     try conn.writeAll(line + Data([10]))
-    let reply = try conn.readLine()
+    // the relay answers within its pair timeout (5 minutes: READY, or "pair timeout"): silence
+    // past that means the connection is gone, and the Mac waits again
+    var tv = timeval(tv_sec: 330, tv_usec: 0)
+    setsockopt(conn.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    let reply: String
+    do { reply = try conn.readLine() } catch { throw WireError(description: "the relay went silent (\(error))") }
+    tv = timeval(tv_sec: 0, tv_usec: 0)
+    setsockopt(conn.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
     if reply != "READY" { throw WireError(description: "relay refused: \(reply)") }
 }
 
@@ -198,6 +213,8 @@ final class Sender {
     /// big, unhurried replies (app icons): after control, taking turns with video
     private var bulk: [Data] = []
     private var bulkTurn = false
+    /// sound on the stream (UDP not alive): right after control, at most 100 ms of it queued
+    private var audio: [Data] = []
     private var video: [(data: Data, window: UInt64, key: Bool, queued: CFAbsoluteTime)] = []
     private var waitingForKey: Set<UInt64> = []
     private var maxDelay: Double = 0
@@ -248,6 +265,17 @@ final class Sender {
     /// UDP video path; used while it is alive, TCP otherwise.
     var udp: UdpLink?
 
+    /// A packet of sound (its payload, Audio.swift): UDP while alive, else the Audio channel.
+    func sendAudio(_ payload: Data) {
+        if let u = udp, u.alive { u.sendAudio(payload); return }
+        let d = conn.frame(.audio, payload)
+        cond.lock()
+        audio.append(d)
+        if audio.count > 20 { audio.removeFirst(audio.count - 20) } // late sound is useless: the newest wins
+        cond.signal()
+        cond.unlock()
+    }
+
     func sendVideo(_ p: VideoPacket) {
         if let u = udp, u.alive { u.sendVideo(p); return }
         var ask: UInt64?
@@ -277,9 +305,10 @@ final class Sender {
     private func run() {
         while true {
             cond.lock()
-            while control.isEmpty && video.isEmpty && bulk.isEmpty { cond.wait() }
+            while control.isEmpty && video.isEmpty && bulk.isEmpty && audio.isEmpty { cond.wait() }
             let item: (Data, CFAbsoluteTime?)
             if !control.isEmpty { item = (control.removeFirst(), nil) }
+            else if !audio.isEmpty { item = (audio.removeFirst(), nil) }
             else if !bulk.isEmpty && (video.isEmpty || bulkTurn) { item = (bulk.removeFirst(), nil); bulkTurn = false }
             else { let v = video.removeFirst(); item = (v.data, v.queued); bulkTurn = true }
             cond.unlock()

@@ -97,10 +97,15 @@ func chooseInPanel(pid: pid_t, rect: CGRect, path: String) -> Bool {
     }
 
     // 2. Open: some macOS versions open a file straight from "Go to"; otherwise press the button.
+    // (closed only once it stays gone: a busy app can answer Accessibility with no windows for
+    // a moment, and taking that for closed left the panel up with the app stuck behind it)
+    var gone = 0
     for attempt in 0..<30 {
         usleep(200_000)
         let panels = panelWindows(pid)
-        if panels.count < panelsBefore || panels.isEmpty { log("panel choose: panel closed"); return true }
+        gone = panels.count < panelsBefore || panels.isEmpty ? gone + 1 : 0
+        if gone >= 3 { log("panel choose: panel closed"); return true }
+        if gone > 0 { continue }
         if attempt % 5 == 4, let p = panels.first, let b = openButton(p) {
             let enabled = (pAX(b, kAXEnabledAttribute as String) as? Bool) ?? false
             log("panel choose: Open button enabled=\(enabled)")

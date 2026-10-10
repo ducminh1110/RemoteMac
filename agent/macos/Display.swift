@@ -211,7 +211,10 @@ final class DisplayManager {
 
     /// Fullscreen on the virtual display (content = the client's monitor size), or back.
     func fullscreen(_ w: WinInfo, on: Bool) -> Bool {
-        guard let aw = axWindowFor(pid: w.pid, id: w.id, rect: w.rect) else { return false }
+        // right after a display change the app may not answer Accessibility for a moment
+        var found = axWindowFor(pid: w.pid, id: w.id, rect: w.rect)
+        for _ in 0..<10 where found == nil { usleep(200_000); found = axWindowFor(pid: w.pid, id: w.id, rect: tracker.current(w.id)?.rect ?? w.rect) }
+        guard let aw = found else { log("window \(w.id) fullscreen: the app does not show it to Accessibility"); return false }
         // The Mac's screen is our display (mirrored, the client's size, no room kept above): the
         // window takes the whole display where it is (macOS's own full screen moves it to a new
         // Space, with its animation), the menu bar and Dock hidden while it is there

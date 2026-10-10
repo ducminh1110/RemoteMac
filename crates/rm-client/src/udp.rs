@@ -398,6 +398,11 @@ fn run(sock: SealedUdp, relay: SocketAddr, register: Vec<u8>, stats: Arc<Mutex<L
                             on_out(o);
                         }
                     }
+                    rm_protocol::audio::T_AUDIO => {
+                        if let Some(a) = rm_protocol::audio::AudioPacket::from_datagram(p) {
+                            on_out(Out::Audio(a));
+                        }
+                    }
                     udp::T_PONG => {
                         if let Some((t, agent)) = udp::parse_pong(p) {
                             let ours = epoch.elapsed().as_micros() as u64;

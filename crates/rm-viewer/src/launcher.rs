@@ -1,75 +1,60 @@
-//! The "Remote Mac" launcher: a native window with a large-icon ListView of the Mac's applications.
-//! Double-click (or Enter) launches one; several can run at once, each in its own windows and
-//! taskbar group. Only one viewer process runs: a second invocation (e.g. a Start-menu shortcut)
-//! forwards its `--app` to this window with WM_COPYDATA and exits.
+//! The launcher window: the Mac's apps, after Apple's Screen Sharing on macOS 26 (launchui.rs
+//! draws it and says what clicks and keys do; this puts it in a Windows window). The window has
+//! no Windows title bar: its toolbar is the title bar, with the window buttons in it (frame.rs).
+//! Click an app (or Enter) to open it; type to search; arrow keys move; files dropped on it open
+//! on the Mac.
+//!
+//! Only one viewer process runs: a second invocation (e.g. a Start-menu shortcut) forwards its
+//! `--app` to this window with WM_COPYDATA and exits.
 
+use crate::glass::Level;
+use crate::launchui::{Key, View};
 use std::ffi::c_void;
-use windows::core::{w, HSTRING, PCWSTR, PWSTR};
+use std::time::Instant;
+use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
-use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 pub const CLASS: PCWSTR = w!("RmLauncher");
 /// COPYDATASTRUCT.dwData tag for "launch this application id".
 pub const COPYDATA_LAUNCH: usize = 0x524D_4C31; // "RML1"
-/// WM_COMMAND id of the Settings button
-pub const ID_SETTINGS: usize = 300;
-const ICON_PX: i32 = 64;
-/// Layout (DIPs at 96 dpi): heading band, footer band, side margin.
-const HEAD: i32 = 76;
-const FOOT: i32 = 16;
-const SIDE: i32 = 18;
-const BG: (u8, u8, u8) = (247, 247, 248);
+/// The animation timer (WM_TIMER id) while something moves.
+pub const TIMER: usize = 41;
+/// The smallest the window gets (DIPs).
+pub const MIN_W: f32 = 560.0;
+pub const MIN_H: f32 = 400.0;
+
+/// What a click on the launcher asks for (the window's own buttons are done here).
+pub enum Act {
+    Launch(String),
+    Settings,
+}
 
 pub struct Launcher {
     pub hwnd: HWND,
-    pub list: HWND,
-    settings: HWND,
-    images: HIMAGELIST,
-    /// Application ids in list order.
+    /// Application ids in the Mac's order.
     pub ids: Vec<String>,
-    /// Footer line (JetBrains Mono): connection details.
-    footer: String,
-    /// The grid's font: kept alive as long as the list uses it.
-    _font: HFONT,
-}
-
-fn rgb((r, g, b): (u8, u8, u8)) -> COLORREF {
-    COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
-}
-
-fn font(face: &str, px: i32, weight: i32) -> HFONT {
-    unsafe { CreateFontW(-px, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, &HSTRING::from(face)) }
+    view: View,
+    level: Level,
+    timer: bool,
 }
 
 impl Launcher {
     pub fn create(hinst: HINSTANCE, show: bool) -> Option<Self> {
         unsafe {
-            let icc = INITCOMMONCONTROLSEX { dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_LISTVIEW_CLASSES };
-            let _ = InitCommonControlsEx(&icc);
-            let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("MacBridge"), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 680, 460, None, None, Some(hinst), None).ok()?;
-            let list = CreateWindowExW(WINDOW_EX_STYLE(0), WC_LISTVIEWW, w!(""), WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | LVS_ICON | LVS_AUTOARRANGE | LVS_SINGLESEL),
-                0, 0, 600, 380, Some(hwnd), None, Some(hinst), None).ok()?;
-            let images = ImageList_Create(ICON_PX, ICON_PX, ILC_COLOR32, 8, 8);
-            SendMessageW(list, LVM_SETIMAGELIST, Some(WPARAM(LVSIL_NORMAL as usize)), Some(LPARAM(images.0)));
-            // a calm, Mac-like grid: Inter labels on the window's own background, roomy cells
-            let ui = font(crate::native::ui_face(500), 13, 500);
-            SendMessageW(list, WM_SETFONT, Some(WPARAM(ui.0 as usize)), Some(LPARAM(1)));
-            SendMessageW(list, LVM_SETBKCOLOR, None, Some(LPARAM(rgb(BG).0 as isize)));
-            SendMessageW(list, LVM_SETTEXTBKCOLOR, None, Some(LPARAM(rgb(BG).0 as isize)));
-            SendMessageW(list, LVM_SETTEXTCOLOR, None, Some(LPARAM(rgb((30, 30, 32)).0 as isize)));
-            SendMessageW(list, LVM_SETICONSPACING, None, Some(LPARAM(((112 << 16) | 120) as isize)));
-            let ex = (LVS_EX_DOUBLEBUFFER | LVS_EX_BORDERSELECT) as isize;
-            SendMessageW(list, LVM_SETEXTENDEDLISTVIEWSTYLE, Some(WPARAM(ex as usize)), Some(LPARAM(ex)));
-            let _ = windows::Win32::UI::Controls::SetWindowTheme(list, w!("Explorer"), PCWSTR::null());
-            let settings = CreateWindowExW(WINDOW_EX_STYLE(0), w!("BUTTON"), w!("⚙  Settings"), WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0), 0, 0, 110, 30, Some(hwnd), Some(HMENU(ID_SETTINGS as *mut c_void)), Some(hinst), None).ok()?;
-            SendMessageW(settings, WM_SETFONT, Some(WPARAM(ui.0 as usize)), Some(LPARAM(1)));
-            let l = Self { hwnd, list, settings, images, ids: vec![], footer: String::new(), _font: ui };
-            let mut l = l;
-            l.fit(); // WM_SIZE during creation came before the viewer's state existed
-            l.status("connecting…");
+            // 920 x 620 DIPs on the monitor with the pointer
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let s = crate::surface::scale_at(pt.x, pt.y);
+            let (w, h) = ((920.0 * s) as i32, (620.0 * s) as i32);
+            let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("MacBridge"), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, w, h, None, None, Some(hinst), None).ok()?;
+            // files dropped here open on the Mac with their default app
+            windows::Win32::UI::Shell::DragAcceptFiles(hwnd, true);
+            crate::frame::adopt(hwnd);
+            let mut l = Self { hwnd, ids: vec![], view: View::new(), level: Level::Full, timer: false };
+            l.restyle();
             if show {
                 let _ = ShowWindow(hwnd, SW_SHOW);
             }
@@ -77,100 +62,198 @@ impl Launcher {
         }
     }
 
-    pub fn status(&mut self, s: &str) {
-        self.footer = s.to_string();
+    /// Which Mac it is and how it is connected (the toolbar's title and subtitle).
+    pub fn set_connection(&mut self, mac: &str, state: &str, route: &str) {
+        self.view.set_connection(mac, state, route);
+        self.redraw();
+    }
+
+    /// The connection's phase now (connecting again, lost…): shown when it changes.
+    pub fn poll(&mut self) {
+        use crate::lifecycle::Phase;
+        let st = match crate::lifecycle::current() {
+            Phase::Idle => return,
+            Phase::Connected => "Connected",
+            Phase::Reconnecting => "Connecting again…",
+            Phase::Disconnecting | Phase::Disconnected => "Disconnected",
+            Phase::Error(_) => "Not connected",
+            _ => "Connecting…",
+        };
+        let route = crate::net::route_label();
+        if st != self.view.state || route != self.view.route {
+            let mac = self.view.mac.clone();
+            self.view.set_connection(&mac, st, &route);
+            self.redraw();
+        }
+    }
+
+    /// The window changed size (or was maximized, or restored).
+    pub fn fit(&mut self) {
+        self.sync();
+        self.redraw();
+    }
+
+    /// The theme or the scale changed: everything drawn again.
+    pub fn restyle(&mut self) {
+        let (dark, _, level) = crate::surface::glass_look();
+        self.level = level;
+        crate::frame::appearance(self.hwnd, dark);
+        self.sync();
+        self.animate();
+    }
+
+    /// The window's size, scale and appearance, to the view.
+    fn sync(&mut self) {
+        let mut rc = RECT::default();
         unsafe {
-            // the title stays "MacBridge": what is connected where is no concern of the app list
+            let _ = GetClientRect(self.hwnd, &mut rc);
+        }
+        let s = (unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(self.hwnd) } as f32 / 96.0).max(1.0);
+        self.view.set_window(rc.right.max(1) as usize, rc.bottom.max(1) as usize, s, crate::surface::dark_mode(), self.level);
+        self.view.set_maximized(crate::frame::maximized(self.hwnd));
+    }
+
+    /// The window became the active one, or stopped being it (its buttons go grey).
+    pub fn set_active(&mut self, active: bool) {
+        self.view.set_active(active);
+        self.redraw();
+    }
+
+    /// WM_NCHITTEST: the toolbar's empty part moves the window.
+    pub fn hit_test(&self, lp: LPARAM) -> LRESULT {
+        crate::frame::hit_test(self.hwnd, lp, true, |x, y| self.view.is_caption(x, y))
+    }
+
+    fn redraw(&self) {
+        unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
         }
     }
 
-    fn scale(&self) -> f64 {
-        (unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(self.hwnd) } as f64 / 96.0).max(1.0)
-    }
-
-    pub fn fit(&self) {
-        let sc = self.scale();
-        let px = |v: i32| (v as f64 * sc).round() as i32;
-        unsafe {
-            let mut rc = RECT::default();
-            let _ = GetClientRect(self.hwnd, &mut rc);
-            let _ = MoveWindow(self.list, px(SIDE), px(HEAD), (rc.right - 2 * px(SIDE)).max(1), (rc.bottom - px(HEAD) - px(FOOT)).max(1), true);
-            // Settings, top right in the heading band
-            let _ = MoveWindow(self.settings, rc.right - px(SIDE) - px(116), px(22), px(116), px(32), true);
-        }
-    }
-
-    /// Heading ("MacBridge" + how many apps) above the app grid.
-    pub fn paint(&self, hdc: HDC) {
-        let sc = self.scale();
-        let px = |v: i32| (v as f64 * sc).round() as i32;
-        unsafe {
-            let mut rc = RECT::default();
-            let _ = GetClientRect(self.hwnd, &mut rc);
-            let b = CreateSolidBrush(rgb(BG));
-            FillRect(hdc, &rc, b);
-            let _ = DeleteObject(b.into());
-            SetBkMode(hdc, TRANSPARENT);
-            let title = font(crate::native::ui_face(600), px(22), 600);
-            let sub = font(crate::native::ui_face(400), px(13), 400);
-            let mono = font(crate::native::mono_face(), px(11), 400);
-            let old = SelectObject(hdc, title.into());
-            SetTextColor(hdc, rgb((22, 22, 24)));
-            let mut t: Vec<u16> = "MacBridge".encode_utf16().collect();
-            let mut r = RECT { left: px(SIDE + 6), top: px(16), right: rc.right - px(SIDE), bottom: px(46) };
-            DrawTextW(hdc, &mut t, &mut r, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-            SelectObject(hdc, sub.into());
-            SetTextColor(hdc, rgb((120, 120, 128)));
-            let mut t: Vec<u16> = format!("{} apps · double-click to open", self.ids.len()).encode_utf16().collect();
-            let mut r = RECT { left: px(SIDE + 6), top: px(46), right: rc.right - px(SIDE), bottom: px(66) };
-            DrawTextW(hdc, &mut t, &mut r, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
-            SelectObject(hdc, old);
-            for f in [title, sub, mono] {
-                let _ = DeleteObject(f.into());
-            }
-        }
-    }
-
     pub fn set_apps(&mut self, apps: &[(String, String, bool)]) {
-        unsafe {
-            SendMessageW(self.list, LVM_DELETEALLITEMS, None, None);
-            self.ids.clear();
-            for (i, (id, name, available)) in apps.iter().enumerate() {
-                let label = if *available { name.clone() } else { format!("{name} (not installed)") };
-                let mut text: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
-                let item = LVITEMW { mask: LVIF_TEXT | LVIF_IMAGE, iItem: i as i32, pszText: PWSTR(text.as_mut_ptr()), iImage: -1, ..Default::default() };
-                SendMessageW(self.list, LVM_INSERTITEMW, None, Some(LPARAM(&item as *const _ as isize)));
-                self.ids.push(id.clone());
-            }
-            let n = apps.len();
-            let prev = self.footer.split(" · ").filter(|p| !p.ends_with(" apps") && *p != "connecting…").collect::<Vec<_>>().join(" · ");
-            self.status(&if prev.is_empty() { format!("{n} apps") } else { format!("{prev} · {n} apps") });
-        }
+        self.view.set_apps(apps);
+        self.ids = self.view.tiles().iter().map(|t| t.id.clone()).collect();
+        self.animate();
     }
 
-    pub fn set_icon(&self, app: &str, icon: HICON) {
-        let Some(row) = self.ids.iter().position(|x| x == app) else { return };
-        unsafe {
-            let img = ImageList_ReplaceIcon(self.images, -1, icon);
-            let item = LVITEMW { mask: LVIF_IMAGE, iItem: row as i32, iImage: img, ..Default::default() };
-            SendMessageW(self.list, LVM_SETITEMW, None, Some(LPARAM(&item as *const _ as isize)));
+    /// The app's icon (straight-alpha RGBA, `size` square).
+    pub fn set_icon(&mut self, app: &str, size: u32, rgba: &[u8]) {
+        self.view.set_icon(app, size, rgba);
+        self.redraw();
+    }
+
+    /// Which apps have a window open here (a dot under their icon, as in the Dock).
+    pub fn set_open(&mut self, open: &[String]) {
+        if self.view.set_open(open) {
+            self.redraw();
         }
     }
 
     pub fn count(&self) -> usize {
-        unsafe { SendMessageW(self.list, LVM_GETITEMCOUNT, None, None).0 as usize }
+        self.view.tiles().len()
     }
 
-    /// Application id for an LVN_ITEMACTIVATE notification, if it is ours.
-    pub fn activated(&self, lp: LPARAM) -> Option<String> {
-        unsafe {
-            let hdr = &*(lp.0 as *const NMHDR);
-            if hdr.hwndFrom != self.list || hdr.code != LVN_ITEMACTIVATE {
-                return None;
+    // ---------------------------------------------------------------- input
+
+    pub fn mouse_move(&mut self, x: i32, y: i32) {
+        let before = self.view.hot();
+        self.view.mouse_move(x as f32, y as f32);
+        if self.view.hot() != before {
+            self.animate();
+        }
+    }
+
+    pub fn mouse_leave(&mut self) {
+        self.view.mouse_leave();
+        self.animate();
+    }
+
+    pub fn mouse_down(&mut self, x: i32, y: i32) {
+        self.view.mouse_down(x as f32, y as f32);
+        self.animate();
+    }
+
+    /// The button came up at (x, y): what to do.
+    pub fn mouse_up(&mut self, x: i32, y: i32) -> Option<Act> {
+        let act = self.view.mouse_up(x as f32, y as f32);
+        self.animate();
+        self.act(act)
+    }
+
+    fn act(&mut self, act: Option<crate::launchui::Act>) -> Option<Act> {
+        match act? {
+            crate::launchui::Act::Launch(id) => Some(Act::Launch(id)),
+            crate::launchui::Act::Settings => Some(Act::Settings),
+            crate::launchui::Act::Window(l) => {
+                crate::frame::press(self.hwnd, l);
+                None
             }
-            let act = &*(lp.0 as *const NMITEMACTIVATE);
-            self.ids.get(act.iItem.max(0) as usize).cloned()
+        }
+    }
+
+    /// The wheel turned by `delta` (120 a notch, up positive).
+    pub fn wheel(&mut self, delta: i32) {
+        self.view.wheel(delta);
+        self.animate();
+    }
+
+    /// A key went down: Enter opens the selection, arrows move it, Escape clears the search.
+    pub fn key(&mut self, vk: u16) -> Option<Act> {
+        use windows::Win32::UI::Input::KeyboardAndMouse::*;
+        let k = match VIRTUAL_KEY(vk) {
+            VK_LEFT => Key::Left,
+            VK_RIGHT => Key::Right,
+            VK_UP => Key::Up,
+            VK_DOWN => Key::Down,
+            VK_HOME => Key::Home,
+            VK_END => Key::End,
+            VK_RETURN => Key::Enter,
+            VK_ESCAPE => Key::Escape,
+            _ => return None,
+        };
+        let act = self.view.key(k);
+        self.animate();
+        self.act(act)
+    }
+
+    /// Typed text goes to the search.
+    pub fn char(&mut self, c: char) {
+        self.view.char(c);
+        self.animate();
+    }
+
+    fn animate(&mut self) {
+        self.redraw();
+        if !self.timer {
+            self.timer = true;
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER, 16, None);
+            }
+        }
+    }
+
+    /// The timer fired: draw, and keep it while something moves.
+    pub fn on_timer(&mut self) {
+        self.redraw();
+        if !self.view.busy(Instant::now()) {
+            self.timer = false;
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- drawing
+
+    /// Draw into `hdc` (WM_PAINT, WM_PRINTCLIENT).
+    pub fn paint(&mut self, hdc: HDC) {
+        let c = self.view.render(Instant::now());
+        let bi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: c.w as i32, biHeight: -(c.h as i32), biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
+            ..Default::default()
+        };
+        unsafe {
+            StretchDIBits(hdc, 0, 0, c.w as i32, c.h as i32, 0, 0, c.w as i32, c.h as i32, Some(c.px.as_ptr() as *const c_void), &bi, DIB_RGB_COLORS, SRCCOPY);
         }
     }
 }

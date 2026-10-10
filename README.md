@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/images/macbridge-icon.png" width="160" alt="MacBridge icon: a Liquid Glass window with a bridge across it">
+
 # MacBridge
 
 **Your Mac's apps, as real windows on your Windows PC.**
@@ -15,10 +17,15 @@ Desktop, streamed the way Moonlight streams a game.
 
 </div>
 
+<p align="center">
+  <img src="docs/images/launcher-light.png" width="860" alt="The launcher: the Mac's apps in a Finder-like grid under a Liquid Glass toolbar">
+</p>
+
 ---
 
 ## Contents
 
+- [Screenshots](#screenshots)
 - [Features](#features)
 - [How it works](#how-it-works)
 - [Quick start (release builds)](#quick-start-release-builds)
@@ -31,6 +38,25 @@ Desktop, streamed the way Moonlight streams a game.
 - [Project layout](#project-layout)
 - [Contributing](#contributing)
 - [License and credits](#license-and-credits)
+
+## Screenshots
+
+MacBridge's own windows are drawn after Apple's Screen Sharing on macOS 26: no Windows title
+bar (the window's toolbar is its title bar, with the red, yellow and green buttons), Liquid Glass
+controls, text set as macOS sets it, light and dark. These pictures are rendered by the app's
+own drawing code (`RM_PREVIEW=dir cargo test -p rm-viewer preview`); the app icons in them are stand-ins.
+
+| The launcher, dark | Scrolled: the grid softens under the glass toolbar |
+|---|---|
+| ![The launcher in dark mode](docs/images/launcher-dark.png) | ![The launcher scrolled: icons blur and fade under the Liquid Glass toolbar](docs/images/launcher-scrolled.png) |
+
+| Connect by ID | Connect by address (no ID, no relay) | Connecting |
+|---|---|---|
+| ![The connect window by ID, a message in red](docs/images/connect-light.png) | ![The connect window by address: only the address and the password](docs/images/connect-address.png) | ![The connect window in dark mode while it connects](docs/images/connect-dark.png) |
+
+| Settings | A menu open in Settings |
+|---|---|
+| ![Settings after System Settings: a glass sidebar, rounded groups, menus and switches](docs/images/settings-light.png) | ![A menu of Settings, the choice ticked](docs/images/settings-menu.png) |
 
 ## Features
 
@@ -51,7 +77,20 @@ Desktop, streamed the way Moonlight streams a game.
   the connection goes through a small relay that you can host yourself.
 - **Clipboard sync** of text and images in both directions, with keyboard translation
   (Ctrl ⇄ ⌘) and Unicode text input.
-- **Launch any app** in `/Applications`. Apps already running are adopted.
+- **Launch any app** in `/Applications`, from the launcher or **MacBridge Search**
+  (Ctrl+Alt+Space), with a loading window in the app's own colours. Apps already running are
+  adopted, and so are apps opened on the Mac after your click (a document in Finder, the Dock).
+- **Sound.** The Mac's sound plays on the PC: low-latency PCM over the same encrypted
+  transport, with a jitter buffer that adapts to the network. *(new in 1.2)*
+- **Drag and drop to open.** Drop files from Explorer onto a Mac app to open them there.
+  Programs and scripts are refused. *(new in 1.2)*
+- **Connect by address** too: type the Mac's IPv4 or IPv6 address or name (over a VPN, for
+  example), with the same encryption and no relay. *(new in 1.2)*
+- **Liquid Glass UI** for MacBridge's own menus, search and banners, with reduced-motion and
+  reduced-transparency fallbacks, and three **keyboard modes** (Windows, Mac, Fusion).
+  *(new in 1.2)*
+- **Desktop Fusion** *(experimental)*: the Mac's real Dock streamed onto the PC's desktop, with
+  the Mac's wallpaper set to the PC's while it is on (and always put back).
 - **End-to-end encrypted.** A password-authenticated key exchange, then ChaCha20-Poly1305 on
   everything. A relay only carries ciphertext and never learns anything about the password.
 - **Quiet by default.** The Mac app shows its ID and password, then runs in the background.
@@ -101,8 +140,12 @@ the internet. Builds from source have no relay set (see below).
 ```bash
 tar -xzf MacBridge-macos.tar.gz && cd MacBridge
 xattr -d com.apple.quarantine macbridge 2>/dev/null; chmod +x macbridge
-./macbridge --password choose-a-password
+./macbridge.sh --password choose-a-password
 ```
+
+`macbridge.sh` checks the macOS version, Gatekeeper's quarantine mark and the two permissions
+first, and says how to fix what is missing (`./macbridge.sh --check` only checks). It then
+starts `macbridge` with the same options.
 
 ```
   MacBridge is ready — connect from Windows with:
@@ -122,8 +165,9 @@ The first time, macOS asks to allow your terminal app under **System Settings �
 Security → Screen Recording** and **Accessibility**. Allow both, then run the command again.
 The ID stays the same on that Mac.
 
-**2. On Windows:** run `MacBridge.exe`, type the ID and the password, and press **Connect**.
-Pick an app from the launcher, or choose **Mac Desktop**.
+**2. On Windows:** run `MacBridge.exe`, type the ID and the password, and press **Connect**
+(or choose **By Address** and type only the Mac's address and the password). Pick an app from the launcher, or
+choose **Mac Desktop**.
 
 The [user guide](docs/USER-GUIDE.md) covers everything else: options, settings, shortcuts,
 logs, troubleshooting and uninstalling.
@@ -140,6 +184,11 @@ MacBridge picks the path for you:
    relay shown in the **Relay server** field of the connect window (remembered for next
    time). The Mac waits on both paths at once, and the first viewer to arrive gets the
    session.
+3. **By address.** With **By Address** (or `--direct host[:port] --password PASS`), only the
+   address and the password are typed: the viewer connects straight to the Mac's TCP port 7471
+   (or the Mac's `--port`), over IPv4 or IPv6, as Moonlight connects to Sunshine, and never
+   uses a relay. The secret of that session is the password alone. Use it over a VPN or a forwarded port. The handshake and encryption are the
+   same; there is no unencrypted fallback.
 
 **Where the Mac's ID comes from**
 
@@ -237,8 +286,11 @@ publishes a GitHub release with all three packages.
 | Action | How |
 |---|---|
 | Fullscreen a Mac app | green traffic light, or **F11** |
-| Mac Desktop controls | the **navigation ball**: drag it anywhere, click for the menu (exit fullscreen, minimize, pointer, settings, disconnect) |
-| Settings (frame rate, bitrate, sharpness, screen size, pixel-for-pixel) | **Ctrl+Alt+Shift+P** |
+| Mac Desktop controls | the **navigation ball**: drag it anywhere, click for the menu (exit fullscreen, minimize, open an app, pointer, sound, settings, disconnect) |
+| Open or switch to a Mac app by name (MacBridge Search) | **Ctrl+Alt+Space** |
+| Open a file on the Mac | drop it from Explorer onto a Mac app's window |
+| Settings (frame rate, bitrate, sharpness, screen size, pixel-for-pixel, sound, keyboard, glass, animations, Desktop Fusion) | **Ctrl+Alt+Shift+P** |
+| The Mac's sound off / on | **Ctrl+Alt+Shift+M** |
 | Show this PC's pointer over the picture | **Ctrl+Alt+Shift+C** |
 | Stream statistics overlay | **Ctrl+Alt+Shift+S** |
 | Copy / paste | Ctrl+C / Ctrl+V. The clipboard syncs both ways, including images |
@@ -263,7 +315,12 @@ relay or straight over the local network:
   connection, and the Mac locks out for a minute after five in a row. Keys are fresh for every
   session (forward secrecy).
 - **Encrypted transport.** The session stream and every UDP datagram of the session (video,
-  input, reports, the Mac Desktop's GameStream tunnel) are protected with ChaCha20-Poly1305.
+  sound, input, reports, the Mac Desktop's GameStream tunnel) are protected with
+  ChaCha20-Poly1305.
+- **Scoped file opening.** The viewer can only ask the Mac to open documents in the uploads
+  folder or the user's home, through LaunchServices; programs, scripts and packages are
+  refused and no shell is ever run. The Mac's wallpaper is changed only during Desktop Fusion
+  and always restored.
   Tampered data is rejected.
 - **What a relay sees:** the session ID, IP addresses, and the size and timing of the traffic.
   Nothing else. A relay with `RM_RELAY_KEY` set also refuses clients without the key.
@@ -281,7 +338,9 @@ Found a vulnerability? Please report it privately as described in SECURITY.md.
 |---|---|
 | [User guide](docs/USER-GUIDE.md) | installing, connecting, options, shortcuts, logs, troubleshooting |
 | [Relay setup](deploy/RELAY-SETUP.md) | running your own relay server |
-| [Architecture](docs/ARCHITECTURE.md) | how it works: connection paths, protocol, encryption |
+| [Architecture](docs/ARCHITECTURE.md) | how it works: connection paths, protocol, encryption, sound, Desktop Fusion |
+| [Changelog](CHANGELOG.md) | what changed in each version |
+| [QA checklist](docs/QA-CHECKLIST.md) | what to check by hand before a release |
 | [Security policy](SECURITY.md) | the security model and reporting vulnerabilities |
 | [Contributing](CONTRIBUTING.md) | building, testing and sending changes |
 

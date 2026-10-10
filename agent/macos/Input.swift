@@ -44,6 +44,11 @@ final class InputInjector {
     /// Mac Desktop: presses and releases received per path and button, and acted on per button
     private var received: [String: Int] = [:], injected: [String: Int] = [:]
 
+    /// The region the Mac's Dock is streamed from, while it is (set by main).
+    var dockRect: () -> CGRect? = { nil }
+    /// The region the Mac's menu bar is streamed from, while it is (set by main).
+    var menuBarRect: () -> CGRect? = { nil }
+
     /// A new Mac Desktop session: its clicks are counted afresh.
     func resetDesktopClicks() { received = [:]; injected = [:] }
     private let desktop: DesktopSession
@@ -56,6 +61,12 @@ final class InputInjector {
         let w: WinInfo
         if wid == desktopWindowID && desktop.isActive {
             w = WinInfo(id: wid, pid: 0, title: "Mac Desktop", rect: desktop.bounds)
+        } else if wid == dockWindowID, let r = dockRect() {
+            // the Mac's Dock (Fusion.swift): coordinates are within the region streamed
+            w = WinInfo(id: wid, pid: 0, title: "Dock", rect: r)
+        } else if wid == menuBarWindowID, let r = menuBarRect() {
+            // the Mac's menu bar (MenuStrip.swift): coordinates are within its strip
+            w = WinInfo(id: wid, pid: 0, title: "Menu Bar", rect: r)
         } else {
             guard let found = tracker.current(wid) else { return "unknown window \(wid)" }
             w = found

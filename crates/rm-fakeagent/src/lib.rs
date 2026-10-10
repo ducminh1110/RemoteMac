@@ -25,7 +25,14 @@ pub const UPLOAD_DIR: &str = "/Users/runner/Downloads/RemoteMac Uploads";
 
 /// "desktop" is the whole Mac (one window showing the screen); input on it goes to the window
 /// under the pointer, like on the real agent.
-const APPS: [(&str, &str); 3] = [("desktop", "Mac Desktop"), ("testapp", "RM Test App"), ("notes", "Notes Test")];
+/// The Dock's window id and size (as the Mac's: Fusion.swift).
+const DOCK_ID: u64 = 0x7FFF_0002;
+const DOCK: (usize, usize) = (480, 64);
+/// the Mac's menu bar, as Desktop Fusion's exact windows stream it (scripted strip)
+const MENUBAR_ID: u64 = 0x7FFF_0003;
+const MENUBAR: (usize, usize) = (1280, 24);
+
+const APPS: [(&str, &str); 4] = [("desktop", "Mac Desktop"), ("testapp", "RM Test App"), ("notes", "Notes Test"), ("textedit", "TextEdit")];
 
 fn caps() -> CapabilityReport {
     let ok = || Capability::Available { detail: "fake agent".into() };
@@ -90,6 +97,16 @@ struct State {
     /// the viewer shows GameStream's pictures: the desktop goes only that way (until then also
     /// the usual way, as the Mac app does)
     gs_ready: bool,
+    /// sound is being sent (a 440 Hz tone): set to stop it
+    audio: Option<Arc<AtomicBool>>,
+    /// the Dock is streamed: set to stop it
+    dock: Option<Arc<AtomicBool>>,
+    /// windows are shown as the Mac draws them ("window_style"): their title bars are described
+    exact: bool,
+    /// the menu bar is streamed: set to stop it
+    menubar: Option<Arc<AtomicBool>>,
+    /// the wallpaper set from the PC (path or colour), if any
+    wallpaper: Option<String>,
 }
 
 type Writer<W> = Arc<Mutex<W>>;
@@ -136,12 +153,45 @@ fn open_window<W: Write + Send + 'static>(
         st.lock().unwrap().desktop = Some(id);
     }
     send(writer, &Message::WindowCreated { window_id: id, application_id: app.into(), title: t, bounds, parent_id: parent, role })?;
+    if app != "desktop" {
+        send_shape(writer, id, w, h, 10.0)?;
+        // an exact window's title bar: a 28-point band with the three buttons (scripted)
+        if role != WindowRole::Popup && st.lock().unwrap().exact {
+            let light = |x: i32| Some(Rect { x, y: 8, w: 12, h: 12 });
+            send(writer, &Message::WindowChrome { window_id: id, title_height: 28, close: light(8), minimize: light(28), zoom: light(48), controls: vec![] })?;
+        }
+    }
     let wr = writer.clone();
     let hue = (60 * id % 256) as u8;
     let st2 = st.clone();
     let handle = std::thread::spawn(move || video_loop(wr, st2, id, w, h, hue, stop));
     st.lock().unwrap().windows.get_mut(&id).unwrap().video = Some(handle);
     Ok(id)
+}
+
+/// A `w` x `h` alpha mask with corners rounded by `r` pixels (anti-aliased), as the Mac's
+/// windows have.
+pub fn rounded_mask(w: usize, h: usize, r: f32) -> Vec<u8> {
+    let mut m = vec![255u8; w * h];
+    if r <= 0.0 {
+        return m;
+    }
+    for y in 0..h {
+        for x in 0..w {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let (cx, cy) = (px.clamp(r, w as f32 - r), py.clamp(r, h as f32 - r));
+            let d = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
+            m[y * w + x] = ((r + 0.5 - d).clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+    }
+    m
+}
+
+/// The shape of window `id`'s pictures (`w` x `h`), rounded like a Mac window's (scripted).
+fn send_shape<W: Write>(writer: &Writer<W>, id: u64, w: usize, h: usize, r: f32) -> Result<(), ProtocolError> {
+    let m = rounded_mask(w, h, r);
+    let rle = if r <= 0.0 { String::new() } else { base64_encode(&mask::encode(&m)) };
+    send(writer, &Message::WindowMask { window_id: id, width: w as u32, height: h as u32, rle })
 }
 
 fn close_window<W: Write>(writer: &Writer<W>, st: &Arc<Mutex<State>>, id: u64) -> Result<(), ProtocolError> {
@@ -224,7 +274,10 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
         Some(Message::ClientHello(_)) => {}
         _ => return Ok(()),
     }
-    send(&writer, &Message::ServerHello(Hello::ours("rm-fakeagent", &["h264"], &["control", "video", "files"])))?;
+    // exact windows only when asked for (RM_FAKE_EXACT=1): the viewer's smoke test checks its own frame
+    let exact = std::env::var_os("RM_FAKE_EXACT").is_some_and(|v| v != "0");
+    let features: &[&str] = if exact { &["control", "video", "files", "audio", "open_file", "fusion", "mask", "exact"] } else { &["control", "video", "files", "audio", "open_file", "fusion", "mask"] };
+    send(&writer, &Message::ServerHello(Hello::ours("rm-fakeagent", &["h264"], features)))?;
     send(&writer, &Message::CapabilityReport(caps()))?;
     // TCP messages and input that came over UDP (the direct path) go through one loop
     let (tx, rx) = std::sync::mpsc::channel::<Result<Option<Message>, ProtocolError>>();
@@ -263,6 +316,21 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
                     _ => Message::Error { code: "menu_invoke_failed".into(), message: format!("{application_id} {path:?}") },
                 }
             }
+            // the menu bar: a click opens a menu under it (a popup of the bar), Escape closes it
+            Message::MouseButton { window_id: MENUBAR_ID, down: true, .. } => {
+                if st.lock().unwrap().menubar.is_some() {
+                    open_window(&writer, &st, "menubar", "Menu", WindowRole::Popup, Some(MENUBAR_ID))?;
+                }
+                continue;
+            }
+            Message::Key { window_id: MENUBAR_ID, physical_key, down: true, .. } if physical_key == "Escape" => {
+                let menus: Vec<u64> = st.lock().unwrap().windows.iter().filter(|(_, w)| w.parent == Some(MENUBAR_ID)).map(|(k, _)| *k).collect();
+                for m in menus {
+                    close_window(&writer, &st, m)?;
+                }
+                continue;
+            }
+            Message::MouseMove { window_id: MENUBAR_ID, .. } | Message::MouseButton { window_id: MENUBAR_ID, .. } | Message::Key { window_id: MENUBAR_ID, .. } => continue,
             // Mac Desktop: a click picks the window under the pointer; keys go to it
             Message::MouseButton { window_id, down: true, x, y, .. } if st.lock().unwrap().desktop == Some(window_id) => {
                 let mut s = st.lock().unwrap();
@@ -426,6 +494,22 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
                 }
             }
             Message::PanelCancel { window_id } => close_window(&writer, &st, window_id)?,
+            // a dropped file, uploaded: it opens in a window of the app asked for (default: notes),
+            // whose title says what it opened; anything not uploaded this session is refused
+            Message::OpenFile { path, application_id } => {
+                let size = st.lock().unwrap().files.get(&path).copied().filter(|_| !rm_protocol::runs_code(&path));
+                // the default app: TextEdit for text, else the notes app
+                let app = application_id.unwrap_or_else(|| if path.ends_with(".txt") { "textedit" } else { "notes" }.into());
+                match (size, APPS.iter().find(|(id, _)| *id == app)) {
+                    (Some(size), Some((id, name))) => {
+                        let file = path.rsplit('/').next().unwrap_or("").to_string();
+                        let w = open_window(&writer, &st, id, name, WindowRole::Window, None)?;
+                        send(&writer, &Message::AppLaunched { application_id: (*id).into(), pid: 4242 })?;
+                        send(&writer, &Message::WindowTitleChanged { window_id: w, title: format!("{name} [opened {file} {size} bytes]") })?;
+                    }
+                    _ => send(&writer, &Message::Error { code: "open_rejected".into(), message: path })?,
+                }
+            }
             Message::WindowResizeRequest { window_id, width, height } => {
                 st.lock().unwrap().sizes.insert(window_id, (width, height));
                 st.lock().unwrap().rects.insert(window_id, Rect { x: 200, y: 216, w: width, h: height });
@@ -463,6 +547,7 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
                     let bounds = Rect { x: if on { 1920 } else { 200 }, y: if on { 25 } else { 216 }, w, h };
                     st.lock().unwrap().rects.insert(window_id, bounds);
                     send(&writer, &Message::WindowMoved { window_id, bounds })?;
+                    send_shape(&writer, window_id, w as usize, h as usize, if on { 0.0 } else { 10.0 })?;
                     let wr = writer.clone();
                     let hue = (60 * window_id % 256) as u8;
                     let st2 = st.clone();
@@ -479,6 +564,64 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
                 }
             }
             Message::Ping { nonce } => send(&writer, &Message::Pong { nonce })?,
+            // Desktop Fusion: a strip streamed as the Dock, the wallpaper kept (scripted)
+            Message::DockStream { enabled } => {
+                let mut s = st.lock().unwrap();
+                if let Some(stop) = s.dock.take() {
+                    stop.store(true, Ordering::SeqCst);
+                }
+                if enabled {
+                    let stop = Arc::new(AtomicBool::new(false));
+                    s.dock = Some(stop.clone());
+                    drop(s);
+                    send(&writer, &Message::DockStatus { available: true, window_id: DOCK_ID, bounds: Rect { x: 220, y: 1000, w: DOCK.0 as u32, h: DOCK.1 as u32 }, edge: "bottom".into(), reason: None })?;
+                    send_shape(&writer, DOCK_ID, DOCK.0, DOCK.1, 18.0)?;
+                    let (wr, st2) = (writer.clone(), st.clone());
+                    std::thread::spawn(move || video_loop(wr, st2, DOCK_ID, DOCK.0, DOCK.1, 200, stop));
+                }
+            }
+            Message::SetWallpaper { path, style: _, color } => {
+                let known = path.as_ref().is_none_or(|p| st.lock().unwrap().files.contains_key(p));
+                if known {
+                    st.lock().unwrap().wallpaper = Some(path.unwrap_or(color));
+                    send(&writer, &Message::WallpaperStatus { applied: true, reason: None })?;
+                } else {
+                    send(&writer, &Message::WallpaperStatus { applied: false, reason: Some("only an image sent from Windows is used".into()) })?;
+                }
+            }
+            Message::WindowStyle { exact } => st.lock().unwrap().exact = exact,
+            Message::MenuBarStream { enabled } => {
+                let mut s = st.lock().unwrap();
+                if let Some(stop) = s.menubar.take() {
+                    stop.store(true, Ordering::SeqCst);
+                }
+                if enabled {
+                    let stop = Arc::new(AtomicBool::new(false));
+                    s.menubar = Some(stop.clone());
+                    drop(s);
+                    send(&writer, &Message::MenuBarStatus { available: true, window_id: MENUBAR_ID, bounds: Rect { x: 0, y: 0, w: MENUBAR.0 as u32, h: MENUBAR.1 as u32 }, reason: None })?;
+                    let (wr, st2) = (writer.clone(), st.clone());
+                    std::thread::spawn(move || video_loop(wr, st2, MENUBAR_ID, MENUBAR.0, MENUBAR.1, 230, stop));
+                }
+            }
+            Message::RestoreWallpaper => {
+                st.lock().unwrap().wallpaper = None;
+                send(&writer, &Message::WallpaperStatus { applied: false, reason: None })?;
+            }
+            Message::AudioControl { enabled } => {
+                let mut s = st.lock().unwrap();
+                if let Some(stop) = s.audio.take() {
+                    stop.store(true, Ordering::SeqCst);
+                }
+                if enabled {
+                    let stop = Arc::new(AtomicBool::new(false));
+                    s.audio = Some(stop.clone());
+                    let (w, st2) = (writer.clone(), st.clone());
+                    std::thread::spawn(move || audio_loop(w, st2, stop));
+                }
+                drop(s);
+                send(&writer, &Message::AudioStatus { state: if enabled { "playing" } else { "stopped" }.into(), reason: None })?;
+            }
             Message::RequestKeyframe { window_id } => {
                 st.lock().unwrap().key_requests.insert(window_id);
             }
@@ -495,6 +638,37 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
         }
     }
     Ok(())
+}
+
+/// A 440 Hz tone in 5 ms packets, over UDP while it is alive, else on the Audio channel.
+fn audio_loop<W: Write>(w: Writer<W>, st: Arc<Mutex<State>>, stop: Arc<AtomicBool>) {
+    use rm_protocol::audio::{AudioPacket, PACKET_FRAMES, SAMPLE_RATE};
+    let start = std::time::Instant::now();
+    let (mut seq, mut phase) = (0u32, 0f64);
+    while !stop.load(Ordering::SeqCst) {
+        let mut samples = Vec::with_capacity(PACKET_FRAMES * 2);
+        for _ in 0..PACKET_FRAMES {
+            let v = (phase.sin() * 8000.0) as i16;
+            samples.extend([v, v]);
+            phase += std::f64::consts::TAU * 440.0 / SAMPLE_RATE as f64;
+        }
+        let p = AudioPacket { seq, pts_us: udp_agent::clock_us(), channels: 2, samples };
+        seq = seq.wrapping_add(1);
+        let udp = st.lock().unwrap().udp.clone().filter(|u| u.alive());
+        if let Some(u) = udp {
+            u.send_audio(&p);
+        } else {
+            let Ok(bytes) = rm_protocol::encode_audio(&p) else { return };
+            if w.lock().unwrap().write_all(&bytes).is_err() {
+                return;
+            }
+        }
+        // paced by the clock, as a sound card is
+        let due = start + Duration::from_micros(seq as u64 * 5_000);
+        if let Some(d) = due.checked_duration_since(std::time::Instant::now()) {
+            std::thread::sleep(d);
+        }
+    }
 }
 
 fn video_loop<W: Write>(w: Writer<W>, st: Arc<Mutex<State>>, id: u64, width: usize, height: usize, hue: u8, stop: Arc<AtomicBool>) {

@@ -1,6 +1,7 @@
 //! Records a real agent session for replay elsewhere: opens each application in turn, asks for
 //! its menu bar and icon once its first window is up, and stores everything the agent sends for
-//! that app (windows, titles, menus, icons, H.264 video) in an `.rmrec` file.
+//! that app (windows, titles, menus, icons, H.264 video) in an `.rmrec` file. The name `dock`
+//! records the Mac's Dock as Desktop Fusion streams it instead (its status and video).
 
 use crate::Session;
 use rm_protocol::recording::{self, Record};
@@ -8,6 +9,14 @@ use rm_protocol::{encode, encode_video, Frame, Message, ProtocolError, WindowRol
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
+
+/// The pseudo-app that records the Mac's Dock (Desktop Fusion), and the window id the Mac
+/// streams it as.
+pub const DOCK: &str = "dock";
+const DOCK_WINDOW: u64 = 0x7FFF_0002;
+/// The pseudo-app that records the Mac's menu bar (exact windows' menus), and its window id.
+pub const MENUBAR: &str = "menubar";
+const MENUBAR_WINDOW: u64 = 0x7FFF_0003;
 
 pub struct Plan {
     pub apps: Vec<String>,
@@ -37,6 +46,12 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
     };
     let t0 = Instant::now();
     put(out, recording::SESSION, t0, encode(&Message::CapabilityReport(sess.capabilities.clone()))?)?;
+    // windows as the Mac draws them (their title bar and buttons), when it can: the replay shows them so
+    if sess.negotiated.features.iter().any(|f| f == "exact") {
+        let m = Message::WindowStyle { exact: true };
+        sess.send(&m)?;
+        put(out, recording::SESSION, t0, encode(&m)?)?;
+    }
     sess.send(&Message::ListApps)?;
     let mut summary = Summary::default();
     let mut owner: HashMap<u64, String> = HashMap::new();
@@ -56,7 +71,15 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
     }
     for app in plan.apps.clone() {
         let start = Instant::now();
-        sess.send(&Message::AppLaunch { application_id: app.clone(), arguments: vec![], working_directory: None, environment: Default::default() })?;
+        if app == DOCK {
+            owner.insert(DOCK_WINDOW, app.clone()); // its first frame may come before its status
+            sess.send(&Message::DockStream { enabled: true })?;
+        } else if app == MENUBAR {
+            owner.insert(MENUBAR_WINDOW, app.clone());
+            sess.send(&Message::MenuBarStream { enabled: true })?;
+        } else {
+            sess.send(&Message::AppLaunch { application_id: app.clone(), arguments: vec![], working_directory: None, environment: Default::default() })?;
+        }
         let (mut windows, mut frames, mut bytes, mut first, mut asked) = (0usize, 0usize, 0usize, None::<Instant>, false);
         loop {
             let done = match first {
@@ -75,8 +98,12 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
             // which app a frame belongs to
             let tag = match &f {
                 Frame::Video(v) => owner.get(&v.window_id).cloned(),
+                Frame::Audio(_) => None,
                 Frame::Msg(Message::WindowCreated { window_id, application_id, role, .. }) => {
                     owner.insert(*window_id, application_id.clone());
+                    // its first picture may have come before this (over UDP) and not been kept
+                    // as this app's; a window that does not change (a dialog) sends no other
+                    sess.send(&Message::RequestKeyframe { window_id: *window_id })?;
                     if *application_id == app {
                         windows += 1;
                         if *role == WindowRole::Window && first.is_none() {
@@ -85,7 +112,23 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
                     }
                     Some(application_id.clone())
                 }
-                Frame::Msg(Message::WindowDestroyed { window_id } | Message::WindowMoved { window_id, .. } | Message::WindowTitleChanged { window_id, .. }) => owner.get(window_id).cloned(),
+                Frame::Msg(Message::WindowDestroyed { window_id } | Message::WindowMoved { window_id, .. } | Message::WindowTitleChanged { window_id, .. } | Message::WindowMask { window_id, .. } | Message::WindowChrome { window_id, .. }) => owner.get(window_id).cloned(),
+                Frame::Msg(Message::MenuBarStatus { available, window_id, .. }) if app == MENUBAR => {
+                    owner.insert(*window_id, app.clone());
+                    if *available && first.is_none() {
+                        windows += 1;
+                        first = Some(Instant::now());
+                    }
+                    Some(app.clone())
+                }
+                Frame::Msg(Message::DockStatus { available, window_id, .. }) if app == DOCK => {
+                    owner.insert(*window_id, app.clone());
+                    if *available && first.is_none() {
+                        windows += 1;
+                        first = Some(Instant::now());
+                    }
+                    Some(app.clone())
+                }
                 Frame::Msg(Message::AppLaunched { application_id, .. } | Message::AppExited { application_id, .. } | Message::AppIcon { application_id, .. } | Message::MenuBar { application_id, .. }) => Some(application_id.clone()),
                 Frame::Msg(_) => None,
             };
@@ -99,9 +142,10 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
                     encode_video(v)?
                 }
                 Frame::Msg(m) => encode(m)?,
+                Frame::Audio(a) => rm_protocol::encode_audio(a)?,
             };
             put(out, &app, start, wire)?;
-            if first.is_some() && !asked {
+            if first.is_some() && !asked && app != DOCK && app != MENUBAR {
                 asked = true;
                 sess.send(&Message::GetMenuBar { application_id: app.clone() })?;
                 sess.send(&Message::GetAppIcon { application_id: app.clone() })?;
@@ -111,6 +155,14 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
         summary.apps.push((app.clone(), windows, frames, bytes, first.map(|f| (f - start).as_secs_f64())));
         eprintln!("recorded {app}: windows={windows} videoFrames={frames} bytes={bytes} firstWindowAfter={:?}", first.map(|f| f - start));
         // close it before the next app (not recorded: the replay keeps the windows open)
+        if app == DOCK {
+            sess.send(&Message::DockStream { enabled: false })?;
+            continue;
+        }
+        if app == MENUBAR {
+            sess.send(&Message::MenuBarStream { enabled: false })?;
+            continue;
+        }
         sess.send(&Message::AppTerminate { application_id: app.clone() })?;
         let until = Instant::now() + Duration::from_secs(4);
         while Instant::now() < until {

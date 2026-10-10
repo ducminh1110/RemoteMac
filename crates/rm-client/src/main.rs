@@ -1,18 +1,22 @@
 use rm_client::Session;
 
 fn usage() -> ! {
-    eprintln!("usage: remote-mac [--relay HOST:PORT] (--id ID --password PASS | --session NAME) [--launch APP_ID | --e2e APP_ID | --record FILE --apps a,b [--settle SECS] [--shots DIR]]\n       --session takes its token from $RM_SESSION_TOKEN; a Mac on this network is found by its ID; otherwise the relay is --relay, $RM_RELAY or the one built in");
+    eprintln!("usage: remote-mac [--relay HOST:PORT] (--id ID --password PASS | --session NAME)\n       remote-mac --direct HOST[:PORT] --password PASS     (straight to the Mac: no ID, no relay) [--launch APP_ID | --e2e APP_ID | --record FILE --apps a,b [--settle SECS] [--shots DIR]]\n       --session takes its token from $RM_SESSION_TOKEN; a Mac on this network is found by its ID; otherwise the relay is --relay, $RM_RELAY or the one built in");
     std::process::exit(2)
 }
 
 fn main() {
     let (mut relay, mut session, mut launch, mut e2e) = (None, None, None, None);
     let (mut record, mut apps, mut settle, mut shots) = (None, None, None, None);
+    let mut vanish = false;
+    let mut direct: Option<String> = None;
     let (mut id, mut password) = (None, std::env::var("RM_PASSWORD").ok());
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--relay" => relay = args.next(),
+            // straight to the Mac at this address (IP or name, IPv4 or IPv6), any network
+            "--direct" => direct = args.next(),
             "--session" => session = args.next(),
             "--id" => id = args.next(),
             "--password" => password = args.next(),
@@ -22,6 +26,9 @@ fn main() {
             "--apps" => apps = args.next(),
             "--settle" => settle = args.next().and_then(|s| s.parse::<u64>().ok()),
             "--shots" => shots = args.next(),
+            // test aid: a viewer whose network goes away without a word (one ping, then silence
+            // with the connection left open)
+            "--vanish" => vanish = true,
             _ => usage(),
         }
     }
@@ -29,14 +36,25 @@ fn main() {
     // ID + password (what the Mac prints) or the legacy session name + RM_SESSION_TOKEN
     let (session, token, wait) = match (session, id, password) {
         (Some(s), _, _) => (s, std::env::var("RM_SESSION_TOKEN").unwrap_or_else(|_| usage()), true),
+        // straight to an address: the password alone, no ID (as Moonlight to Sunshine)
+        (None, None, Some(pw)) if direct.is_some() => (rm_protocol::session::DIRECT.to_string(), rm_protocol::session::direct_token(&pw), false),
         (None, Some(id), Some(pw)) => {
             let id = rm_protocol::session::normalize_id(&id).unwrap_or_else(|| fail("--id", "expected the 9-digit ID the Mac prints"));
             (rm_protocol::session::relay_session(&id), rm_protocol::session::token(&id, &pw), false)
         }
         _ => usage(),
     };
-    let (stream, route) = rm_relay::lan::connect(relay.as_deref(), &session, &rm_protocol::session::relay_token(&session), wait).unwrap_or_else(|e| fail("connect", e));
-    eprintln!("connected {}", match &route { rm_relay::lan::Route::Lan(a) => format!("on this network ({a})"), rm_relay::lan::Route::Relay(r) => format!("through the relay {r}") });
+    let rt = rm_protocol::session::relay_token(&session);
+    let (stream, route) = match &direct {
+        Some(d) => rm_relay::lan::connect_direct(d, &session, &rt),
+        None => rm_relay::lan::connect(relay.as_deref(), &session, &rt, wait),
+    }
+    .unwrap_or_else(|e| fail("connect", e));
+    eprintln!("connected {}", match &route {
+        rm_relay::lan::Route::Lan(a) => format!("on this network ({a})"),
+        rm_relay::lan::Route::Direct(a) => format!("straight to {a}"),
+        rm_relay::lan::Route::Relay(r) => format!("through the relay {r}"),
+    });
     // the password proved and the keys agreed end to end: everything after this is encrypted
     let (stream, keys) = rm_protocol::secure::client_tcp(stream, &session, &token).unwrap_or_else(|e| fail("secure handshake", e));
     eprintln!("end-to-end encrypted (ChaCha20-Poly1305)");
@@ -46,6 +64,12 @@ fn main() {
     stream.get_ref().set_read_timeout(timed.then(|| std::time::Duration::from_secs(10))).ok();
     let sock = stream.get_ref().try_clone().unwrap_or_else(|e| fail("socket", e));
     let mut s = Session::handshake(stream).unwrap_or_else(|e| fail("handshake", e));
+    if vanish {
+        s.send(&rm_protocol::Message::Ping { nonce: 1 }).unwrap_or_else(|e| fail("ping", e));
+        eprintln!("connected; now silent, as a viewer whose network is gone");
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        std::process::exit(0);
+    }
     if timed {
         // ... then a short one when UDP video comes in beside the TCP stream
         sock.set_read_timeout(Some(std::time::Duration::from_millis(if udp { 20 } else { 1000 }))).ok();

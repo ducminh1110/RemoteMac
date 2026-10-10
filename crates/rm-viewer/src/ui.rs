@@ -111,6 +111,12 @@ struct Remote {
     fullscreen: bool,
     saved: RECT,
     reveal: bool,
+    /// the shape of its pictures from the Mac (picture size, alpha per pixel)
+    mask: Option<(u32, u32, std::sync::Arc<Vec<u8>>)>,
+    /// shown as the Mac draws it: its own title bar and buttons in the picture, no chrome here
+    exact: bool,
+    /// that title bar (where it is moved by, its buttons), from the Mac
+    mac_chrome: Option<chrome::MacChrome>,
 }
 
 struct App {
@@ -119,6 +125,11 @@ struct App {
     remotes: HashMap<isize, Remote>,
     by_id: HashMap<u64, isize>,
     ctrl_as_command: bool,
+    /// how keys map (Settings > Keyboard; --raw-ctrl: Mac)
+    key_mode: KeyMode,
+    /// keys sent down and not up yet, per window: released when the window loses the focus
+    /// (a key up that Windows gives another window must not leave a key held on the Mac)
+    keys_down: HashMap<isize, Vec<&'static str>>,
     smoke: Option<Smoke>,
     showcase: Option<Showcase>,
     exit: Option<i32>,
@@ -143,6 +154,9 @@ struct App {
     panels: HashMap<u64, Option<u64>>,
     /// Upload transfer id -> panel id waiting for the uploaded file.
     uploads: HashMap<u64, u64>,
+    /// uploads of files dropped on a window or the launcher: opened on the Mac once there
+    /// (with this app; None: its default app)
+    open_uploads: HashMap<u64, Option<String>>,
     next_transfer: u64,
     redirect_panels: bool,
     /// Start-menu folder for this Mac's app shortcuts; they exist only while the Mac is connected.
@@ -232,6 +246,7 @@ impl Stats {
         }
         v.push(format!("Latency capture->shown {}  (->received {}, decode {:.1} ms)", avg(self.shown_ms, self.shown_n), avg(self.recv_ms, self.recv_n), self.decode_us as f64 / self.shown.max(1) as f64 / 1000.0));
         v.push(format!("Decoder {:?}  pacing {}  frames skipped {}", net::decoder_kind(), if pacing { "vsync" } else { "off" }, self.skipped));
+        v.push(crate::audio::audio().summary());
         v
     }
 }
@@ -268,6 +283,10 @@ pub fn run(opts: Options) -> i32 {
             }
         }
         crate::splash::register(hinst);
+        crate::glassmenu::register(hinst);
+        crate::palette::register(hinst);
+        crate::banner::register(hinst);
+        crate::dock::register(hinst);
         crate::settings_ui::register(hinst);
         crate::navball::register(hinst, ball_menu);
         let controller = match CreateWindowExW(WINDOW_EX_STYLE(0), w!("RmController"), w!("rm-controller"), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(hinst), None) {
@@ -278,10 +297,16 @@ pub fn run(opts: Options) -> i32 {
             }
         };
         let ctl = controller.0 as isize;
+        // Ctrl+Alt+Space anywhere: MacBridge Search (another app may own it: then the ball and
+        // the launcher still open it)
+        if RegisterHotKey(Some(controller), HOTKEY_SEARCH, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_SPACE.0 as u32).is_err() {
+            eprintln!("Ctrl+Alt+Space is taken by another app: open the search from the launcher or the navigation ball");
+        }
         let wake = move || {
             let _ = PostMessageW(Some(hwnd_of(ctl)), WM_UI_EVENT, WPARAM(0), LPARAM(0));
         };
         native::load_fonts();
+        crate::motion::set_preference(crate::settings::Settings::load().motion);
         // decided before any window exists: composition windows, and with them GPU pictures
         let use_comp = opts.d3d && comp::available();
         net::set_decoder(choose_decoder(use_comp));
@@ -301,10 +326,31 @@ pub fn run(opts: Options) -> i32 {
             // ID + password window; it connects in the background and shows why an attempt failed
             let app = opts.app.clone();
             let id = crate::connect::last_id();
-            let got = crate::connect::connect_window(id.as_deref(), None, |typed, password, relay| {
-                let (session, token) = (rm_protocol::session::relay_session(typed), rm_protocol::session::token(typed, password));
-                net::connect_with(Some(relay).filter(|r| !r.trim().is_empty()), &session, &token, app.as_deref(), false, wake)
-                    .map(|x| (x, rm_protocol::session::display_id(typed)))
+            let got = crate::connect::connect_window(id.as_deref(), None, |typed, password, via| {
+                // by its ID: the session of that ID; straight to an address: the direct session,
+                // the password alone (no ID, no relay)
+                let (session, token) = match via {
+                    crate::connect::Via::Address(_) => (rm_protocol::session::DIRECT.to_string(), rm_protocol::session::direct_token(password)),
+                    crate::connect::Via::Id(_) => (rm_protocol::session::relay_session(typed), rm_protocol::session::token(typed, password)),
+                };
+                let relay = match via {
+                    crate::connect::Via::Id(r) => {
+                        net::set_direct(None);
+                        Some(r.as_str()).filter(|r| !r.trim().is_empty())
+                    }
+                    crate::connect::Via::Address(a) => {
+                        net::set_direct(Some(a.clone()));
+                        None
+                    }
+                };
+                net::connect_with(relay, &session, &token, app.as_deref(), false, wake)
+                    .map(|x| {
+                        remember_session(relay, &session, &token);
+                        (x, match via {
+                            crate::connect::Via::Address(a) => a.trim().to_string(),
+                            crate::connect::Via::Id(_) => rm_protocol::session::display_id(typed),
+                        })
+                    })
                     .map_err(|e| {
                         eprintln!("connect failed: {e}");
                         net::friendly_error(&e)
@@ -315,7 +361,12 @@ pub fn run(opts: Options) -> i32 {
             x
         } else {
             match net::connect(opts.relay.as_deref(), &opts.session, &opts.token, opts.app.as_deref(), wake) {
-                Ok(x) => x,
+                Ok(x) => {
+                    if !opts.smoke && opts.showcase.is_none() {
+                        remember_session(opts.relay.as_deref(), &opts.session, &opts.token);
+                    }
+                    x
+                }
                 Err(e) => {
                     eprintln!("connect failed: {e}");
                     return 1;
@@ -329,7 +380,10 @@ pub fn run(opts: Options) -> i32 {
             shortcuts::remove_all(d);
         }
         link.send(&Message::ListApps);
-        let launcher = Launcher::create(hinst, opts.app.is_none() && !opts.smoke);
+        let mut launcher = Launcher::create(hinst, opts.app.is_none() && !opts.smoke);
+        if let Some(l) = launcher.as_mut() {
+            l.set_connection(&net::mac_label(), "Connected", &net::route_label());
+        }
         if launcher.is_none() {
             eprintln!("warning: launcher window could not be created");
         }
@@ -337,9 +391,9 @@ pub fn run(opts: Options) -> i32 {
         eprintln!("window surfaces: {}", if use_comp { "DirectComposition (rounded corners)" } else if opts.d3d { "Direct3D 11" } else { "GDI" });
         let showcase = opts.showcase.map(Showcase::new);
         APP.with(|a| {
-            *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, smoke, showcase, exit: None, hinst: hinst.0 as isize, gs_key: None, controller: ctl,
+            *a.borrow_mut() = Some(App { link, rx, remotes: HashMap::new(), by_id: HashMap::new(), ctrl_as_command: opts.ctrl_as_command, key_mode: if opts.ctrl_as_command { KeyMode::from_setting(crate::settings::Settings::load().keyboard) } else { KeyMode::Mac }, keys_down: HashMap::new(), smoke, showcase, exit: None, hinst: hinst.0 as isize, gs_key: None, controller: ctl,
                 icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_applied_image: None, clip_seq: 0, d3d: opts.d3d, comp: use_comp,
-                launcher, panels: HashMap::new(), uploads: HashMap::new(), next_transfer: 1, redirect_panels: opts.windows_file_picker,
+                launcher, panels: HashMap::new(), uploads: HashMap::new(), open_uploads: HashMap::new(), next_transfer: 1, redirect_panels: opts.windows_file_picker,
                 shortcut_dir, app_names: vec![], icon_rgba: HashMap::new(), menus: HashMap::new(), display_req: None, display: None, stats: Stats::default(),
                 pending: HashMap::new(), vsync: None, overlay: std::env::var_os("RM_STATS").is_some(), overlay_lines: vec![], stats_logged: Instant::now() - Duration::from_secs(4) })
         });
@@ -399,6 +453,126 @@ fn choose_decoder(use_comp: bool) -> net::DecoderKind {
     .unwrap_or(Software)
 }
 
+// ------------------------------------------------------------------ reconnecting
+
+/// How to reach the Mac again: (relay, session, session secret) of the connection made.
+static SESSION: std::sync::Mutex<Option<(Option<String>, String, String)>> = std::sync::Mutex::new(None);
+/// A connection made again in the background, for the UI thread to take over.
+static RECONNECTED: std::sync::Mutex<Option<Reconnected>> = std::sync::Mutex::new(None);
+type Reconnected = Result<(Link, Receiver<UiEvent>), String>;
+/// How long a lost connection is tried again before giving up.
+const RECONNECT_FOR: Duration = Duration::from_secs(120);
+
+fn remember_session(relay: Option<&str>, session: &str, token: &str) {
+    *SESSION.lock().unwrap() = Some((relay.map(String::from), session.to_string(), token.to_string()));
+}
+
+/// The connection is gone: close the Mac's windows here, remember which apps were open, and
+/// connect again in the background (the Mac waits for the next connection; its apps stay open).
+/// False when there is nothing to reconnect to.
+fn start_reconnect() -> bool {
+    let Some((relay, session, token)) = SESSION.lock().unwrap().clone() else { return false };
+    let Some(ctl) = with_app(|a| a.controller) else { return false };
+    crate::gsdesktop::stop();
+    let (windows, open_apps) = with_app(|a| {
+        let mut apps: Vec<String> = vec![];
+        for r in a.remotes.values().filter(|r| r.parent.is_none() && r.role == WindowRole::Window) {
+            if !apps.contains(&r.app) {
+                apps.push(r.app.clone());
+            }
+        }
+        let windows: Vec<isize> = a.remotes.keys().copied().collect();
+        a.remotes.clear();
+        a.by_id.clear();
+        a.panels.clear();
+        a.gs_key = None;
+        (windows, apps)
+    })
+    .unwrap_or_default();
+    for h in windows {
+        unsafe {
+            let _ = DestroyWindow(hwnd_of(h));
+        }
+    }
+    *REOPEN.lock().unwrap() = open_apps;
+    on_mac_gone();
+    fusion_reset(); // the Dock's window went with the others; asked for again once connected
+    crate::lifecycle::set(crate::lifecycle::Phase::Reconnecting);
+    // the glass banner at the top of the screen says what is happening
+    let mut at = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut at);
+    }
+    if let Some(hinst) = with_app(|a| a.hinst) {
+        crate::banner::show(HINSTANCE(hinst as *mut c_void), at.x, at.y);
+    }
+    if let Some(l) = with_app(|a| a.launcher.as_ref().map(|l| l.hwnd.0 as isize)).flatten() {
+        unsafe {
+            let _ = SetWindowTextW(hwnd_of(l), w!("MacBridge — connection lost, connecting again…"));
+            let _ = ShowWindow(hwnd_of(l), SW_SHOW);
+        }
+    }
+    eprintln!("connection lost: connecting again for up to {} s", RECONNECT_FOR.as_secs());
+    let _ = std::thread::Builder::new().name("rm-reconnect".into()).spawn(move || {
+        let wake = move || unsafe {
+            let _ = PostMessageW(Some(hwnd_of(ctl)), WM_UI_EVENT, WPARAM(0), LPARAM(0));
+        };
+        let until = Instant::now() + RECONNECT_FOR;
+        let result = loop {
+            std::thread::sleep(Duration::from_secs(2));
+            match net::connect_with(relay.as_deref(), &session, &token, None, false, wake) {
+                Ok(x) => break Ok(x),
+                // the Mac now has another password, or is locked: trying again does not help
+                Err(e) if e.contains("wrong password") || e.contains("locked") => break Err(e),
+                Err(e) if Instant::now() >= until => break Err(e),
+                Err(e) => eprintln!("connecting again: {e}"),
+            }
+        };
+        *RECONNECTED.lock().unwrap() = Some(result);
+        wake();
+    });
+    true
+}
+
+/// Apps whose windows were open when the connection was lost: opened again once it is back.
+static REOPEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// On the UI thread: take over a connection made again, or give up.
+fn take_reconnected() {
+    let Some(result) = RECONNECTED.lock().unwrap().take() else { return };
+    match result {
+        Ok((link, rx)) => {
+            eprintln!("connected again");
+            crate::banner::connected();
+            MAC_GONE.store(false, std::sync::atomic::Ordering::Release);
+            let launcher = with_app(|a| {
+                a.link = link;
+                a.rx = rx;
+                a.display_req = None;
+                a.link.send(&Message::ListApps);
+                a.launcher.as_ref().map(|l| l.hwnd.0 as isize)
+            })
+            .flatten();
+            if let Some(l) = launcher {
+                unsafe {
+                    let _ = SetWindowTextW(hwnd_of(l), w!("MacBridge"));
+                }
+            }
+            // the apps that were open come back (still running on the Mac: their windows reappear)
+            let apps = std::mem::take(&mut *REOPEN.lock().unwrap());
+            for app in apps {
+                launch_app(&app);
+            }
+        }
+        Err(why) => {
+            crate::banner::hide();
+            crate::lifecycle::set(crate::lifecycle::Phase::Disconnected);
+            native::message_box("MacBridge", &format!("The connection to the Mac was lost and could not be made again.\n\n{}\n\n{}", net::friendly_error(&why), crate::log_hint()));
+            quit(0);
+        }
+    }
+}
+
 /// The Mac is no longer reachable from this viewer: its apps leave the Start menu and Search.
 fn on_mac_gone() {
     MAC_GONE.store(true, std::sync::atomic::Ordering::Release);
@@ -452,7 +626,9 @@ fn shortcuts_tick() {
 }
 
 fn quit(code: i32) {
+    crate::lifecycle::set(crate::lifecycle::Phase::Disconnecting);
     on_mac_gone();
+    crate::lifecycle::set(crate::lifecycle::Phase::Disconnected);
     with_app(|a| a.exit = Some(code));
     unsafe { PostQuitMessage(code) };
 }
@@ -469,9 +645,16 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             on_vsync();
             LRESULT(0)
         }
+        WM_TIMER if wp.0 == TIMER_DOCK => {
+            dock_slide_tick();
+            LRESULT(0)
+        }
         WM_TIMER => {
             stats_tick();
             shortcuts_tick();
+            fusion_tick();
+            menu_bar_tick();
+            with_app(|a| a.launcher.as_mut().map(|l| l.poll()));
             smoke_tick();
             showcase_tick();
             LRESULT(0)
@@ -484,34 +667,131 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             pick_file_for_panel(wp.0 as u64);
             LRESULT(0)
         }
+        WM_GALLERY_MENU => {
+            // the glass menu over a window (gallery screenshots); modal until cancelled
+            let frame = hwnd_of(wp.0 as isize);
+            let mut r = RECT::default();
+            let _ = GetWindowRect(frame, &mut r);
+            ball_menu(frame, POINT { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 });
+            LRESULT(0)
+        }
+        WM_HOTKEY if wp.0 as i32 == HOTKEY_SEARCH => {
+            open_palette();
+            LRESULT(0)
+        }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }
 }
 
 // ------------------------------------------------------------------ launcher
 
+/// What a click or key on the launcher asked for (done outside the app state's borrow).
+fn launcher_act(hwnd: HWND, act: Option<launcher::Act>) {
+    match act {
+        Some(launcher::Act::Launch(app)) => launch_app(&app),
+        Some(launcher::Act::Settings) => open_settings(Some(hwnd)),
+        None => {}
+    }
+}
+
+/// The launcher's dots under the apps open here, and the connection it shows.
+fn launcher_sync() {
+    with_app(|a| {
+        let open: Vec<String> = a.remotes.values().filter(|r| r.role != WindowRole::Popup && r.app != DOCK_APP).map(|r| r.app.clone()).collect();
+        if let Some(l) = a.launcher.as_mut() {
+            l.set_open(&open);
+        }
+    });
+}
+
 unsafe extern "system" fn launcher_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
+        // no Windows title bar: the launcher's toolbar is its title bar (frame.rs)
+        WM_NCCALCSIZE => crate::frame::calc_size(hwnd, wp, lp),
+        WM_NCHITTEST => with_app(|a| a.launcher.as_ref().map(|l| l.hit_test(lp))).flatten().unwrap_or_else(|| DefWindowProcW(hwnd, msg, wp, lp)),
+        WM_NCACTIVATE => {
+            with_app(|a| a.launcher.as_mut().map(|l| l.set_active(wp.0 != 0)));
+            // nothing of the old title bar is drawn again
+            DefWindowProcW(hwnd, msg, wp, LPARAM(-1))
+        }
+        WM_GETMINMAXINFO => {
+            crate::frame::min_size(hwnd, lp, launcher::MIN_W, launcher::MIN_H);
+            LRESULT(0)
+        }
+        WM_DROPFILES => {
+            drop_files(hwnd, windows::Win32::UI::Shell::HDROP(wp.0 as *mut c_void));
+            LRESULT(0)
+        }
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
-            with_app(|a| a.launcher.as_ref().map(|l| l.paint(hdc)));
+            with_app(|a| a.launcher.as_mut().map(|l| l.paint(hdc)));
             let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        WM_PRINTCLIENT => {
+            with_app(|a| a.launcher.as_mut().map(|l| l.paint(HDC(wp.0 as *mut c_void))));
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
         WM_SIZE => {
-            with_app(|a| a.launcher.as_ref().map(|l| l.fit()));
+            with_app(|a| a.launcher.as_mut().map(|l| l.fit()));
             LRESULT(0)
         }
-        WM_COMMAND if wp.0 & 0xffff == launcher::ID_SETTINGS => {
-            open_settings(Some(hwnd));
+        WM_DPICHANGED => {
+            let r = &*(lp.0 as *const RECT);
+            let _ = SetWindowPos(hwnd, None, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            with_app(|a| a.launcher.as_mut().map(|l| l.restyle()));
             LRESULT(0)
         }
-        WM_NOTIFY => {
-            if let Some(app) = with_app(|a| a.launcher.as_ref().and_then(|l| l.activated(lp))).flatten() {
-                launch_app(&app);
+        WM_SETTINGCHANGE | WM_THEMECHANGED => {
+            // light / dark switched: drawn again in the other appearance
+            with_app(|a| a.launcher.as_mut().map(|l| l.restyle()));
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+        WM_MOUSEMOVE => {
+            let (x, y) = lp_xy(lp);
+            with_app(|a| a.launcher.as_mut().map(|l| l.mouse_move(x, y)));
+            let mut tme = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+            let _ = TrackMouseEvent(&mut tme);
+            LRESULT(0)
+        }
+        WM_MOUSE_LEAVE => {
+            with_app(|a| a.launcher.as_mut().map(|l| l.mouse_leave()));
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            let (x, y) = lp_xy(lp);
+            SetCapture(hwnd);
+            let _ = SetFocus(Some(hwnd));
+            with_app(|a| a.launcher.as_mut().map(|l| l.mouse_down(x, y)));
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            let (x, y) = lp_xy(lp);
+            let _ = ReleaseCapture();
+            let act = with_app(|a| a.launcher.as_mut().and_then(|l| l.mouse_up(x, y))).flatten();
+            launcher_act(hwnd, act);
+            LRESULT(0)
+        }
+        WM_MOUSEWHEEL => {
+            let delta = ((wp.0 >> 16) & 0xffff) as i16 as i32;
+            with_app(|a| a.launcher.as_mut().map(|l| l.wheel(delta)));
+            LRESULT(0)
+        }
+        WM_KEYDOWN => {
+            let act = with_app(|a| a.launcher.as_mut().and_then(|l| l.key(wp.0 as u16))).flatten();
+            launcher_act(hwnd, act);
+            LRESULT(0)
+        }
+        WM_CHAR => {
+            if let Some(c) = char::from_u32(wp.0 as u32) {
+                with_app(|a| a.launcher.as_mut().map(|l| l.char(c)));
             }
+            LRESULT(0)
+        }
+        WM_TIMER if wp.0 == launcher::TIMER => {
+            with_app(|a| a.launcher.as_mut().map(|l| l.on_timer()));
             LRESULT(0)
         }
         WM_COPYDATA => {
@@ -552,8 +832,507 @@ fn open_settings(owner: Option<HWND>) {
         local_cursor().store(s.local_cursor, std::sync::atomic::Ordering::Relaxed);
         PIXEL_FOR_PIXEL.store(s.pixel_for_pixel(), std::sync::atomic::Ordering::Relaxed);
         with_app(|a| a.link.send(&s.message(net::display_scale(), net::screen_px())));
+        // keys: the mode at once (the menus' shortcut labels follow when they are rebuilt)
+        with_app(|a| {
+            if a.ctrl_as_command {
+                a.key_mode = KeyMode::from_setting(s.keyboard);
+            }
+        });
+        crate::motion::set_preference(s.motion);
+        // sound: volume at once; muting also stops the Mac sending it
+        let sound = crate::audio::audio();
+        sound.set_volume(s.volume as f32 / 100.0);
+        if sound.muted() == s.audio {
+            with_app(|a| crate::audio::set_muted(Some(&a.link), !s.audio));
+        }
         eprintln!("settings: {s:?}");
     });
+}
+
+// ------------------------------------------------------------------ Desktop Fusion
+//
+// With Desktop Fusion on (Settings), the Mac's own Dock is streamed here: a borderless window
+// at the bottom of the screen that slides in when the pointer rests at the bottom edge and away
+// when it leaves, as the Mac's Dock does when it hides itself. The Mac's wallpaper is set to
+// this PC's, so the strip around the Dock is this PC's own desktop picture. When the Mac's Dock
+// cannot be streamed (it hides itself there, or an older Mac), a Dock drawn here stands in.
+
+/// The application id the Mac's Dock window is shown as.
+const DOCK_APP: &str = "dock";
+
+#[derive(Default)]
+struct Fusion {
+    /// the Mac was asked (Dock, wallpaper) on this connection
+    started: bool,
+    /// the Dock's window and the edge it is at
+    dock: Option<(isize, String)>,
+    /// why the Mac's Dock cannot be shown (then the one drawn here stands in)
+    unavailable: Option<String>,
+    /// the wallpaper last sent, and when it was last looked at
+    wallpaper: Option<String>,
+    checked: Option<Instant>,
+    /// uploads of the wallpaper: (style, colour) to set once it is on the Mac
+    uploads: HashMap<u64, (String, String)>,
+    /// the Dock slid in (0 hidden .. 1 shown), and since when the pointer has been away
+    shown: Option<crate::motion::Anim>,
+    away_since: Option<Instant>,
+}
+
+thread_local! { static FUSION: RefCell<Fusion> = RefCell::new(Fusion::default()); }
+
+/// A new connection: everything is asked for again.
+fn fusion_reset() {
+    FUSION.with(|f| {
+        let up = std::mem::take(&mut f.borrow_mut().uploads);
+        *f.borrow_mut() = Fusion { uploads: up, ..Default::default() };
+    });
+}
+
+/// Every 100 ms: start or stop Fusion as the setting says, follow the wallpaper, slide the Dock.
+fn fusion_tick() {
+    let s = crate::settings::Settings::load_cached();
+    let connected = !MAC_GONE.load(std::sync::atomic::Ordering::Acquire);
+    // RM_FUSION=1: on whatever Settings say, also in a showcase (screenshots, tests)
+    let forced = std::env::var_os("RM_FUSION").is_some_and(|v| v != "0");
+    let headless = !forced && with_app(|a| a.smoke.is_some() || a.showcase.is_some()).unwrap_or(true);
+    let want = (s.dock || forced) && connected && !headless;
+    let supported = net::mac_has("fusion");
+    let started = FUSION.with(|f| f.borrow().started);
+    if !want || !supported {
+        if started {
+            stop_fusion(connected);
+        }
+        // a Mac without Fusion: the Dock drawn here
+        if want { native_dock() } else { crate::dock::close() }
+        return;
+    }
+    if !started {
+        FUSION.with(|f| f.borrow_mut().started = true);
+        with_app(|a| a.link.send(&Message::DockStream { enabled: true }));
+        eprintln!("Desktop Fusion: the Mac's Dock and this PC's wallpaper");
+    }
+    sync_wallpaper();
+    if FUSION.with(|f| f.borrow().unavailable.is_some()) {
+        native_dock();
+    } else {
+        crate::dock::close();
+    }
+    dock_autohide();
+}
+
+fn stop_fusion(connected: bool) {
+    let dock = FUSION.with(|f| {
+        let mut f = f.borrow_mut();
+        f.started = false;
+        f.wallpaper = None;
+        f.unavailable = None;
+        f.shown = None;
+        f.dock.take()
+    });
+    if connected {
+        with_app(|a| {
+            a.link.send(&Message::DockStream { enabled: false });
+            a.link.send(&Message::RestoreWallpaper);
+        });
+    }
+    if let Some((h, _)) = dock {
+        with_app(|a| {
+            if let Some(r) = a.remotes.remove(&h) {
+                a.by_id.remove(&r.id);
+            }
+        });
+        unsafe {
+            let _ = DestroyWindow(hwnd_of(h));
+        }
+    }
+    eprintln!("Desktop Fusion off: the Mac's Dock and wallpaper are its own again");
+}
+
+/// Send this PC's wallpaper to the Mac when it changed (looked at every few seconds).
+fn sync_wallpaper() {
+    let due = FUSION.with(|f| f.borrow().checked.is_none_or(|t| t.elapsed() > Duration::from_secs(4)));
+    if !due {
+        return;
+    }
+    FUSION.with(|f| f.borrow_mut().checked = Some(Instant::now()));
+    let wp = crate::wallpaper::current();
+    if FUSION.with(|f| f.borrow().wallpaper.as_deref() == Some(wp.key.as_str())) {
+        return;
+    }
+    FUSION.with(|f| f.borrow_mut().wallpaper = Some(wp.key.clone()));
+    let picture = wp.path.as_ref().and_then(|p| crate::wallpaper::upload_name(p).map(|n| (p.clone(), n)));
+    match picture {
+        Some((path, name)) => {
+            let Some((link, tid)) = with_app(|a| {
+                let tid = a.next_transfer;
+                a.next_transfer += 1;
+                (a.link.clone(), tid)
+            }) else { return };
+            FUSION.with(|f| f.borrow_mut().uploads.insert(tid, (wp.style.clone(), wp.color.clone())));
+            eprintln!("Desktop Fusion: sending this PC's wallpaper ({}, {})", wp.style, wp.color);
+            std::thread::spawn(move || {
+                if let Err(e) = net::upload_file_as(&link, tid, &path, name) {
+                    eprintln!("wallpaper not sent: {e}");
+                }
+            });
+        }
+        None => {
+            eprintln!("Desktop Fusion: this PC's desktop is a plain colour ({})", wp.color);
+            with_app(|a| a.link.send(&Message::SetWallpaper { path: None, style: wp.style.clone(), color: wp.color.clone() }));
+        }
+    }
+}
+
+/// The Mac's Dock: shown as a window here, or why it is not.
+fn on_dock(available: bool, id: u64, (x, y, w, h): (i32, i32, u32, u32), edge: String, reason: Option<String>) {
+    if !available {
+        eprintln!("the Mac's Dock is not shown here: {}", reason.as_deref().unwrap_or("?"));
+        let old = FUSION.with(|f| {
+            let mut f = f.borrow_mut();
+            f.unavailable = reason.or(Some("unavailable".into()));
+            f.dock.take()
+        });
+        if let Some((h, _)) = old {
+            with_app(|a| {
+                if let Some(r) = a.remotes.remove(&h) {
+                    a.by_id.remove(&r.id);
+                }
+            });
+            unsafe {
+                let _ = DestroyWindow(hwnd_of(h));
+            }
+        }
+        return;
+    }
+    if !FUSION.with(|f| f.borrow().started) {
+        return; // turned off meanwhile
+    }
+    FUSION.with(|f| f.borrow_mut().unavailable = None);
+    let existing = with_app(|a| a.by_id.get(&id).copied()).flatten();
+    match existing {
+        Some(k) => {
+            // the Dock grew or moved on the Mac
+            with_app(|a| {
+                if let Some(r) = a.remotes.get_mut(&k) {
+                    (r.rx, r.ry, r.rw, r.rh) = (x, y, w, h);
+                }
+            });
+            FUSION.with(|f| f.borrow_mut().dock = Some((k, edge)));
+            place_dock(hwnd_of(k));
+        }
+        None => {
+            create_remote_window(id, DOCK_APP, "Dock", (x, y, w, h), None, WindowRole::Popup);
+            if let Some(k) = with_app(|a| a.by_id.get(&id).copied()).flatten() {
+                unsafe {
+                    let _ = SetWindowPos(hwnd_of(k), Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                    let _ = ShowWindow(hwnd_of(k), SW_HIDE); // until the pointer comes to the edge
+                }
+                FUSION.with(|f| {
+                    let mut f = f.borrow_mut();
+                    f.dock = Some((k, edge));
+                    f.shown = Some(crate::motion::Anim::at(0.0));
+                });
+                place_dock(hwnd_of(k));
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------ the Mac's menu bar (exact windows)
+
+/// The app id the Mac's menu bar strip is shown as (its menus have it too).
+const MENUBAR_APP: &str = "menubar";
+
+thread_local! {
+    /// the strip's window, while the Mac streams its menu bar
+    static MENU_BAR: std::cell::Cell<Option<isize>> = const { std::cell::Cell::new(None) };
+}
+
+fn on_menu_bar(available: bool, id: u64, w: u32, h: u32, reason: Option<String>) {
+    if !available {
+        eprintln!("the Mac's menu bar is not shown here: {}", reason.as_deref().unwrap_or("?"));
+        if let Some(k) = MENU_BAR.with(|m| m.take()) {
+            unsafe {
+                let _ = DestroyWindow(hwnd_of(k));
+            }
+        }
+        return;
+    }
+    match with_app(|a| a.by_id.get(&id).copied()).flatten() {
+        Some(k) => {
+            with_app(|a| a.remotes.get_mut(&k).map(|r| (r.rw, r.rh) = (w, h)));
+            place_menu_bar(hwnd_of(k));
+        }
+        None => {
+            create_remote_window(id, MENUBAR_APP, "Menu Bar", (0, 0, w, h), None, WindowRole::Popup);
+            // its first picture may have come before this (video over UDP, this over TCP): the
+            // menu bar hardly changes, so ask for one now
+            with_app(|a| a.link.send(&Message::RequestKeyframe { window_id: id }));
+            if let Some(k) = with_app(|a| a.by_id.get(&id).copied()).flatten() {
+                MENU_BAR.with(|m| m.set(Some(k)));
+                unsafe {
+                    let _ = ShowWindow(hwnd_of(k), SW_HIDE); // until a Mac window is in front
+                }
+                eprintln!("the Mac's menu bar: {w}x{h} points, at the top of the screen while a Mac window is in front");
+            }
+        }
+    }
+}
+
+/// The strip at the top of the monitor of the Mac window in front (its Mac points at that
+/// screen's scale, from the left as on the Mac).
+fn place_menu_bar(frame: HWND) {
+    let Some((w, h, scale)) = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| (r.rw, r.rh, pic_scale(r.scale)))).flatten() else { return };
+    let anchor = unsafe { GetForegroundWindow() };
+    let mon = unsafe {
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let _ = GetMonitorInfoW(MonitorFromWindow(anchor, MONITOR_DEFAULTTOPRIMARY), &mut info);
+        info.rcMonitor
+    };
+    let (pw, ph) = (((w as f64 * scale).round() as i32).min(mon.right - mon.left), (h as f64 * scale).round() as i32);
+    unsafe {
+        let _ = SetWindowPos(frame, Some(HWND_TOPMOST), mon.left, mon.top, pw, ph, SWP_NOACTIVATE);
+    }
+    layout(frame);
+}
+
+/// How tall the strip is on `mon`'s monitor while shown (0: not shown there).
+fn menu_bar_height(mon: HMONITOR) -> i32 {
+    let Some(k) = MENU_BAR.with(|m| m.get()) else { return 0 };
+    unsafe {
+        let h = hwnd_of(k);
+        if !IsWindowVisible(h).as_bool() || MonitorFromWindow(h, MONITOR_DEFAULTTONULL) != mon {
+            return 0;
+        }
+        let mut r = RECT::default();
+        let _ = GetWindowRect(h, &mut r);
+        r.bottom - r.top
+    }
+}
+
+/// Every few hundred ms: the strip shows while a Mac window (or one of its menus, or the strip)
+/// is in front, on that window's monitor, and that window keeps its title bar below it; it goes
+/// when a Windows app is in front, as the Mac's menu bar belongs to the Mac app in front.
+fn menu_bar_tick() {
+    let Some(k) = MENU_BAR.with(|m| m.get()) else { return };
+    let strip = hwnd_of(k);
+    let fg = unsafe { GetForegroundWindow() };
+    let mac = with_app(|a| a.remotes.get(&(fg.0 as isize)).map(|r| r.exact && !r.fullscreen && r.app != DESKTOP_APP && r.role != WindowRole::Popup)).flatten().unwrap_or(false);
+    let ours = fg == strip || with_app(|a| a.remotes.get(&(fg.0 as isize)).is_some_and(|r| r.app == MENUBAR_APP)).unwrap_or(false);
+    unsafe {
+        let shown = IsWindowVisible(strip).as_bool();
+        if mac {
+            if !shown || MonitorFromWindow(strip, MONITOR_DEFAULTTONULL) != MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST) {
+                place_menu_bar(strip);
+                let _ = ShowWindow(strip, SW_SHOWNOACTIVATE);
+            }
+            // the window in front keeps its title bar below the strip (it is moved by it)
+            let mut r = RECT::default();
+            let _ = GetWindowRect(fg, &mut r);
+            let mut s = RECT::default();
+            let _ = GetWindowRect(strip, &mut s);
+            if !IsZoomed(fg).as_bool() && r.top < s.bottom && r.bottom > s.top && GetCapture().0.is_null() {
+                let _ = SetWindowPos(fg, None, r.left, s.bottom, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        } else if shown && !ours {
+            let _ = ShowWindow(strip, SW_HIDE);
+        }
+    }
+}
+
+/// Where the Dock's window goes: centred on the edge of the primary screen's work area, slid
+/// out by how hidden it is.
+fn dock_rect(frame: HWND) -> Option<(RECT, RECT)> {
+    let (w, h, scale) = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| (r.rw, r.rh, pic_scale(r.scale)))).flatten()?;
+    let edge = FUSION.with(|f| f.borrow().dock.as_ref().map(|d| d.1.clone())).unwrap_or_default();
+    let wa = unsafe {
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let _ = GetMonitorInfoW(MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY), &mut info);
+        info.rcWork
+    };
+    let (pw, ph) = ((w as f64 * scale).round() as i32, (h as f64 * scale).round() as i32);
+    let (cx, cy) = ((wa.left + wa.right) / 2, (wa.top + wa.bottom) / 2);
+    let (shown, hidden) = match edge.as_str() {
+        "left" => (RECT { left: wa.left, top: cy - ph / 2, right: wa.left + pw, bottom: cy + ph / 2 }, RECT { left: wa.left - pw, top: cy - ph / 2, right: wa.left, bottom: cy + ph / 2 }),
+        "right" => (RECT { left: wa.right - pw, top: cy - ph / 2, right: wa.right, bottom: cy + ph / 2 }, RECT { left: wa.right, top: cy - ph / 2, right: wa.right + pw, bottom: cy + ph / 2 }),
+        _ => (RECT { left: cx - pw / 2, top: wa.bottom - ph, right: cx + pw / 2, bottom: wa.bottom }, RECT { left: cx - pw / 2, top: wa.bottom, right: cx + pw / 2, bottom: wa.bottom + ph }),
+    };
+    Some((shown, hidden))
+}
+
+fn place_dock(frame: HWND) {
+    let Some((shown, hidden)) = dock_rect(frame) else { return };
+    let t = FUSION.with(|f| f.borrow().shown.as_ref().map(|a| a.value())).unwrap_or(0.0).clamp(0.0, 1.0);
+    let lerp = |a: i32, b: i32| a + ((b - a) as f32 * t).round() as i32;
+    let r = RECT { left: lerp(hidden.left, shown.left), top: lerp(hidden.top, shown.top), right: lerp(hidden.right, shown.right), bottom: lerp(hidden.bottom, shown.bottom) };
+    unsafe {
+        let _ = SetWindowPos(frame, Some(HWND_TOPMOST), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOACTIVATE);
+    }
+    layout(frame);
+}
+
+/// The pointer at the edge brings the Dock in; away from it (and its menus) for a moment, out.
+fn dock_autohide() {
+    let Some((k, edge)) = FUSION.with(|f| f.borrow().dock.clone()) else { return };
+    let frame = hwnd_of(k);
+    let Some((shown_r, _)) = dock_rect(frame) else { return };
+    let mut p = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut p);
+    }
+    let near = 3;
+    let at_edge = match edge.as_str() {
+        "left" => p.x <= shown_r.left + near && p.y >= shown_r.top && p.y <= shown_r.bottom,
+        "right" => p.x >= shown_r.right - near && p.y >= shown_r.top && p.y <= shown_r.bottom,
+        _ => p.y >= shown_r.bottom - near && p.x >= shown_r.left && p.x <= shown_r.right,
+    };
+    let over = p.x >= shown_r.left - 8 && p.x <= shown_r.right + 8 && p.y >= shown_r.top - 8 && p.y <= shown_r.bottom + 8;
+    // a menu of the Dock is open, or the Mac Desktop (it has the Dock in its picture)
+    let dock_id = with_app(|a| a.remotes.get(&k).map(|r| r.id)).flatten();
+    let menu_open = with_app(|a| a.remotes.values().any(|r| r.parent.is_some() && r.parent == dock_id)).unwrap_or(false);
+    let desktop = with_app(|a| a.remotes.values().any(|r| r.app == DESKTOP_APP)).unwrap_or(false);
+    let (target, changed) = FUSION.with(|f| {
+        let mut f = f.borrow_mut();
+        let cur = f.shown.as_ref().map_or(0.0, |a| a.target());
+        let want = if desktop {
+            0.0
+        } else if at_edge || over || menu_open {
+            f.away_since = None;
+            1.0
+        } else if cur > 0.5 {
+            let since = *f.away_since.get_or_insert_with(Instant::now);
+            if since.elapsed() > Duration::from_millis(600) { 0.0 } else { 1.0 }
+        } else {
+            0.0
+        };
+        let changed = (want - cur).abs() > 0.01;
+        if changed {
+            use crate::motion::{tokens, Curve};
+            let (d, c) = if want > 0.5 { (tokens::pick(tokens::WINDOW, 0.3), Curve::ARRIVE) } else { (tokens::pick(tokens::WINDOW, 0.1), Curve::Accelerate) };
+            match f.shown.as_mut() {
+                Some(a) => a.retarget(want, d, c),
+                None => f.shown = Some(crate::motion::Anim::new(cur, want, d, c)),
+            }
+        }
+        (want, changed)
+    });
+    let animating = FUSION.with(|f| f.borrow().shown.as_ref().is_some_and(|a| !a.done()));
+    if changed && target > 0.5 {
+        unsafe {
+            let _ = ShowWindow(frame, SW_SHOWNOACTIVATE);
+        }
+    }
+    if animating || changed {
+        place_dock(frame);
+        // smooth: a frame every 16 ms while it slides
+        if let Some(ctl) = with_app(|a| a.controller) {
+            unsafe {
+                SetTimer(Some(hwnd_of(ctl)), TIMER_DOCK, 16, None);
+            }
+        }
+    } else if target < 0.5 && unsafe { IsWindowVisible(frame).as_bool() } {
+        unsafe {
+            let _ = ShowWindow(frame, SW_HIDE);
+        }
+    }
+}
+
+/// The 16 ms timer while the Dock slides.
+fn dock_slide_tick() {
+    let Some((k, _)) = FUSION.with(|f| f.borrow().dock.clone()) else { return };
+    let done = FUSION.with(|f| f.borrow().shown.as_ref().is_none_or(|a| a.done()));
+    place_dock(hwnd_of(k));
+    if done {
+        if let Some(ctl) = with_app(|a| a.controller) {
+            unsafe {
+                let _ = KillTimer(Some(hwnd_of(ctl)), TIMER_DOCK);
+            }
+        }
+        if FUSION.with(|f| f.borrow().shown.as_ref().map_or(0.0, |a| a.target())) < 0.5 {
+            unsafe {
+                let _ = ShowWindow(hwnd_of(k), SW_HIDE);
+            }
+        }
+    }
+}
+
+const TIMER_DOCK: usize = 7;
+
+/// The Dock drawn here (when the Mac's cannot be streamed): the open Mac apps, the Mac
+/// Desktop and Search.
+fn native_dock() {
+    let Some((hinst, items, icons)) = with_app(|a| {
+        if a.smoke.is_some() || a.showcase.is_some() {
+            return None;
+        }
+        let mut items = vec![crate::dock::DockItem { id: DESKTOP_APP.into(), name: "Mac Desktop".into(), running: a.remotes.values().any(|r| r.app == DESKTOP_APP) }];
+        let mut seen = std::collections::HashSet::new();
+        for r in a.remotes.values().filter(|r| r.role == WindowRole::Window && r.parent.is_none() && r.app != DESKTOP_APP) {
+            if seen.insert(r.app.clone()) {
+                let name = a.app_names.iter().find(|(id, _)| *id == r.app).map_or(r.app.clone(), |(_, n)| n.clone());
+                items.push(crate::dock::DockItem { id: r.app.clone(), name, running: true });
+            }
+        }
+        items.push(crate::dock::DockItem { id: "\u{1}search".into(), name: "Open an App…".into(), running: false });
+        Some((a.hinst, items, a.icon_rgba.clone()))
+    })
+    .flatten() else { return };
+    crate::dock::sync(HINSTANCE(hinst as *mut c_void), items, &icons, |id| {
+        if id == "\u{1}search" {
+            open_palette();
+            return;
+        }
+        let window = with_app(|a| a.remotes.iter().find(|(_, r)| r.app == id && r.role == WindowRole::Window).map(|(k, _)| *k)).flatten();
+        match window {
+            Some(h) => unsafe {
+                let h = hwnd_of(h);
+                if IsIconic(h).as_bool() {
+                    let _ = ShowWindow(h, SW_RESTORE);
+                }
+                let _ = SetForegroundWindow(h);
+            },
+            None => launch_app(&id),
+        }
+    });
+}
+
+/// The id of the Ctrl+Alt+Space hot key.
+const HOTKEY_SEARCH: i32 = 1;
+
+/// MacBridge Search: type to open a Mac app or switch to one already open.
+fn open_palette() {
+    let Some((hinst, entries, icons)) = with_app(|a| {
+        let running: std::collections::HashSet<&str> = a.remotes.values().filter(|r| r.role == WindowRole::Window).map(|r| r.app.as_str()).collect();
+        let mut entries: Vec<crate::palette::Entry> = a.app_names.iter().map(|(id, name)| crate::palette::Entry { id: id.clone(), name: name.clone(), running: running.contains(id.as_str()) }).collect();
+        if !entries.iter().any(|e| e.id == DESKTOP_APP) {
+            entries.push(crate::palette::Entry { id: DESKTOP_APP.into(), name: "Mac Desktop".into(), running: running.contains(DESKTOP_APP) });
+        }
+        (a.hinst, entries, a.icon_rgba.clone())
+    }) else { return };
+    if MAC_GONE.load(std::sync::atomic::Ordering::Acquire) || entries.is_empty() {
+        return;
+    }
+    crate::palette::show(HINSTANCE(hinst as *mut c_void), entries, icons, |id| {
+        // open already: its window comes forward; else it opens
+        let window = with_app(|a| a.remotes.iter().find(|(_, r)| r.app == id && r.role == WindowRole::Window).map(|(k, _)| *k)).flatten();
+        match window {
+            Some(h) => unsafe {
+                let h = hwnd_of(h);
+                if IsIconic(h).as_bool() {
+                    let _ = ShowWindow(h, SW_RESTORE);
+                }
+                let _ = SetForegroundWindow(h);
+            },
+            None => launch_app(&id),
+        }
+    });
+}
+
+/// The Mac's sound off or on (shortcut, navigation ball).
+fn toggle_mute() {
+    let muted = !crate::audio::audio().muted();
+    with_app(|a| crate::audio::set_muted(Some(&a.link), muted));
+    eprintln!("sound {}", if muted { "muted" } else { "on" });
 }
 
 /// "fit=W,H,S" for the Mac Desktop: the monitor the launcher is on, in points as on this PC,
@@ -617,10 +1396,10 @@ fn launch_app(app: &str) {
                 arguments.push(format!("gamestream={hex}"));
                 with_app(|a| a.gs_key = Some(key));
             }
-            // the "opening" card: icon, name, what is happening and how far along
+            // the loading window: the app's icon and name, a spinner, what is happening
             if let Some((hinst, name, icon, smoke)) = with_app(|a| {
                 let name = a.app_names.iter().find(|(id, _)| id == app).map(|(_, n)| n.clone()).unwrap_or_else(|| if app == DESKTOP_APP { "Mac Desktop".into() } else { app.to_string() });
-                (a.hinst, name, a.icons.get(app).map(|i| HICON(*i as *mut c_void)), a.smoke.is_some())
+                (a.hinst, name, a.icon_rgba.get(app).cloned(), a.smoke.is_some())
             }) {
                 if !smoke {
                     crate::splash::show(HINSTANCE(hinst as *mut c_void), app, &name, icon);
@@ -668,6 +1447,48 @@ fn pick_file_for_panel(panel: u64) {
             link.send(&Message::PanelCancel { window_id: panel });
         }
     });
+}
+
+/// Files dropped from Explorer on a Mac app's window (opened with that app) or on the launcher
+/// or the Mac Desktop (opened with their default app): uploaded, then opened on the Mac.
+fn drop_files(target: HWND, hdrop: windows::Win32::UI::Shell::HDROP) {
+    use windows::Win32::UI::Shell::{DragFinish, DragQueryFileW};
+    let mut paths = vec![];
+    unsafe {
+        let n = DragQueryFileW(hdrop, u32::MAX, None);
+        for i in 0..n.min(20) {
+            let len = DragQueryFileW(hdrop, i, None) as usize;
+            let mut buf = vec![0u16; len + 1];
+            DragQueryFileW(hdrop, i, Some(&mut buf));
+            paths.push(std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len])));
+        }
+        DragFinish(hdrop);
+    }
+    if !net::mac_has("open_file") {
+        eprintln!("files dropped, but this Mac's MacBridge cannot open them (update it)");
+        return;
+    }
+    // the app of the window it landed on (the Mac Desktop and the launcher: the default app)
+    let frame = unsafe { GetAncestor(target, GA_ROOT) };
+    let app = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.app.clone())).flatten().filter(|x| x != DESKTOP_APP);
+    for path in paths.into_iter().filter(|p| p.is_file()) {
+        if rm_protocol::runs_code(&path.to_string_lossy()) {
+            eprintln!("{} is not opened on the Mac: files that run code are refused", path.display());
+            continue;
+        }
+        let Some((link, tid)) = with_app(|a| {
+            let tid = a.next_transfer;
+            a.next_transfer += 1;
+            a.open_uploads.insert(tid, app.clone());
+            (a.link.clone(), tid)
+        }) else { return };
+        eprintln!("uploading {} to open it on the Mac", path.display());
+        std::thread::spawn(move || {
+            if let Err(e) = net::upload_file(&link, tid, &path) {
+                eprintln!("upload failed: {e}");
+            }
+        });
+    }
 }
 
 /// Digest of a .bmp file's picture (its DIB: the file header is rebuilt on each side).
@@ -882,6 +1703,7 @@ fn on_vsync() {
 }
 
 fn drain_events() {
+    take_reconnected();
     let events: Vec<UiEvent> = with_app(|a| a.rx.try_iter().collect()).unwrap_or_default();
     for ev in latest_frames_only(events) {
         handle_event(ev);
@@ -945,6 +1767,14 @@ fn handle_event(ev: UiEvent) {
                 }
                 if parent.is_none() {
                     crate::splash::step(&app, 4); // the window is there: waiting for its first picture
+                    // the loading window moves onto it
+                    if let Some(h) = with_app(|a| a.by_id.get(&id).copied()).flatten() {
+                        let mut r = RECT::default();
+                        unsafe {
+                            let _ = GetWindowRect(hwnd_of(h), &mut r);
+                        }
+                        crate::splash::arrive(&app, r);
+                    }
                 }
             }
         }
@@ -956,9 +1786,9 @@ fn handle_event(ev: UiEvent) {
                     l.set_apps(&rows);
                 }
                 for x in &apps {
-                    if let Some(icon) = a.icons.get(&x.id) {
-                        if let Some(l) = a.launcher.as_ref() {
-                            l.set_icon(&x.id, HICON(*icon as *mut c_void));
+                    if let Some((size, rgba)) = a.icon_rgba.get(&x.id) {
+                        if let Some(l) = a.launcher.as_mut() {
+                            l.set_icon(&x.id, *size, rgba);
                         }
                     } else if a.icons_requested.insert(x.id.clone()) {
                         a.link.send(&Message::GetAppIcon { application_id: x.id.clone() });
@@ -985,7 +1815,14 @@ fn handle_event(ev: UiEvent) {
             with_app(|a| a.display = available.then_some((width, height)));
         }
         UiEvent::Uploaded { transfer_id, remote_path } => {
+            if let Some((style, color)) = FUSION.with(|f| f.borrow_mut().uploads.remove(&transfer_id)) {
+                with_app(|a| a.link.send(&Message::SetWallpaper { path: Some(remote_path.clone()), style, color }));
+            }
             with_app(|a| {
+                if let Some(app) = a.open_uploads.remove(&transfer_id) {
+                    eprintln!("opening the dropped file on the Mac{}", app.as_ref().map(|x| format!(" with {x}")).unwrap_or_default());
+                    a.link.send(&Message::OpenFile { path: remote_path.clone(), application_id: app });
+                }
                 if let Some(panel) = a.uploads.remove(&transfer_id) {
                     a.panels.remove(&panel);
                     a.link.send(&Message::PanelChooseFile { window_id: panel, remote_path });
@@ -995,6 +1832,7 @@ fn handle_event(ev: UiEvent) {
         UiEvent::UploadFailed { transfer_id, reason } => {
             eprintln!("upload {transfer_id} failed on the Mac: {reason}");
             with_app(|a| {
+                a.open_uploads.remove(&transfer_id);
                 if let Some(panel) = a.uploads.remove(&transfer_id) {
                     a.panels.remove(&panel);
                     a.link.send(&Message::PanelCancel { window_id: panel });
@@ -1002,6 +1840,7 @@ fn handle_event(ev: UiEvent) {
             });
         }
         UiEvent::Icon { app, size, rgba } => {
+            crate::splash::set_icon(&app, size, &rgba);
             let Some(icon) = native::make_icon(size, &rgba) else { return };
             let known = with_app(|a| {
                 a.icon_rgba.insert(app.clone(), (size, rgba.clone()));
@@ -1013,8 +1852,8 @@ fn handle_event(ev: UiEvent) {
             }
             let windows: Vec<isize> = with_app(|a| {
                 a.icons.insert(app.clone(), icon.0 as isize);
-                if let Some(l) = a.launcher.as_ref() {
-                    l.set_icon(&app, icon);
+                if let Some(l) = a.launcher.as_mut() {
+                    l.set_icon(&app, size, &rgba);
                 }
                 a.remotes.iter().filter(|(_, r)| r.app == app).map(|(k, _)| *k).collect()
             })
@@ -1099,6 +1938,15 @@ fn handle_event(ev: UiEvent) {
                 quit(0);
             }
         }
+        UiEvent::Dock { available, id, x, y, w, h, edge, reason } => on_dock(available, id, (x, y, w, h), edge, reason),
+        UiEvent::Mask { id, width, height, alpha } => on_mask(id, width, height, alpha),
+        UiEvent::MacMenuBar { available, id, w, h, reason } => on_menu_bar(available, id, w, h, reason),
+        UiEvent::Chrome { id, chrome } => {
+            with_app(|a| {
+                let k = *a.by_id.get(&id)?;
+                a.remotes.get_mut(&k).map(|r| r.mac_chrome = Some(chrome))
+            });
+        }
         UiEvent::AppExited(app) => eprintln!("remote app exited: {app}"),
         UiEvent::Launched(app) => crate::splash::step(&app, 3),
         UiEvent::Notice(n) => {
@@ -1114,6 +1962,10 @@ fn handle_event(ev: UiEvent) {
         UiEvent::Disconnected(why) => {
             eprintln!("disconnected: {why}");
             let interactive = with_app(|a| a.smoke.is_none() && a.showcase.is_none()).unwrap_or(false);
+            // a connection lost (network, the Mac restarting): connect again by itself
+            if interactive && start_reconnect() {
+                return;
+            }
             if interactive {
                 // never vanish without a word
                 native::message_box("MacBridge", &format!("The connection to the Mac was closed.\n\n{why}\n\n{}", crate::log_hint()));
@@ -1158,6 +2010,11 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
             let _ = DestroyWindow(hwnd);
             return;
         };
+        if !popup {
+            // files dropped from Explorer open in this app on the Mac
+            windows::Win32::UI::Shell::DragAcceptFiles(hwnd, true);
+            windows::Win32::UI::Shell::DragAcceptFiles(content, true);
+        }
         if use_comp {
             // the composition clip makes the (larger, anti-aliased) rounded corners; DWM's own
             // rounding would add its 1px highlight in the transparent corner
@@ -1177,7 +2034,8 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         let scale = native::dpi_scale(hwnd);
         let (cached, parent_origin) = with_app(|a| {
             a.remotes.insert(hwnd.0 as isize, Remote { id, app: app.into(), role, parent, rx: x, ry: y, rw: w, rh: h, scale, maximized: false, presenter: None, comp: None, picture: None, frames: 0,
-                high_surrogate: None, cmds: HashMap::new(), content: content.0 as isize, menu: 0, menu_x: vec![], open_menu: None, hover: false, pressed: None, active: false, owned, fullscreen: false, saved: RECT::default(), reveal: false });
+                high_surrogate: None, cmds: HashMap::new(), content: content.0 as isize, menu: 0, menu_x: vec![], open_menu: None, hover: false, pressed: None, active: false, owned, fullscreen: false, saved: RECT::default(), reveal: false, mask: None,
+                exact: net::exact_windows() && !popup && app != DESKTOP_APP && app != DOCK_APP, mac_chrome: None });
             a.by_id.insert(id, hwnd.0 as isize);
             let cached = a.icons.get(app).copied();
             if cached.is_none() && a.icons_requested.insert(app.to_string()) {
@@ -1231,6 +2089,7 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         layout(hwnd);
         let _ = InvalidateRect(Some(hwnd), None, false);
         eprintln!("window created id={id} app={app} role={role:?} parent={parent:?} renderer={renderer} {w}x{h}pt scale={scale} title={title:?}");
+        launcher_sync();
         if app == DESKTOP_APP {
             // the whole Mac: straight to fullscreen, as a remote desktop is used
             toggle_fullscreen(hwnd);
@@ -1264,7 +2123,11 @@ fn content_of(frame: HWND) -> Option<HWND> {
 
 /// Height of the chrome (title bar, plus the menu strip when the app has a menu bar).
 fn bar_px(frame: HWND) -> i32 {
-    with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| if (r.fullscreen && !r.reveal) || r.role == WindowRole::Popup { 0 } else { chrome::bar_height(r.scale, r.menu != 0) })).flatten().unwrap_or(0)
+    with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| if (r.fullscreen && !r.reveal) || r.role == WindowRole::Popup || r.exact { 0 } else { chrome::bar_height(r.scale, r.menu != 0) })).flatten().unwrap_or(0)
+}
+
+fn is_exact(frame: HWND) -> bool {
+    with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.exact)).flatten().unwrap_or(false)
 }
 
 fn is_popup(frame: HWND) -> bool {
@@ -1274,6 +2137,14 @@ fn is_popup(frame: HWND) -> bool {
 /// Put a popup exactly where the Mac shows it over its parent's picture, at the parent's
 /// picture scale (so a list lines up with the button it came from).
 fn place_popup(frame: HWND) {
+    if with_app(|a| a.remotes.get(&(frame.0 as isize)).is_some_and(|r| r.app == DOCK_APP)).unwrap_or(false) {
+        place_dock(frame);
+        return;
+    }
+    if with_app(|a| a.remotes.get(&(frame.0 as isize)).is_some_and(|r| r.app == MENUBAR_APP && r.parent.is_none())).unwrap_or(false) {
+        place_menu_bar(frame);
+        return;
+    }
     let Some((parent, x, y, w, h, scale)) = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| (r.parent, r.rx, r.ry, r.rw, r.rh, pic_scale(r.scale)))).flatten() else { return };
     let host = parent.and_then(|p| with_app(|a| {
         let k = *a.by_id.get(&p)?;
@@ -1380,31 +2251,43 @@ fn toggle_fullscreen(frame: HWND) {
 
 /// The navigation ball's menu (Mac Desktop in fullscreen), opened beside the ball at `at`.
 fn ball_menu(frame: HWND, at: POINT) {
+    use crate::glassmenu::Item;
     const EXIT: u32 = 1;
     const MINIMIZE: u32 = 2;
     const SETTINGS: u32 = 3;
     const POINTER: u32 = 4;
     const CLOSE: u32 = 5;
+    const SOUND: u32 = 6;
+    const SEARCH: u32 = 7;
+    let pointer = local_cursor().load(std::sync::atomic::Ordering::Relaxed);
+    let sound = !crate::audio::audio().muted();
+    let mut items = vec![
+        Item::action(EXIT, "Exit Full Screen").with_shortcut("F11"),
+        Item::action(MINIMIZE, "Minimize"),
+        Item::Separator,
+        Item::action(SEARCH, "Open an App…").with_shortcut("Ctrl+Alt+Space"),
+        Item::action(POINTER, "Show This PC's Pointer").with_shortcut("Ctrl+Alt+Shift+C").checked(pointer),
+    ];
+    if crate::audio::audio().supported() {
+        items.push(Item::action(SOUND, "Sound").with_shortcut("Ctrl+Alt+Shift+M").checked(sound));
+    }
+    items.extend([Item::action(SETTINGS, "Settings…").with_shortcut("Ctrl+Alt+Shift+P"), Item::Separator, Item::action(CLOSE, "Disconnect Mac Desktop")]);
+    let hinst = with_app(|a| a.hinst).unwrap_or(0);
+    let left = crate::navball::opens_left(frame, at);
+    let cmd = crate::glassmenu::show(HINSTANCE(hinst as *mut c_void), frame, at, left, items);
     unsafe {
-        let Ok(m) = CreatePopupMenu() else { return };
-        let pointer = local_cursor().load(std::sync::atomic::Ordering::Relaxed);
-        let _ = AppendMenuW(m, MF_STRING, EXIT as usize, w!("Exit full screen\tF11"));
-        let _ = AppendMenuW(m, MF_STRING, MINIMIZE as usize, w!("Minimize"));
-        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
-        let _ = AppendMenuW(m, MF_STRING | if pointer { MF_CHECKED } else { MF_UNCHECKED }, POINTER as usize, w!("Show this PC's pointer\tCtrl+Alt+Shift+C"));
-        let _ = AppendMenuW(m, MF_STRING, SETTINGS as usize, w!("Settings…\tCtrl+Alt+Shift+P"));
-        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
-        let _ = AppendMenuW(m, MF_STRING, CLOSE as usize, w!("Disconnect Mac Desktop"));
-        let side = if crate::navball::opens_left(frame, at) { TPM_RIGHTALIGN } else { TPM_LEFTALIGN };
-        let _ = SetForegroundWindow(frame);
-        let cmd = TrackPopupMenuEx(m, (side | TPM_TOPALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON).0, at.x, at.y, frame, None).0 as u32;
-        let _ = DestroyMenu(m);
         match cmd {
-            EXIT => toggle_fullscreen(frame),
-            MINIMIZE => { let _ = ShowWindow(frame, SW_MINIMIZE); }
-            SETTINGS => open_settings(Some(frame)),
-            POINTER => set_local_pointer(!pointer),
-            CLOSE => { let _ = PostMessageW(Some(frame), WM_CLOSE, WPARAM(0), LPARAM(0)); }
+            Some(EXIT) => toggle_fullscreen(frame),
+            Some(MINIMIZE) => {
+                let _ = ShowWindow(frame, SW_MINIMIZE);
+            }
+            Some(SETTINGS) => open_settings(Some(frame)),
+            Some(POINTER) => set_local_pointer(!pointer),
+            Some(SOUND) => toggle_mute(),
+            Some(SEARCH) => open_palette(),
+            Some(CLOSE) => {
+                let _ = PostMessageW(Some(frame), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
             _ => {}
         }
     }
@@ -1446,14 +2329,56 @@ fn layout(frame: HWND) {
     unsafe { let _ = MoveWindow(content, 0, bar, cw, (ch - bar).max(1), true); }
     let square = unsafe { IsZoomed(frame).as_bool() } || is_fullscreen(frame);
     with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).map(|r| {
-        let radius = if square { 0.0 } else { (chrome::CORNER_RADIUS * r.scale) as f32 };
+        let (plain, shaped) = corner_radii(r, cw, bar, square);
         if let Some(c) = r.comp.as_mut() {
-            c.layout(cw, ch, bar, radius);
+            c.layout(cw, ch, bar, plain, shaped);
         }
     }));
     if bar == 0 {
         with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).and_then(|r| r.comp.as_mut()).map(|c| c.set_chrome(0, 0, &[])));
     }
+}
+
+/// The window's corner radii (pixels; top-left, top-right, bottom-right, bottom-left), for a
+/// picture without its shape and with it. The Mac's own rounding when its shape is known
+/// (measured from it), else a current macOS window's; a shaped picture makes its own corners,
+/// so only the chrome above it (when drawn) is rounded, like the Mac's.
+fn corner_radii(r: &Remote, cw: i32, bar: i32, square: bool) -> ([f32; 4], [f32; 4]) {
+    if square {
+        return ([0.0; 4], [0.0; 4]);
+    }
+    let measured = r.mask.as_ref().map(|(mw, mh, a)| rm_protocol::mask::corner_radius(a, *mw as usize, *mh as usize, false, true) * cw as f32 / (*mw).max(1) as f32).filter(|v| *v > 0.5);
+    let radius = measured.unwrap_or((chrome::CORNER_RADIUS * r.scale) as f32);
+    let top = if bar > 0 { radius } else { 0.0 };
+    ([radius; 4], [top, top, 0.0, 0.0])
+}
+
+/// What is at (`x`, `y`) (client pixels of the picture) of an exact window: its Mac title bar's
+/// buttons, the band it is moved by, or the Mac's; None for a window in MacBridge's frame.
+fn mac_hit(frame: HWND, x: i32, y: i32) -> Option<chrome::MacHit> {
+    let cs = content_of(frame).map(client_size).unwrap_or_else(|| client_size(frame));
+    with_app(|a| {
+        let r = a.remotes.get(&(frame.0 as isize)).filter(|r| r.exact)?;
+        let Some(c) = r.mac_chrome.as_ref() else { return Some(chrome::MacHit::Client) };
+        let (px, py) = crate::keymap::scale_point(x, y, cs, (r.rw, r.rh));
+        Some(c.hit(px, py))
+    })
+    .flatten()
+}
+
+/// The Mac sent the shape of a window's pictures.
+fn on_mask(id: u64, width: u32, height: u32, alpha: Option<std::sync::Arc<Vec<u8>>>) {
+    let Some(k) = with_app(|a| a.by_id.get(&id).copied()).flatten() else { return };
+    let mask = alpha.map(|a| (width, height, a));
+    with_app(|a| {
+        if let Some(r) = a.remotes.get_mut(&k) {
+            r.mask = mask.clone();
+            if let Some(c) = r.comp.as_mut() {
+                c.set_mask(mask);
+            }
+        }
+    });
+    layout(hwnd_of(k));
 }
 
 /// Current picture size of the window expressed in Mac points.
@@ -1520,7 +2445,7 @@ fn build_popup(nodes: &[MenuNode], cc: bool, ids: &mut std::vec::IntoIter<(u16, 
 /// Give a top-level window the Mac app's menu bar (drawn in the strip under the title bar,
 /// each title opening a native popup menu), keeping the picture size.
 fn set_window_menu(frame: HWND, menus: &[MenuNode]) {
-    let cc = with_app(|a| a.ctrl_as_command).unwrap_or(true);
+    let cc = with_app(|a| a.key_mode.ctrl_as_command()).unwrap_or(true);
     let table = menu::commands(menus);
     unsafe {
         let content = content_of(frame).map(client_size).unwrap_or((0, 0));
@@ -1587,10 +2512,18 @@ fn open_menu_popup(frame: HWND, i: usize) {
 
 // ------------------------------------------------------------------ remote windows
 
+/// The window lost the focus: every key still held there is let go on the Mac.
+fn release_keys(frame: HWND) {
+    let held = with_app(|a| a.keys_down.remove(&(frame.0 as isize))).flatten().unwrap_or_default();
+    for name in held {
+        send_for(frame, |r, _| Some(Message::Key { window_id: r.id, physical_key: name.into(), modifiers: vec![], down: false }));
+    }
+}
+
 fn send_for(frame: HWND, f: impl FnOnce(&Remote, bool) -> Option<Message>) {
     with_app(|a| {
         if let Some(r) = a.remotes.get(&(frame.0 as isize)) {
-            if let Some(m) = f(r, a.ctrl_as_command) {
+            if let Some(m) = f(r, a.key_mode.ctrl_as_command()) {
                 a.link.send(&m);
             }
         }
@@ -1809,6 +2742,10 @@ fn light_action(frame: HWND, l: chrome::Light) {
 /// Top-level window of a remote window: Mac chrome, window management, focus.
 unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
+        WM_DROPFILES => {
+            drop_files(hwnd, windows::Win32::UI::Shell::HDROP(wp.0 as *mut c_void));
+            LRESULT(0)
+        }
         WM_NCCALCSIZE if wp.0 != 0 => {
             // Keep the left/right/bottom resize borders; the top belongs to our title bar.
             let p = &mut *(lp.0 as *mut NCCALCSIZE_PARAMS);
@@ -1827,8 +2764,10 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
             if GetMonitorInfoW(mon, &mut info).as_bool() {
                 let (w, m) = (info.rcWork, info.rcMonitor);
-                mi.ptMaxPosition = POINT { x: w.left - m.left, y: w.top - m.top };
-                mi.ptMaxSize = POINT { x: w.right - w.left, y: w.bottom - w.top };
+                // an exact Mac window maximised stops below the Mac's menu bar shown there
+                let bar = if is_exact(hwnd) { (menu_bar_height(mon) - (w.top - m.top)).max(0) } else { 0 };
+                mi.ptMaxPosition = POINT { x: w.left - m.left, y: w.top - m.top + bar };
+                mi.ptMaxSize = POINT { x: w.right - w.left, y: w.bottom - w.top - bar };
             }
             LRESULT(0)
         }
@@ -1849,12 +2788,34 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             let on_menu = with_app(|a| a.remotes.get(&(hwnd.0 as isize)).map(|r| r.menu_x.iter().any(|(a, b)| pt.x >= *a && pt.x < *b))).flatten().unwrap_or(false);
             let code = if !IsZoomed(hwnd).as_bool() && !fullscreen && pt.y < b {
                 if pt.x < 2 * b { HTTOPLEFT } else if pt.x >= cw - 2 * b { HTTOPRIGHT } else { HTTOP }
-            } else if pt.y < bar_px(hwnd) && !chrome::over_lights(pt.x, pt.y, scale) && !on_menu && !fullscreen {
+            } else if !fullscreen
+                && ((pt.y < bar_px(hwnd) && !chrome::over_lights(pt.x, pt.y, scale) && !on_menu)
+                    // an exact window: its own Mac title bar, where nothing takes clicks
+                    || mac_hit(hwnd, pt.x, pt.y) == Some(chrome::MacHit::Caption))
+            {
                 HTCAPTION
             } else {
                 HTCLIENT
             };
             LRESULT(code as isize)
+        }
+        // over an exact window's title bar the Mac's pointer (in the video) is still the pointer,
+        // and it moves there on the Mac too (the buttons show their glyphs as on the Mac)
+        WM_SETCURSOR if (lp.0 & 0xffff) as u32 == HTCAPTION && is_exact(hwnd) && !local_cursor().load(std::sync::atomic::Ordering::Relaxed) => {
+            SetCursor(None);
+            LRESULT(1)
+        }
+        WM_NCMOUSEMOVE if wp.0 as u32 == HTCAPTION && is_exact(hwnd) => {
+            let mut pt = POINT { x: (lp.0 & 0xffff) as i16 as i32, y: ((lp.0 >> 16) & 0xffff) as i16 as i32 };
+            if let Some(c) = content_of(hwnd) {
+                let _ = ScreenToClient(c, &mut pt);
+                let cs = client_size(c);
+                send_for(hwnd, |r, _| {
+                    let (px, py) = scale_point(pt.x, pt.y, cs, (r.rw, r.rh));
+                    Some(Message::MouseMove { window_id: r.id, x: px, y: py })
+                });
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
         }
         WM_NCACTIVATE => {
             let active = wp.0 != 0;
@@ -1976,6 +2937,8 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_ACTIVATE => {
             if (wp.0 & 0xffff) as u32 != WA_INACTIVE {
                 send_for(hwnd, |r, _| Some(Message::WindowFocus { window_id: r.id }));
+            } else {
+                release_keys(hwnd);
             }
             DefWindowProcW(hwnd, msg, wp, lp)
         }
@@ -2014,6 +2977,7 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 Some(r.menu)
             })
             .flatten();
+            launcher_sync();
             if let Some(m) = menu.filter(|m| *m != 0) {
                 let _ = DestroyMenu(HMENU(m as *mut c_void));
             }
@@ -2036,6 +3000,10 @@ fn local_cursor() -> &'static std::sync::atomic::AtomicBool {
 unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let frame = GetParent(hwnd).unwrap_or_default();
     match msg {
+        WM_DROPFILES => {
+            drop_files(frame, windows::Win32::UI::Shell::HDROP(wp.0 as *mut c_void));
+            LRESULT(0)
+        }
         // over the picture the Mac's pointer (in the video) is the pointer
         WM_SETCURSOR if (lp.0 & 0xffff) as u32 == HTCLIENT && !local_cursor().load(std::sync::atomic::Ordering::Relaxed) => {
             SetCursor(None);
@@ -2056,6 +3024,38 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
+        // an exact window: its Mac title bar's free band and its top edge are the frame's
+        // (moving, resizing), the rest the Mac's
+        WM_NCHITTEST if is_exact(frame) => {
+            let mut pt = POINT { x: (lp.0 & 0xffff) as i16 as i32, y: ((lp.0 >> 16) & 0xffff) as i16 as i32 };
+            let _ = ScreenToClient(hwnd, &mut pt);
+            let free = !IsZoomed(frame).as_bool() && !is_fullscreen(frame);
+            let edge = free && pt.y < frame_border(frame);
+            if edge || (free && mac_hit(frame, pt.x, pt.y) == Some(chrome::MacHit::Caption)) {
+                LRESULT(HTTRANSPARENT as isize)
+            } else {
+                LRESULT(HTCLIENT as isize)
+            }
+        }
+        WM_LBUTTONDOWN if matches!(mac_hit(frame, lp_xy(lp).0, lp_xy(lp).1), Some(chrome::MacHit::Light(_))) => {
+            // the Mac's red, yellow, green buttons: this window closes, minimises, goes full screen here
+            if let Some(chrome::MacHit::Light(l)) = mac_hit(frame, lp_xy(lp).0, lp_xy(lp).1) {
+                with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).map(|r| r.pressed = Some(l)));
+                SetCapture(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP if with_app(|a| a.remotes.get(&(frame.0 as isize)).is_some_and(|r| r.exact && r.pressed.is_some())).unwrap_or(false) => {
+            let _ = ReleaseCapture();
+            let pressed = with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).and_then(|r| r.pressed.take())).flatten();
+            let (x, y) = lp_xy(lp);
+            if let (Some(l), Some(chrome::MacHit::Light(now))) = (pressed, mac_hit(frame, x, y)) {
+                if l == now {
+                    light_action(frame, l);
+                }
+            }
+            LRESULT(0)
+        }
         WM_MOUSEMOVE => {
             let (x, y) = lp_xy(lp);
             if is_fullscreen(frame) && !is_desktop(frame) {
@@ -2137,6 +3137,13 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 }
                 return LRESULT(0);
             }
+            // Ctrl+Alt+Shift+M: the Mac's sound off / on
+            if vk == 'M' as u32 && mods.ctrl && mods.alt && mods.shift {
+                if down {
+                    toggle_mute();
+                }
+                return LRESULT(0);
+            }
             // Ctrl+Alt+Shift+S: the stats overlay, as in Moonlight
             if vk == 'S' as u32 && mods.ctrl && mods.alt && mods.shift {
                 if down {
@@ -2152,8 +3159,16 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             if sends_as_text(vk, mods) {
                 return LRESULT(0); // WM_CHAR delivers the character, layout-correct
             }
-            if let Some(name) = vk_to_physical(vk) {
-                send_for(frame, |r, cc| Some(Message::Key { window_id: r.id, physical_key: name.into(), modifiers: map_modifiers(mods, cc), down }));
+            let mode = with_app(|a| a.key_mode).unwrap_or(KeyMode::Windows);
+            if let Some((name, modifiers)) = map_key(vk, mods, mode) {
+                with_app(|a| {
+                    let held = a.keys_down.entry(frame.0 as isize).or_default();
+                    held.retain(|k| *k != name);
+                    if down {
+                        held.push(name);
+                    }
+                });
+                send_for(frame, |r, _| Some(Message::Key { window_id: r.id, physical_key: name.into(), modifiers, down }));
             }
             LRESULT(0)
         }
@@ -2215,7 +3230,7 @@ fn find_window(app: &str, role: WindowRole) -> Option<(HWND, u64)> {
 
 fn send_key(window_id: u64, key: &str, ctrl: bool) {
     with_app(|a| {
-        let mods = map_modifiers(Mods { ctrl, ..Default::default() }, a.ctrl_as_command);
+        let mods = map_modifiers(Mods { ctrl, ..Default::default() }, a.key_mode.ctrl_as_command());
         for down in [true, false] {
             a.link.send(&Message::Key { window_id, physical_key: key.into(), modifiers: mods.clone(), down });
         }
@@ -2556,7 +3571,7 @@ fn smoke_tick() {
         }
         (30, Some(_)) => {
             let ids = with_app(|a| a.launcher.as_ref().map(|l| (l.count(), l.ids.clone()))).flatten();
-            if let Some((3, ids)) = ids {
+            if let Some((4, ids)) = ids {
                 finish("launcher lists the Mac's applications", true, format!("{ids:?}"), 31);
                 launch_app("notes"); // same path as a double-click on the "Notes Test" icon
             }
@@ -2800,10 +3815,10 @@ fn smoke_tick() {
                 return;
             };
             let found: Vec<(String, Option<String>)> = shortcuts::list(&dir).iter().filter_map(|p| shortcuts::read(p)).collect();
-            let want = [("--app desktop".to_string(), Some("RemoteMac.desktop".to_string())), ("--app testapp".to_string(), Some("RemoteMac.testapp".to_string())), ("--app notes".to_string(), Some("RemoteMac.notes".to_string()))];
+            let want = [("--app desktop".to_string(), Some("RemoteMac.desktop".to_string())), ("--app testapp".to_string(), Some("RemoteMac.testapp".to_string())), ("--app notes".to_string(), Some("RemoteMac.notes".to_string())), ("--app textedit".to_string(), Some("RemoteMac.textedit".to_string()))];
             let icons = dir.join("icons").read_dir().map(|d| d.count()).unwrap_or(0);
-            if want.iter().all(|w| found.contains(w)) && icons >= 3 {
-                finish("each Mac app is in the Start menu / Windows Search (shortcut + icon + AUMID)", found.len() == 3, format!("{found:?} icons={icons}"), 38);
+            if want.iter().all(|w| found.contains(w)) && icons >= want.len() {
+                finish("each Mac app is in the Start menu / Windows Search (shortcut + icon + AUMID)", found.len() == want.len(), format!("{found:?} icons={icons}"), 38);
             }
         }
         (38, _) => {
@@ -2887,6 +3902,159 @@ fn showcase_note(line: String) {
     with_app(|a| a.showcase.as_mut().map(|s| s.report.push(line)));
 }
 
+// ------------------------------------------------------------------ UI gallery (CI)
+//
+// RM_UI_GALLERY=1 with --showcase: once the apps are open, each of MacBridge's own surfaces is
+// shown in turn (the app loading window, the glass menu, MacBridge Search, the reconnect banner)
+// and a screenshot of it is asked for: `shot.req` holds "name x y w h" (screen px); the script
+// takes it and answers with `<name>.done`. The pictures are for people to look at.
+
+struct Gallery {
+    step: usize,
+    since: Instant,
+    asked: Option<String>,
+}
+
+thread_local! { static GALLERY: RefCell<Option<Gallery>> = const { RefCell::new(None) }; }
+
+const WM_GALLERY_MENU: u32 = WM_APP + 9;
+
+/// One step of the gallery; false once it is over (or not asked for).
+fn gallery_tick(dir: &std::path::Path) -> bool {
+    if std::env::var_os("RM_UI_GALLERY").is_none() {
+        return false;
+    }
+    let (step, since, asked) = GALLERY.with(|g| {
+        let mut g = g.borrow_mut();
+        let g = g.get_or_insert(Gallery { step: 0, since: Instant::now(), asked: None });
+        (g.step, g.since, g.asked.clone())
+    });
+    // a screenshot was asked for: wait for it, then put that surface away and go on
+    if let Some(name) = asked {
+        if !dir.join(format!("{name}.done")).exists() && since.elapsed() < Duration::from_secs(20) {
+            return true;
+        }
+        match step {
+            0 => crate::splash::done("gallery"),
+            1 => crate::glassmenu::cancel(),
+            2 => crate::palette::close(),
+            3 => crate::banner::hide(),
+            _ => {}
+        }
+        GALLERY.with(|g| {
+            if let Some(g) = g.borrow_mut().as_mut() {
+                (g.step, g.since, g.asked) = (g.step + 1, Instant::now(), None);
+            }
+        });
+        return true;
+    }
+    let ask = |name: &str, r: Option<RECT>| {
+        let Some(r) = r else { return };
+        let _ = std::fs::write(dir.join("shot.req"), format!("{name} {} {} {} {}", r.left, r.top, r.right - r.left, r.bottom - r.top));
+        GALLERY.with(|g| g.borrow_mut().as_mut().map(|g| (g.asked, g.since) = (Some(name.into()), Instant::now())));
+        showcase_note(format!("gallery: {name}"));
+    };
+    let first = with_app(|a| a.remotes.iter().find(|(_, r)| r.role == WindowRole::Window && r.parent.is_none()).map(|(k, r)| (*k, r.app.clone()))).flatten();
+    let fresh = since.elapsed() < Duration::from_millis(150);
+    match step {
+        0 => {
+            // the app loading window (kept open: the app does not really start)
+            if fresh && !crate::splash::showing("gallery") {
+                if let Some((hinst, name, icon)) = with_app(|a| {
+                    let app = first.as_ref().map(|f| f.1.clone()).unwrap_or_default();
+                    let name = a.app_names.iter().find(|(id, _)| *id == app).map_or("Mac app".to_string(), |(_, n)| n.clone());
+                    (a.hinst, name, a.icon_rgba.get(&app).cloned())
+                }) {
+                    crate::splash::show(HINSTANCE(hinst as *mut c_void), "gallery", &name, icon);
+                    crate::splash::step("gallery", 2);
+                }
+            } else if since.elapsed() > Duration::from_millis(1200) {
+                ask("10-loading-window", crate::splash::rect("gallery"));
+            }
+        }
+        1 => {
+            // the glass menu (the navigation ball's), opened over the first app's window
+            if fresh {
+                if let (Some((k, _)), Some(ctl)) = (first, with_app(|a| a.controller)) {
+                    unsafe {
+                        let _ = PostMessageW(Some(hwnd_of(ctl)), WM_GALLERY_MENU, WPARAM(k as usize), LPARAM(0));
+                    }
+                }
+            } else if since.elapsed() > Duration::from_millis(900) {
+                ask("11-glass-menu", crate::glassmenu::rect());
+            }
+        }
+        2 => {
+            // MacBridge Search with "te" typed
+            if fresh && !crate::palette::showing() {
+                open_palette();
+                crate::palette::type_text("te");
+            } else if since.elapsed() > Duration::from_millis(1000) {
+                ask("12-search", crate::palette::rect());
+            }
+        }
+        3 => {
+            // the reconnect banner (shown as when the connection drops)
+            if fresh {
+                if let Some(hinst) = with_app(|a| a.hinst) {
+                    crate::banner::show(HINSTANCE(hinst as *mut c_void), 200, 200);
+                }
+            } else if since.elapsed() > Duration::from_millis(1000) {
+                ask("13-reconnect-banner", crate::banner::rect());
+            }
+        }
+        4 => {
+            // Desktop Fusion (RM_FUSION=1, a Mac that streams its Dock): the pointer resting at
+            // the bottom edge, the Mac's Dock slid in over this PC's desktop
+            // (the Mac Desktop has the Dock in its picture: closed first, as the user would)
+            if fresh {
+                let desktop = with_app(|a| a.remotes.iter().find(|(_, r)| r.app == DESKTOP_APP).map(|(k, _)| *k)).flatten();
+                if let Some(k) = desktop {
+                    unsafe {
+                        let _ = PostMessageW(Some(hwnd_of(k)), WM_CLOSE, WPARAM(0), LPARAM(0));
+                    }
+                }
+            }
+            let frame = FUSION.with(|f| f.borrow().dock.as_ref().map(|d| hwnd_of(d.0)));
+            if let Some((shown, _)) = frame.and_then(dock_rect) {
+                if since.elapsed() > Duration::from_millis(1000) && since.elapsed() < Duration::from_millis(2500) {
+                    unsafe {
+                        let _ = SetCursorPos((shown.left + shown.right) / 2, shown.bottom - 1);
+                    }
+                } else if since.elapsed() > Duration::from_millis(3000) {
+                    let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+                    ask("14-fusion-dock", Some(RECT { left: 0, top: (shown.top - 220).max(0), right: sw, bottom: sh }));
+                }
+            }
+        }
+        5 => {
+            // exact windows: a Mac window in front, the Mac's own menu bar above it at the top
+            let win = with_app(|a| a.remotes.iter().find(|(_, r)| r.exact && r.role == WindowRole::Window && r.app != DESKTOP_APP).map(|(k, _)| *k)).flatten();
+            if let (Some(_), Some(k)) = (MENU_BAR.with(|m| m.get()), win) {
+                if fresh {
+                    unsafe {
+                        let _ = SetForegroundWindow(hwnd_of(k));
+                    }
+                } else if since.elapsed() > Duration::from_millis(2500) {
+                    let sw = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+                    let mut r = RECT::default();
+                    unsafe {
+                        let _ = GetWindowRect(hwnd_of(k), &mut r);
+                    }
+                    ask("15-menu-bar", Some(RECT { left: 0, top: 0, right: sw, bottom: (r.bottom + 12).min(r.top + 420).max(200) }));
+                }
+            }
+        }
+        _ => return false,
+    }
+    // a surface that could not be shown is passed over
+    if since.elapsed() > Duration::from_secs(6) {
+        GALLERY.with(|g| g.borrow_mut().as_mut().map(|g| (g.step, g.since, g.asked) = (g.step + 1, Instant::now(), None)));
+        showcase_note(format!("gallery: step {step} not shown"));
+    }
+    true
+}
+
 fn showcase_tick() {
     let Some((dir, apps_known, next, current, launcher_saved, ready_at, quit_at, settle, timeout, started)) = with_app(|a| {
         let s = a.showcase.as_ref()?;
@@ -2924,6 +4092,10 @@ fn showcase_tick() {
         return;
     }
     if let Some(t) = ready_at {
+        // MacBridge's own surfaces, one by one, for screenshots (RM_UI_GALLERY=1)
+        if dir.join("desktop.done").exists() && t.elapsed() < Duration::from_secs(150) && gallery_tick(&dir) {
+            return;
+        }
         if dir.join("desktop.done").exists() || t.elapsed() > Duration::from_secs(60) {
             let apps: Vec<String> = with_app(|a| a.showcase.as_ref().map(|s| s.cfg.apps.clone())).flatten().unwrap_or_default();
             for app in apps {

@@ -431,6 +431,8 @@ pub enum Out {
     Frame(VideoFrame),
     /// A frame of this window is gone (even with FEC): the decoder needs a keyframe.
     Lost(u64),
+    /// A packet of sound ([`crate::audio`]).
+    Audio(crate::audio::AudioPacket),
 }
 
 #[derive(Default)]

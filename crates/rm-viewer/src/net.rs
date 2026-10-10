@@ -55,6 +55,18 @@ pub fn set_display_scale(s: f64) {
 
 static SCREEN_FIT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
+static DIRECT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Connect straight to this address (an IP or host name, with :port) instead of looking for the
+/// Mac on this network or going through a relay (None: the usual way). Set by the connect window.
+pub fn set_direct(addr: Option<String>) {
+    *DIRECT.lock().unwrap() = addr.map(|a| a.trim().to_string()).filter(|a| !a.is_empty());
+}
+
+pub fn direct() -> Option<String> {
+    DIRECT.lock().unwrap().clone()
+}
+
 /// This PC's screen as "W,H,S" (see `Message::VideoDecoder::screen`), set by the UI.
 pub fn set_screen_fit(s: Option<String>) {
     *SCREEN_FIT.lock().unwrap() = s;
@@ -178,6 +190,15 @@ pub enum UiEvent {
     AppExited(String),
     /// The Mac started the app (the launch card moves on).
     Launched(String),
+    /// The Mac's own Dock (Desktop Fusion): streamed as window `id` from this region of the
+    /// Mac's screen (points), at `edge`; or why it cannot be shown.
+    Dock { available: bool, id: u64, x: i32, y: i32, w: u32, h: u32, edge: String, reason: Option<String> },
+    /// The Mac's own menu bar, streamed as window `id` (its strip in Mac points), or why not.
+    MacMenuBar { available: bool, id: u64, w: u32, h: u32, reason: Option<String> },
+    /// The title bar of exact window `id` (Mac points from its picture's top-left).
+    Chrome { id: u64, chrome: crate::chrome::MacChrome },
+    /// The shape of window `id`'s pictures of `width`x`height` (alpha per pixel; None: opaque).
+    Mask { id: u64, width: u32, height: u32, alpha: Option<std::sync::Arc<Vec<u8>>> },
     Notice(String),
     Disconnected(String),
 }
@@ -258,7 +279,7 @@ pub fn friendly_error(e: &str) -> String {
         "Wrong password."
     } else if e.contains("older MacBridge") {
         "The Mac runs an older MacBridge without encryption. Update the Mac and this PC to the same version."
-    } else if e.contains("not found on this network") {
+    } else if e.contains("not found on this network") || e.contains("did not answer at") || e.contains("is not a Mac address") || e.contains("could not be resolved") {
         return e.to_string();
     } else {
         return format!("Cannot reach the MacBridge server: {e}");
@@ -275,16 +296,47 @@ pub fn connect(relay: Option<&str>, session: &str, token: &str, app: Option<&str
 /// [`connect`]; `wait: false` fails at once when the Mac is not waiting at the relay. A Mac on
 /// this network (found by its ID) is joined straight; else `relay` is used.
 pub fn connect_with(relay: Option<&str>, session: &str, token: &str, app: Option<&str>, wait: bool, wake: impl Fn() + Send + Sync + 'static) -> Result<(Link, Receiver<UiEvent>), String> {
-    let (stream, route) = rm_relay::lan::connect(relay, session, &rm_protocol::session::relay_token(session), wait)?;
-    eprintln!("connected {}", match &route { rm_relay::lan::Route::Lan(a) => format!("on this network ({a})"), rm_relay::lan::Route::Relay(r) => format!("through the relay {r}") });
+    use crate::lifecycle::{set, Phase};
+    set(Phase::Connecting);
+    let r = connect_steps(relay, session, token, app, wait, wake);
+    match &r {
+        Ok(_) => set(Phase::Connected),
+        Err(e) => set(Phase::Error(friendly_error(e))),
+    };
+    r
+}
+
+fn connect_steps(relay: Option<&str>, session: &str, token: &str, app: Option<&str>, wait: bool, wake: impl Fn() + Send + Sync + 'static) -> Result<(Link, Receiver<UiEvent>), String> {
+    use crate::lifecycle::{set, Phase};
+    let rt = rm_protocol::session::relay_token(session);
+    let (stream, route) = match direct() {
+        Some(addr) => rm_relay::lan::connect_direct(&addr, session, &rt)?,
+        None => rm_relay::lan::connect(relay, session, &rt, wait)?,
+    };
+    eprintln!("connected {}", match &route {
+        rm_relay::lan::Route::Lan(a) => format!("on this network ({a})"),
+        rm_relay::lan::Route::Direct(a) => format!("straight to {a}"),
+        rm_relay::lan::Route::Relay(r) => format!("through the relay {r}"),
+    });
+    *ROUTE.lock().unwrap() = match &route {
+        rm_relay::lan::Route::Lan(_) => "This network".into(),
+        rm_relay::lan::Route::Direct(a) => format!("Direct to {}", a.ip()),
+        rm_relay::lan::Route::Relay(_) => "Through the relay".into(),
+    };
+    *SESSION.lock().unwrap() = session.to_string();
     // the password proved and the keys agreed end to end (the relay sees only ciphertext)
+    set(Phase::Authenticating);
     let (stream, keys) = rm_protocol::secure::client_tcp(stream, session, token).map_err(|e| e.to_string())?;
     eprintln!("end-to-end encrypted (ChaCha20-Poly1305)");
-    let lan = matches!(route, rm_relay::lan::Route::Lan(_));
+    let lan = route.is_direct();
     let relay = route.udp_relay();
     let relay = relay.as_str();
     let writer = stream.try_clone().map_err(|e| e.to_string())?;
+    // the raw socket, to cut a connection that went silent (see the heartbeat below)
+    let raw = stream.get_ref().try_clone().map_err(|e| e.to_string())?;
+    set(Phase::Negotiating);
     let sess = Session::handshake(stream).map_err(|e| format!("handshake: {e}"))?;
+    set(Phase::EstablishingMedia);
     let (tx, rx) = channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     let mut link = Link::start(writer);
@@ -311,17 +363,68 @@ pub fn connect_with(relay: Option<&str>, session: &str, token: &str, app: Option
     let kind = decoder_kind();
     link.send(&Message::VideoDecoder { high_profile: kind != DecoderKind::Software, hardware: kind == DecoderKind::Hardware, scale: Some(display_scale()), screen: screen_fit() });
     // the user's settings (frame rate, bitrate, sharpness)
-    link.send(&crate::settings::Settings::load().message(display_scale(), screen_px()));
+    let settings = crate::settings::Settings::load();
+    link.send(&settings.message(display_scale(), screen_px()));
+    *MAC_FEATURES.lock().unwrap() = sess.negotiated.features.clone();
+    // the Mac's sound, unless muted (a Mac without the feature is never asked)
+    let audio = crate::audio::audio();
+    audio.reset();
+    audio.set_supported(sess.negotiated.features.iter().any(|f| f == "audio"));
+    if audio.supported() && settings.audio {
+        link.send(&Message::AudioControl { enabled: true });
+    }
+    // Mac windows as the Mac draws them (before any window opens), when it can and it is wanted
+    let exact = mac_has("exact") && settings.frame == 0 && !std::env::var_os("RM_FRAMED").is_some_and(|v| v != "0");
+    EXACT.store(exact, std::sync::atomic::Ordering::Relaxed);
+    if mac_has("exact") {
+        link.send(&Message::WindowStyle { exact });
+    }
+    // their menus: the Mac's own menu bar, at the top of the screen
+    if exact && mac_has("menubar") {
+        link.send(&Message::MenuBarStream { enabled: true });
+    }
     if let Some(app) = app {
         link.send(&Message::AppLaunch { application_id: app.into(), arguments: vec![], working_directory: None, environment: Default::default() });
     }
     *GS_VIDEO.lock().unwrap() = Some(video.clone());
     let l2 = link.clone();
-    std::thread::spawn(move || recv_loop(sess, l2, video, tx, wake));
+    let alive = Heartbeat::start(link.clone(), raw);
+    std::thread::spawn(move || recv_loop(sess, l2, video, tx, wake, alive));
     Ok((link, rx))
 }
 
 static GS_VIDEO: Mutex<Option<Arc<Video>>> = Mutex::new(None);
+
+static EXACT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ROUTE: Mutex<String> = Mutex::new(String::new());
+static SESSION: Mutex<String> = Mutex::new(String::new());
+
+/// How the Mac is reached, in words ("This network", "Through the relay"…); empty before.
+pub fn route_label() -> String {
+    ROUTE.lock().unwrap().clone()
+}
+
+/// The Mac as people know it: "Mac 123 456 789" from its ID (the session), else "Your Mac".
+pub fn mac_label() -> String {
+    let s = SESSION.lock().unwrap().clone();
+    match s.strip_prefix("rm-").filter(|id| id.len() == 9 && id.chars().all(|c| c.is_ascii_digit())) {
+        Some(id) => format!("Mac {} {} {}", &id[..3], &id[3..6], &id[6..]),
+        None => "Your Mac".into(),
+    }
+}
+
+/// Mac windows are shown as the Mac draws them (their own title bar and buttons, the Mac's menu
+/// bar at the top of the screen) rather than in MacBridge's frame.
+pub fn exact_windows() -> bool {
+    EXACT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What the connected Mac supports beyond the basics ("audio", "open_file"), from its hello.
+static MAC_FEATURES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+pub fn mac_has(feature: &str) -> bool {
+    MAC_FEATURES.lock().unwrap().iter().any(|f| f == feature)
+}
 
 /// Start the Mac Desktop in full GameStream mode for window `id` (see gsdesktop.rs): the tunnel
 /// rides this connection, decoded pictures take the usual path.
@@ -375,6 +478,7 @@ impl Video {
             rm_protocol::udp::Out::Frame(_) => {}
             // lost even with FEC: the decoder needs a fresh keyframe
             rm_protocol::udp::Out::Lost(id) => self.link().send(&Message::RequestKeyframe { window_id: id }),
+            rm_protocol::udp::Out::Audio(a) => crate::audio::audio().push(&a),
         }
     }
 
@@ -468,19 +572,75 @@ fn spawn_decoder(id: u64, link: Link, tx: Sender<UiEvent>, wake: Arc<dyn Fn() + 
     DecodeWorker { tx: ftx, resync: false }
 }
 
-fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Sender<UiEvent>, wake: Arc<dyn Fn() + Send + Sync>) {
+/// Keeps the connection honest: a ping to the Mac every 2 s (the Mac ends a session it has not
+/// heard from in a while, and waits for the next one), and a connection that has carried
+/// nothing from the Mac for 10 s is cut: a network gone without a word (Wi-Fi off, cable out)
+/// otherwise looks like a quiet Mac forever.
+pub struct Heartbeat {
+    heard: std::sync::atomic::AtomicU64,
+    stop: std::sync::atomic::AtomicBool,
+    epoch: std::time::Instant,
+}
+
+/// Silence from the Mac that ends the connection.
+const SILENT_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+impl Heartbeat {
+    fn start(link: Link, raw: TcpStream) -> Arc<Heartbeat> {
+        let hb = Arc::new(Heartbeat { heard: Default::default(), stop: Default::default(), epoch: std::time::Instant::now() });
+        let h = hb.clone();
+        let _ = std::thread::Builder::new().name("rm-heartbeat".into()).spawn(move || {
+            let mut nonce = 0u64;
+            while !h.stop.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                nonce += 1;
+                link.send(&Message::Ping { nonce });
+                let silent = h.epoch.elapsed().saturating_sub(std::time::Duration::from_millis(h.heard.load(std::sync::atomic::Ordering::Relaxed)));
+                if silent > SILENT_LIMIT {
+                    eprintln!("nothing from the Mac for {} s: the connection is gone", silent.as_secs());
+                    let _ = raw.shutdown(std::net::Shutdown::Both);
+                    return;
+                }
+            }
+        });
+        hb
+    }
+
+    fn heard(&self) {
+        self.heard.store(self.epoch.elapsed().as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Sender<UiEvent>, wake: Arc<dyn Fn() + Send + Sync>, alive: Arc<Heartbeat>) {
     let emit = |e: UiEvent| {
         if tx.send(e).is_ok() {
             wake();
         }
     };
+    struct StopOnExit(Arc<Heartbeat>);
+    impl Drop for StopOnExit {
+        fn drop(&mut self) {
+            self.0.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let _stop = StopOnExit(alive.clone());
     loop {
-        match sess.recv() {
+        let r = sess.recv();
+        if matches!(r, Ok(Some(_))) {
+            alive.heard();
+        }
+        match r {
             // the Mac Desktop's picture comes the usual way until GameStream has it
             Ok(Some(Frame::Video(v))) if !crate::gsdesktop::owns(v.window_id) => video.push(v, false),
             Ok(Some(Frame::Video(_))) => {}
+            Ok(Some(Frame::Audio(a))) => crate::audio::audio().push(&a),
             Ok(Some(Frame::Msg(m))) => match m {
-                Message::WindowCreated { window_id, application_id, title, bounds, parent_id, role } => emit(UiEvent::WindowCreated { id: window_id, app: application_id, title, x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, parent: parent_id, role }),
+                Message::WindowCreated { window_id, application_id, title, bounds, parent_id, role } => {
+                    // its first picture may have come before this (video over UDP, this over
+                    // TCP) and been dropped; a window that does not change sends no other
+                    video.link().send(&Message::RequestKeyframe { window_id });
+                    emit(UiEvent::WindowCreated { id: window_id, app: application_id, title, x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, parent: parent_id, role })
+                }
                 Message::Apps { apps } => emit(UiEvent::Apps(apps)),
                 Message::DisplayStatus { available, width, height, reason, .. } => emit(UiEvent::Display { available, width, height, reason }),
                 Message::MenuBar { application_id, menus } if rm_protocol::MenuNode::count(&menus) <= rm_protocol::MAX_MENU_ITEMS => {
@@ -509,6 +669,18 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
                 }
                 Message::AppExited { application_id, .. } => emit(UiEvent::AppExited(application_id)),
                 Message::AppLaunched { application_id, .. } => emit(UiEvent::Launched(application_id)),
+                Message::AudioStatus { state, reason } => crate::audio::audio().set_mac_status(&state, reason.as_deref()),
+                Message::DockStatus { available, window_id, bounds, edge, reason } => emit(UiEvent::Dock { available, id: window_id, x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, edge, reason }),
+                Message::MenuBarStatus { available, window_id, bounds, reason } => emit(UiEvent::MacMenuBar { available, id: window_id, w: bounds.w, h: bounds.h, reason }),
+                Message::WindowChrome { window_id, title_height, close, minimize, zoom, controls } => {
+                    let r = |r: rm_protocol::Rect| (r.x, r.y, r.w, r.h);
+                    emit(UiEvent::Chrome { id: window_id, chrome: crate::chrome::MacChrome { title_height, lights: [close.map(r), minimize.map(r), zoom.map(r)], controls: controls.into_iter().map(r).collect() } })
+                }
+                Message::WindowMask { window_id, width, height, rle } => {
+                    let alpha = rm_protocol::mask::from_message(width, height, &rle).map(std::sync::Arc::new);
+                    emit(UiEvent::Mask { id: window_id, width, height, alpha })
+                }
+                Message::WallpaperStatus { applied, reason } => eprintln!("wallpaper on the Mac: {}", if applied { "this PC's".to_string() } else { reason.unwrap_or_else(|| "the Mac's own".into()) }),
                 Message::Error { code, message } => emit(UiEvent::Notice(format!("{code}: {message}"))),
                 Message::CapabilityUnavailable { capability, reason } => emit(UiEvent::Notice(format!("{capability} unavailable: {reason}"))),
                 Message::P2pOffer { secret, candidates } => {
@@ -528,17 +700,15 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
     }
 }
 
-/// Send a local file to the agent in protocol-sized chunks. Runs on the caller's thread
-/// (the UI spawns one); the agent answers with `FileUploaded` / `FileUploadFailed`.
-pub fn upload_file(link: &Link, transfer_id: u64, path: &std::path::Path) -> Result<u64, String> {
+/// [`upload_file`] under another name on the Mac.
+pub fn upload_file_as(link: &Link, transfer_id: u64, path: &std::path::Path, name: &str) -> Result<u64, String> {
     use std::io::Read;
     let mut f = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let size = f.metadata().map_err(|e| e.to_string())?.len();
     if size > rm_protocol::MAX_UPLOAD {
         return Err(format!("{} is larger than the {} byte limit", path.display(), rm_protocol::MAX_UPLOAD));
     }
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "upload".into());
-    link.send(&Message::FileUploadBegin { transfer_id, name, size });
+    link.send(&Message::FileUploadBegin { transfer_id, name: name.into(), size });
     let mut buf = vec![0u8; rm_protocol::UPLOAD_CHUNK];
     let mut offset = 0u64;
     loop {
@@ -551,6 +721,13 @@ pub fn upload_file(link: &Link, transfer_id: u64, path: &std::path::Path) -> Res
     }
     link.send(&Message::FileUploadEnd { transfer_id });
     Ok(offset)
+}
+
+/// Send a local file to the agent in protocol-sized chunks. Runs on the caller's thread
+/// (the UI spawns one); the agent answers with `FileUploaded` / `FileUploadFailed`.
+pub fn upload_file(link: &Link, transfer_id: u64, path: &std::path::Path) -> Result<u64, String> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "upload".into());
+    upload_file_as(link, transfer_id, path, &name)
 }
 
 #[cfg(test)]
@@ -595,6 +772,65 @@ mod tests {
             if let Ok(UiEvent::Destroyed { .. }) = rx.recv_timeout(Duration::from_millis(300)) { destroyed = true }
         }
         assert!(destroyed);
+    }
+
+    /// The Mac's sound reaches the jitter buffer (over TCP first, then UDP) and plays.
+    /// (The buffer is the process's one sound output: other tests' scripted Macs send their
+    /// tones into it too, so only what holds for any mix of them is checked here; the jitter
+    /// buffer's own tests check order, loss and timing.)
+    #[test]
+    fn sound_reaches_the_jitter_buffer() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        std::thread::spawn(move || rm_relay::serve(l, Default::default()));
+        let (a, tok) = (addr.clone(), "viewer-audio-token-0123456789");
+        std::thread::spawn(move || { let _ = rm_fakeagent::serve_via_relay(&a, "v-audio", tok); });
+        std::thread::sleep(Duration::from_millis(150));
+        let (_link, _rx) = connect(Some(&addr), "v-audio", tok, None, || {}).unwrap();
+        let sound = crate::audio::audio();
+        assert!(sound.supported(), "the fake Mac offers sound");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut out = vec![0i16; 480];
+        let mut heard = 0;
+        while std::time::Instant::now() < deadline && heard < 50 {
+            std::thread::sleep(Duration::from_millis(5));
+            sound.pull(&mut out);
+            heard += out.iter().any(|&s| s.abs() > 1000) as usize;
+        }
+        let st = sound.stats();
+        assert!(heard >= 50 && st.received >= 40, "tone played {heard} times: {st:?}");
+    }
+
+    /// A file uploaded from this PC opens on the Mac with the app asked for; a path that was not
+    /// uploaded is refused.
+    #[test]
+    fn dropped_file_opens_on_the_mac() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        std::thread::spawn(move || rm_relay::serve(l, Default::default()));
+        let (a, tok) = (addr.clone(), "viewer-open-token-0123456789");
+        std::thread::spawn(move || { let _ = rm_fakeagent::serve_via_relay(&a, "v-open", tok); });
+        std::thread::sleep(Duration::from_millis(150));
+        let (link, rx) = connect(Some(&addr), "v-open", tok, None, || {}).unwrap();
+        assert!(mac_has("open_file"));
+        link.send(&Message::OpenFile { path: "/etc/passwd".into(), application_id: None });
+        let file = std::env::temp_dir().join(format!("rm-drop-{}.txt", std::process::id()));
+        std::fs::write(&file, b"hello mac").unwrap();
+        upload_file(&link, 9, &file).unwrap();
+        let (mut refused, mut opened) = (false, None);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline && !(refused && opened.is_some()) {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(UiEvent::Notice(n)) if n.starts_with("open_rejected") => refused = true,
+                Ok(UiEvent::Uploaded { transfer_id: 9, remote_path }) => link.send(&Message::OpenFile { path: remote_path, application_id: Some("testapp".into()) }),
+                Ok(UiEvent::Title { title, .. }) if title.contains("[opened rm-drop") => opened = Some(title),
+                _ => {}
+            }
+        }
+        let _ = std::fs::remove_file(&file);
+        assert!(refused, "a file that was not uploaded is refused");
+        let t = opened.expect("the uploaded file opens");
+        assert!(t.starts_with("RM Test App") && t.ends_with("9 bytes]"), "{t}");
     }
 
     /// Video moves to UDP once the path works, and FEC carries it through a lossy relay.

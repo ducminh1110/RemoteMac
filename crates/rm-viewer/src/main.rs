@@ -6,12 +6,14 @@ fn main() {
     let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let has = |k: &str| args.iter().any(|a| a == k);
     if has("-h") || has("--help") {
-        eprintln!("usage: MacBridge.exe                      (asks for the Mac's ID and password)\n       MacBridge.exe --id 123456789 --password PASS\n       RM_SESSION_TOKEN=.. MacBridge.exe --session NAME   (legacy)\n  [--relay HOST:PORT] [--app testapp] [--logs-enabled] [--raw-ctrl] [--no-clipboard] [--renderer d3d11|gdi] [--mac-file-panel] [--no-shortcuts] [--smoke] [--showcase DIR --apps xcode,textedit --settle SECS --type TEXT]");
+        eprintln!("usage: MacBridge.exe                      (asks for the Mac's ID and password)\n       MacBridge.exe --id 123456789 --password PASS\n       RM_SESSION_TOKEN=.. MacBridge.exe --session NAME   (legacy)\n  [--relay HOST:PORT | --direct HOST[:PORT]] [--app testapp] [--logs-enabled] [--raw-ctrl] [--no-clipboard] [--renderer d3d11|gdi] [--mac-file-panel] [--no-shortcuts] [--smoke] [--showcase DIR --apps xcode,textedit --settle SECS --type TEXT]");
         std::process::exit(0)
     }
     // a Mac on this network is found by its ID; for one elsewhere: --relay, $RM_RELAY, the relay
     // built into this build (none in the source), or what the connect window is given
     let relay = get("--relay").or_else(|| std::env::var("RM_RELAY").ok().filter(|r| !r.is_empty())).or_else(|| rm_protocol::session::default_relay().map(String::from));
+    // or straight to the Mac at an address (IP or host name, IPv4 or IPv6), any network
+    rm_viewer::net::set_direct(get("--direct"));
     // --session (legacy, token from RM_SESSION_TOKEN) | --id + --password | the connect window
     let (session, token, prompt) = match (get("--session"), get("--id"), get("--password").or_else(|| std::env::var("RM_PASSWORD").ok())) {
         (Some(s), _, _) => (s, std::env::var("RM_SESSION_TOKEN").unwrap_or_default(), false),
