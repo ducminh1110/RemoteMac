@@ -100,6 +100,11 @@ struct Remote {
     /// Pixel span of each menu title in the strip (from the last paint), for clicks.
     menu_x: Vec<(i32, i32)>,
     open_menu: Option<usize>,
+    /// the Mac app's menus (their glass menus are made from them)
+    menus: Vec<MenuNode>,
+    /// the menu title under the pointer, and since when (its pill fades in)
+    hot: Option<usize>,
+    hot_since: Instant,
     /// Pointer over the traffic lights (they show their glyphs).
     hover: bool,
     pressed: Option<chrome::Light>,
@@ -673,6 +678,10 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             let mut r = RECT::default();
             let _ = GetWindowRect(frame, &mut r);
             ball_menu(frame, POINT { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 });
+            LRESULT(0)
+        }
+        WM_GALLERY_APP_MENU => {
+            open_menu_popup(hwnd_of(wp.0 as isize), lp.0 as usize);
             LRESULT(0)
         }
         WM_HOTKEY if wp.0 as i32 == HOTKEY_SEARCH => {
@@ -2038,7 +2047,7 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         let scale = native::dpi_scale(hwnd);
         let (cached, parent_origin) = with_app(|a| {
             a.remotes.insert(hwnd.0 as isize, Remote { id, app: app.into(), role, parent, rx: x, ry: y, rw: w, rh: h, scale, maximized: false, presenter: None, comp: None, picture: None, frames: 0,
-                high_surrogate: None, cmds: HashMap::new(), content: content.0 as isize, menu: 0, menu_x: vec![], open_menu: None, hover: false, pressed: None, active: false, owned, fullscreen: false, saved: RECT::default(), reveal: false, mask: None,
+                high_surrogate: None, cmds: HashMap::new(), content: content.0 as isize, menu: 0, menu_x: vec![], open_menu: None, menus: vec![], hot: None, hot_since: Instant::now(), hover: false, pressed: None, active: false, owned, fullscreen: false, saved: RECT::default(), reveal: false, mask: None,
                 exact: net::exact_windows() && !popup && app != DESKTOP_APP && app != DOCK_APP, mac_chrome: None });
             a.by_id.insert(id, hwnd.0 as isize);
             let cached = a.icons.get(app).copied();
@@ -2464,6 +2473,7 @@ fn set_window_menu(frame: HWND, menus: &[MenuNode]) {
         let old = with_app(|a| {
             let r = a.remotes.get_mut(&(frame.0 as isize))?;
             r.cmds = table.into_iter().collect();
+            r.menus = menus.to_vec();
             r.menu_x.clear();
             Some(std::mem::replace(&mut r.menu, bar.0 as isize))
         })
@@ -2490,26 +2500,80 @@ fn invoke_menu_cmd(frame: HWND, id: u16) {
     });
 }
 
-/// Open menu `i` of the strip as a popup under its title (modal until an item is chosen).
-fn open_menu_popup(frame: HWND, i: usize) {
-    let Some((menu, (x0, _), bar)) = with_app(|a| {
-        let r = a.remotes.get_mut(&(frame.0 as isize))?;
-        let span = *r.menu_x.get(i)?;
-        r.open_menu = Some(i);
-        Some((r.menu, span, chrome::bar_height(r.scale, true)))
-    })
-    .flatten() else { return };
-    unsafe {
-        let _ = InvalidateRect(Some(frame), None, false);
-        let _ = UpdateWindow(frame);
-        let mut pt = POINT { x: x0, y: bar };
-        let _ = ClientToScreen(frame, &mut pt);
-        let sub = GetSubMenu(HMENU(menu as *mut c_void), i as i32);
-        let cmd = if sub.is_invalid() { 0 } else { TrackPopupMenuEx(sub, (TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD).0, pt.x, pt.y, frame, None).0 };
+/// The glass menus of a Mac app's menu bar, one per title; command ids handed out in the order
+/// `menu::commands` uses.
+fn glass_menus(menus: &[MenuNode], cc: bool) -> Vec<Vec<crate::glassmenu::Item>> {
+    use crate::glassmenu::Item;
+    fn items(nodes: &[MenuNode], cc: bool, ids: &mut std::vec::IntoIter<(u16, Vec<u32>)>) -> Vec<Item> {
+        nodes
+            .iter()
+            .map(|n| {
+                if n.separator {
+                    Item::Separator
+                } else if n.children.is_empty() {
+                    let id = ids.next().map_or(0, |(id, _)| id as u32);
+                    Item::Action { id, label: n.title.clone(), shortcut: n.shortcut.as_ref().map(|s| menu::translate_shortcut(s, cc)), checked: false, enabled: n.enabled }
+                } else {
+                    Item::Submenu { label: n.title.clone(), enabled: n.enabled, items: items(&n.children, cc, ids) }
+                }
+            })
+            .collect()
+    }
+    let mut ids = menu::commands(menus).into_iter();
+    menus.iter().map(|top| items(&top.children, cc, &mut ids)).collect()
+}
+
+/// Open menu `i` of the title bar as a glass menu under its title (modal until it closes); the
+/// pointer moving to another title, or Left / Right, opens that one instead.
+fn open_menu_popup(frame: HWND, mut i: usize) {
+    use crate::glassmenu::{BarTrack, Outcome};
+    loop {
+        let Some((items, spans, bar, hinst)) = with_app(|a| {
+            let cc = a.key_mode.ctrl_as_command();
+            let hinst = a.hinst;
+            let r = a.remotes.get_mut(&(frame.0 as isize))?;
+            r.menu_x.get(i)?;
+            r.open_menu = Some(i);
+            r.hot = None;
+            let items = glass_menus(&r.menus, cc).into_iter().nth(i)?;
+            Some((items, r.menu_x.clone(), chrome::bar_height(r.scale, true), hinst))
+        })
+        .flatten() else { return };
+        unsafe {
+            let _ = InvalidateRect(Some(frame), None, false);
+            let _ = UpdateWindow(frame);
+        }
+        let mut pt = POINT { x: spans[i].0, y: bar };
+        unsafe {
+            let _ = ClientToScreen(frame, &mut pt);
+        }
+        let title_at = |x: i32, y: i32| -> Option<usize> {
+            let mut p = POINT { x, y };
+            unsafe {
+                let _ = ScreenToClient(frame, &mut p);
+            }
+            if p.y < 0 || p.y >= bar {
+                return None;
+            }
+            spans.iter().position(|(a, b)| p.x >= *a && p.x < *b)
+        };
+        let track = BarTrack { current: i, count: spans.len(), title_at: &title_at };
+        let out = crate::glassmenu::show_in_bar(HINSTANCE(hinst as *mut c_void), frame, pt, items, &track);
         with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).map(|r| r.open_menu = None));
-        let _ = InvalidateRect(Some(frame), None, false);
-        if cmd > 0 {
-            invoke_menu_cmd(frame, cmd as u16);
+        unsafe {
+            let _ = InvalidateRect(Some(frame), None, false);
+        }
+        match out {
+            Outcome::Chosen(id) => return invoke_menu_cmd(frame, id as u16),
+            Outcome::Switch(j) => {
+                i = j;
+                // the menu just closed is off the screen before the next one takes its glass
+                // from what is behind it
+                unsafe {
+                    let _ = windows::Win32::Graphics::Dwm::DwmFlush();
+                }
+            }
+            Outcome::Closed => return,
         }
     }
 }
@@ -2591,130 +2655,78 @@ fn fill(hdc: HDC, rc: RECT, c: chrome::Rgb) {
     }
 }
 
-/// Inter at `weight` (bundled; Segoe UI if it could not be loaded).
-fn ui_font(px: i32, weight: i32) -> HFONT {
-    let face = native::ui_face(weight);
-    unsafe { CreateFontW(-px, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, &HSTRING::from(face)) }
+
+/// The launcher's kind of window button for the chrome's.
+fn look_light(l: chrome::Light) -> crate::look::Light {
+    match l {
+        chrome::Light::Close => crate::look::Light::Close,
+        chrome::Light::Minimize => crate::look::Light::Minimize,
+        chrome::Light::Zoom => crate::look::Light::Zoom,
+    }
 }
 
-/// Paint the Mac chrome (title bar with traffic lights and title; menu strip) into `hdc`.
+/// How long a menu title's pill takes to come in.
+const HOT_FADE: Duration = Duration::from_millis(120);
+const TIMER_HOT: usize = 0x48;
+
+/// Paint the title bar (titlebar.rs: the buttons, the app's menus, the title) into `hdc`.
 fn paint_chrome(frame: HWND, hdc: HDC) {
-    struct View { scale: f64, active: bool, hover: bool, dialog: bool, menu: isize, open: Option<usize> }
-    let Some(v) = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| View { scale: r.scale, active: r.active, hover: r.hover, dialog: r.owned, menu: r.menu, open: r.open_menu })).flatten() else { return };
     let (cw, _) = client_size(frame);
     let bar = bar_px(frame);
     if cw <= 0 || bar <= 0 {
         return;
     }
-    unsafe {
-        // double-buffered: draw into a bitmap, then one blit
-        let mem = CreateCompatibleDC(Some(hdc));
-        let dib = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: cw, biHeight: -bar, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
-            ..Default::default()
+    let mut buf = [0u16; 512];
+    let n = unsafe { GetWindowTextW(frame, &mut buf) }.max(0) as usize;
+    let title = String::from_utf16_lossy(&buf[..n]);
+    let maximized = unsafe { IsZoomed(frame).as_bool() } || is_fullscreen(frame);
+    let dark = crate::surface::dark_mode();
+    let Some((c, spans, composed)) = with_app(|a| {
+        let r = a.remotes.get(&(frame.0 as isize))?;
+        let menus: Vec<(String, bool)> = r.menus.iter().map(|m| (m.title.clone(), m.enabled)).collect();
+        let lit = match (r.open_menu, r.hot) {
+            (Some(i), _) => Some((i, 1.0, true)),
+            (None, Some(i)) => Some((i, crate::motion::cubic_bezier(0.0, 0.0, 0.2, 1.0, r.hot_since.elapsed().as_secs_f32() / HOT_FADE.as_secs_f32()), false)),
+            _ => None,
         };
-        let mut bits: *mut c_void = std::ptr::null_mut();
-        let Ok(bmp) = CreateDIBSection(Some(mem), &dib, DIB_RGB_COLORS, &mut bits, None, 0) else {
-            let _ = DeleteDC(mem);
-            return;
+        let b = crate::titlebar::Bar {
+            w: cw as usize,
+            scale: r.scale as f32,
+            active: r.active,
+            dark,
+            dialog: r.owned,
+            maximized,
+            title: &title,
+            menus: &menus,
+            hover_lights: r.hover,
+            pressed: r.pressed.map(look_light),
+            lit,
         };
-        let old = SelectObject(mem, bmp.into());
-        let tbg = chrome::title_bg(v.active);
-        fill(mem, RECT { left: 0, top: 0, right: cw, bottom: bar }, tbg);
-        // traffic lights (a dialog's minimise/zoom are greyed out, as on the Mac)
-        let d = chrome::light_size(v.scale);
-        for l in chrome::LIGHTS {
-            let enabled = !(v.dialog && l != chrome::Light::Close);
-            let px = chrome::light_sprite(d, l, v.active && enabled, v.hover && enabled, tbg);
-            let (ox, oy) = chrome::light_origin(l, v.scale);
-            let bmi = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: d, biHeight: -d, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
-                ..Default::default()
-            };
-            SetDIBitsToDevice(mem, ox, oy, d as u32, d as u32, 0, 0, 0, d as u32, px.as_ptr() as *const c_void, &bmi, DIB_RGB_COLORS);
-        }
-        SetBkMode(mem, TRANSPARENT);
-        let bold = ui_font((13.0 * v.scale).round() as i32, 600);
-        let regular = ui_font((13.0 * v.scale).round() as i32, 400);
-        let oldf = SelectObject(mem, bold.into());
-        // menus right after the lights: the app's name in bold, then its menus
-        let lw = chrome::lights_width(v.scale);
-        let mut spans = vec![];
-        let mut menus_end = lw;
-        if v.menu != 0 {
-            let hm = HMENU(v.menu as *mut c_void);
-            let pad = (8.0 * v.scale).round() as i32;
-            let mut x = lw - pad / 2;
-            for i in 0..GetMenuItemCount(Some(hm)).max(0) {
-                let mut t = [0u16; 128];
-                let len = GetMenuStringW(hm, i as u32, Some(&mut t), MF_BYPOSITION).max(0) as usize;
-                let text: Vec<u16> = String::from_utf16_lossy(&t[..len]).replace("&&", "&").encode_utf16().collect();
-                SelectObject(mem, if i == 0 { bold.into() } else { regular.into() });
-                let mut sz = SIZE::default();
-                let _ = GetTextExtentPoint32W(mem, &text, &mut sz);
-                let span = (x, x + sz.cx + 2 * pad);
-                if span.1 > cw - (8.0 * v.scale) as i32 {
-                    break; // like the Mac, menus that do not fit are left out
-                }
-                let open = v.open == Some(i as usize);
-                if open {
-                    let b = CreateSolidBrush(rgb(chrome::MENU_HIGHLIGHT));
-                    let oldb = SelectObject(mem, b.into());
-                    let pen = SelectObject(mem, GetStockObject(NULL_PEN));
-                    let r = (12.0 * v.scale) as i32;
-                    let m = (8.0 * v.scale) as i32;
-                    let _ = RoundRect(mem, span.0, m, span.1, bar - m, r, r);
-                    SelectObject(mem, pen);
-                    SelectObject(mem, oldb);
-                    let _ = DeleteObject(b.into());
-                }
-                let state = GetMenuState(hm, i as u32, MF_BYPOSITION);
-                SetTextColor(mem, rgb(chrome::menu_fg(v.active, state & MF_GRAYED.0 == 0)));
-                let mut text = text;
-                let mut rc = RECT { left: span.0, top: 0, right: span.1, bottom: bar };
-                DrawTextW(mem, &mut text, &mut rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                spans.push(span);
-                x = span.1;
-                menus_end = x;
+        let spans: Vec<(i32, i32)> = crate::titlebar::layout(&b).menus.iter().map(|(a, b)| (a.round() as i32, b.round() as i32)).collect();
+        Some((crate::titlebar::draw(&b), spans, r.comp.is_some()))
+    })
+    .flatten() else { return };
+    let h = (c.h as i32).min(bar);
+    if composed {
+        // the bar as the composition's chrome (opaque)
+        let mut px = Vec::with_capacity(cw as usize * bar as usize * 4);
+        for y in 0..bar as usize {
+            let row = y.min(c.h - 1) * c.w;
+            for p in &c.px[row..row + c.w.min(cw as usize)] {
+                px.extend_from_slice(&[p[0], p[1], p[2], 255]);
             }
         }
-        // the title, centred on the window when there is room, else in the space left of the menus
-        let mut buf = [0u16; 512];
-        let n = GetWindowTextW(frame, &mut buf).max(0) as usize;
-        SelectObject(mem, bold.into());
-        let mut sz = SIZE::default();
-        let _ = GetTextExtentPoint32W(mem, &buf[..n], &mut sz);
-        let gap = (16.0 * v.scale) as i32;
-        let centred = (cw - sz.cx) / 2;
-        let mut rc = if centred > menus_end + gap {
-            RECT { left: centred, top: 0, right: centred + sz.cx + 2, bottom: bar }
-        } else {
-            RECT { left: menus_end + gap, top: 0, right: cw - gap, bottom: bar }
+        with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).and_then(|r| r.comp.as_mut()).map(|cm| cm.set_chrome(cw, bar, &px)));
+    } else {
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: c.w as i32, biHeight: -(c.h as i32), biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
+            ..Default::default()
         };
-        if rc.right - rc.left > (40.0 * v.scale) as i32 {
-            SetTextColor(mem, rgb(chrome::title_fg(v.active)));
-            DrawTextW(mem, &mut buf[..n], &mut rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        unsafe {
+            SetDIBitsToDevice(hdc, 0, 0, c.w as u32, h as u32, 0, 0, 0, c.h as u32, c.px.as_ptr() as *const c_void, &bmi, DIB_RGB_COLORS);
         }
-        fill(mem, RECT { left: 0, top: bar - 1, right: cw, bottom: bar }, chrome::HAIRLINE);
-        SelectObject(mem, oldf);
-        let _ = DeleteObject(bold.into());
-        let _ = DeleteObject(regular.into());
-        let _ = GdiFlush();
-        let composed = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.comp.is_some())).flatten().unwrap_or(false);
-        if composed {
-            // GDI leaves alpha at 0: the bar is opaque
-            let px = std::slice::from_raw_parts_mut(bits as *mut u8, (cw * bar * 4) as usize);
-            px.chunks_exact_mut(4).for_each(|p| p[3] = 255);
-            let px = px.to_vec();
-            with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).and_then(|r| r.comp.as_mut()).map(|c| c.set_chrome(cw, bar, &px)));
-        } else {
-            let _ = BitBlt(hdc, 0, 0, cw, bar, Some(mem), 0, 0, SRCCOPY);
-        }
-        SelectObject(mem, old);
-        let _ = DeleteObject(bmp.into());
-        let _ = DeleteDC(mem);
-        with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).map(|r| r.menu_x = spans));
     }
+    with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).map(|r| r.menu_x = spans));
 }
 
 fn invalidate_chrome(frame: HWND) {
@@ -2846,22 +2858,45 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_ERASEBKGND => LRESULT(1),
         WM_MOUSEMOVE => {
             let (x, y) = lp_xy(lp);
-            let changed = with_app(|a| {
+            let bar = bar_px(hwnd);
+            let (changed, fade) = with_app(|a| {
                 let r = a.remotes.get_mut(&(hwnd.0 as isize))?;
                 let over = chrome::over_lights(x, y, r.scale);
-                Some(std::mem::replace(&mut r.hover, over) != over)
+                // the menu title under the pointer gets its pill (fading in)
+                let hot = (y < bar).then(|| r.menu_x.iter().position(|(a, b)| x >= *a && x < *b)).flatten();
+                let lights = std::mem::replace(&mut r.hover, over) != over;
+                let menu = r.hot != hot;
+                if menu {
+                    r.hot = hot;
+                    r.hot_since = Instant::now();
+                }
+                Some((lights || menu, menu && hot.is_some()))
             })
             .flatten()
-            .unwrap_or(false);
+            .unwrap_or((false, false));
             if changed {
                 invalidate_chrome(hwnd);
                 let mut tme = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
                 let _ = TrackMouseEvent(&mut tme);
             }
+            if fade {
+                SetTimer(Some(hwnd), TIMER_HOT, 16, None);
+            }
+            LRESULT(0)
+        }
+        WM_TIMER if wp.0 == TIMER_HOT => {
+            invalidate_chrome(hwnd);
+            let done = with_app(|a| a.remotes.get(&(hwnd.0 as isize)).map(|r| r.hot.is_none() || r.hot_since.elapsed() > HOT_FADE)).flatten().unwrap_or(true);
+            if done {
+                let _ = KillTimer(Some(hwnd), TIMER_HOT);
+            }
             LRESULT(0)
         }
         WM_MOUSE_LEAVE => {
-            with_app(|a| a.remotes.get_mut(&(hwnd.0 as isize)).map(|r| r.hover = false));
+            with_app(|a| a.remotes.get_mut(&(hwnd.0 as isize)).map(|r| {
+                r.hover = false;
+                r.hot = None;
+            }));
             invalidate_chrome(hwnd);
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
@@ -3922,6 +3957,9 @@ struct Gallery {
 thread_local! { static GALLERY: RefCell<Option<Gallery>> = const { RefCell::new(None) }; }
 
 const WM_GALLERY_MENU: u32 = WM_APP + 9;
+/// open menu `lp` of window `wp`'s title bar (gallery screenshots)
+const WM_GALLERY_APP_MENU: u32 = WM_APP + 10;
+thread_local! { static GALLERY_KEYS: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
 
 /// One step of the gallery; false once it is over (or not asked for).
 fn gallery_tick(dir: &std::path::Path) -> bool {
@@ -3943,6 +3981,7 @@ fn gallery_tick(dir: &std::path::Path) -> bool {
             1 => crate::glassmenu::cancel(),
             2 => crate::palette::close(),
             3 => crate::banner::hide(),
+            7 => crate::glassmenu::cancel(),
             6 => {
                 // the launcher back to its size
                 if let Some(h) = with_app(|a| a.launcher.as_ref().map(|l| l.hwnd)).flatten() {
@@ -4098,6 +4137,45 @@ fn gallery_tick(dir: &std::path::Path) -> bool {
                     // a maximized window reaches past the screen's edges by its frame
                     let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
                     ask("16-launcher-zoomed", Some(RECT { left: r.left.max(0), top: r.top.max(0), right: r.right.min(sw), bottom: r.bottom.min(sh) }));
+                }
+            }
+        }
+        7 => {
+            // a Mac app's menu opened from its title bar, with the menu of its first row beside it
+            // (TextEdit's Format > Font when there is TextEdit)
+            let pick = with_app(|a| {
+                let mut wins: Vec<(isize, &Remote)> = a.remotes.iter().filter(|(_, r)| r.role == WindowRole::Window && !r.exact && r.menus.len() > 1).map(|(k, r)| (*k, r)).collect();
+                wins.sort_by_key(|(_, r)| r.app != "textedit");
+                wins.first().map(|(k, r)| (*k, r.menus.iter().position(|m| m.title == "Format" && r.menu_x.len() > 3).unwrap_or(1)))
+            })
+            .flatten();
+            if let (Some((k, menu)), Some(ctl)) = (pick, with_app(|a| a.controller)) {
+                let t = since.elapsed();
+                if fresh {
+                    GALLERY_KEYS.with(|g| g.set(0));
+                    unsafe {
+                        let _ = SetForegroundWindow(hwnd_of(k));
+                        let _ = PostMessageW(Some(hwnd_of(ctl)), WM_GALLERY_APP_MENU, WPARAM(k as usize), LPARAM(menu as isize));
+                    }
+                } else if t > Duration::from_millis(700) && GALLERY_KEYS.with(|g| g.get()) == 0 {
+                    // the keys a person would press: down to the first row, right to open its menu
+                    GALLERY_KEYS.with(|g| g.set(1));
+                    unsafe {
+                        let _ = PostMessageW(Some(hwnd_of(k)), WM_KEYDOWN, WPARAM(VK_DOWN.0 as usize), LPARAM(0));
+                    }
+                } else if t > Duration::from_millis(900) && GALLERY_KEYS.with(|g| g.get()) == 1 {
+                    GALLERY_KEYS.with(|g| g.set(2));
+                    unsafe {
+                        let _ = PostMessageW(Some(hwnd_of(k)), WM_KEYDOWN, WPARAM(VK_RIGHT.0 as usize), LPARAM(0));
+                    }
+                } else if t > Duration::from_millis(1700) {
+                    let mut r = RECT::default();
+                    unsafe {
+                        let _ = GetWindowRect(hwnd_of(k), &mut r);
+                    }
+                    let m = crate::glassmenu::rect().unwrap_or(r);
+                    let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+                    ask("17-app-menu", Some(RECT { left: (r.left.min(m.left) - 16).max(0), top: (r.top - 16).max(0), right: (r.right.max(m.right) + 16).min(sw), bottom: (m.bottom + 16).max(r.top + 200).min(sh) }));
                 }
             }
         }

@@ -25,6 +25,7 @@ pub mod gsdesktop;
 pub mod settings;
 pub mod settingsui;
 pub mod text;
+pub mod titlebar;
 pub mod net;
 #[cfg(windows)]
 pub mod d3d;

@@ -47,6 +47,10 @@ or headphones; both on the same network unless the item says otherwise. Note bot
 - [ ] By default (menus in the title bar): Finder, Safari, TextEdit windows have MacBridge's
       title bar with the app's menus; clicks and typing in them work at once, also with the
       pointer moving fast; resizing by the edges and the green button work.
+- [ ] The title bar's text matches the launcher's (same font and spacing), light and dark; the
+      menu title under the pointer gets a pill. Menus open as glass menus; TextEdit's Format >
+      Font opens beside it; moving along the titles switches menus; Left / Right / Escape work;
+      the window's buttons stay coloured while a menu is open.
 - [ ] The launcher's green button fills the screen and the launcher is drawn at that size
       (nothing black, no second copy of it); again restores it.
 - [ ] Leave the Mac unused for an hour, and asleep for a while: the PC connects again at once.

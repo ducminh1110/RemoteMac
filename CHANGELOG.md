@@ -3,6 +3,20 @@
 Each version of MacBridge, newest first. Both sides should run the same version; a newer
 Windows app works with an older Mac app without the features the Mac lacks.
 
+## Unreleased
+
+### Changed
+
+- **The title bar of a Mac app's window is drawn as the rest of MacBridge**: the same text as
+  the launcher and Settings (Inter, Apple's tracking, unhinted), the launcher's red, yellow and
+  green buttons, light or dark as Windows is, and the menu title under the pointer on a small
+  glass pill that fades in.
+- **The app's menus open as glass menus** (as the navigation ball's), no longer as Windows'
+  popup menus: their shortcuts on the right, rows that open another menu beside them (Format >
+  Font), and the Mac's way of moving through them: press on a title and let go on an item, or
+  click and click; the pointer moving along the titles, or Left and Right, goes from one menu to
+  the next; Escape closes. The window stays the active one while a menu is open.
+
 ## 1.2.0-beta.2
 
 The second beta, with what using 1.2.0-beta.1 on real machines showed. Update both sides, and

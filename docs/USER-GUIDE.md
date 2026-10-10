@@ -202,7 +202,10 @@ still works, without the newer features.
   menu): type part of a Mac app's name, then Enter to open it, or to switch to it when it is
   already open. Arrow keys move, Escape closes.
 - **Menus**: in the window's title bar, beside its buttons (as the Mac draws them: in the Mac's
-  menu bar at the top of the screen). Shortcuts are translated (Ctrl acts as ⌘ by default).
+  menu bar at the top of the screen). They open as glass menus and work as the Mac's: press on a
+  title and let go on an item, or click, then click; move along the titles (or press Left and
+  Right) to go from one menu to the next; a row with a chevron opens another menu beside it.
+  Shortcuts are translated (Ctrl acts as ⌘ by default).
 - **Fullscreen**: the green light or **F11**. The Mac app is sized exactly to your monitor.
 - **Closing** an app's last window quits the app on the Mac. Closing one of several windows
   closes only that window.
