@@ -350,7 +350,10 @@ func startStream(_ id: CGWindowID, inset: CGFloat, popup: Bool = false) {
     let ws = WindowStream(windowID: id, inset: inset) { pkt in sender.sendVideo(pkt) }
     ws.popup = popup
     ws.keepButtons = exactWindows
-    if viewerFeatures.contains("mask") { ws.onShape = { w, h, a in sendShape(id, w, h, a) } }
+    // the shape: all of it for exact windows and popups; under the viewer's own title bar
+    // (its frame) the top corners are filled, so they are not cut out
+    let framed = !exactWindows && !popup
+    if viewerFeatures.contains("mask") { ws.onShape = { w, h, a in sendShape(id, w, h, framed ? Shape.fillingTop(a, width: w, height: h) : a) } }
     ws.setBitrate(sender.bitrate)
     streamsLock.lock(); streams[id] = ws; streamsLock.unlock()
     Task { do { try await ws.start(); log("stream started window=\(id)") } catch { log("stream start failed window=\(id): \(error)")

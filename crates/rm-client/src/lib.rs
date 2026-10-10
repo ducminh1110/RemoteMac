@@ -36,7 +36,7 @@ impl<S: Read + Write> Session<S> {
     /// Runs the handshake. Only returns once the agent has sent ServerHello
     /// AND its capability report; `state` is then `Ready`, never earlier.
     pub fn handshake(mut stream: S) -> Result<Self, ClientError> {
-        let ours = Hello::ours(&format!("remote-mac {}", env!("CARGO_PKG_VERSION")), &["h264"], &["control", "audio", "open_file", "fusion", "mask"]);
+        let ours = Hello::ours(&format!("remote-mac {}", env!("CARGO_PKG_VERSION")), &["h264"], &["control", "audio", "open_file", "fusion", "mask", "exact", "menubar"]);
         write_message(&mut stream, &Message::ClientHello(ours.clone()))?;
         let theirs = match next(&mut stream)? {
             Message::ServerHello(h) => h,

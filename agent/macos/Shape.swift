@@ -41,6 +41,18 @@ enum Shape {
         return a
     }
 
+    /// The shape with its top corners opaque (as far as a window's rounding reaches): a window
+    /// in the viewer's frame has the viewer's title bar above it, and its top corners are filled.
+    static func fillingTop(_ a: [UInt8], width w: Int, height h: Int) -> [UInt8] {
+        guard a.count == w * h else { return a }
+        var out = a
+        let r = min(64, w / 4, h / 4)
+        for y in 0..<r {
+            for x in 0..<r { out[y * w + x] = 255; out[y * w + (w - 1 - x)] = 255 }
+        }
+        return out
+    }
+
     /// rm-protocol's mask runs: (u16 LE length, u8 alpha) pairs, row by row.
     static func runs(_ a: [UInt8]) -> Data {
         var out = Data()

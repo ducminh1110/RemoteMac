@@ -103,7 +103,7 @@ final class WindowStream: NSObject, SCStreamOutput {
     ///  - a window whose title bar is part of its content (toolbar windows) carries the Mac's
     ///    own window buttons and macOS's purple "being captured" pill top-left: the viewer
     ///    draws its own buttons, so that area takes the colour beside it.
-    private func polish(_ pb: CVPixelBuffer, scale: CGFloat, hideButtons: Bool, fillCorners: Bool) {
+    private func polish(_ pb: CVPixelBuffer, scale: CGFloat, hideButtons: Bool, fillTop: Bool, fillBottom: Bool) {
         guard CVPixelBufferGetPlaneCount(pb) == 2, CVPixelBufferLockBaseAddress(pb, []) == kCVReturnSuccess else { return }
         defer { CVPixelBufferUnlockBaseAddress(pb, []) }
         guard let yb = CVPixelBufferGetBaseAddressOfPlane(pb, 0), let cb = CVPixelBufferGetBaseAddressOfPlane(pb, 1) else { return }
@@ -124,7 +124,7 @@ final class WindowStream: NSObject, SCStreamOutput {
         // corners: transparent (black) pixels outside a circle of radius r take the colour of
         // the pixel diagonally inside the rounding (not when the viewer has the window's shape:
         // it shows the corners as clear, and the edge as the Mac draws it)
-        for (left, top) in [(true, true), (false, true), (true, false), (false, false)] where fillCorners {
+        for (left, top) in [(true, true), (false, true), (true, false), (false, false)] where top ? fillTop : fillBottom {
             let sx = left ? r : w - 1 - r, sy = top ? r : h - 1 - r
             for dy in 0..<r {
                 for dx in 0..<r {
@@ -386,7 +386,8 @@ final class WindowStream: NSObject, SCStreamOutput {
         let ptsUs = (capUs <= nowUs && nowUs - capUs < 1_000_000) ? capUs : nowUs
         // (not a popup: its first row is not window buttons, filling it hid the item there)
         if display == nil && region == nil && !popup && pointsWide > 0 {
-            polish(pb, scale: CGFloat(w) / pointsWide, hideButtons: inset == 0 && !keepButtons, fillCorners: onShape == nil)
+            // (the top corners sit under the viewer's own title bar unless the window is exact)
+            polish(pb, scale: CGFloat(w) / pointsWide, hideButtons: inset == 0 && !keepButtons, fillTop: onShape == nil || !keepButtons, fillBottom: onShape == nil)
         }
         lock.lock(); lastPB = pb; lock.unlock()
         encode(pb, pts: CMSampleBufferGetPresentationTimeStamp(sb), ptsUs: ptsUs, key: key)
