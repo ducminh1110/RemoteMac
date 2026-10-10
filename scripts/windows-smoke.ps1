@@ -49,4 +49,35 @@ $vlog = Get-Content "out\showcase-fake\viewer.log" -ErrorAction SilentlyContinue
 $vlog | Select-String -Pattern "video decoder|frame pacing|stream:" | Select-Object -First 6 | ForEach-Object { Write-Host $_.Line }
 if (-not ($vlog | Select-String -Pattern "Network UDP\+FEC")) { Write-Host "video did not use UDP in the showcase"; $failed++ }
 foreach ($p in @($agent, $relay)) { if (-not $p.HasExited) { $p.Kill() } }
+
+# the connect window as it first shows (no ID given): a picture of it in the log
+try {
+  Add-Type -AssemblyName System.Drawing
+  Add-Type -Namespace W -Name U -MemberDefinition @"
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string c, string t);
+[DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+public struct RECT { public int Left, Top, Right, Bottom; }
+"@
+  $cv = Start-Process -PassThru -NoNewWindow -FilePath target\release\remote-mac-viewer.exe -RedirectStandardError "out\viewer-connect.log"
+  $h = [IntPtr]::Zero
+  for ($i = 0; $i -lt 40 -and $h -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 250; $h = [W.U]::FindWindow("RmConnect", $null) }
+  if ($h -ne [IntPtr]::Zero) {
+    [W.U]::SetForegroundWindow($h) | Out-Null
+    Start-Sleep -Seconds 2
+    $r = New-Object W.U+RECT
+    [W.U]::GetWindowRect($h, [ref]$r) | Out-Null
+    $bmp = New-Object System.Drawing.Bitmap ($r.Right - $r.Left), ($r.Bottom - $r.Top)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($r.Left, $r.Top, 0, 0, $bmp.Size)
+    $ms = New-Object IO.MemoryStream
+    $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+    $b64 = [Convert]::ToBase64String($ms.ToArray())
+    Write-Host "GALLERY-BEGIN 16-connect"
+    for ($i = 0; $i -lt $b64.Length; $i += 4000) { Write-Host $b64.Substring($i, [Math]::Min(4000, $b64.Length - $i)) }
+    Write-Host "GALLERY-END"
+    $g.Dispose(); $bmp.Dispose(); $ms.Dispose()
+  } else { Write-Host "the connect window did not show" }
+  if (-not $cv.HasExited) { $cv.Kill() }
+} catch { Write-Host "connect window picture failed: $_" }
 exit $failed

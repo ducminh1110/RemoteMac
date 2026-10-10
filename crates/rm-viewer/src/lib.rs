@@ -10,6 +10,7 @@ pub mod keymap;
 pub mod launchview;
 pub mod lifecycle;
 pub mod loadview;
+pub mod look;
 pub mod motion;
 pub mod paint;
 pub mod palette;

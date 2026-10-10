@@ -3,14 +3,18 @@
 //! one built into this build, or one the user types; it is remembered). Or the user types the
 //! Mac's address (an IP or a host name, any network that reaches it). While it connects, the
 //! steps show as they happen (finding the Mac, checking the password, setting up, video).
-//! A plain Win32 window (Inter, light Mac-like colours) with its own small message loop; it
-//! returns once the user presses Connect (or closes it).
+//! It looks like the launcher (MobileLab's look, look.rs): a tinted window, one floating rounded
+//! panel with the mark and a large title, filled fields, a segmented "Find it by its ID / Type
+//! its address" control and an accent Connect button; the fields are Windows' own edit controls
+//! (typing, IME, Tab and Enter as everywhere). It has its own small message loop and returns once
+//! the user presses Connect (or closes it).
 
 use std::ffi::c_void;
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_DISABLED, ODS_FOCUS, ODS_SELECTED};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -21,9 +25,19 @@ const PW_EDIT: i32 = 102;
 const RELAY_EDIT: i32 = 103;
 const VIA_ID: i32 = 104;
 const VIA_ADDRESS: i32 = 105;
-const BG: (u8, u8, u8) = (247, 247, 248);
-const W: i32 = 420;
-const H: i32 = 452;
+const W: i32 = 440;
+const H: i32 = 548;
+/// Layout (DIPs): the panel, the fields' left edge and width, each field's top.
+const PANEL: (i32, i32, i32, i32) = (16, 16, 408, 516);
+const FX: i32 = 40;
+const FW: i32 = 360;
+const FH: i32 = 36;
+const ID_Y: i32 = 176;
+const PW_Y: i32 = 242;
+const SEG_Y: i32 = 298;
+const RELAY_Y: i32 = 368;
+const STATUS_Y: i32 = 414;
+const BUTTON: (i32, i32, i32, i32) = (264, 474, 136, 36);
 
 /// How the Mac is reached.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,13 +60,20 @@ struct State {
     done: Option<Option<(String, String, Via)>>,
     heading: HFONT,
     body: HFONT,
-    bg: HBRUSH,
+    /// the panel's and the fields' colours as brushes (for the edit controls' backgrounds)
+    panel: HBRUSH,
+    field: HBRUSH,
+    dark: bool,
 }
 
 thread_local! { static STATE: std::cell::RefCell<Option<State>> = const { std::cell::RefCell::new(None) }; }
 
 fn rgb((r, g, b): (u8, u8, u8)) -> COLORREF {
     COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
+}
+
+fn colour(c: crate::paint::Rgba) -> COLORREF {
+    rgb(((c.r * 255.0) as u8, (c.g * 255.0) as u8, (c.b * 255.0) as u8))
 }
 
 fn font(face: &str, px: i32, weight: i32) -> HFONT {
@@ -147,6 +168,8 @@ pub fn connect_window<T: Send>(id: Option<&str>, error: Option<&str>, try_connec
         let wc = WNDCLASSW { lpfnWndProc: Some(proc), hInstance: hinst, lpszClassName: CLASS, hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), ..Default::default() };
         RegisterClassW(&wc); // a second call fails harmlessly (already registered)
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+        let dark = crate::surface::dark_mode();
+        let t = crate::look::theme(dark);
         let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("MacBridge"), style, CW_USEDEFAULT, CW_USEDEFAULT, W, H, None, None, Some(hinst), None).ok()?;
         let s = GetDpiForWindow(hwnd).max(96) as f64 / 96.0;
         let px = |v: i32| (v as f64 * s).round() as i32;
@@ -156,6 +179,7 @@ pub fn connect_window<T: Send>(id: Option<&str>, error: Option<&str>, try_connec
         let (ww, wh) = (r.right - r.left, r.bottom - r.top);
         let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
         let _ = SetWindowPos(hwnd, None, (sw - ww) / 2, (sh - wh) / 3, ww, wh, SWP_NOZORDER);
+        frame_colours(hwnd, dark);
 
         let body = font(crate::native::ui_face(400), px(14), 400);
         let heading = font(crate::native::ui_face(600), px(22), 600);
@@ -166,23 +190,28 @@ pub fn connect_window<T: Send>(id: Option<&str>, error: Option<&str>, try_connec
             SendMessageW(c, WM_SETFONT, Some(WPARAM(f.0 as usize)), Some(LPARAM(1)));
             c
         };
-        let edit_style = WS_TABSTOP.0 | WS_BORDER.0 | ES_AUTOHSCROLL as u32;
-        child(w!("STATIC"), "ID", 0, 0, 32, 92, 356, 18, 0, body);
-        let id_edit = child(w!("EDIT"), id.unwrap_or(""), edit_style, 0, 32, 112, 356, 30, ID_EDIT, mono);
-        child(w!("STATIC"), "Password", 0, 0, 32, 152, 356, 18, 0, body);
-        let pw_edit = child(w!("EDIT"), "", edit_style | ES_PASSWORD as u32, 0, 32, 172, 356, 30, PW_EDIT, mono);
+        // the edits sit in filled fields drawn behind them (no border of their own)
+        let edit_style = WS_TABSTOP.0 | ES_AUTOHSCROLL as u32;
+        let inner = |y: i32| (FX + 12, y + (FH - 22) / 2, FW - 24, 22);
+        let (ex, ey, ew, eh) = inner(ID_Y);
+        let id_edit = child(w!("EDIT"), id.unwrap_or(""), edit_style, 0, ex, ey, ew, eh, ID_EDIT, mono);
+        let (ex, ey, ew, eh) = inner(PW_Y);
+        let pw_edit = child(w!("EDIT"), "", edit_style | ES_PASSWORD as u32, 0, ex, ey, ew, eh, PW_EDIT, mono);
         // how to reach it: by its ID (this network, else a relay), or at an address typed here
+        // (a segmented control: two buttons drawn here)
         let (address, by_address) = last_address();
-        let r1 = child(w!("BUTTON"), "Find it by its ID", WS_TABSTOP.0 | WS_GROUP.0 | BS_AUTORADIOBUTTON as u32, 0, 32, 214, 170, 22, VIA_ID, body);
-        let r2 = child(w!("BUTTON"), "Type its address", BS_AUTORADIOBUTTON as u32, 0, 210, 214, 178, 22, VIA_ADDRESS, body);
-        SendMessageW(if by_address { r2 } else { r1 }, BM_SETCHECK, Some(WPARAM(1)), None);
-        let field_label = child(w!("STATIC"), field_text(by_address), 0, 0, 32, 246, 356, 18, 0, body);
+        let half = FW / 2;
+        child(w!("BUTTON"), "Find it by its ID", WS_TABSTOP.0 | WS_GROUP.0 | BS_OWNERDRAW as u32, 0, FX, SEG_Y, half, 32, VIA_ID, body);
+        child(w!("BUTTON"), "Type its address", WS_TABSTOP.0 | BS_OWNERDRAW as u32, 0, FX + half, SEG_Y, half, 32, VIA_ADDRESS, body);
+        let field_label = child(w!("STATIC"), field_text(by_address), 0, 0, FX, RELAY_Y - 20, FW, 18, 0, body);
         let (shown, other) = if by_address { (address, last_relay()) } else { (last_relay(), address) };
-        let relay_edit = child(w!("EDIT"), &shown, edit_style | WS_GROUP.0, 0, 32, 266, 356, 30, RELAY_EDIT, mono);
-        let error_label = child(w!("STATIC"), error.unwrap_or(""), 0, 0, 32, 308, 356, 74, 0, body);
-        child(w!("BUTTON"), "Connect", WS_TABSTOP.0 | WS_GROUP.0 | BS_DEFPUSHBUTTON as u32, 0, 268, 392, 120, 34, IDOK.0, body);
+        let (ex, ey, ew, eh) = inner(RELAY_Y);
+        let relay_edit = child(w!("EDIT"), &shown, edit_style | WS_GROUP.0, 0, ex, ey, ew, eh, RELAY_EDIT, mono);
+        let error_label = child(w!("STATIC"), error.unwrap_or(""), 0, 0, FX, STATUS_Y, FW, 50, 0, body);
+        let (bx, by, bw, bh) = BUTTON;
+        child(w!("BUTTON"), "Connect", WS_TABSTOP.0 | WS_GROUP.0 | BS_OWNERDRAW as u32, 0, bx, by, bw, bh, IDOK.0, body);
         STATE.with(|st| {
-            *st.borrow_mut() = Some(State { id: id_edit, pw: pw_edit, relay: relay_edit, error: error_label, field_label, by_address, other, done: None, heading, body, bg: CreateSolidBrush(rgb(BG)) });
+            *st.borrow_mut() = Some(State { id: id_edit, pw: pw_edit, relay: relay_edit, error: error_label, field_label, by_address, other, done: None, heading, body, panel: CreateSolidBrush(colour(t.panel)), field: CreateSolidBrush(colour(t.field)), dark });
         });
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
@@ -265,7 +294,8 @@ pub fn connect_window<T: Send>(id: Option<&str>, error: Option<&str>, try_connec
         if let Some(s) = STATE.with(|st| st.borrow_mut().take()) {
             let _ = DeleteObject(s.heading.into());
             let _ = DeleteObject(s.body.into());
-            let _ = DeleteObject(s.bg.into());
+            let _ = DeleteObject(s.panel.into());
+            let _ = DeleteObject(s.field.into());
         }
         let _ = DeleteObject(mono.into());
         result
@@ -295,6 +325,16 @@ fn switch_via(by_address: bool) {
             s.by_address = by_address;
         }
     });
+    unsafe {
+        if let Ok(p) = GetParent(field) {
+            let _ = InvalidateRect(Some(p), None, false);
+            for id in [VIA_ID, VIA_ADDRESS] {
+                if let Ok(b) = GetDlgItem(Some(p), id) {
+                    let _ = InvalidateRect(Some(b), None, false);
+                }
+            }
+        }
+    }
 }
 
 fn set_text(h: HWND, t: &str) {
@@ -315,49 +355,154 @@ fn edit_of(id: bool) -> HWND {
     STATE.with(|st| st.borrow().as_ref().map(|s| if id { s.id } else { s.pw })).unwrap_or_default()
 }
 
+/// The title bar in the window's tint (Windows 11), dark with dark mode.
+fn frame_colours(hwnd: HWND, dark: bool) {
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
+    let t = crate::look::theme(dark);
+    unsafe {
+        let on: i32 = dark as i32;
+        let _ = DwmSetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE(20), &on as *const _ as *const c_void, 4);
+        let cap = colour(t.win[0]).0;
+        let _ = DwmSetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE(35), &cap as *const _ as *const c_void, 4);
+        let txt = colour(t.text).0;
+        let _ = DwmSetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE(36), &txt as *const _ as *const c_void, 4);
+    }
+}
+
+/// Put a canvas on `hdc` at (x, y).
+fn blit(hdc: HDC, c: &crate::paint::Canvas, x: i32, y: i32) {
+    let bi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: c.w as i32, biHeight: -(c.h as i32), biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
+        ..Default::default()
+    };
+    unsafe {
+        StretchDIBits(hdc, x, y, c.w as i32, c.h as i32, 0, 0, c.w as i32, c.h as i32, Some(c.px.as_ptr() as *const c_void), &bi, DIB_RGB_COLORS, SRCCOPY);
+    }
+}
+
+/// The window behind its controls: the tint, the panel, the mark and title, the field labels,
+/// the filled fields (an accent ring on the one with the focus).
+fn paint(hwnd: HWND, hdc: HDC) {
+    use crate::paint::Canvas;
+    use crate::surface::{text, Align};
+    let mut rc = RECT::default();
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut rc);
+    }
+    let s = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
+    let p = |v: i32| v as f32 * s;
+    let Some((dark, ids)) = STATE.with(|st| st.borrow().as_ref().map(|st| (st.dark, [st.id, st.pw, st.relay]))) else { return };
+    let t = crate::look::theme(dark);
+    let mut c = Canvas::new(rc.right.max(1) as usize, rc.bottom.max(1) as usize);
+    crate::look::tint(&mut c, &t);
+    let (px0, py0, pw, ph) = PANEL;
+    crate::look::panel(&mut c, p(px0), p(py0), p(pw), p(ph), 14.0 * s, s, &t);
+    crate::look::mark(&mut c, p(FX), p(42), 40.0 * s, t.accent);
+    text(&mut c, "Connect to your Mac", p(FX), p(94), p(FW), (22.0 * s).round() as i32, 600, t.text, Align::Left);
+    text(&mut c, "Open MacBridge on the Mac, then type its ID and password.", p(FX), p(126), p(FW), (13.0 * s).round() as i32, 400, t.text2, Align::Left);
+    for (label, y) in [("ID", ID_Y), ("Password", PW_Y)] {
+        text(&mut c, label, p(FX), p(y - 20), p(FW), (12.0 * s).round() as i32, 600, t.text2, Align::Left);
+    }
+    let focus = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() };
+    for (h, y) in ids.iter().zip([ID_Y, PW_Y, RELAY_Y]) {
+        if *h == focus {
+            c.stroke_round_rect_with(p(FX) - 2.0 * s, p(y) - 2.0 * s, p(FW) + 4.0 * s, p(FH) + 4.0 * s, 10.0 * s, 2.5 * s, |_, _| t.accent.alpha(0.6));
+        }
+        c.fill_round_rect(p(FX), p(y), p(FW), p(FH), 8.0 * s, t.field);
+    }
+    blit(hdc, &c, 0, 0);
+}
+
+/// The segmented control's halves and the Connect button.
+fn draw_button(d: &DRAWITEMSTRUCT) {
+    use crate::paint::{Canvas, Rgba};
+    use crate::surface::{text, Align};
+    let Some((dark, by_address)) = STATE.with(|st| st.borrow().as_ref().map(|st| (st.dark, st.by_address))) else { return };
+    let t = crate::look::theme(dark);
+    let r = d.rcItem;
+    let (w, h) = ((r.right - r.left).max(1), (r.bottom - r.top).max(1));
+    let s = unsafe { GetDpiForWindow(d.hwndItem) }.max(96) as f32 / 96.0;
+    let mut c = Canvas::filled(w as usize, h as usize, t.panel);
+    let (fw, fh) = (w as f32, h as f32);
+    let pressed = d.itemState.0 & ODS_SELECTED.0 != 0;
+    let disabled = d.itemState.0 & ODS_DISABLED.0 != 0;
+    let focused = d.itemState.0 & ODS_FOCUS.0 != 0;
+    let px = |v: f32| (v * s).round() as i32;
+    match d.CtlID as i32 {
+        VIA_ID | VIA_ADDRESS => {
+            // one half of a filled capsule; the chosen half a raised white pill
+            let left = d.CtlID as i32 == VIA_ID;
+            let rad = 9.0 * s;
+            let (x0, ww) = if left { (0.0, fw + rad) } else { (-rad, fw + rad) };
+            c.fill_round_rect(x0, 0.0, ww, fh, rad, t.field);
+            let chosen = left != by_address;
+            let label = if left { "Find it by its ID" } else { "Type its address" };
+            if chosen {
+                let (ix, iy, iw, ih) = (3.0 * s, 3.0 * s, fw - 6.0 * s, fh - 6.0 * s);
+                c.shadow(ix, iy, iw, ih, 7.0 * s, 2.0 * s, 0.5 * s, Rgba::BLACK.alpha(if dark { 0.45 } else { 0.14 }));
+                c.fill_round_rect(ix, iy, iw, ih, 7.0 * s, t.capsule);
+            }
+            if focused {
+                c.stroke_round_rect_with(2.0 * s, 2.0 * s, fw - 4.0 * s, fh - 4.0 * s, 8.0 * s, 1.5 * s, |_, _| t.accent.alpha(0.7));
+            }
+            let (_, _, mh) = crate::surface::text_mask(label, px(13.0), if chosen { 600 } else { 500 }, w as usize);
+            text(&mut c, label, 0.0, (fh - mh as f32) / 2.0, fw, px(13.0), if chosen { 600 } else { 500 }, if chosen { t.text } else { t.text2 }, Align::Center);
+        }
+        _ => {
+            // Connect: an accent capsule (darker pressed, faded while connecting)
+            let base = if pressed { t.accent.shade(-0.15) } else { t.accent };
+            let col = if disabled { base.alpha(0.45) } else { base };
+            if focused && !disabled {
+                c.stroke_round_rect_with(0.5 * s, 0.5 * s, fw - s, fh - s, fh / 2.0, 2.0 * s, |_, _| t.accent.alpha(0.45));
+            }
+            c.fill_round_rect(2.5 * s, 2.5 * s, fw - 5.0 * s, fh - 5.0 * s, (fh - 5.0 * s) / 2.0, col);
+            let (_, _, mh) = crate::surface::text_mask("Connect", px(14.0), 600, w as usize);
+            text(&mut c, "Connect", 0.0, (fh - mh as f32) / 2.0, fw, px(14.0), 600, Rgba::WHITE, Align::Center);
+        }
+    }
+    blit(d.hDC, &c, r.left, r.top);
+}
+
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
-            let mut rc = RECT::default();
-            let _ = GetClientRect(hwnd, &mut rc);
-            let s = GetDpiForWindow(hwnd).max(96) as f64 / 96.0;
-            let px = |v: i32| (v as f64 * s).round() as i32;
-            STATE.with(|st| {
-                if let Some(st) = st.borrow().as_ref() {
-                    FillRect(hdc, &rc, st.bg);
-                    SetBkMode(hdc, TRANSPARENT);
-                    let old = SelectObject(hdc, st.heading.into());
-                    SetTextColor(hdc, rgb((28, 28, 30)));
-                    let mut t = RECT { left: px(32), top: px(26), right: rc.right - px(32), bottom: px(56) };
-                    let mut h: Vec<u16> = "Connect to your Mac".encode_utf16().collect();
-                    DrawTextW(hdc, &mut h, &mut t, DT_LEFT | DT_SINGLELINE);
-                    SelectObject(hdc, st.body.into());
-                    SetTextColor(hdc, rgb((110, 110, 115)));
-                    let mut t = RECT { left: px(32), top: px(58), right: rc.right - px(32), bottom: px(80) };
-                    let mut h: Vec<u16> = "Open MacBridge on the Mac, then type its ID and password.".encode_utf16().collect();
-                    DrawTextW(hdc, &mut h, &mut t, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-                    SelectObject(hdc, old);
-                }
-            });
+            paint(hwnd, hdc);
             let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
         }
+        WM_PRINTCLIENT => {
+            paint(hwnd, HDC(wp.0 as *mut c_void));
+            LRESULT(0)
+        }
         WM_ERASEBKGND => LRESULT(1),
-        WM_CTLCOLORSTATIC => {
+        // the edits on their filled fields, the labels on the panel
+        WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
             let hdc = HDC(wp.0 as *mut c_void);
             let ctl = HWND(lp.0 as *mut c_void);
             STATE.with(|st| match st.borrow().as_ref() {
                 Some(st) => {
-                    SetBkColor(hdc, rgb(BG));
+                    let t = crate::look::theme(st.dark);
+                    let edit = ctl == st.id || ctl == st.pw || ctl == st.relay;
+                    SetBkColor(hdc, colour(if edit { t.field } else { t.panel }));
                     // the status line: the step under way in grey, a failure in red
                     let busy = crate::lifecycle::current().busy();
-                    SetTextColor(hdc, if ctl == st.error && !busy { rgb((200, 40, 40)) } else if ctl == st.error { rgb((90, 90, 96)) } else { rgb((60, 60, 64)) });
-                    LRESULT(st.bg.0 as isize)
+                    let fg = if ctl == st.error && !busy { t.fail } else if ctl == st.error || ctl == st.field_label { t.text2 } else { t.text };
+                    SetTextColor(hdc, colour(fg));
+                    LRESULT(if edit { st.field.0 as isize } else { st.panel.0 as isize })
                 }
                 None => DefWindowProcW(hwnd, msg, wp, lp),
             })
+        }
+        WM_DRAWITEM => {
+            draw_button(&*(lp.0 as *const DRAWITEMSTRUCT));
+            LRESULT(1)
+        }
+        // a field gets or loses the focus: its accent ring
+        WM_COMMAND if matches!(((wp.0 >> 16) & 0xffff) as u32, EN_SETFOCUS | EN_KILLFOCUS) => {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            LRESULT(0)
         }
         WM_COMMAND if matches!((wp.0 & 0xFFFF) as i32, VIA_ID | VIA_ADDRESS) => {
             switch_via((wp.0 & 0xFFFF) as i32 == VIA_ADDRESS);

@@ -10,6 +10,7 @@
 //! `--app` to this window with WM_COPYDATA and exits.
 
 use crate::launchview::{self, Grid, Nav, Tile};
+use crate::look::{self, theme};
 use crate::motion::{tokens, Anim, Curve};
 use crate::paint::{Canvas, Rgba};
 use std::cell::RefCell;
@@ -27,68 +28,6 @@ pub const CLASS: PCWSTR = w!("RmLauncher");
 pub const COPYDATA_LAUNCH: usize = 0x524D_4C31; // "RML1"
 /// The animation timer (WM_TIMER id) while something moves.
 pub const TIMER: usize = 41;
-
-/// MobileLab's colour tokens (light, dark).
-struct Theme {
-    win: [Rgba; 3],
-    panel: Rgba,
-    text: Rgba,
-    text2: Rgba,
-    text3: Rgba,
-    accent: Rgba,
-    field: Rgba,
-    hover: Rgba,
-    pressed: Rgba,
-    capsule: Rgba,
-    divider: Rgba,
-    ring: Rgba,
-    shade: Rgba,
-    pass: Rgba,
-    warn: Rgba,
-    fail: Rgba,
-}
-
-fn theme(dark: bool) -> Theme {
-    if dark {
-        Theme {
-            win: [Rgba::rgb(0x17, 0x1b, 0x23), Rgba::rgb(0x1e, 0x22, 0x2b), Rgba::rgb(0x1a, 0x1e, 0x27)],
-            panel: Rgba::rgb(0x1f, 0x1f, 0x24),
-            text: Rgba::rgb(0xec, 0xec, 0xee),
-            text2: Rgba::rgb(0xa0, 0xa0, 0xa8),
-            text3: Rgba::rgb(0x6f, 0x6f, 0x78),
-            accent: Rgba::rgb(0x0a, 0x84, 0xff),
-            field: Rgba::rgb(0x33, 0x33, 0x38),
-            hover: Rgba::WHITE.alpha(0.07),
-            pressed: Rgba::WHITE.alpha(0.12),
-            capsule: Rgba::rgb(0x3b, 0x3b, 0x3f),
-            divider: Rgba::rgb(0x3a, 0x3a, 0x3f),
-            ring: Rgba::WHITE.alpha(0.07),
-            shade: Rgba::BLACK.alpha(0.4),
-            pass: Rgba::rgb(0x32, 0xd1, 0x5b),
-            warn: Rgba::rgb(0xff, 0xb3, 0x40),
-            fail: Rgba::rgb(0xff, 0x45, 0x3a),
-        }
-    } else {
-        Theme {
-            win: [Rgba::rgb(0xd5, 0xe6, 0xf8), Rgba::rgb(0xe6, 0xee, 0xf8), Rgba::rgb(0xd9, 0xe3, 0xf2)],
-            panel: Rgba::WHITE,
-            text: Rgba::rgb(0x1d, 0x1d, 0x1f),
-            text2: Rgba::rgb(0x6c, 0x6c, 0x72),
-            text3: Rgba::rgb(0xa1, 0xa1, 0xa8),
-            accent: Rgba::rgb(0x0a, 0x7a, 0xff),
-            field: Rgba::rgb(0xef, 0xef, 0xf1),
-            hover: Rgba::BLACK.alpha(0.05),
-            pressed: Rgba::BLACK.alpha(0.09),
-            capsule: Rgba::WHITE,
-            divider: Rgba::rgb(0xe4, 0xe4, 0xe8),
-            ring: Rgba::rgba(30, 50, 90, 31),
-            shade: Rgba::rgba(20, 40, 80, 26),
-            pass: Rgba::rgb(0x30, 0xb3, 0x56),
-            warn: Rgba::rgb(0xff, 0x9f, 0x0a),
-            fail: Rgba::rgb(0xff, 0x3b, 0x30),
-        }
-    }
-}
 
 type Mask = (Vec<u8>, usize, usize);
 
@@ -513,27 +452,13 @@ impl Launcher {
         }
         let t = theme(dark);
         let mut c = Canvas::new(w as usize, h as usize);
-        // a 155-degree gradient through three tints, as MobileLab's window
-        let (dx, dy) = (155f32.to_radians().sin(), -155f32.to_radians().cos());
-        let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
-        let span = (w as f32 * dx).abs() + (h as f32 * dy).abs();
-        for y in 0..h as usize {
-            for x in 0..w as usize {
-                let u = (((x as f32 - cx) * dx + (y as f32 - cy) * dy) / span + 0.5).clamp(0.0, 1.0);
-                let col = if u < 0.48 { t.win[0].lerp(t.win[1], u / 0.48) } else { t.win[1].lerp(t.win[2], (u - 0.48) / 0.52) };
-                c.blend(x, y, col, 1.0);
-            }
-        }
-        // the panel, floating: a hairline ring and two soft shadows
+        // MobileLab's tinted window, and the panel floating on it
+        look::tint(&mut c, &t);
         let (px, py, pw, ph) = {
             let g = launchview::GAP * s;
             (g, launchview::TOOLBAR * s, w as f32 - 2.0 * g, h as f32 - launchview::TOOLBAR * s - g)
         };
-        let r = launchview::RADIUS * s;
-        c.shadow(px, py, pw, ph, r, 28.0 * s, 10.0 * s, t.shade.alpha(t.shade.a * 0.7));
-        c.shadow(px, py, pw, ph, r, 3.0 * s, 1.0 * s, t.shade);
-        c.fill_round_rect(px - 0.5 * s, py - 0.5 * s, pw + s, ph + s, r + 0.5 * s, t.ring);
-        c.fill_round_rect(px, py, pw, ph, r, t.panel);
+        look::panel(&mut c, px, py, pw, ph, launchview::RADIUS * s, s, &t);
         // the footer strip's hairline
         let fy = py + ph - launchview::FOOTER * s;
         c.fill_round_rect(px, fy, pw, (0.5 * s).max(1.0), 0.0, t.divider);
@@ -609,15 +534,6 @@ impl Launcher {
         c.arc(x, y, r * 0.55, r * 0.26, 0.0, std::f32::consts::TAU, |_| col);
     }
 
-    fn mark(c: &mut Canvas, x: f32, y: f32, s: f32, accent: Rgba) {
-        // MacBridge's mark: an accent rounded square with a white display on it
-        let d = 26.0 * s;
-        c.fill_round_rect_with(x, y, d, d, 6.5 * s, |_, py| accent.lerp(accent.shade(-0.18), ((py - y) / d).clamp(0.0, 1.0)));
-        let (sx, sy, sw, sh) = (x + 6.0 * s, y + 7.0 * s, 14.0 * s, 9.5 * s);
-        c.stroke_round_rect_with(sx, sy, sw, sh, 2.0 * s, 1.5 * s, |_, _| Rgba::WHITE);
-        c.fill_capsule(x + d / 2.0 - 3.5 * s, y + 19.5 * s, x + d / 2.0 + 3.5 * s, y + 19.5 * s, 0.9 * s, Rgba::WHITE);
-    }
-
     fn spinner(c: &mut Canvas, cx: f32, cy: f32, s: f32, col: Rgba, t: f32) {
         let lead = (t * 12.0) % 12.0;
         for i in 0..12 {
@@ -638,7 +554,7 @@ impl Launcher {
         let mut c = self.base(w, h, s, dark);
         // ---- toolbar: mark and name, capsule, Settings
         let ty = 13.0 * s;
-        Self::mark(&mut c, 16.0 * s, ty, s, t.accent);
+        look::mark(&mut c, 16.0 * s, ty, 26.0 * s, t.accent);
         let m = self.text("MacBridge", 13.0 * s, 700, 200.0 * s);
         self.put(&mut c, &m, 50.0 * s, ty + (26.0 * s - m.2 as f32) / 2.0, t.text);
         let (cx0, cy0, cw, ch) = self.capsule_rect(w, s);
