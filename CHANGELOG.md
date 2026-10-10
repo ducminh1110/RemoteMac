@@ -3,7 +3,11 @@
 Each version of MacBridge, newest first. Both sides should run the same version; a newer
 Windows app works with an older Mac app without the features the Mac lacks.
 
-## Unreleased
+## 1.2.0-beta.2
+
+The second beta, with what using 1.2.0-beta.1 on real machines showed. Update both sides, and
+your own relay if you run one. As before, what the automated tests cannot check (a real Mac
+left running for hours, asleep and awake again) is for you to try.
 
 ### Changed
 
