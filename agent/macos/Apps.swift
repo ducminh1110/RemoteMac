@@ -169,12 +169,19 @@ final class AppManager {
         if a != nil { return true }   // never kill an app we did not start
         switch p {
         case .process(let proc)?:
-            proc.terminate(); proc.waitUntilExit()
+            // a process that ignores the request is stopped after a while (waiting for it to
+            // exit on its own could wait for ever, and the Mac would never take the next viewer)
+            let pid = proc.processIdentifier
+            proc.terminate()
+            for _ in 0..<30 where proc.isRunning && kill(pid, 0) == 0 { usleep(100_000) }
+            if proc.isRunning { kill(pid, SIGKILL) }
         case .app(let app)?:
-            // asked to quit, as Cmd+Q; forced after a while
+            // asked to quit, as Cmd+Q; forced after a while (gone is checked with the process
+            // itself too: `isTerminated` is only kept up to date by a run loop)
+            let pid = app.processIdentifier
             app.terminate()
-            for _ in 0..<30 where !app.isTerminated { usleep(100_000) }
-            if !app.isTerminated { app.forceTerminate() }
+            for _ in 0..<30 where !app.isTerminated && kill(pid, 0) == 0 { usleep(100_000) }
+            if !app.isTerminated && kill(pid, 0) == 0 { app.forceTerminate() }
         case nil:
             return false
         }
@@ -224,5 +231,9 @@ final class AppManager {
         return String(exe[..<r.lowerBound]) + ".app"
     }
 
-    func terminateAll() { for id in Array(running.keys) { _ = terminate(id: id) } }
+    /// All at once: each may take a few seconds to quit.
+    func terminateAll() {
+        lock.lock(); let ids = Array(running.keys); lock.unlock()
+        DispatchQueue.concurrentPerform(iterations: ids.count) { i in _ = terminate(id: ids[i]) }
+    }
 }

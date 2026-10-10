@@ -46,8 +46,11 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
     };
     let t0 = Instant::now();
     put(out, recording::SESSION, t0, encode(&Message::CapabilityReport(sess.capabilities.clone()))?)?;
-    // windows as the Mac draws them (their title bar and buttons), when it can: the replay shows them so
-    if sess.negotiated.features.iter().any(|f| f == "exact") {
+    // windows as the Mac draws them (their title bar and buttons) only when asked for
+    // (RM_RECORD_EXACT=1): the viewer shows them in its own frame by default, and the replay
+    // shows them as it would
+    let exact = std::env::var_os("RM_RECORD_EXACT").is_some_and(|v| v != "0");
+    if exact && sess.negotiated.features.iter().any(|f| f == "exact") {
         let m = Message::WindowStyle { exact: true };
         sess.send(&m)?;
         put(out, recording::SESSION, t0, encode(&m)?)?;

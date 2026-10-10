@@ -374,7 +374,7 @@ fn connect_steps(relay: Option<&str>, session: &str, token: &str, app: Option<&s
         link.send(&Message::AudioControl { enabled: true });
     }
     // Mac windows as the Mac draws them (before any window opens), when it can and it is wanted
-    let exact = mac_has("exact") && settings.frame == 0 && !std::env::var_os("RM_FRAMED").is_some_and(|v| v != "0");
+    let exact = mac_has("exact") && settings.frame == 1 && !std::env::var_os("RM_FRAMED").is_some_and(|v| v != "0");
     EXACT.store(exact, std::sync::atomic::Ordering::Relaxed);
     if mac_has("exact") {
         link.send(&Message::WindowStyle { exact });
@@ -414,7 +414,8 @@ pub fn mac_label() -> String {
 }
 
 /// Mac windows are shown as the Mac draws them (their own title bar and buttons, the Mac's menu
-/// bar at the top of the screen) rather than in MacBridge's frame.
+/// bar at the top of the screen) rather than in MacBridge's frame (the default: the app's menus
+/// in its title bar).
 pub fn exact_windows() -> bool {
     EXACT.load(std::sync::atomic::Ordering::Relaxed)
 }

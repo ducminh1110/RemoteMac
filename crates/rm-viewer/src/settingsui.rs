@@ -109,7 +109,7 @@ const SECTIONS: [Section; 5] = [
         name: "Appearance",
         icon: Symbol::Appearance,
         colour: Rgba::rgb(0x5e, 0x5c, 0xe6),
-        groups: &[(&[Field::Frame], "As the Mac draws them: each window with its own title bar and buttons, the Mac's menu bar at the top of the screen. Applies to windows opened next."), (&[Field::Glass, Field::Motion], "")],
+        groups: &[(&[Field::Frame], "The app's menus sit in each window's title bar, beside its buttons. As the Mac draws them (experimental): the Mac's own title bars, and its menu bar at the top of the screen. Applies from the next connection."), (&[Field::Glass, Field::Motion], "")],
     },
     Section { name: "Desktop Fusion", icon: Symbol::Dock, colour: Rgba::rgb(0xaf, 0x52, 0xde), groups: &[(&[Field::Fusion], "Experimental: the Mac's own Dock at the bottom of this PC's screen, on this PC's wallpaper (the Mac takes it while connected and gets its own back after).")] },
 ];

@@ -104,6 +104,34 @@ echo "=== launcher --check (exit $LRC)"; cat out/launcher-check.txt
 { [[ $LRC == 0 || $LRC == 3 ]] && grep -q "MacBridge permissions:" out/launcher-check.txt; } \
   || { echo "the launcher's permission check failed"; [[ $RC == 0 ]] && RC=1; }
 
+# in the background, as users start it from a terminal (a pseudo-terminal here): the copy in
+# the background watches over the one doing the work; that one dying (a crash) is started again
+# and the Mac is reachable again; --stop ends both
+B=out/bg; rm -rf $B; mkdir -p $B; cp out/remote-agent-mac $B/macbridge
+BG_ID=456789123
+bgconnect() { RM_NO_LAN=1 ./target/release/remote-mac --relay 127.0.0.1:$PORT --id $BG_ID --password "$PASS" >out/client-bg-$1.log 2>&1; }
+RM_NO_LAN=1 script -q /dev/null $B/macbridge --logs-enabled --relay 127.0.0.1:$PORT --id $BG_ID --password "$PASS" >out/bg-banner.txt 2>&1 </dev/null
+sleep 3
+SUP=$(tr -d '[:space:]' <"$HOME/Library/Application Support/RemoteMac/macbridge.pid" 2>/dev/null)
+W1=$(pgrep -P "${SUP:-0}" | head -1)
+if [[ -n "$SUP" && -n "$W1" ]] && bgconnect 1; then
+  echo "in the background (watcher $SUP, worker $W1): reachable"
+else
+  echo "in the background: not reachable (watcher '$SUP', worker '$W1'): $(tail -3 out/client-bg-1.log)"; tail -8 out/bg-banner.txt; [[ $RC == 0 ]] && RC=1
+fi
+[[ -n "$W1" ]] && kill -9 "$W1"
+sleep 4
+W2=$(pgrep -P "${SUP:-0}" | head -1)
+if [[ -n "$W2" && "$W2" != "$W1" ]] && bgconnect 2; then
+  echo "a worker that died was started again ($W2): reachable"
+else
+  echo "after the worker died: not reachable (worker '$W2'): $(tail -3 out/client-bg-2.log)"; [[ $RC == 0 ]] && RC=1
+fi
+$B/macbridge --stop >out/bg-stop.txt 2>&1 || { echo "--stop failed: $(cat out/bg-stop.txt)"; [[ $RC == 0 ]] && RC=1; }
+sleep 2
+if pgrep -f "$B/macbridge" >/dev/null; then echo "--stop left MacBridge running: $(pgrep -fl "$B/macbridge")"; [[ $RC == 0 ]] && RC=1; fi
+echo "=== background log"; tail -25 "$HOME/Library/Logs/MacBridge/macbridge.log" 2>/dev/null
+
 # far, lossy link: a relay limited to 6 Mbit/s that drops 5% of UDP packets; FEC rebuilds them
 # and the agent adapts its bitrate instead of queueing video (informational, not gating)
 # (RM_NO_P2P, RM_NO_LAN: this one must go through the throttled relay)

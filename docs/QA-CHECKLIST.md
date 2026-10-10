@@ -44,6 +44,12 @@ or headphones; both on the same network unless the item says otherwise. Note bot
 
 ## 3b. Exact windows, the menu bar, shapes
 
+- [ ] By default (menus in the title bar): Finder, Safari, TextEdit windows have MacBridge's
+      title bar with the app's menus; clicks and typing in them work at once, also with the
+      pointer moving fast; resizing by the edges and the green button work.
+- [ ] The launcher's green button fills the screen and the launcher is drawn at that size
+      (nothing black, no second copy of it); again restores it.
+- [ ] Leave the Mac unused for an hour, and asleep for a while: the PC connects again at once.
 - [ ] With **Mac windows** = as the Mac draws them: Safari, TextEdit, Finder windows show their own
       title bar and buttons; dragging the empty title bar moves the window here (snap to the
       screen edges works); toolbar buttons and the address field work; red closes, yellow
@@ -90,8 +96,9 @@ or headphones; both on the same network unless the item says otherwise. Note bot
 ## 8. Desktop Fusion (experimental)
 
 - [ ] Turn on **Desktop Fusion**: the Mac's desktop picture becomes the PC's within a few
-      seconds; the Dock slides in at the bottom of the PC's screen when the pointer rests at
-      the bottom edge, and away when it leaves.
+      seconds; the Dock slides in at the bottom of the PC's screen when the pointer comes down
+      to the taskbar under it (no need to press against the bottom of the screen), and away
+      when it leaves.
 - [ ] Clicking an app in the Dock opens it as a Windows window; a right-click menu of a Dock
       icon shows over the Dock.
 - [ ] Change the PC's wallpaper while connected: the Mac follows within 4–5 s.

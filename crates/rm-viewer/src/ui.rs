@@ -1180,11 +1180,15 @@ fn dock_autohide() {
     unsafe {
         let _ = GetCursorPos(&mut p);
     }
-    let near = 3;
+    // the edge is the work area's (the taskbar's top when it shows): reached on the way down,
+    // not only with the pointer pressed against the bottom of the screen (or the taskbar); a band
+    // as wide as the Dock and a little more along it
+    let s = crate::surface::scale_at(p.x, p.y);
+    let (near, wide) = ((10.0 * s).round() as i32, (40.0 * s).round() as i32);
     let at_edge = match edge.as_str() {
-        "left" => p.x <= shown_r.left + near && p.y >= shown_r.top && p.y <= shown_r.bottom,
-        "right" => p.x >= shown_r.right - near && p.y >= shown_r.top && p.y <= shown_r.bottom,
-        _ => p.y >= shown_r.bottom - near && p.x >= shown_r.left && p.x <= shown_r.right,
+        "left" => p.x <= shown_r.left + near && p.y >= shown_r.top - wide && p.y <= shown_r.bottom + wide,
+        "right" => p.x >= shown_r.right - near && p.y >= shown_r.top - wide && p.y <= shown_r.bottom + wide,
+        _ => p.y >= shown_r.bottom - near && p.x >= shown_r.left - wide && p.x <= shown_r.right + wide,
     };
     let over = p.x >= shown_r.left - 8 && p.x <= shown_r.right + 8 && p.y >= shown_r.top - 8 && p.y <= shown_r.bottom + 8;
     // a menu of the Dock is open, or the Mac Desktop (it has the Dock in its picture)
@@ -3939,6 +3943,14 @@ fn gallery_tick(dir: &std::path::Path) -> bool {
             1 => crate::glassmenu::cancel(),
             2 => crate::palette::close(),
             3 => crate::banner::hide(),
+            6 => {
+                // the launcher back to its size
+                if let Some(h) = with_app(|a| a.launcher.as_ref().map(|l| l.hwnd)).flatten() {
+                    if crate::frame::maximized(h) {
+                        crate::frame::press(h, crate::look::Light::Zoom);
+                    }
+                }
+            }
             _ => {}
         }
         GALLERY.with(|g| {
@@ -4028,9 +4040,10 @@ fn gallery_tick(dir: &std::path::Path) -> bool {
             }
         }
         5 => {
-            // exact windows: a Mac window in front, the Mac's own menu bar above it at the top
-            let win = with_app(|a| a.remotes.iter().find(|(_, r)| r.exact && r.role == WindowRole::Window && r.app != DESKTOP_APP).map(|(k, _)| *k)).flatten();
-            if let (Some(_), Some(k)) = (MENU_BAR.with(|m| m.get()), win) {
+            // a Mac window in front with its menus: in its title bar (MacBridge's frame), or the
+            // Mac's own menu bar above it at the top of the screen (exact windows)
+            let win = with_app(|a| a.remotes.iter().find(|(_, r)| r.role == WindowRole::Window && r.app != DESKTOP_APP && r.app != DOCK_APP).map(|(k, r)| (*k, r.exact))).flatten();
+            if let Some((k, exact)) = win.filter(|(_, exact)| !exact || MENU_BAR.with(|m| m.get()).is_some()) {
                 if fresh {
                     unsafe {
                         let _ = SetForegroundWindow(hwnd_of(k));
@@ -4041,7 +4054,50 @@ fn gallery_tick(dir: &std::path::Path) -> bool {
                     unsafe {
                         let _ = GetWindowRect(hwnd_of(k), &mut r);
                     }
-                    ask("15-menu-bar", Some(RECT { left: 0, top: 0, right: sw, bottom: (r.bottom + 12).min(r.top + 420).max(200) }));
+                    if exact {
+                        ask("15-menu-bar", Some(RECT { left: 0, top: 0, right: sw, bottom: (r.bottom + 12).min(r.top + 420).max(200) }));
+                    } else {
+                        ask("15-window-menus", Some(RECT { left: (r.left - 16).max(0), top: (r.top - 16).max(0), right: (r.right + 16).min(sw), bottom: (r.bottom + 16).min(r.top + 360) }));
+                    }
+                }
+            }
+        }
+        6 => {
+            // the launcher zoomed with its green button (as a click on it does): it fills the
+            // screen, drawn at its new size (nothing of it left black)
+            if let Some(h) = with_app(|a| a.launcher.as_ref().map(|l| l.hwnd)).flatten() {
+                if fresh && !crate::frame::maximized(h) {
+                    unsafe {
+                        let _ = ShowWindow(h, SW_SHOW);
+                        let _ = SetForegroundWindow(h);
+                    }
+                    crate::frame::press(h, crate::look::Light::Zoom);
+                } else if !fresh && since.elapsed() > Duration::from_millis(1500) {
+                    let (cw, ch) = client_size(h);
+                    if let Some(shot) = capture(h, false) {
+                        // a patch near the bottom right corner, where the old size ended
+                        let (x0, y0) = ((shot.w - 60).max(0), (shot.h - 60).max(0));
+                        let (mut black, mut all) = (0, 0);
+                        for y in y0..(y0 + 40).min(shot.h) {
+                            for x in x0..(x0 + 40).min(shot.w) {
+                                let i = ((y * shot.w + x) * 4) as usize;
+                                all += 1;
+                                black += (shot.px[i..i + 3] == [0, 0, 0]) as i32;
+                            }
+                        }
+                        let drawn = all > 0 && black * 10 < all * 9;
+                        showcase_note(format!("launcher zoomed: {cw}x{ch} px, {}", if drawn { "drawn at its new size" } else { "NOT drawn at its new size" }));
+                        if !drawn {
+                            with_app(|a| a.showcase.as_mut().map(|s| s.failed = true));
+                        }
+                    }
+                    let mut r = RECT::default();
+                    unsafe {
+                        let _ = GetWindowRect(h, &mut r);
+                    }
+                    // a maximized window reaches past the screen's edges by its frame
+                    let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+                    ask("16-launcher-zoomed", Some(RECT { left: r.left.max(0), top: r.top.max(0), right: r.right.min(sw), bottom: r.bottom.min(sh) }));
                 }
             }
         }

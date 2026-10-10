@@ -188,25 +188,21 @@ still works, without the newer features.
 
 - **Each Mac window is a Windows window**, with its own taskbar button. While connected, the
   Mac's apps also appear in the Start menu and Windows Search.
-- **As the Mac draws it** (the default; Settings → **Mac windows**): the window comes whole,
-  with its own title bar and red, yellow and green buttons, and nothing of MacBridge's around
-  it. Drag it by the empty part of its title bar (it snaps and maximises as Windows windows do);
-  resize it by its edges. Red closes it, yellow minimises it to the taskbar, green makes it full
-  screen. Its rounded corners are the Mac's, over whatever is behind them.
-- **The Mac's menu bar** is at the top of the screen while a Mac window is in front, as on the
-  Mac: the app's menus, the Apple menu, the status items and the clock. It goes away when a
-  Windows app is in front. (The Mac's setting "Automatically hide and show the menu bar" must be
-  off for it.)
-- **With MacBridge's title bar and menus** (Settings → **Mac windows**) the window has a title
-  bar of MacBridge's with the app's menus in it instead, as in earlier versions.
+- **The title bar** (the default) is MacBridge's, with the red, yellow and green buttons, the
+  app's menus beside them and the window's title. Drag it to move the window; resize it by its
+  edges. Red closes it, yellow minimises it to the taskbar, green makes it full screen.
+- **As the Mac draws it** (Settings → **Mac windows**, experimental): the window comes whole,
+  with its own title bar and buttons, and nothing of MacBridge's around it; the Mac's menu bar
+  is then at the top of the screen while a Mac window is in front. (The Mac's setting
+  "Automatically hide and show the menu bar" must be off for it.)
 - **Opening an app** shows a loading window like the Mac's own: the app's icon and name
   with a spinner, over a blur of the app's main colour. It turns into the app's window when
   that appears.
 - **MacBridge Search** (**Ctrl+Alt+Space**, or **Open an App…** in the navigation ball's
   menu): type part of a Mac app's name, then Enter to open it, or to switch to it when it is
   already open. Arrow keys move, Escape closes.
-- **Menus**: in the Mac's menu bar at the top (or, with MacBridge's title bar, under it).
-  Shortcuts are translated (Ctrl acts as ⌘ by default).
+- **Menus**: in the window's title bar, beside its buttons (as the Mac draws them: in the Mac's
+  menu bar at the top of the screen). Shortcuts are translated (Ctrl acts as ⌘ by default).
 - **Fullscreen**: the green light or **F11**. The Mac app is sized exactly to your monitor.
 - **Closing** an app's last window quits the app on the Mac. Closing one of several windows
   closes only that window.
@@ -246,8 +242,9 @@ The Mac's sound plays on this PC (on by default; **Sound** and **Volume** in Set
 
 - While it is on, the Mac's desktop picture is set to the same picture as the PC's, and the
   Mac's real Dock is streamed as a window of its own along the bottom of the PC's screen. It
-  slides in when the pointer rests at the bottom edge and away when the pointer leaves, so
-  it looks like a Dock over the PC's own wallpaper.
+  slides in when the pointer comes down to the taskbar (or to the bottom edge, with the taskbar
+  hidden) under it and away when the pointer leaves, so it looks like a Dock over the PC's own
+  wallpaper.
 - Clicking an icon in it works as on the Mac: apps it opens become Windows windows, and its
   menus show over it.
 - Only the Dock and the desktop picture are captured for it; app windows behind it never
@@ -278,7 +275,7 @@ last step), the Mac Desktop scale, the decoder and frame pacing; and:
 | **Keyboard** | **Windows**: Ctrl acts as ⌘ Command (the default). **Mac**: keys as on a Mac keyboard (Ctrl is Control, the Windows key is ⌘). **Fusion**: as Windows, plus Windows' text keys: Home/End go to the start/end of the line, Ctrl+Home/End to the start/end of the document, Ctrl+arrows move by word, Ctrl+Backspace/Delete delete a word, Ctrl+Y redoes. |
 | **Glass** | how MacBridge's own menus and panels are drawn: Liquid Glass, frosted (blur only), or solid (least GPU). Windows' "transparency effects" setting off also turns the glass solid. |
 | **Animations** | as Windows is set (Settings → Accessibility → Visual effects → Animation effects), reduced, or full. Reduced keeps fades but drops movement and springs. |
-| **Mac windows** | as the Mac draws them (its menu bar at the top), or with MacBridge's title bar and menus; from the next connection |
+| **Mac windows** | with the app's menus in the title bar, or as the Mac draws them (experimental: its menu bar at the top); from the next connection |
 | **Desktop Fusion** | see [Desktop Fusion](#7-desktop-fusion-experimental) |
 
 Keys still held down when a window loses the focus are let go on the Mac, so none stays

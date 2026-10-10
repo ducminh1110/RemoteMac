@@ -5,8 +5,37 @@ Windows app works with an older Mac app without the features the Mac lacks.
 
 ## Unreleased
 
+### Changed
+
+- **The app's menus are back in each window's title bar** (Settings → **Mac windows**, the
+  default again): MacBridge's title bar with the red, yellow and green buttons, the menus beside
+  them and the title. The Mac's own title bars and its menu bar at the top of the screen are
+  now the experimental choice ("As the Mac draws them"). A choice made in 1.2.0-beta.1 is not
+  carried over.
+
 ### Fixed
 
+- **The Mac no longer freezes under a moving pointer, and is never left unreachable.** Every
+  pointer move asked the window tracker for its window and waited behind the tracker's work
+  (which waits on busy apps, Finder above all): clicks, keys and resizing fell further and
+  further behind, the connection backed up and was lost, and the Mac took long to be
+  reachable again. Now:
+  - the window of a click or a move is read without waiting;
+  - of pointer moves waiting one after another only the last is posted (a move before or after
+    a click or a key keeps its place);
+  - the connection is only read on its thread, so it never backs up; the viewer's pings are
+    answered at once;
+  - a viewer gone silent is noticed by a thread doing nothing else;
+  - the end of a session (the apps quitting, the wallpaper and the displays as they were)
+    takes at most a few seconds: the apps quit all at once, one that does not is stopped, and
+    the Mac waits for the next viewer after 8 seconds whatever happens;
+  - in the background, the copy that left the terminal watches over the one doing the work and
+    starts it again if it dies (`--stop` ends both).
+- **The launcher's green button fills the screen with the launcher drawn at that size.** The
+  window grew while its picture kept the old size (the rest black, with a stale copy of it).
+- **The Dock of Desktop Fusion comes when the pointer reaches the taskbar** (or the bottom edge
+  with the taskbar hidden), along the Dock and a little beyond it, instead of only with the
+  pointer pressed against the bottom of the screen.
 - **A Mac that wakes from sleep is reachable at once.** Its wait at the relay most likely died
   while it slept, and keepalive took up to about 40 seconds to notice; a viewer connecting in
   that time found the Mac "not online". The Mac now sees that it slept (the wall clock went on

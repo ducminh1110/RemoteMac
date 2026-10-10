@@ -49,8 +49,9 @@ while let a = argv.next() {
     }
 }
 let env = ProcessInfo.processInfo.environment
-// started in the background (below): our own session, so closing the terminal does not end us
-if env["RM_DAEMON"] != nil { becomeDaemon() }
+// started in the background (below): our own session, so closing the terminal does not end us;
+// this copy watches over the worker (started again if it dies), which does the rest
+if env["RM_DAEMON"] != nil && env["RM_WORKER"] == nil { becomeDaemon(); superviseWorker() }
 /// From a terminal (not a script) with the ID and password: show them, then go to the background.
 let goBackground = !foreground && env["RM_DAEMON"] == nil && sessionArg == nil && isatty(STDOUT_FILENO) == 1
 if goBackground, let pid = runningInBackground() {
@@ -380,6 +381,38 @@ if env["RM_NO_UDP"] == nil, let u = UdpLink(hostPort: cameLocally ? "127.0.0.1:9
 let menuQueue = DispatchQueue(label: "rm.menus")
 let iconQueue = DispatchQueue(label: "rm.icons", qos: .utility)
 let inputQueue = DispatchQueue(label: "rm.input", qos: .userInteractive)
+/// Pointer moves come far faster than the Mac needs them (a mouse reports hundreds a second):
+/// of moves that follow one another while they wait, only the last is posted, so the input
+/// never falls behind; a move before or after anything else (a click, a key) keeps its place.
+let inputLock = NSLock()
+var moveSeq = 0
+/// the last move queued and not posted yet, with nothing queued after it
+var waitingMove: Int?
+var supersededMoves = Set<Int>()
+/// What the viewer sent, handled on the input queue in arrival order (over the connection or
+/// straight over UDP).
+func enqueue(_ m: [String: Any]) {
+    let move = m["type"] as? String == "mouse_move"
+    var seq = 0
+    inputLock.lock()
+    if move {
+        if let w = waitingMove { supersededMoves.insert(w) }
+        moveSeq += 1; seq = moveSeq; waitingMove = seq
+    } else {
+        waitingMove = nil
+    }
+    inputLock.unlock()
+    inputQueue.async {
+        if move {
+            inputLock.lock()
+            if waitingMove == seq { waitingMove = nil }
+            let stale = supersededMoves.remove(seq) != nil
+            inputLock.unlock()
+            if stale { return }
+        }
+        handle(m)
+    }
+}
 /// Read (off the main path: big apps take a moment) and send an app's menu bar.
 func sendMenuBar(_ id: String) {
     menuQueue.async {
@@ -654,7 +687,7 @@ func gsEvent(_ e: RmGsEvent) {
         m["type"] = "text_input"; m["text"] = s
     default: return
     }
-    inputQueue.async { handle(m) }
+    enqueue(m)
 }
 
 /// Make a file panel open `path`: "Go to folder" (Cmd+Shift+G), type the full path, confirm twice.
@@ -969,7 +1002,7 @@ func handle(_ m: [String: Any]) {
 }
 
 // input runs on its own queue (inputQueue), in arrival order, whether it came over TCP or straight over UDP
-sender.udp?.onInput = { m in inputQueue.async { handle(m) } }
+sender.udp?.onInput = { m in enqueue(m) }
 
 // ---- a viewer gone without a word (network lost) is noticed, and the Mac waits for the next ----
 /// The viewer pings every 2 s (older viewers do not: then nothing is assumed).
@@ -993,11 +1026,28 @@ Thread {
             streamsLock.lock(); let all = streams; streamsLock.unlock()
             for (id, ws) in all { ws.setLightsActive(id == front) }
         }
+    }
+}.start()
+/// After the session ends, the Mac waits for the next viewer within a few seconds whatever
+/// happens: a step of the clean-up that hangs (a busy app, a display that does not answer)
+/// never leaves it unreachable.
+func startOverSoon(_ why: String) {
+    DispatchQueue.global().asyncAfter(deadline: .now() + 8) {
+        log("\(why) did not finish in time: waiting for the next viewer anyway")
+        if sessionArg == nil { restartForNextClient(after: 0) }
+        exit(0)
+    }
+}
+// on a thread of its own, doing nothing else: nothing the session does can hold it up
+Thread {
+    while true {
+        sleep(1)
         let heard = max(heardOverTCP, sender.udp?.lastHeard ?? 0)
         let silent = CFAbsoluteTimeGetCurrent() - heard
         if viewerSendsHeartbeats && silent > 10 {
             log("nothing from the viewer for \(Int(silent)) s: the connection is gone; waiting for the next one")
             connectionLost = true
+            startOverSoon("ending the lost session")
             Darwin.shutdown(conn.fd, SHUT_RDWR) // the read loop ends, and with it the session
             return
         }
@@ -1009,11 +1059,20 @@ let reader = Thread {
         while let (ch, payload) = try conn.readFrame() {
             heardOverTCP = CFAbsoluteTimeGetCurrent()
             guard ch != .video, let m = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] else { continue }
-            // other messages wait for the input before them (typing, then closing the window)
-            if inputTypes.contains(m["type"] as? String ?? "") { inputQueue.async { handle(m) } } else { inputQueue.sync {}; handle(m) }
+            // answered at once: the viewer knows the Mac is there by it
+            if m["type"] as? String == "ping" {
+                viewerSendsHeartbeats = true
+                send(["type": "pong", "nonce": m["nonce"] ?? 0])
+                continue
+            }
+            // the rest in arrival order (typing, then closing the window), on the input queue:
+            // this thread only reads, so the connection never backs up behind a busy app (the
+            // viewer would stall, then lose the Mac)
+            enqueue(m)
         }
         log("client disconnected")
     } catch { log("read loop ended: \(error)") }
+    startOverSoon("ending the session")
     // the viewer closed: its apps close with it; the connection was lost: they stay open, and the
     // viewer finds them again when it connects back
     if connectionLost { log("the apps stay open for the viewer to come back to") } else { apps.terminateAll() }

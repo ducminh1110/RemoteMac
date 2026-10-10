@@ -61,7 +61,7 @@ own drawing code (`RM_PREVIEW=dir cargo test -p rm-viewer preview`); the app ico
 ## Features
 
 - **One app, one window.** Every Mac window becomes a native Windows window with Mac-style
-  traffic lights, its menu bar, resizing, minimize and fullscreen. Popups, menus and sheets
+  traffic lights and the app's menus in its title bar, resizing, minimize and fullscreen. Popups, menus and sheets
   appear where the Mac shows them.
 - **Mac Desktop mode.** The whole Mac screen in fullscreen, carried by Moonlight's own client
   core (moonlight-common-c) and a host ported from Sunshine. A floating **navigation ball**

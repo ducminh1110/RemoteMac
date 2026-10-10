@@ -9,7 +9,7 @@ on:
     inputs:
       apps:
         description: Mac apps to record and open on Windows (comma separated ids)
-        default: xcode,textedit,testapp,desktop,dock,menubar
+        default: xcode,textedit,testapp,desktop,dock
   push:
     branches: [claude/inspiring-einstein-er2d37]
     paths: [crates/**, agent/**, probe/macos/testapp.swift, scripts/mac-record.sh, scripts/windows-showcase.ps1, .github/workflows/mac-to-windows.yml]
@@ -18,7 +18,7 @@ permissions:
   contents: read
 
 env:
-  APPS: ${{ github.event.inputs.apps || 'xcode,textedit,testapp,desktop,dock,menubar' }}
+  APPS: ${{ github.event.inputs.apps || 'xcode,textedit,testapp,desktop,dock' }}
 
 jobs:
   mac:

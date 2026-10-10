@@ -37,8 +37,9 @@ pub struct Settings {
     pub motion: u8,
     /// the RemoteMac Dock at the bottom of the screen while connected (experimental)
     pub dock: bool,
-    /// how Mac windows look ([`WINDOW_FRAMES`]): 0 as the Mac draws them (title bar, buttons;
-    /// the Mac's menu bar at the top of the screen), 1 with MacBridge's own title bar and menus
+    /// how Mac windows look ([`WINDOW_FRAMES`]): 0 with MacBridge's own title bar, the app's
+    /// menus in it; 1 as the Mac draws them (title bar, buttons; the Mac's menu bar at the top of
+    /// the screen; experimental)
     pub frame: u8,
 }
 
@@ -61,7 +62,7 @@ pub const DECODERS: [&str; 3] = ["Auto (GPU when it works)", "GPU (hardware)", "
 pub const KEYBOARD_MODES: [&str; 3] = ["Windows — Ctrl acts as ⌘ Command", "Mac — keys as on a Mac keyboard (Win = ⌘)", "Fusion — Windows shortcuts and text keys"];
 pub const GLASS_LEVELS: [&str; 3] = ["Liquid Glass (refraction and light)", "Frosted (blur only)", "Off (solid, least GPU)"];
 pub const MOTION_LEVELS: [&str; 3] = ["As Windows is set", "Reduced", "Full"];
-pub const WINDOW_FRAMES: [&str; 2] = ["As the Mac draws them (its menu bar at the top)", "With MacBridge's title bar and menus"];
+pub const WINDOW_FRAMES: [&str; 2] = ["With the app's menus in the title bar", "As the Mac draws them (experimental)"];
 
 fn path() -> std::path::PathBuf {
     crate::log_path().with_file_name("settings.json")
@@ -88,7 +89,9 @@ impl Settings {
             s.glass = n("glass").map_or(s.glass, |x| x.min(2) as u8);
             s.motion = n("motion").map_or(s.motion, |x| x.min(2) as u8);
             s.dock = b("dock").unwrap_or(s.dock);
-            s.frame = n("frame").map_or(s.frame, |x| x.min(1) as u8);
+            // "window_frame" since the menus went back into the windows (1.2.0-beta.1's "frame"
+            // had them at the top of the screen first, and is not carried over)
+            s.frame = n("window_frame").map_or(s.frame, |x| x.min(1) as u8);
         }
         s
     }
@@ -112,7 +115,7 @@ impl Settings {
         let v = serde_json::json!({
             "fps": self.fps, "bitrate_mbps": self.bitrate_mbps, "sharpness": self.quality,
             "decoder": self.decoder, "pacing": self.pacing, "local_cursor": self.local_cursor, "desktop_2x": self.desktop_2x, "workspace": self.workspace,
-            "audio": self.audio, "volume": self.volume, "keyboard": self.keyboard, "glass": self.glass, "motion": self.motion, "dock": self.dock, "frame": self.frame,
+            "audio": self.audio, "volume": self.volume, "keyboard": self.keyboard, "glass": self.glass, "motion": self.motion, "dock": self.dock, "window_frame": self.frame,
         });
         if let Some(d) = path().parent() {
             std::fs::create_dir_all(d)?;

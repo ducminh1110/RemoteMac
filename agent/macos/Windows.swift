@@ -227,7 +227,14 @@ func titleBarInset(pid: pid_t, rect: CGRect) -> CGFloat {
 }
 
 final class WindowTracker {
-    private var known: [CGWindowID: WinInfo] = [:]
+    private var known: [CGWindowID: WinInfo] = [:] {
+        didSet { seenLock.lock(); seen = known; seenLock.unlock() }
+    }
+    /// `known` as last changed, for whoever asks (every pointer move asks): read under a lock
+    /// held only for that, never behind a tick of the tracker's queue (a tick that waits on a
+    /// busy app's Accessibility would hold every click and key back with it)
+    private var seen: [CGWindowID: WinInfo] = [:]
+    private let seenLock = NSLock()
     /// Windows seen but not yet reported: dialogs need a moment before their AX tree is complete.
     private var pending: [CGWindowID: Int] = [:]
     /// Popups not over any window shown on Windows: left alone while they are on screen.
@@ -277,7 +284,7 @@ final class WindowTracker {
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)
     }
 
-    func current(_ id: CGWindowID) -> WinInfo? { queue.sync { known[id] } }
+    func current(_ id: CGWindowID) -> WinInfo? { seenLock.lock(); defer { seenLock.unlock() }; return seen[id] }
 
     /// An app that was already open on the Mac is now shown on Windows: its windows that existed
     /// when the agent started (left alone as the user's until now) are reported like new ones.
