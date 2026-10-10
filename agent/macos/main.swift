@@ -162,6 +162,19 @@ final class ClientRace {
     static let lan = "on this network"
     var taken: Bool { lock.lock(); defer { lock.unlock() }; return winner != nil }
     func waiting(_ c: Conn?) { lock.lock(); pending = c; lock.unlock() }
+    /// the waiting relay connection was dropped because the Mac woke (it waits again at once)
+    private var kicked = false
+    /// The Mac woke from sleep: the relay connection still waiting is most likely dead (the relay
+    /// or a router dropped it meanwhile) and keepalive takes a while to say so. It is dropped, and
+    /// the Mac waits at the relay again at once.
+    func woke() {
+        lock.lock(); defer { lock.unlock() }
+        guard winner == nil, let p = pending else { return }
+        log("the Mac woke from sleep: waiting at the relay again")
+        kicked = true; Darwin.shutdown(p.fd, SHUT_RDWR)
+    }
+    /// The last wait ended because the Mac woke (asked once).
+    func wasKicked() -> Bool { lock.lock(); defer { lock.unlock() }; let k = kicked; kicked = false; return k }
     /// `c` is the connection taken, unless another came first (then it is closed).
     func offer(_ c: Conn, _ how: String, session: String = sessionID) {
         lock.lock(); defer { lock.unlock() }
@@ -178,6 +191,21 @@ final class ClientRace {
     }
 }
 
+/// `woke` runs each time the Mac has slept: the wall clock went on while the uptime clock (which
+/// stops while the Mac sleeps) did not. No run loop is needed (this process has none while waiting).
+func watchSleep(_ woke: @escaping () -> Void) {
+    Thread {
+        func clocks() -> (Double, Double) { (Date().timeIntervalSince1970, Double(DispatchTime.now().uptimeNanoseconds) / 1e9) }
+        var (wall, up) = clocks()
+        while true {
+            sleep(5)
+            let (w, u) = clocks()
+            if (w - wall) - (u - up) > 10 { woke() }
+            (wall, up) = (w, u)
+        }
+    }.start()
+}
+
 func waitForClient() -> (Conn, local: Bool, session: String) {
     let lan = env["RM_NO_LAN"] == nil && sessionArg == nil ? LanListener(session: sessionID) : nil
     if let l = lan { log("on this network at port \(l.tcpPort) (found by the viewer through UDP \(lanPort))") }
@@ -185,6 +213,7 @@ func waitForClient() -> (Conn, local: Bool, session: String) {
     let race = ClientRace()
     if let relay = relayAddr {
         let lanToo = lan != nil
+        watchSleep { race.woke() }
         Thread {
             var announced = false
             while !race.taken {
@@ -205,7 +234,7 @@ func waitForClient() -> (Conn, local: Bool, session: String) {
                     // nobody came within the relay's wait: wait again at once (a viewer arriving
                     // in between would find this Mac offline); the relay refused or went silent:
                     // after a moment
-                    let pause: UInt32 = "\(error)".contains("pair timeout") ? 0 : 2
+                    let pause: UInt32 = "\(error)".contains("pair timeout") || race.wasKicked() ? 0 : 2
                     if !lanToo { log("\(error); waiting again"); restartForNextClient(after: pause) }
                     log("relay: \(error); waiting again"); sleep(pause); continue
                 }

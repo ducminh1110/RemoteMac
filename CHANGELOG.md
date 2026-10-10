@@ -3,6 +3,15 @@
 Each version of MacBridge, newest first. Both sides should run the same version; a newer
 Windows app works with an older Mac app without the features the Mac lacks.
 
+## Unreleased
+
+### Fixed
+
+- **A Mac that wakes from sleep is reachable at once.** Its wait at the relay most likely died
+  while it slept, and keepalive took up to about 40 seconds to notice; a viewer connecting in
+  that time found the Mac "not online". The Mac now sees that it slept (the wall clock went on
+  while its uptime did not) and waits at the relay again straight away.
+
 ## 1.2.0-beta.1
 
 A beta: everything below passes the automated tests (unit tests on Linux and Windows, the real
