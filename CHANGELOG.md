@@ -105,7 +105,8 @@ be checked by hand on real machines is listed under **Not yet verified**.
   longer than the relay's pair timeout starts over, the Mac waits again at once when the relay's
   wait runs out, and App Nap no longer slows the background process. The viewer looks again for
   up to 8 seconds when the relay does not know the Mac yet (it waits again moments after each
-  session).
+  session), and the relay no longer pairs a viewer with a Mac whose wait has died (update your
+  own relay with this release's `macbridge-relay.tar.gz`).
 - **The window buttons of Mac windows are back.** While a window is captured, macOS draws a
   "being shared" capsule where its red, yellow and green buttons are (on the Mac's screen and in
   the capture). The Mac now draws the three buttons back in each picture, where the Mac lays

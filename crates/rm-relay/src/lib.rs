@@ -337,6 +337,11 @@ fn handle(mut conn: TcpStream, table: Table, failures: Failures, udp: Udp, cfg: 
                 let _ = reject(old.stream, "replaced");
             }
         }
+        // a waiter whose connection is gone (closed, reset, or found dead by keepalive) waits no
+        // more: the one asking now is told no one is there, and looks again while it waits anew
+        if t.get(&join.session_id).is_some_and(|p| p.role != join.role && gone(&p.stream)) {
+            t.remove(&join.session_id);
+        }
         match t.remove(&join.session_id) {
             Some(p) => {
                 if !constant_time_eq(&p.token, &join.token) || p.role == join.role {
@@ -395,6 +400,22 @@ fn handle(mut conn: TcpStream, table: Table, failures: Failures, udp: Udp, cfg: 
             Ok(())
         }
     }
+}
+
+/// The peer of a waiting connection has gone: it closed it, reset it, or keepalive found it dead
+/// (a waiter sends nothing, so anything else means it is still there).
+fn gone(s: &TcpStream) -> bool {
+    if s.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let mut b = [0u8; 1];
+    let g = match s.peek(&mut b) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
+    };
+    let _ = s.set_nonblocking(false);
+    g
 }
 
 /// Copy bytes, at most `kbps` kilobits per second when set (token bucket, 20 ms quanta).
@@ -630,6 +651,28 @@ mod tests {
         }
         // now even the right token is refused for a while
         assert_eq!(attempt(TOK).as_deref(), Some("ERR locked"));
+    }
+
+    /// A Mac whose wait died (its connection closed) is not paired with: the viewer is told no
+    /// Mac is there (and looks again), instead of a handshake with nobody.
+    #[test]
+    fn a_waiter_that_is_gone_is_not_paired() {
+        let addr = start(Config::default());
+        {
+            let mut s = TcpStream::connect(&addr).unwrap();
+            let j = serde_json::to_string(&Join { session_id: "gone-2".into(), role: Role::Agent, token: TOK.into(), key: None, wait: true, owner: None }).unwrap();
+            s.write_all(format!("{j}\n").as_bytes()).unwrap();
+            thread::sleep(Duration::from_millis(200));
+        } // the Mac's side closes
+        thread::sleep(Duration::from_millis(200));
+        let e = join_with(&addr, "gone-2", Role::Client, TOK, false).unwrap_err();
+        assert_eq!(e.to_string(), "ERR no such session");
+        // a Mac waiting again is paired as usual
+        let a = addr.clone();
+        let agent = thread::spawn(move || join(&a, "gone-2", Role::Agent, TOK).map(|_| ()));
+        thread::sleep(Duration::from_millis(200));
+        assert!(join_with(&addr, "gone-2", Role::Client, TOK, false).is_ok());
+        agent.join().unwrap().unwrap();
     }
 
     #[test]
