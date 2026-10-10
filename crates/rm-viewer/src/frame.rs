@@ -11,8 +11,23 @@ use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+/// MacBridge's icon (logo.rs) on the window: the taskbar and Alt+Tab show it.
+fn own_icon(hwnd: HWND) {
+    thread_local! { static ICON: std::cell::Cell<Option<isize>> = const { std::cell::Cell::new(None) }; }
+    let icon = ICON.with(|c| {
+        if c.get().is_none() {
+            c.set(crate::native::make_icon(64, &crate::logo::rgba(64)).map(|h| h.0 as isize));
+        }
+        c.get()
+    });
+    if let Some(h) = icon {
+        crate::native::set_window_icon(hwnd, HICON(h as *mut std::ffi::c_void));
+    }
+}
+
 /// Take the title bar away (call once the window exists): the frame stays for its shadow.
 pub fn adopt(hwnd: HWND) {
+    own_icon(hwnd);
     unsafe {
         let m = MARGINS { cxLeftWidth: 0, cxRightWidth: 0, cyTopHeight: 1, cyBottomHeight: 0 };
         let _ = DwmExtendFrameIntoClientArea(hwnd, &m);

@@ -13,6 +13,7 @@ pub mod launchview;
 pub mod launchui;
 pub mod lifecycle;
 pub mod loadview;
+pub mod logo;
 pub mod look;
 pub mod motion;
 pub mod paint;

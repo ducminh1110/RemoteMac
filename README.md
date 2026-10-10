@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/images/macbridge-icon.png" width="160" alt="MacBridge icon: a Liquid Glass window with a bridge across it">
+
 # MacBridge
 
 **Your Mac's apps, as real windows on your Windows PC.**
@@ -15,10 +17,15 @@ Desktop, streamed the way Moonlight streams a game.
 
 </div>
 
+<p align="center">
+  <img src="docs/images/launcher-light.png" width="860" alt="The launcher: the Mac's apps in a Finder-like grid under a Liquid Glass toolbar">
+</p>
+
 ---
 
 ## Contents
 
+- [Screenshots](#screenshots)
 - [Features](#features)
 - [How it works](#how-it-works)
 - [Quick start (release builds)](#quick-start-release-builds)
@@ -31,6 +38,21 @@ Desktop, streamed the way Moonlight streams a game.
 - [Project layout](#project-layout)
 - [Contributing](#contributing)
 - [License and credits](#license-and-credits)
+
+## Screenshots
+
+MacBridge's own windows are drawn after Apple's Screen Sharing on macOS 26: no Windows title
+bar (the window's toolbar is its title bar, with the red, yellow and green buttons), Liquid Glass
+controls, text set as macOS sets it, light and dark. These pictures are rendered by the app's
+own drawing code (`RM_PREVIEW=dir cargo test -p rm-viewer preview`); the app icons in them are stand-ins.
+
+| The launcher, dark | Scrolled: the grid softens under the glass toolbar |
+|---|---|
+| ![The launcher in dark mode](docs/images/launcher-dark.png) | ![The launcher scrolled: icons blur and fade under the Liquid Glass toolbar](docs/images/launcher-scrolled.png) |
+
+| Connect by ID | Connect by address (no ID, no relay) | Connecting |
+|---|---|---|
+| ![The connect window by ID, a message in red](docs/images/connect-light.png) | ![The connect window by address: only the address and the password](docs/images/connect-address.png) | ![The connect window in dark mode while it connects](docs/images/connect-dark.png) |
 
 ## Features
 
