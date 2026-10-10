@@ -215,6 +215,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -235,8 +236,10 @@ jobs:
           | `MacBridge-macos.tar.gz` | macOS 14+, Apple silicon and Intel: `macbridge` |
           | `macbridge-relay.tar.gz` | your own relay server (Linux x86_64 / ARM64), one-command installer |
 
-          **Mac:** `./macbridge --password YOUR-PASSWORD` shows the ID and the password, then runs in the background
-          (`./macbridge --stop` ends it). **Windows:** open `MacBridge.exe`, type both, press Connect.
+          **Mac:** `./macbridge.sh --password YOUR-PASSWORD` shows the ID and the password, then runs in the background
+          (`./macbridge --stop` ends it). **Windows:** open `MacBridge.exe`, then either **By ID** (the ID and the
+          password: found on this network, or through the relay) or **By Address** (the Mac's IP address or name and
+          the password: straight to the Mac, no relay). The Mac takes both at once.
 
           ## Highlights
 
@@ -253,5 +256,11 @@ jobs:
           `macbridge-relay.tar.gz` as well. See the [user guide](../../blob/HEAD/docs/USER-GUIDE.md).
           MD
           sed -i 's/^          //' notes.md
-          gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "MacBridge ${VERSION#v}" --notes-file notes.md --latest \
+          # this version's part of the changelog
+          V="${VERSION#v}"
+          awk -v v="## $V" '$0==v{f=1;next} /^## /{if(f)exit} f' CHANGELOG.md > changes.md || true
+          if [ -s changes.md ]; then { echo; echo "## What's new in $V"; cat changes.md; } >> notes.md; fi
+          # a version with a suffix (1.2.0-beta.1) is a pre-release; a plain one the latest release
+          if [[ "$V" == *-* ]]; then KIND=--prerelease; else KIND=--latest; fi
+          gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "MacBridge $V" --notes-file notes.md $KIND \
             dist/MacBridge-macos.tar.gz dist/MacBridge-windows.zip dist/macbridge-relay.tar.gz
