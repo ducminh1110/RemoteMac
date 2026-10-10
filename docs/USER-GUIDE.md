@@ -264,12 +264,17 @@ a dynamic or video desktop picture may come back as a still picture.
 
 ## 8. Settings and shortcuts
 
-Open **Settings** from the launcher, the navigation ball, or **Ctrl+Alt+Shift+P**. It holds the
-frame rate, bitrate, sharpness, the Mac screen size, pixel-for-pixel mode and the pointer, and:
+Open **Settings** from the launcher (the gear in its toolbar), the navigation ball, or
+**Ctrl+Alt+Shift+P**. It is laid out as the Mac's System Settings: the sections on the left
+(**Video**, **Sound**, **Keyboard & Pointer**, **Appearance**, **Desktop Fusion**; Up and Down
+move between them), their settings on the right. A change applies at once; there is no Save.
+**Video** holds the frame rate, bitrate, sharpness, the Mac screen size (pixel for pixel is its
+last step), the Mac Desktop scale, the decoder and frame pacing; and:
 
 | Setting | |
 |---|---|
 | **Sound**, **Volume** | the Mac's sound on this PC (see [Sound](#6-sound)) |
+| **Use this PC's pointer** | this PC's pointer over the picture instead of the Mac's (Ctrl+Alt+Shift+C) |
 | **Keyboard** | **Windows**: Ctrl acts as ⌘ Command (the default). **Mac**: keys as on a Mac keyboard (Ctrl is Control, the Windows key is ⌘). **Fusion**: as Windows, plus Windows' text keys: Home/End go to the start/end of the line, Ctrl+Home/End to the start/end of the document, Ctrl+arrows move by word, Ctrl+Backspace/Delete delete a word, Ctrl+Y redoes. |
 | **Glass** | how MacBridge's own menus and panels are drawn: Liquid Glass, frosted (blur only), or solid (least GPU). Windows' "transparency effects" setting off also turns the glass solid. |
 | **Animations** | as Windows is set (Settings → Accessibility → Visual effects → Animation effects), reduced, or full. Reduced keeps fades but drops movement and springs. |
