@@ -250,7 +250,7 @@ do {
     guard cmin <= 1 && cmax >= 1 else {
         try conn.send(["type": "error", "code": "version_mismatch", "message": "agent speaks protocol 1, client \(cmin)...\(cmax)"]); exit(1)
     }
-    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "fusion", "mask"],
+    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "fusion", "mask", "exact"],
                    "max_surface": [3840, 2160], "agent": "macbridge \(appVersion) \(ProcessInfo.processInfo.operatingSystemVersionString)"])
     try conn.send(probeCapabilities())
 } catch { fail("handshake: \(error)") }
@@ -362,6 +362,12 @@ func sendShape(_ id: CGWindowID, _ w: Int, _ h: Int, _ a: [UInt8]) {
     log("window \(id) shape: \(w)x\(h) px, \(clear) clear (\((m["rle"] as? String)?.count ?? 0) bytes)")
     send(m)
 }
+/// The title bar of exact window `id` as it is now ("window_chrome"), for the viewer to move it by.
+func sendChrome(_ id: CGWindowID) {
+    guard let w = tracker.current(id), let m = windowChrome(id: id, pid: w.pid, rect: w.rect) else { return }
+    log("window \(id) title bar: \(m["title_height"] ?? 0) points, \((m["controls"] as? [Any])?.count ?? 0) control(s) in it")
+    send(m)
+}
 func stopStream(_ id: CGWindowID) {
     streamsLock.lock(); let ws = streams.removeValue(forKey: id); streamsLock.unlock()
     if let ws = ws { Task { await ws.stop(); log("stream stopped window=\(id) packets=\(ws.sent)") } }
@@ -382,6 +388,7 @@ tracker.onCreated = { w in
         }
     }
     if w.role == .window { DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { sendMenuBar(w.appID) } }
+    if exactWindows && w.role != .popup { DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { sendChrome(w.id) } }
 }
 tracker.onDestroyed = { id in
     log("window destroyed id=\(id)")
@@ -396,6 +403,8 @@ tracker.onMoved = { w in
     if lastSize[w.id] != w.rect.size {            // size changed: the encoder is bound to a size, so restart the stream
         lastSize[w.id] = w.rect.size
         stopStream(w.id); startStream(w.id, inset: w.inset, popup: w.role == .popup)
+        // the toolbar's items move with the width
+        if exactWindows && w.role != .popup { DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { sendChrome(w.id) } }
     }
 }
 tracker.onTitle = { w in send(["type": "window_title_changed", "window_id": Int(w.id), "title": w.title]) }
@@ -801,6 +810,9 @@ func handle(_ m: [String: Any]) {
                 }
             }
         }
+    case "window_style":
+        exactWindows = m["exact"] as? Bool ?? false
+        log("windows shown \(exactWindows ? "as the Mac draws them (title bar and buttons)" : "with the viewer's own title bar")")
     case "dock_stream":
         let on = m["enabled"] as? Bool ?? false
         log("Mac Dock on Windows: \(on ? "asked for" : "no longer wanted")")

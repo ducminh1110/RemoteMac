@@ -193,6 +193,8 @@ pub enum UiEvent {
     /// The Mac's own Dock (Desktop Fusion): streamed as window `id` from this region of the
     /// Mac's screen (points), at `edge`; or why it cannot be shown.
     Dock { available: bool, id: u64, x: i32, y: i32, w: u32, h: u32, edge: String, reason: Option<String> },
+    /// The title bar of exact window `id` (Mac points from its picture's top-left).
+    Chrome { id: u64, chrome: crate::chrome::MacChrome },
     /// The shape of window `id`'s pictures of `width`x`height` (alpha per pixel; None: opaque).
     Mask { id: u64, width: u32, height: u32, alpha: Option<std::sync::Arc<Vec<u8>>> },
     Notice(String),
@@ -363,6 +365,12 @@ fn connect_steps(relay: Option<&str>, session: &str, token: &str, app: Option<&s
     if audio.supported() && settings.audio {
         link.send(&Message::AudioControl { enabled: true });
     }
+    // Mac windows as the Mac draws them (before any window opens), when it can and it is wanted
+    let exact = mac_has("exact") && settings.frame == 0 && !std::env::var_os("RM_FRAMED").is_some_and(|v| v != "0");
+    EXACT.store(exact, std::sync::atomic::Ordering::Relaxed);
+    if mac_has("exact") {
+        link.send(&Message::WindowStyle { exact });
+    }
     if let Some(app) = app {
         link.send(&Message::AppLaunch { application_id: app.into(), arguments: vec![], working_directory: None, environment: Default::default() });
     }
@@ -374,6 +382,14 @@ fn connect_steps(relay: Option<&str>, session: &str, token: &str, app: Option<&s
 }
 
 static GS_VIDEO: Mutex<Option<Arc<Video>>> = Mutex::new(None);
+
+static EXACT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Mac windows are shown as the Mac draws them (their own title bar and buttons, the Mac's menu
+/// bar at the top of the screen) rather than in MacBridge's frame.
+pub fn exact_windows() -> bool {
+    EXACT.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// What the connected Mac supports beyond the basics ("audio", "open_file"), from its hello.
 static MAC_FEATURES: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -622,6 +638,10 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
                 Message::AppLaunched { application_id, .. } => emit(UiEvent::Launched(application_id)),
                 Message::AudioStatus { state, reason } => crate::audio::audio().set_mac_status(&state, reason.as_deref()),
                 Message::DockStatus { available, window_id, bounds, edge, reason } => emit(UiEvent::Dock { available, id: window_id, x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, edge, reason }),
+                Message::WindowChrome { window_id, title_height, close, minimize, zoom, controls } => {
+                    let r = |r: rm_protocol::Rect| (r.x, r.y, r.w, r.h);
+                    emit(UiEvent::Chrome { id: window_id, chrome: crate::chrome::MacChrome { title_height, lights: [close.map(r), minimize.map(r), zoom.map(r)], controls: controls.into_iter().map(r).collect() } })
+                }
                 Message::WindowMask { window_id, width, height, rle } => {
                     let alpha = rm_protocol::mask::from_message(width, height, &rle).map(std::sync::Arc::new);
                     emit(UiEvent::Mask { id: window_id, width, height, alpha })

@@ -43,6 +43,12 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
     };
     let t0 = Instant::now();
     put(out, recording::SESSION, t0, encode(&Message::CapabilityReport(sess.capabilities.clone()))?)?;
+    // windows as the Mac draws them (their title bar and buttons), when it can: the replay shows them so
+    if sess.negotiated.features.iter().any(|f| f == "exact") {
+        let m = Message::WindowStyle { exact: true };
+        sess.send(&m)?;
+        put(out, recording::SESSION, t0, encode(&m)?)?;
+    }
     sess.send(&Message::ListApps)?;
     let mut summary = Summary::default();
     let mut owner: HashMap<u64, String> = HashMap::new();

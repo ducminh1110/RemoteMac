@@ -113,6 +113,10 @@ struct Remote {
     reveal: bool,
     /// the shape of its pictures from the Mac (picture size, alpha per pixel)
     mask: Option<(u32, u32, std::sync::Arc<Vec<u8>>)>,
+    /// shown as the Mac draws it: its own title bar and buttons in the picture, no chrome here
+    exact: bool,
+    /// that title bar (where it is moved by, its buttons), from the Mac
+    mac_chrome: Option<chrome::MacChrome>,
 }
 
 struct App {
@@ -1740,6 +1744,12 @@ fn handle_event(ev: UiEvent) {
         }
         UiEvent::Dock { available, id, x, y, w, h, edge, reason } => on_dock(available, id, (x, y, w, h), edge, reason),
         UiEvent::Mask { id, width, height, alpha } => on_mask(id, width, height, alpha),
+        UiEvent::Chrome { id, chrome } => {
+            with_app(|a| {
+                let k = *a.by_id.get(&id)?;
+                a.remotes.get_mut(&k).map(|r| r.mac_chrome = Some(chrome))
+            });
+        }
         UiEvent::AppExited(app) => eprintln!("remote app exited: {app}"),
         UiEvent::Launched(app) => crate::splash::step(&app, 3),
         UiEvent::Notice(n) => {
@@ -1827,7 +1837,8 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         let scale = native::dpi_scale(hwnd);
         let (cached, parent_origin) = with_app(|a| {
             a.remotes.insert(hwnd.0 as isize, Remote { id, app: app.into(), role, parent, rx: x, ry: y, rw: w, rh: h, scale, maximized: false, presenter: None, comp: None, picture: None, frames: 0,
-                high_surrogate: None, cmds: HashMap::new(), content: content.0 as isize, menu: 0, menu_x: vec![], open_menu: None, hover: false, pressed: None, active: false, owned, fullscreen: false, saved: RECT::default(), reveal: false, mask: None });
+                high_surrogate: None, cmds: HashMap::new(), content: content.0 as isize, menu: 0, menu_x: vec![], open_menu: None, hover: false, pressed: None, active: false, owned, fullscreen: false, saved: RECT::default(), reveal: false, mask: None,
+                exact: net::exact_windows() && !popup && app != DESKTOP_APP && app != DOCK_APP, mac_chrome: None });
             a.by_id.insert(id, hwnd.0 as isize);
             let cached = a.icons.get(app).copied();
             if cached.is_none() && a.icons_requested.insert(app.to_string()) {
@@ -1914,7 +1925,11 @@ fn content_of(frame: HWND) -> Option<HWND> {
 
 /// Height of the chrome (title bar, plus the menu strip when the app has a menu bar).
 fn bar_px(frame: HWND) -> i32 {
-    with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| if (r.fullscreen && !r.reveal) || r.role == WindowRole::Popup { 0 } else { chrome::bar_height(r.scale, r.menu != 0) })).flatten().unwrap_or(0)
+    with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| if (r.fullscreen && !r.reveal) || r.role == WindowRole::Popup || r.exact { 0 } else { chrome::bar_height(r.scale, r.menu != 0) })).flatten().unwrap_or(0)
+}
+
+fn is_exact(frame: HWND) -> bool {
+    with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| r.exact)).flatten().unwrap_or(false)
 }
 
 fn is_popup(frame: HWND) -> bool {
@@ -2134,6 +2149,19 @@ fn corner_radii(r: &Remote, cw: i32, bar: i32, square: bool) -> ([f32; 4], [f32;
     let radius = measured.unwrap_or((chrome::CORNER_RADIUS * r.scale) as f32);
     let top = if bar > 0 { radius } else { 0.0 };
     ([radius; 4], [top, top, 0.0, 0.0])
+}
+
+/// What is at (`x`, `y`) (client pixels of the picture) of an exact window: its Mac title bar's
+/// buttons, the band it is moved by, or the Mac's; None for a window in MacBridge's frame.
+fn mac_hit(frame: HWND, x: i32, y: i32) -> Option<chrome::MacHit> {
+    let cs = content_of(frame).map(client_size).unwrap_or_else(|| client_size(frame));
+    with_app(|a| {
+        let r = a.remotes.get(&(frame.0 as isize)).filter(|r| r.exact)?;
+        let Some(c) = r.mac_chrome.as_ref() else { return Some(chrome::MacHit::Client) };
+        let (px, py) = crate::keymap::scale_point(x, y, cs, (r.rw, r.rh));
+        Some(c.hit(px, py))
+    })
+    .flatten()
 }
 
 /// The Mac sent the shape of a window's pictures.
@@ -2556,12 +2584,34 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             let on_menu = with_app(|a| a.remotes.get(&(hwnd.0 as isize)).map(|r| r.menu_x.iter().any(|(a, b)| pt.x >= *a && pt.x < *b))).flatten().unwrap_or(false);
             let code = if !IsZoomed(hwnd).as_bool() && !fullscreen && pt.y < b {
                 if pt.x < 2 * b { HTTOPLEFT } else if pt.x >= cw - 2 * b { HTTOPRIGHT } else { HTTOP }
-            } else if pt.y < bar_px(hwnd) && !chrome::over_lights(pt.x, pt.y, scale) && !on_menu && !fullscreen {
+            } else if !fullscreen
+                && ((pt.y < bar_px(hwnd) && !chrome::over_lights(pt.x, pt.y, scale) && !on_menu)
+                    // an exact window: its own Mac title bar, where nothing takes clicks
+                    || mac_hit(hwnd, pt.x, pt.y) == Some(chrome::MacHit::Caption))
+            {
                 HTCAPTION
             } else {
                 HTCLIENT
             };
             LRESULT(code as isize)
+        }
+        // over an exact window's title bar the Mac's pointer (in the video) is still the pointer,
+        // and it moves there on the Mac too (the buttons show their glyphs as on the Mac)
+        WM_SETCURSOR if (lp.0 & 0xffff) as u32 == HTCAPTION && is_exact(hwnd) && !local_cursor().load(std::sync::atomic::Ordering::Relaxed) => {
+            SetCursor(None);
+            LRESULT(1)
+        }
+        WM_NCMOUSEMOVE if wp.0 as u32 == HTCAPTION && is_exact(hwnd) => {
+            let mut pt = POINT { x: (lp.0 & 0xffff) as i16 as i32, y: ((lp.0 >> 16) & 0xffff) as i16 as i32 };
+            if let Some(c) = content_of(hwnd) {
+                let _ = ScreenToClient(c, &mut pt);
+                let cs = client_size(c);
+                send_for(hwnd, |r, _| {
+                    let (px, py) = scale_point(pt.x, pt.y, cs, (r.rw, r.rh));
+                    Some(Message::MouseMove { window_id: r.id, x: px, y: py })
+                });
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
         }
         WM_NCACTIVATE => {
             let active = wp.0 != 0;
@@ -2769,6 +2819,38 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
+        // an exact window: its Mac title bar's free band and its top edge are the frame's
+        // (moving, resizing), the rest the Mac's
+        WM_NCHITTEST if is_exact(frame) => {
+            let mut pt = POINT { x: (lp.0 & 0xffff) as i16 as i32, y: ((lp.0 >> 16) & 0xffff) as i16 as i32 };
+            let _ = ScreenToClient(hwnd, &mut pt);
+            let free = !IsZoomed(frame).as_bool() && !is_fullscreen(frame);
+            let edge = free && pt.y < frame_border(frame);
+            if edge || (free && mac_hit(frame, pt.x, pt.y) == Some(chrome::MacHit::Caption)) {
+                LRESULT(HTTRANSPARENT as isize)
+            } else {
+                LRESULT(HTCLIENT as isize)
+            }
+        }
+        WM_LBUTTONDOWN if matches!(mac_hit(frame, lp_xy(lp).0, lp_xy(lp).1), Some(chrome::MacHit::Light(_))) => {
+            // the Mac's red, yellow, green buttons: this window closes, minimises, goes full screen here
+            if let Some(chrome::MacHit::Light(l)) = mac_hit(frame, lp_xy(lp).0, lp_xy(lp).1) {
+                with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).map(|r| r.pressed = Some(l)));
+                SetCapture(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP if with_app(|a| a.remotes.get(&(frame.0 as isize)).is_some_and(|r| r.exact && r.pressed.is_some())).unwrap_or(false) => {
+            let _ = ReleaseCapture();
+            let pressed = with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).and_then(|r| r.pressed.take())).flatten();
+            let (x, y) = lp_xy(lp);
+            if let (Some(l), Some(chrome::MacHit::Light(now))) = (pressed, mac_hit(frame, x, y)) {
+                if l == now {
+                    light_action(frame, l);
+                }
+            }
+            LRESULT(0)
+        }
         WM_MOUSEMOVE => {
             let (x, y) = lp_xy(lp);
             if is_fullscreen(frame) && !is_desktop(frame) {

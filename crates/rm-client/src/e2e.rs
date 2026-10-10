@@ -100,6 +100,8 @@ struct Ctx<'a, S: Read + Write> {
     dock_picture: Option<rm_decode::Picture>,
     /// window shapes received: id -> (width, height, mask; None when opaque)
     masks: std::collections::HashMap<u64, (u32, u32, Option<Vec<u8>>)>,
+    /// exact windows' title bars: id -> (band height, has its close button, controls in it)
+    chromes: std::collections::HashMap<u64, (u32, bool, usize)>,
 }
 
 fn is_timeout(e: &ProtocolError) -> bool {
@@ -123,6 +125,9 @@ impl<S: Read + Write> Ctx<'_, S> {
             Frame::Msg(Message::AudioStatus { state, reason }) => self.audio_status = Some((state, reason)),
             Frame::Msg(Message::DockStatus { available, window_id, bounds, reason, .. }) => self.dock = Some((available, window_id, bounds.w, bounds.h, reason)),
             Frame::Msg(Message::WallpaperStatus { applied, reason }) => self.wallpaper = Some((applied, reason)),
+            Frame::Msg(Message::WindowChrome { window_id, title_height, close, controls, .. }) => {
+                self.chromes.insert(window_id, (title_height, close.is_some(), controls.len()));
+            }
             Frame::Msg(Message::WindowMask { window_id, width, height, rle }) => {
                 self.masks.insert(window_id, (width, height, rm_protocol::mask::from_message(width, height, &rle)));
             }
@@ -269,7 +274,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let caps_dump = serde_json::to_string(&sess.capabilities).unwrap_or_default();
     let mut c = Ctx { sess, r: Report::default(), started: Instant::now(), first_video: None, last_title: String::new(),
         destroyed: false, exited: false, launched_pid: None, errors: vec![], non_annexb: 0,
-        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None, main_rect: None, desktop: None, desktop_frames: 0, desktop_video: None, gs_tunnel: None, gs_out: None, audio_status: None, audio_packets: 0, audio_bad: 0, audio_peak: 0, audio_seq: None, audio_gaps: 0, created_apps: vec![], app: app.to_string(), dock: None, dock_frames: 0, dock_video: None, wallpaper: None, dock_decoder: None, dock_picture: None, masks: Default::default() };
+        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None, main_rect: None, desktop: None, desktop_frames: 0, desktop_video: None, gs_tunnel: None, gs_out: None, audio_status: None, audio_packets: 0, audio_bad: 0, audio_peak: 0, audio_seq: None, audio_gaps: 0, created_apps: vec![], app: app.to_string(), dock: None, dock_frames: 0, dock_video: None, wallpaper: None, dock_decoder: None, dock_picture: None, masks: Default::default(), chromes: Default::default() };
 
     c.r.check("agent reports capture+input+GUI", caps_ok, caps_dump);
 
@@ -445,6 +450,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     }
 
     documents(&mut c, wid);
+    exact_windows(&mut c);
     fusion(&mut c);
 
     // ---- a virtual display the size of the client's monitor; fullscreen fills it exactly
@@ -637,6 +643,35 @@ fn documents<S: Read + Write>(c: &mut Ctx<S>, wid: u64) {
         }
     }
     let _ = wid;
+}
+
+/// Exact windows ("window_style"): a window opened then comes whole, its own title bar and
+/// buttons in the picture, with that title bar described (to move it by) and all four corners
+/// in its shape; back to MacBridge's frame afterwards.
+fn exact_windows<S: Read + Write>(c: &mut Ctx<S>) {
+    let Some(note) = upload(c, 23, "rm e2e exact.txt", b"MacBridge exact window\n") else {
+        c.r.check("exact window: shown as the Mac draws it", false, "upload failed");
+        return;
+    };
+    c.send(Message::WindowStyle { exact: true });
+    c.created_apps.retain(|(_, a)| a != "textedit");
+    c.send(Message::OpenFile { path: note, application_id: None });
+    let opened = c.pump(15, |c| c.created_apps.iter().any(|(_, a)| a == "textedit"));
+    let id = c.created_apps.iter().find(|(_, a)| a == "textedit").map(|(w, _)| *w);
+    let got = opened && c.pump(8, |c| id.is_some_and(|w| c.chromes.contains_key(&w) && c.masks.contains_key(&w)));
+    let chrome = id.and_then(|w| c.chromes.get(&w).copied());
+    let shape = id.and_then(|w| c.masks.get(&w)).map(|(w, h, m)| m.as_ref().map(|m| {
+        let r = |top, left| rm_protocol::mask::corner_radius(m, *w as usize, *h as usize, top, left);
+        (r(true, true), r(true, false), r(false, false), r(false, true))
+    }));
+    let ok = got && matches!(chrome, Some((t, true, _)) if (20..=90).contains(&t)) && matches!(shape, Some(Some((a, b, cc, d))) if a >= 4.0 && b >= 4.0 && cc >= 4.0 && d >= 4.0);
+    c.r.check("exact window: whole, its title bar described (band, buttons) and all four corners in its shape", ok, format!("chrome(band,close,controls)={chrome:?} corners={shape:?} opened={opened}"));
+    if let Some(w) = id {
+        c.send(Message::AppTerminate { application_id: "textedit".into() });
+        c.pump(10, |c| c.destroyed_ids.contains(&w));
+    }
+    c.send(Message::WindowStyle { exact: false });
+    c.created_apps.retain(|(_, a)| a != "textedit");
 }
 
 /// Sound while the Mac Desktop is open (every app is heard): asked for, received as valid PCM

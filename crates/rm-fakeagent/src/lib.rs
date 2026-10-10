@@ -98,6 +98,8 @@ struct State {
     audio: Option<Arc<AtomicBool>>,
     /// the Dock is streamed: set to stop it
     dock: Option<Arc<AtomicBool>>,
+    /// windows are shown as the Mac draws them ("window_style"): their title bars are described
+    exact: bool,
     /// the wallpaper set from the PC (path or colour), if any
     wallpaper: Option<String>,
 }
@@ -148,6 +150,11 @@ fn open_window<W: Write + Send + 'static>(
     send(writer, &Message::WindowCreated { window_id: id, application_id: app.into(), title: t, bounds, parent_id: parent, role })?;
     if app != "desktop" {
         send_shape(writer, id, w, h, 10.0)?;
+        // an exact window's title bar: a 28-point band with the three buttons (scripted)
+        if role != WindowRole::Popup && st.lock().unwrap().exact {
+            let light = |x: i32| Some(Rect { x, y: 8, w: 12, h: 12 });
+            send(writer, &Message::WindowChrome { window_id: id, title_height: 28, close: light(8), minimize: light(28), zoom: light(48), controls: vec![] })?;
+        }
     }
     let wr = writer.clone();
     let hue = (60 * id % 256) as u8;
@@ -262,7 +269,10 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
         Some(Message::ClientHello(_)) => {}
         _ => return Ok(()),
     }
-    send(&writer, &Message::ServerHello(Hello::ours("rm-fakeagent", &["h264"], &["control", "video", "files", "audio", "open_file", "fusion"])))?;
+    // exact windows only when asked for (RM_FAKE_EXACT=1): the viewer's smoke test checks its own frame
+    let exact = std::env::var_os("RM_FAKE_EXACT").is_some_and(|v| v != "0");
+    let features: &[&str] = if exact { &["control", "video", "files", "audio", "open_file", "fusion", "mask", "exact"] } else { &["control", "video", "files", "audio", "open_file", "fusion", "mask"] };
+    send(&writer, &Message::ServerHello(Hello::ours("rm-fakeagent", &["h264"], features)))?;
     send(&writer, &Message::CapabilityReport(caps()))?;
     // TCP messages and input that came over UDP (the direct path) go through one loop
     let (tx, rx) = std::sync::mpsc::channel::<Result<Option<Message>, ProtocolError>>();
@@ -559,6 +569,7 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
                     send(&writer, &Message::WallpaperStatus { applied: false, reason: Some("only an image sent from Windows is used".into()) })?;
                 }
             }
+            Message::WindowStyle { exact } => st.lock().unwrap().exact = exact,
             Message::RestoreWallpaper => {
                 st.lock().unwrap().wallpaper = None;
                 send(&writer, &Message::WallpaperStatus { applied: false, reason: None })?;

@@ -1,7 +1,7 @@
 //! The Settings window (launcher button, or Ctrl+Alt+Shift+P in any remote window): frame
 //! rate, bitrate, sharpness, decoder, frame pacing, pointer — as Moonlight's settings page.
 
-use crate::settings::{Settings, BITRATES, DECODERS, DESKTOP_SCALES, FPS, GLASS_LEVELS, KEYBOARD_MODES, MOTION_LEVELS, QUALITY, WORKSPACES};
+use crate::settings::{Settings, BITRATES, DECODERS, DESKTOP_SCALES, FPS, GLASS_LEVELS, KEYBOARD_MODES, MOTION_LEVELS, QUALITY, WINDOW_FRAMES, WORKSPACES};
 use std::cell::RefCell;
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::*;
@@ -27,6 +27,7 @@ struct Ui {
     keyboard: HWND,
     glass: HWND,
     motion: HWND,
+    frame: HWND,
     dock: HWND,
     font: HFONT,
     on_save: Box<dyn Fn(Settings)>,
@@ -148,10 +149,14 @@ pub fn show(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: i
         let m_items: Vec<String> = MOTION_LEVELS.iter().map(|x| x.to_string()).collect();
         let motion = combo(hwnd, hinst, cx, y, cw, &m_items, current.motion as usize, font);
         y += row;
+        label(hwnd, hinst, lx, y + px(3), px(140), px(22), "Mac windows", font);
+        let f_items: Vec<String> = WINDOW_FRAMES.iter().map(|x| x.to_string()).collect();
+        let frame = combo(hwnd, hinst, cx, y, cw, &f_items, current.frame as usize, font);
+        y += row;
         let dock = button(hwnd, hinst, lx, y, px(450), "Desktop Fusion: the Mac's Dock on this PC's wallpaper (experimental)", 203, BS_AUTOCHECKBOX as u32, font);
         SendMessageW(dock, BM_SETCHECK, Some(WPARAM(current.dock as usize)), None);
         y += px(34);
-        label(hwnd, hinst, lx, y, px(445), px(44), "Decoder, frame pacing and Mac Desktop scale apply to windows opened from now on.", font);
+        label(hwnd, hinst, lx, y, px(445), px(44), "Decoder, frame pacing, Mac Desktop scale and how Mac windows look apply from the next connection or window opened.", font);
         y += px(52);
         button(hwnd, hinst, px(270), y, px(90), "Save", ID_SAVE, BS_DEFPUSHBUTTON as u32, font);
         button(hwnd, hinst, px(370), y, px(90), "Cancel", ID_CANCEL, 0, font);
@@ -159,7 +164,7 @@ pub fn show(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: i
         let mut r = RECT { left: 0, top: 0, right: px(480), bottom: y + px(26) + px(18) };
         let _ = AdjustWindowRectEx(&mut r, WS_POPUP | WS_CAPTION | WS_SYSMENU, false, WS_EX_DLGMODALFRAME);
         let _ = SetWindowPos(hwnd, None, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
-        UI.with(|u| *u.borrow_mut() = Some(Ui { hwnd, fps, bitrate, quality, desktop, workspace, decoder, pacing, cursor, audio, volume, keyboard, glass, motion, dock, font, on_save: Box::new(on_save) }));
+        UI.with(|u| *u.borrow_mut() = Some(Ui { hwnd, fps, bitrate, quality, desktop, workspace, decoder, pacing, cursor, audio, volume, keyboard, glass, motion, frame, dock, font, on_save: Box::new(on_save) }));
     }
 }
 
@@ -182,6 +187,7 @@ fn read(u: &Ui) -> Settings {
             glass: sel(u.glass).min(GLASS_LEVELS.len() - 1) as u8,
             motion: sel(u.motion).min(MOTION_LEVELS.len() - 1) as u8,
             dock: checked(u.dock),
+            frame: sel(u.frame).min(WINDOW_FRAMES.len() - 1) as u8,
         }
     }
 }

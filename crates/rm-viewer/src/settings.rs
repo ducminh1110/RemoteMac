@@ -37,11 +37,14 @@ pub struct Settings {
     pub motion: u8,
     /// the RemoteMac Dock at the bottom of the screen while connected (experimental)
     pub dock: bool,
+    /// how Mac windows look ([`WINDOW_FRAMES`]): 0 as the Mac draws them (title bar, buttons;
+    /// the Mac's menu bar at the top of the screen), 1 with MacBridge's own title bar and menus
+    pub frame: u8,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { fps: 60, bitrate_mbps: 0, quality: 0, decoder: 0, pacing: false, local_cursor: false, desktop_2x: true, workspace: 1, audio: true, volume: 100, keyboard: 0, glass: 0, motion: 0, dock: false }
+        Self { fps: 60, bitrate_mbps: 0, quality: 0, decoder: 0, pacing: false, local_cursor: false, desktop_2x: true, workspace: 1, audio: true, volume: 100, keyboard: 0, glass: 0, motion: 0, dock: false, frame: 0 }
     }
 }
 
@@ -58,6 +61,7 @@ pub const DECODERS: [&str; 3] = ["Auto (GPU when it works)", "GPU (hardware)", "
 pub const KEYBOARD_MODES: [&str; 3] = ["Windows — Ctrl acts as ⌘ Command", "Mac — keys as on a Mac keyboard (Win = ⌘)", "Fusion — Windows shortcuts and text keys"];
 pub const GLASS_LEVELS: [&str; 3] = ["Liquid Glass (refraction and light)", "Frosted (blur only)", "Off (solid, least GPU)"];
 pub const MOTION_LEVELS: [&str; 3] = ["As Windows is set", "Reduced", "Full"];
+pub const WINDOW_FRAMES: [&str; 2] = ["As the Mac draws them (its menu bar at the top)", "With MacBridge's title bar and menus"];
 
 fn path() -> std::path::PathBuf {
     crate::log_path().with_file_name("settings.json")
@@ -84,6 +88,7 @@ impl Settings {
             s.glass = n("glass").map_or(s.glass, |x| x.min(2) as u8);
             s.motion = n("motion").map_or(s.motion, |x| x.min(2) as u8);
             s.dock = b("dock").unwrap_or(s.dock);
+            s.frame = n("frame").map_or(s.frame, |x| x.min(1) as u8);
         }
         s
     }
@@ -107,7 +112,7 @@ impl Settings {
         let v = serde_json::json!({
             "fps": self.fps, "bitrate_mbps": self.bitrate_mbps, "sharpness": self.quality,
             "decoder": self.decoder, "pacing": self.pacing, "local_cursor": self.local_cursor, "desktop_2x": self.desktop_2x, "workspace": self.workspace,
-            "audio": self.audio, "volume": self.volume, "keyboard": self.keyboard, "glass": self.glass, "motion": self.motion, "dock": self.dock,
+            "audio": self.audio, "volume": self.volume, "keyboard": self.keyboard, "glass": self.glass, "motion": self.motion, "dock": self.dock, "frame": self.frame,
         });
         if let Some(d) = path().parent() {
             std::fs::create_dir_all(d)?;

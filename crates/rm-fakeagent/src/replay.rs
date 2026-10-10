@@ -69,8 +69,15 @@ pub fn serve_replay<S: Read + Write + Send + 'static>(mut reader: S, writer: S, 
         Some(Message::ClientHello(_)) => {}
         _ => return Ok(()),
     }
-    let features: &[&str] = if rec.apps.contains_key(DOCK) { &["control", "video", "fusion", "mask"] } else { &["control", "video", "mask"] };
-    send(&w, &Message::ServerHello(Hello::ours("rm-replay (recorded Mac session)", &["h264"], features)))?;
+    // what the recording has: the Dock (Fusion), windows as the Mac drew them (exact)
+    let mut features = vec!["control", "video", "mask"];
+    if rec.apps.contains_key(DOCK) {
+        features.push("fusion");
+    }
+    if rec.session.contains(&Message::WindowStyle { exact: true }) {
+        features.push("exact");
+    }
+    send(&w, &Message::ServerHello(Hello::ours("rm-replay (recorded Mac session)", &["h264"], &features)))?;
     let caps = rec.session.iter().find_map(|m| if let Message::CapabilityReport(c) = m { Some(c.clone()) } else { None });
     send(&w, &Message::CapabilityReport(caps.unwrap_or_else(|| CapabilityReport::unknown("replay"))))?;
     // per app: stop flag of its playback, windows it opened

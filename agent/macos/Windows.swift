@@ -57,6 +57,64 @@ func axWindowMatching(pid: pid_t, rect: CGRect) -> AXUIElement? {
     return nil
 }
 
+private func wFrame(_ el: AXUIElement) -> CGRect? {
+    var p = CGPoint.zero, s = CGSize.zero
+    guard let pv = wAX(el, kAXPositionAttribute as String), let sv = wAX(el, kAXSizeAttribute as String),
+          AXValueGetValue(pv as! AXValue, .cgPoint, &p), AXValueGetValue(sv as! AXValue, .cgSize, &s) else { return nil }
+    return CGRect(origin: p, size: s)
+}
+
+/// The title bar of an exact window, for the viewer ("window_chrome"), in points from the
+/// window's top-left: the band it is moved by (a toolbar that shares the title bar included),
+/// its three buttons, and what else in that band takes clicks (toolbar items, tabs, fields):
+/// those go to the Mac, the rest of the band moves the window on Windows.
+func windowChrome(id: CGWindowID, pid: pid_t, rect: CGRect) -> [String: Any]? {
+    guard let w = axWindowMatching(pid: pid, rect: rect) else { return nil }
+    func rel(_ r: CGRect) -> [String: Any] { rectJSON(r.offsetBy(dx: -rect.minX, dy: -rect.minY).integral) }
+    var out: [String: Any] = ["type": "window_chrome", "window_id": Int(id)]
+    var lights: [CGRect] = []
+    for (key, attr) in [("close", kAXCloseButtonAttribute), ("minimize", kAXMinimizeButtonAttribute), ("zoom", kAXZoomButtonAttribute)] {
+        if let b = wAX(w, attr as String), CFGetTypeID(b) == AXUIElementGetTypeID(), let f = wFrame(b as! AXUIElement), f.width > 0 {
+            out[key] = rel(f); lights.append(f)
+        }
+    }
+    let kids = wAX(w, kAXChildrenAttribute as String) as? [AXUIElement] ?? []
+    // the band: down to the bottom of a toolbar at the window's top, else the title bar (as far
+    // below the buttons as they are below the top), else nothing to move it by
+    var band: CGFloat = 0
+    if let tb = kids.first(where: { wAXString($0, kAXRoleAttribute as String) == (kAXToolbarRole as String) }), let f = wFrame(tb), f.minY - rect.minY < 8 {
+        band = f.maxY - rect.minY
+    } else if let l = lights.first {
+        band = ((l.minY - rect.minY) * 2 + l.height).rounded()
+    }
+    band = min(max(0, band), rect.height / 2)
+    // what takes clicks in the band (bounded walk: toolbars nest their items in groups)
+    let lightRoles: Set<String> = [kAXCloseButtonSubrole as String, kAXMinimizeButtonSubrole as String, kAXZoomButtonSubrole as String, kAXFullScreenButtonSubrole as String]
+    let inputs: Set<String> = [kAXTextFieldRole as String, kAXComboBoxRole as String, kAXSliderRole as String, kAXIncrementorRole as String,
+                               kAXPopUpButtonRole as String, kAXMenuButtonRole as String, kAXCheckBoxRole as String, kAXRadioButtonRole as String,
+                               kAXButtonRole as String, kAXDisclosureTriangleRole as String, "AXLink", "AXSegmentedControl"]
+    var controls: [[String: Any]] = []
+    var stack = kids.map { ($0, 0) }, visited = 0
+    while let (el, depth) = stack.popLast(), visited < 240, controls.count < 64 {
+        visited += 1
+        let f = wFrame(el)
+        if let f = f, f.minY - rect.minY >= band { continue } // below the band: nothing in it
+        let role = wAXString(el, kAXRoleAttribute as String) ?? ""
+        let sub = wAXString(el, kAXSubroleAttribute as String) ?? ""
+        var actions: CFArray?
+        let names: [String] = AXUIElementCopyActionNames(el, &actions) == .success ? (actions.map { ($0 as NSArray) as? [String] ?? [] } ?? []) : []
+        let presses = names.contains(kAXPressAction as String)
+        if let f = f, !lightRoles.contains(sub), inputs.contains(role) || (presses && role != (kAXGroupRole as String) && role != (kAXToolbarRole as String)), f.width > 0, f.height > 0 {
+            controls.append(rel(f))
+            continue
+        }
+        if depth < 5, let more = wAX(el, kAXChildrenAttribute as String) as? [AXUIElement] { for k in more { stack.append((k, depth + 1)) } }
+    }
+    out["title_height"] = Int(band.rounded())
+    out["controls"] = controls
+    return out
+}
+
 /// Titles of buttons inside an AX element (bounded search: panels nest their buttons in groups).
 private func buttonTitles(_ root: AXUIElement) -> Set<String> {
     var out = Set<String>(), stack = [(root, 0)], visited = 0
@@ -121,6 +179,8 @@ func isWholeDisplay(_ rect: CGRect) -> Bool {
 /// Height of a plain title bar (traffic lights + title, nothing else in it), else 0. Windows whose
 /// toolbar shares the title bar (Xcode, Finder) or whose content runs under it keep it.
 func titleBarInset(pid: pid_t, rect: CGRect) -> CGFloat {
+    // exact windows: the viewer shows the Mac's own title bar
+    if exactWindows { return 0 }
     guard let w = axWindowMatching(pid: pid, rect: rect),
           wAXString(w, kAXSubroleAttribute as String) == (kAXStandardWindowSubrole as String) else { return 0 }
     let kids = wAX(w, kAXChildrenAttribute as String) as? [AXUIElement] ?? []

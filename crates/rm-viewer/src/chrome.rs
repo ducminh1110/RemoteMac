@@ -214,6 +214,44 @@ pub fn nav_ball(size: usize, lit: bool) -> Vec<u8> {
     out
 }
 
+/// The Mac's own title bar of an exact window (from `window_chrome`), in Mac points from the
+/// top-left of its picture: the band it is moved by, its three buttons (close, minimise, zoom)
+/// and what else in the band takes clicks.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MacChrome {
+    pub title_height: u32,
+    pub lights: [Option<(i32, i32, u32, u32)>; 3],
+    pub controls: Vec<(i32, i32, u32, u32)>,
+}
+
+/// What a point of an exact window's picture is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacHit {
+    /// one of the Mac's buttons: handled here (close, minimise this window, full screen)
+    Light(Light),
+    /// the title bar where nothing takes clicks: the window moves here
+    Caption,
+    /// the Mac's: clicks go to it
+    Client,
+}
+
+impl MacChrome {
+    /// What is under (`x`, `y`), in Mac points of the picture.
+    pub fn hit(&self, x: f64, y: f64) -> MacHit {
+        let inside = |r: &(i32, i32, u32, u32), pad: f64| x >= r.0 as f64 - pad && x < r.0 as f64 + r.2 as f64 + pad && y >= r.1 as f64 - pad && y < r.1 as f64 + r.3 as f64 + pad;
+        for (l, r) in LIGHTS.iter().zip(&self.lights) {
+            if r.as_ref().is_some_and(|r| inside(r, 2.0)) {
+                return MacHit::Light(*l);
+            }
+        }
+        if y >= 0.0 && y < self.title_height as f64 && !self.controls.iter().any(|r| inside(r, 0.0)) {
+            MacHit::Caption
+        } else {
+            MacHit::Client
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,5 +319,19 @@ mod tests {
         assert!(px(&g, 6, 6).0 < 200, "glyph darkens the centre: {:?}", px(&g, 6, 6));
         let inactive = light_sprite(12, Light::Zoom, false, true, bg);
         assert_eq!(px(&inactive, 6, 6), (206, 206, 206)); // grey, no glyph, when the window is inactive
+    }
+
+    #[test]
+    fn an_exact_windows_title_bar_is_moved_by_where_nothing_takes_clicks() {
+        // a Safari-like window: buttons at 20, 40, 60; an address field in the toolbar band
+        let c = MacChrome { title_height: 52, lights: [Some((14, 20, 14, 14)), Some((34, 20, 14, 14)), Some((54, 20, 14, 14))], controls: vec![(300, 12, 400, 28)] };
+        assert_eq!(c.hit(20.0, 26.0), MacHit::Light(Light::Close));
+        assert_eq!(c.hit(41.0, 27.0), MacHit::Light(Light::Minimize));
+        assert_eq!(c.hit(60.0, 33.0), MacHit::Light(Light::Zoom), "a little generous, as the Mac's");
+        assert_eq!(c.hit(150.0, 20.0), MacHit::Caption);
+        assert_eq!(c.hit(310.0, 20.0), MacHit::Client, "the address field takes clicks");
+        assert_eq!(c.hit(150.0, 60.0), MacHit::Client, "below the band: the window's content");
+        // a window without a title bar (borderless): everything is the Mac's
+        assert_eq!(MacChrome::default().hit(5.0, 5.0), MacHit::Client);
     }
 }
