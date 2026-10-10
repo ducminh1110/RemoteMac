@@ -110,6 +110,11 @@ be checked by hand on real machines is listed under **Not yet verified**.
   "being shared" capsule where its red, yellow and green buttons are (on the Mac's screen and in
   the capture). The Mac now draws the three buttons back in each picture, where the Mac lays
   them out, in colour for the active window and grey for the others, as macOS does.
+- **A Mac window that does not change (a dialog) always shows a picture.** Its first frame could
+  come (over UDP) before the viewer knew of the window and be dropped, and a keyframe asked for
+  then only came with the window's next change. The viewer now asks for a keyframe as each window
+  appears, and a keyframe asked for of a window that is not changing is sent at once (its last
+  picture again).
 - **The Mac's menu bar always shows a picture.** Its first frame could arrive (over UDP) before
   the viewer knew of the strip and be dropped, and a menu bar that does not change sends no
   other: every stream now sends its picture once more as a keyframe a moment after it starts,

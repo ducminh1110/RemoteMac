@@ -635,7 +635,12 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
             Ok(Some(Frame::Video(_))) => {}
             Ok(Some(Frame::Audio(a))) => crate::audio::audio().push(&a),
             Ok(Some(Frame::Msg(m))) => match m {
-                Message::WindowCreated { window_id, application_id, title, bounds, parent_id, role } => emit(UiEvent::WindowCreated { id: window_id, app: application_id, title, x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, parent: parent_id, role }),
+                Message::WindowCreated { window_id, application_id, title, bounds, parent_id, role } => {
+                    // its first picture may have come before this (video over UDP, this over
+                    // TCP) and been dropped; a window that does not change sends no other
+                    video.link().send(&Message::RequestKeyframe { window_id });
+                    emit(UiEvent::WindowCreated { id: window_id, app: application_id, title, x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, parent: parent_id, role })
+                }
                 Message::Apps { apps } => emit(UiEvent::Apps(apps)),
                 Message::DisplayStatus { available, width, height, reason, .. } => emit(UiEvent::Display { available, width, height, reason }),
                 Message::MenuBar { application_id, menus } if rm_protocol::MenuNode::count(&menus) <= rm_protocol::MAX_MENU_ITEMS => {

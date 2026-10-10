@@ -101,6 +101,9 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
                 Frame::Audio(_) => None,
                 Frame::Msg(Message::WindowCreated { window_id, application_id, role, .. }) => {
                     owner.insert(*window_id, application_id.clone());
+                    // its first picture may have come before this (over UDP) and not been kept
+                    // as this app's; a window that does not change (a dialog) sends no other
+                    sess.send(&Message::RequestKeyframe { window_id: *window_id })?;
                     if *application_id == app {
                         windows += 1;
                         if *role == WindowRole::Window && first.is_none() {

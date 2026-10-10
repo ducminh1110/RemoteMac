@@ -243,7 +243,18 @@ final class WindowStream: NSObject, SCStreamOutput {
     }
     private var bitrate = 20_000_000
 
-    func requestKeyframe() { lock.lock(); forceKey = true; lock.unlock() }
+    func requestKeyframe() {
+        lock.lock(); forceKey = true; let pb = lastPB; lock.unlock()
+        // a picture that does not change brings no next frame to make the keyframe of (a dialog,
+        // the menu bar): the last one goes again as a keyframe, unless a new frame took it first
+        // (a moving window's next frame comes within a few ms: it is the keyframe then, nothing more)
+        guard let last = pb else { return }
+        q.asyncAfter(deadline: .now() + 0.06) { [weak self] in
+            guard let self = self else { return }
+            self.lock.lock(); let still = self.forceKey; self.forceKey = false; self.lock.unlock()
+            if still { self.encode(last, pts: CMClockGetTime(CMClockGetHostTimeClock()), ptsUs: agentClockUs(), key: true) }
+        }
+    }
 
     /// Sharp when still (what remote desktops call refinement): while the picture moves the
     /// bitrate keeps it fluid; once it has been still for a moment one keyframe with the whole

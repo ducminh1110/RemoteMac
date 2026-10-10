@@ -196,6 +196,9 @@ impl<S: Read + Write> Ctx<'_, S> {
                 self.desktop = Some((window_id, bounds));
             }
             Frame::Msg(Message::WindowCreated { window_id, bounds, title, role, parent_id, application_id }) => {
+                // its first picture may have come before this (over UDP): ask for one, as the
+                // viewer does
+                self.send(Message::RequestKeyframe { window_id });
                 self.created.push((window_id, role, parent_id));
                 self.created_apps.push((window_id, application_id.clone()));
                 if application_id != self.app {
