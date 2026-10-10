@@ -15,8 +15,9 @@ use std::time::{Duration, Instant};
 
 /// Gaps longer than this in the recording are shortened (an idle app sends nothing).
 const MAX_GAP: Duration = Duration::from_secs(2);
-/// The recorded Mac Dock (see rm-client's recorder).
+/// The recorded Mac Dock and menu bar (see rm-client's recorder).
 const DOCK: &str = "dock";
+const MENUBAR: &str = "menubar";
 
 type Writer<W> = Arc<Mutex<W>>;
 
@@ -77,6 +78,9 @@ pub fn serve_replay<S: Read + Write + Send + 'static>(mut reader: S, writer: S, 
     if rec.session.contains(&Message::WindowStyle { exact: true }) {
         features.push("exact");
     }
+    if rec.apps.contains_key(MENUBAR) {
+        features.push("menubar");
+    }
     send(&w, &Message::ServerHello(Hello::ours("rm-replay (recorded Mac session)", &["h264"], &features)))?;
     let caps = rec.session.iter().find_map(|m| if let Message::CapabilityReport(c) = m { Some(c.clone()) } else { None });
     send(&w, &Message::CapabilityReport(caps.unwrap_or_else(|| CapabilityReport::unknown("replay"))))?;
@@ -132,6 +136,22 @@ pub fn serve_replay<S: Read + Write + Send + 'static>(mut reader: S, writer: S, 
                     send(&w, &Message::WindowDestroyed { window_id: id })?;
                 }
                 send(&w, &Message::AppExited { application_id, code: Some(0) })?;
+            }
+            Message::MenuBarStream { enabled } => {
+                let Some(records) = rec.apps.get(MENUBAR).cloned() else {
+                    send(&w, &Message::MenuBarStatus { available: false, window_id: 0, bounds: Rect { x: 0, y: 0, w: 0, h: 0 }, reason: Some("the menu bar was not recorded".into()) })?;
+                    continue;
+                };
+                let running = playing.lock().unwrap().remove(MENUBAR);
+                if let Some(stop) = running {
+                    stop.store(true, Ordering::SeqCst);
+                }
+                if enabled {
+                    let stop = Arc::new(AtomicBool::new(false));
+                    playing.lock().unwrap().insert(MENUBAR.to_string(), stop.clone());
+                    let (w, open, closed) = (w.clone(), open.clone(), closed.clone());
+                    std::thread::spawn(move || play(&w, MENUBAR, &records, &stop, &open, &closed));
+                }
             }
             Message::DockStream { enabled } => {
                 let Some(records) = rec.apps.get(DOCK).cloned() else {

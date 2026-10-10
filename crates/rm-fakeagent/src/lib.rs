@@ -28,6 +28,9 @@ pub const UPLOAD_DIR: &str = "/Users/runner/Downloads/RemoteMac Uploads";
 /// The Dock's window id and size (as the Mac's: Fusion.swift).
 const DOCK_ID: u64 = 0x7FFF_0002;
 const DOCK: (usize, usize) = (480, 64);
+/// the Mac's menu bar, as Desktop Fusion's exact windows stream it (scripted strip)
+const MENUBAR_ID: u64 = 0x7FFF_0003;
+const MENUBAR: (usize, usize) = (1280, 24);
 
 const APPS: [(&str, &str); 4] = [("desktop", "Mac Desktop"), ("testapp", "RM Test App"), ("notes", "Notes Test"), ("textedit", "TextEdit")];
 
@@ -100,6 +103,8 @@ struct State {
     dock: Option<Arc<AtomicBool>>,
     /// windows are shown as the Mac draws them ("window_style"): their title bars are described
     exact: bool,
+    /// the menu bar is streamed: set to stop it
+    menubar: Option<Arc<AtomicBool>>,
     /// the wallpaper set from the PC (path or colour), if any
     wallpaper: Option<String>,
 }
@@ -311,6 +316,21 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
                     _ => Message::Error { code: "menu_invoke_failed".into(), message: format!("{application_id} {path:?}") },
                 }
             }
+            // the menu bar: a click opens a menu under it (a popup of the bar), Escape closes it
+            Message::MouseButton { window_id: MENUBAR_ID, down: true, .. } => {
+                if st.lock().unwrap().menubar.is_some() {
+                    open_window(&writer, &st, "menubar", "Menu", WindowRole::Popup, Some(MENUBAR_ID))?;
+                }
+                continue;
+            }
+            Message::Key { window_id: MENUBAR_ID, physical_key, down: true, .. } if physical_key == "Escape" => {
+                let menus: Vec<u64> = st.lock().unwrap().windows.iter().filter(|(_, w)| w.parent == Some(MENUBAR_ID)).map(|(k, _)| *k).collect();
+                for m in menus {
+                    close_window(&writer, &st, m)?;
+                }
+                continue;
+            }
+            Message::MouseMove { window_id: MENUBAR_ID, .. } | Message::MouseButton { window_id: MENUBAR_ID, .. } | Message::Key { window_id: MENUBAR_ID, .. } => continue,
             // Mac Desktop: a click picks the window under the pointer; keys go to it
             Message::MouseButton { window_id, down: true, x, y, .. } if st.lock().unwrap().desktop == Some(window_id) => {
                 let mut s = st.lock().unwrap();
@@ -570,6 +590,20 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
                 }
             }
             Message::WindowStyle { exact } => st.lock().unwrap().exact = exact,
+            Message::MenuBarStream { enabled } => {
+                let mut s = st.lock().unwrap();
+                if let Some(stop) = s.menubar.take() {
+                    stop.store(true, Ordering::SeqCst);
+                }
+                if enabled {
+                    let stop = Arc::new(AtomicBool::new(false));
+                    s.menubar = Some(stop.clone());
+                    drop(s);
+                    send(&writer, &Message::MenuBarStatus { available: true, window_id: MENUBAR_ID, bounds: Rect { x: 0, y: 0, w: MENUBAR.0 as u32, h: MENUBAR.1 as u32 }, reason: None })?;
+                    let (wr, st2) = (writer.clone(), st.clone());
+                    std::thread::spawn(move || video_loop(wr, st2, MENUBAR_ID, MENUBAR.0, MENUBAR.1, 230, stop));
+                }
+            }
             Message::RestoreWallpaper => {
                 st.lock().unwrap().wallpaper = None;
                 send(&writer, &Message::WallpaperStatus { applied: false, reason: None })?;

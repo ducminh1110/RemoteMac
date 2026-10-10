@@ -250,7 +250,7 @@ do {
     guard cmin <= 1 && cmax >= 1 else {
         try conn.send(["type": "error", "code": "version_mismatch", "message": "agent speaks protocol 1, client \(cmin)...\(cmax)"]); exit(1)
     }
-    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "fusion", "mask", "exact"],
+    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "fusion", "mask", "exact", "menubar"],
                    "max_surface": [3840, 2160], "agent": "macbridge \(appVersion) \(ProcessInfo.processInfo.operatingSystemVersionString)"])
     try conn.send(probeCapabilities())
 } catch { fail("handshake: \(error)") }
@@ -265,6 +265,7 @@ let tracker = WindowTracker(apps: apps)
 let desktop = DesktopSession()
 let injector = InputInjector(tracker: tracker, desktop: desktop)
 injector.dockRect = { dockMirror.rect }
+injector.menuBarRect = { menuBarMirror.rect }
 let streamsLock = NSLock()
 var streams: [CGWindowID: WindowStream] = [:]
 var lastSize: [CGWindowID: CGSize] = [:]
@@ -300,6 +301,7 @@ sender.onBitrate = { b in
     streamsLock.lock(); let all = Array(streams.values); streamsLock.unlock()
     for ws in all { ws.setBitrate(b) }
     dockMirror.setBitrate(b)
+    menuBarMirror.setBitrate(b)
 }
 // video over UDP + FEC beside the TCP connection (RM_NO_UDP=1: TCP only)
 // (with the client on this network, or no relay, a port that ignores it stands in for the
@@ -436,6 +438,12 @@ let dockMirror = DockMirror()
 dockMirror.onPacket = { pkt in sender.sendVideo(pkt) }
 dockMirror.onStatus = { m in send(m) }
 dockMirror.onShown = { d in tracker.setDock(d) }
+
+// exact windows' menus: the Mac's own menu bar streamed to Windows
+let menuBarMirror = MenuBarMirror()
+menuBarMirror.onPacket = { pkt in sender.sendVideo(pkt) }
+menuBarMirror.onStatus = { m in send(m) }
+menuBarMirror.onShown = { r in tracker.setMenuBar(r) }
 
 let uploads = UploadStore(send: send)
 uploads.cleanup() // leftovers of a session that ended without cleaning (crash, power loss)
@@ -765,6 +773,8 @@ func handle(_ m: [String: Any]) {
         if let d = Data(base64Encoded: m["bmp_base64"] as? String ?? "") { clipboard.applyImage(d) }
     case "request_keyframe" where CGWindowID(int(m["window_id"])) == dockWindowID:
         dockMirror.requestKeyframe()
+    case "request_keyframe" where CGWindowID(int(m["window_id"])) == menuBarWindowID:
+        menuBarMirror.requestKeyframe()
     case "request_keyframe":
         let wid = CGWindowID(int(m["window_id"]))
         streamsLock.lock(); let ws = streams[wid]; streamsLock.unlock()
@@ -813,6 +823,10 @@ func handle(_ m: [String: Any]) {
     case "window_style":
         exactWindows = m["exact"] as? Bool ?? false
         log("windows shown \(exactWindows ? "as the Mac draws them (title bar and buttons)" : "with the viewer's own title bar")")
+    case "menu_bar_stream":
+        let on = m["enabled"] as? Bool ?? false
+        log("Mac menu bar on Windows: \(on ? "asked for" : "no longer wanted")")
+        if on { menuBarMirror.start() } else { menuBarMirror.stop() }
     case "dock_stream":
         let on = m["enabled"] as? Bool ?? false
         log("Mac Dock on Windows: \(on ? "asked for" : "no longer wanted")")
@@ -901,6 +915,7 @@ Thread {
         ticks += 1
         if ticks % 2 == 0 { audioCap.update(everything: desktop.isActive, pids: Set(apps.pids)) }
         if ticks % 2 == 1 { dockMirror.refresh() } // the Dock grew, moved, or restarted
+        if ticks % 3 == 0 { menuBarMirror.refresh() } // the main display or the bar's height changed
         let heard = max(heardOverTCP, sender.udp?.lastHeard ?? 0)
         let silent = CFAbsoluteTimeGetCurrent() - heard
         if viewerSendsHeartbeats && silent > 10 {

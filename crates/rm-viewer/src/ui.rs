@@ -645,6 +645,7 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             stats_tick();
             shortcuts_tick();
             fusion_tick();
+            menu_bar_tick();
             with_app(|a| a.launcher.as_mut().map(|l| l.poll()));
             smoke_tick();
             showcase_tick();
@@ -1013,6 +1014,105 @@ fn on_dock(available: bool, id: u64, (x, y, w, h): (i32, i32, u32, u32), edge: S
                 });
                 place_dock(hwnd_of(k));
             }
+        }
+    }
+}
+
+// ------------------------------------------------------------------ the Mac's menu bar (exact windows)
+
+/// The app id the Mac's menu bar strip is shown as (its menus have it too).
+const MENUBAR_APP: &str = "menubar";
+
+thread_local! {
+    /// the strip's window, while the Mac streams its menu bar
+    static MENU_BAR: std::cell::Cell<Option<isize>> = const { std::cell::Cell::new(None) };
+}
+
+fn on_menu_bar(available: bool, id: u64, w: u32, h: u32, reason: Option<String>) {
+    if !available {
+        eprintln!("the Mac's menu bar is not shown here: {}", reason.as_deref().unwrap_or("?"));
+        if let Some(k) = MENU_BAR.with(|m| m.take()) {
+            unsafe {
+                let _ = DestroyWindow(hwnd_of(k));
+            }
+        }
+        return;
+    }
+    match with_app(|a| a.by_id.get(&id).copied()).flatten() {
+        Some(k) => {
+            with_app(|a| a.remotes.get_mut(&k).map(|r| (r.rw, r.rh) = (w, h)));
+            place_menu_bar(hwnd_of(k));
+        }
+        None => {
+            create_remote_window(id, MENUBAR_APP, "Menu Bar", (0, 0, w, h), None, WindowRole::Popup);
+            if let Some(k) = with_app(|a| a.by_id.get(&id).copied()).flatten() {
+                MENU_BAR.with(|m| m.set(Some(k)));
+                unsafe {
+                    let _ = ShowWindow(hwnd_of(k), SW_HIDE); // until a Mac window is in front
+                }
+                eprintln!("the Mac's menu bar: {w}x{h} points, at the top of the screen while a Mac window is in front");
+            }
+        }
+    }
+}
+
+/// The strip at the top of the monitor of the Mac window in front (its Mac points at that
+/// screen's scale, from the left as on the Mac).
+fn place_menu_bar(frame: HWND) {
+    let Some((w, h, scale)) = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| (r.rw, r.rh, pic_scale(r.scale)))).flatten() else { return };
+    let anchor = unsafe { GetForegroundWindow() };
+    let mon = unsafe {
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let _ = GetMonitorInfoW(MonitorFromWindow(anchor, MONITOR_DEFAULTTOPRIMARY), &mut info);
+        info.rcMonitor
+    };
+    let (pw, ph) = (((w as f64 * scale).round() as i32).min(mon.right - mon.left), (h as f64 * scale).round() as i32);
+    unsafe {
+        let _ = SetWindowPos(frame, Some(HWND_TOPMOST), mon.left, mon.top, pw, ph, SWP_NOACTIVATE);
+    }
+    layout(frame);
+}
+
+/// How tall the strip is on `mon`'s monitor while shown (0: not shown there).
+fn menu_bar_height(mon: HMONITOR) -> i32 {
+    let Some(k) = MENU_BAR.with(|m| m.get()) else { return 0 };
+    unsafe {
+        let h = hwnd_of(k);
+        if !IsWindowVisible(h).as_bool() || MonitorFromWindow(h, MONITOR_DEFAULTTONULL) != mon {
+            return 0;
+        }
+        let mut r = RECT::default();
+        let _ = GetWindowRect(h, &mut r);
+        r.bottom - r.top
+    }
+}
+
+/// Every few hundred ms: the strip shows while a Mac window (or one of its menus, or the strip)
+/// is in front, on that window's monitor, and that window keeps its title bar below it; it goes
+/// when a Windows app is in front, as the Mac's menu bar belongs to the Mac app in front.
+fn menu_bar_tick() {
+    let Some(k) = MENU_BAR.with(|m| m.get()) else { return };
+    let strip = hwnd_of(k);
+    let fg = unsafe { GetForegroundWindow() };
+    let mac = with_app(|a| a.remotes.get(&(fg.0 as isize)).map(|r| r.exact && !r.fullscreen && r.app != DESKTOP_APP && r.role != WindowRole::Popup)).flatten().unwrap_or(false);
+    let ours = fg == strip || with_app(|a| a.remotes.get(&(fg.0 as isize)).is_some_and(|r| r.app == MENUBAR_APP)).unwrap_or(false);
+    unsafe {
+        let shown = IsWindowVisible(strip).as_bool();
+        if mac {
+            if !shown || MonitorFromWindow(strip, MONITOR_DEFAULTTONULL) != MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST) {
+                place_menu_bar(strip);
+                let _ = ShowWindow(strip, SW_SHOWNOACTIVATE);
+            }
+            // the window in front keeps its title bar below the strip (it is moved by it)
+            let mut r = RECT::default();
+            let _ = GetWindowRect(fg, &mut r);
+            let mut s = RECT::default();
+            let _ = GetWindowRect(strip, &mut s);
+            if !IsZoomed(fg).as_bool() && r.top < s.bottom && r.bottom > s.top && GetCapture().0.is_null() {
+                let _ = SetWindowPos(fg, None, r.left, s.bottom, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        } else if shown && !ours {
+            let _ = ShowWindow(strip, SW_HIDE);
         }
     }
 }
@@ -1817,6 +1917,7 @@ fn handle_event(ev: UiEvent) {
         }
         UiEvent::Dock { available, id, x, y, w, h, edge, reason } => on_dock(available, id, (x, y, w, h), edge, reason),
         UiEvent::Mask { id, width, height, alpha } => on_mask(id, width, height, alpha),
+        UiEvent::MacMenuBar { available, id, w, h, reason } => on_menu_bar(available, id, w, h, reason),
         UiEvent::Chrome { id, chrome } => {
             with_app(|a| {
                 let k = *a.by_id.get(&id)?;
@@ -2015,6 +2116,10 @@ fn is_popup(frame: HWND) -> bool {
 fn place_popup(frame: HWND) {
     if with_app(|a| a.remotes.get(&(frame.0 as isize)).is_some_and(|r| r.app == DOCK_APP)).unwrap_or(false) {
         place_dock(frame);
+        return;
+    }
+    if with_app(|a| a.remotes.get(&(frame.0 as isize)).is_some_and(|r| r.app == MENUBAR_APP && r.parent.is_none())).unwrap_or(false) {
+        place_menu_bar(frame);
         return;
     }
     let Some((parent, x, y, w, h, scale)) = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| (r.parent, r.rx, r.ry, r.rw, r.rh, pic_scale(r.scale)))).flatten() else { return };
@@ -2636,8 +2741,10 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
             if GetMonitorInfoW(mon, &mut info).as_bool() {
                 let (w, m) = (info.rcWork, info.rcMonitor);
-                mi.ptMaxPosition = POINT { x: w.left - m.left, y: w.top - m.top };
-                mi.ptMaxSize = POINT { x: w.right - w.left, y: w.bottom - w.top };
+                // an exact Mac window maximised stops below the Mac's menu bar shown there
+                let bar = if is_exact(hwnd) { (menu_bar_height(mon) - (w.top - m.top)).max(0) } else { 0 };
+                mi.ptMaxPosition = POINT { x: w.left - m.left, y: w.top - m.top + bar };
+                mi.ptMaxSize = POINT { x: w.right - w.left, y: w.bottom - w.top - bar };
             }
             LRESULT(0)
         }
@@ -3894,6 +4001,24 @@ fn gallery_tick(dir: &std::path::Path) -> bool {
                 } else if since.elapsed() > Duration::from_millis(3000) {
                     let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
                     ask("14-fusion-dock", Some(RECT { left: 0, top: (shown.top - 220).max(0), right: sw, bottom: sh }));
+                }
+            }
+        }
+        5 => {
+            // exact windows: a Mac window in front, the Mac's own menu bar above it at the top
+            let win = with_app(|a| a.remotes.iter().find(|(_, r)| r.exact && r.role == WindowRole::Window && r.app != DESKTOP_APP).map(|(k, _)| *k)).flatten();
+            if let (Some(_), Some(k)) = (MENU_BAR.with(|m| m.get()), win) {
+                if fresh {
+                    unsafe {
+                        let _ = SetForegroundWindow(hwnd_of(k));
+                    }
+                } else if since.elapsed() > Duration::from_millis(2500) {
+                    let sw = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+                    let mut r = RECT::default();
+                    unsafe {
+                        let _ = GetWindowRect(hwnd_of(k), &mut r);
+                    }
+                    ask("15-menu-bar", Some(RECT { left: 0, top: 0, right: sw, bottom: (r.bottom + 12).min(r.top + 420).max(200) }));
                 }
             }
         }

@@ -261,6 +261,9 @@ final class WindowTracker {
     /// are popups over it there.
     private var dockShown: (pid: pid_t, rect: CGRect)?
     func setDock(_ d: (pid_t, CGRect)?) { queue.async { self.dockShown = d.map { (pid: $0.0, rect: $0.1) } } }
+    /// The Mac's menu bar is shown on Windows (MenuStrip.swift): its menus are popups of it.
+    private var menuBarShown: CGRect?
+    func setMenuBar(_ r: CGRect?) { queue.async { self.menuBarShown = r } }
 
     /// The viewer clicked or typed in a window of the session: a window that another app opens
     /// in the next few seconds (a document double-clicked in Finder opens in Preview) is the
@@ -372,7 +375,10 @@ final class WindowTracker {
             let fromService = servicePids.contains(pid)
             // a menu or stack of the Mac's Dock shown on Windows (not the Dock itself)
             let dockPopup = dockShown.map { pid == $0.pid && !rect.contains(CGPoint(x: $0.rect.midX, y: $0.rect.midY)) && layer > 0 } ?? false
-            guard launched.contains(pid) || fromService || companions[pid] != nil || dockPopup else { continue }
+            // a menu that drops from the Mac's menu bar shown on Windows (an app's, the Apple
+            // menu, a status item's: whoever draws it), not the bar itself
+            let menuPopup = menuBarShown.map { layer > 0 && rect.minY >= $0.minY - 1 && rect.minY <= $0.maxY + 6 && rect.maxY > $0.maxY + 2 } ?? false
+            guard launched.contains(pid) || fromService || companions[pid] != nil || dockPopup || menuPopup else { continue }
             seen.insert(id)
             if var old = known[id] {
                 if old.rect != rect {
@@ -395,6 +401,12 @@ final class WindowTracker {
             // (a pop-up menu is drawn at once: shown without the wait)
             if age < (layer == popUpMenuLayer ? 1 : 3) { continue }
             pending.removeValue(forKey: id)
+            if menuPopup {
+                let w = WinInfo(id: id, pid: pid, title: title, rect: rect, appID: apps.appID(forPid: pid) ?? "menubar", role: .popup, parent: menuBarWindowID)
+                known[id] = w
+                onCreated?(w)
+                continue
+            }
             if dockPopup {
                 let w = WinInfo(id: id, pid: pid, title: title, rect: rect, appID: "dock", role: .popup, parent: dockWindowID)
                 known[id] = w

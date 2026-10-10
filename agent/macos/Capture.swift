@@ -239,8 +239,11 @@ final class WindowStream: NSObject, SCStreamOutput {
             cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2
             cfg.queueDepth = 6; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true
+            // only those apps' windows (the Dock and the desktop picture), or everything there (no
+            // apps given: the menu bar's strip, which no window covers)
             let apps = content.applications.filter { pids.contains($0.processID) }
-            let s = SCStream(filter: SCContentFilter(display: d, including: apps, exceptingWindows: []), configuration: cfg, delegate: nil)
+            let filter = pids.isEmpty ? SCContentFilter(display: d, excludingWindows: []) : SCContentFilter(display: d, including: apps, exceptingWindows: [])
+            let s = SCStream(filter: filter, configuration: cfg, delegate: nil)
             try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
             t0 = CFAbsoluteTimeGetCurrent()
             config = cfg

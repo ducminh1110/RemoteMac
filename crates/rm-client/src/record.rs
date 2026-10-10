@@ -14,6 +14,9 @@ use std::time::{Duration, Instant};
 /// streams it as.
 pub const DOCK: &str = "dock";
 const DOCK_WINDOW: u64 = 0x7FFF_0002;
+/// The pseudo-app that records the Mac's menu bar (exact windows' menus), and its window id.
+pub const MENUBAR: &str = "menubar";
+const MENUBAR_WINDOW: u64 = 0x7FFF_0003;
 
 pub struct Plan {
     pub apps: Vec<String>,
@@ -71,6 +74,9 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
         if app == DOCK {
             owner.insert(DOCK_WINDOW, app.clone()); // its first frame may come before its status
             sess.send(&Message::DockStream { enabled: true })?;
+        } else if app == MENUBAR {
+            owner.insert(MENUBAR_WINDOW, app.clone());
+            sess.send(&Message::MenuBarStream { enabled: true })?;
         } else {
             sess.send(&Message::AppLaunch { application_id: app.clone(), arguments: vec![], working_directory: None, environment: Default::default() })?;
         }
@@ -104,6 +110,14 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
                     Some(application_id.clone())
                 }
                 Frame::Msg(Message::WindowDestroyed { window_id } | Message::WindowMoved { window_id, .. } | Message::WindowTitleChanged { window_id, .. } | Message::WindowMask { window_id, .. } | Message::WindowChrome { window_id, .. }) => owner.get(window_id).cloned(),
+                Frame::Msg(Message::MenuBarStatus { available, window_id, .. }) if app == MENUBAR => {
+                    owner.insert(*window_id, app.clone());
+                    if *available && first.is_none() {
+                        windows += 1;
+                        first = Some(Instant::now());
+                    }
+                    Some(app.clone())
+                }
                 Frame::Msg(Message::DockStatus { available, window_id, .. }) if app == DOCK => {
                     owner.insert(*window_id, app.clone());
                     if *available && first.is_none() {
@@ -128,7 +142,7 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
                 Frame::Audio(a) => rm_protocol::encode_audio(a)?,
             };
             put(out, &app, start, wire)?;
-            if first.is_some() && !asked && app != DOCK {
+            if first.is_some() && !asked && app != DOCK && app != MENUBAR {
                 asked = true;
                 sess.send(&Message::GetMenuBar { application_id: app.clone() })?;
                 sess.send(&Message::GetAppIcon { application_id: app.clone() })?;
@@ -140,6 +154,10 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
         // close it before the next app (not recorded: the replay keeps the windows open)
         if app == DOCK {
             sess.send(&Message::DockStream { enabled: false })?;
+            continue;
+        }
+        if app == MENUBAR {
+            sess.send(&Message::MenuBarStream { enabled: false })?;
             continue;
         }
         sess.send(&Message::AppTerminate { application_id: app.clone() })?;

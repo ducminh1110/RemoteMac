@@ -102,6 +102,11 @@ struct Ctx<'a, S: Read + Write> {
     masks: std::collections::HashMap<u64, (u32, u32, Option<Vec<u8>>)>,
     /// exact windows' title bars: id -> (band height, has its close button, controls in it)
     chromes: std::collections::HashMap<u64, (u32, bool, usize)>,
+    /// the Mac's menu bar streamed: (available, window id, w, h, reason), its frames and picture
+    menubar: Option<(bool, u64, u32, u32, Option<String>)>,
+    menubar_frames: usize,
+    menubar_decoder: Option<rm_decode::H264Decoder>,
+    menubar_picture: Option<rm_decode::Picture>,
 }
 
 fn is_timeout(e: &ProtocolError) -> bool {
@@ -125,6 +130,16 @@ impl<S: Read + Write> Ctx<'_, S> {
             Frame::Msg(Message::AudioStatus { state, reason }) => self.audio_status = Some((state, reason)),
             Frame::Msg(Message::DockStatus { available, window_id, bounds, reason, .. }) => self.dock = Some((available, window_id, bounds.w, bounds.h, reason)),
             Frame::Msg(Message::WallpaperStatus { applied, reason }) => self.wallpaper = Some((applied, reason)),
+            Frame::Msg(Message::MenuBarStatus { available, window_id, bounds, reason }) => self.menubar = Some((available, window_id, bounds.w, bounds.h, reason)),
+            Frame::Video(v) if self.menubar.as_ref().is_some_and(|d| d.0 && d.1 == v.window_id) => {
+                self.menubar_frames += 1;
+                if self.menubar_decoder.is_none() {
+                    self.menubar_decoder = rm_decode::H264Decoder::new().ok();
+                }
+                if let Some(Ok(Some(p))) = self.menubar_decoder.as_mut().map(|d| d.decode(&v.data)) {
+                    self.menubar_picture = Some(p);
+                }
+            }
             Frame::Msg(Message::WindowChrome { window_id, title_height, close, controls, .. }) => {
                 self.chromes.insert(window_id, (title_height, close.is_some(), controls.len()));
             }
@@ -274,7 +289,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let caps_dump = serde_json::to_string(&sess.capabilities).unwrap_or_default();
     let mut c = Ctx { sess, r: Report::default(), started: Instant::now(), first_video: None, last_title: String::new(),
         destroyed: false, exited: false, launched_pid: None, errors: vec![], non_annexb: 0,
-        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None, main_rect: None, desktop: None, desktop_frames: 0, desktop_video: None, gs_tunnel: None, gs_out: None, audio_status: None, audio_packets: 0, audio_bad: 0, audio_peak: 0, audio_seq: None, audio_gaps: 0, created_apps: vec![], app: app.to_string(), dock: None, dock_frames: 0, dock_video: None, wallpaper: None, dock_decoder: None, dock_picture: None, masks: Default::default(), chromes: Default::default() };
+        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None, main_rect: None, desktop: None, desktop_frames: 0, desktop_video: None, gs_tunnel: None, gs_out: None, audio_status: None, audio_packets: 0, audio_bad: 0, audio_peak: 0, audio_seq: None, audio_gaps: 0, created_apps: vec![], app: app.to_string(), dock: None, dock_frames: 0, dock_video: None, wallpaper: None, dock_decoder: None, dock_picture: None, masks: Default::default(), chromes: Default::default(), menubar: None, menubar_frames: 0, menubar_decoder: None, menubar_picture: None };
 
     c.r.check("agent reports capture+input+GUI", caps_ok, caps_dump);
 
@@ -451,6 +466,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
 
     documents(&mut c, wid);
     exact_windows(&mut c);
+    menu_bar(&mut c);
     fusion(&mut c);
 
     // ---- a virtual display the size of the client's monitor; fullscreen fills it exactly
@@ -672,6 +688,36 @@ fn exact_windows<S: Read + Write>(c: &mut Ctx<S>) {
     }
     c.send(Message::WindowStyle { exact: false });
     c.created_apps.retain(|(_, a)| a != "textedit");
+}
+
+/// The Mac's menu bar ("menu_bar_stream"): streamed as a window of its own (the main screen's
+/// top strip), its menus shown as popups of it; a click on the Apple menu opens it.
+fn menu_bar<S: Read + Write>(c: &mut Ctx<S>) {
+    c.send(Message::MenuBarStream { enabled: true });
+    let ok = c.pump(12, |c| c.menubar.as_ref().is_some_and(|d| !d.0 || c.menubar_picture.is_some()));
+    let d = c.menubar.clone();
+    let shown = ok && d.as_ref().is_some_and(|d| d.0 && d.2 > 300 && (16..=80).contains(&d.3)) && c.menubar_picture.is_some();
+    c.r.check("menu bar: the Mac's own menu bar is streamed as a window of its own", shown, format!("status={d:?} frames={}", c.menubar_frames));
+    if let Some(p) = c.menubar_picture.take() {
+        eprintln!("[INFO] the Mac's menu bar as streamed: {}x{} px, {} colours", p.width, p.height, p.distinct_colors());
+        print_picture("MENUBAR", &p);
+    }
+    if let Some((true, id, _, h, _)) = d {
+        // the Apple menu, at the bar's left end: it opens as a popup of the bar
+        let before = c.created.len();
+        let (x, y) = (24.0, h as f64 / 2.0);
+        c.send(Message::MouseMove { window_id: id, x, y });
+        c.pump(1, |_| false);
+        c.send(Message::MouseButton { window_id: id, button: MouseButton::Left, down: true, x, y });
+        c.send(Message::MouseButton { window_id: id, button: MouseButton::Left, down: false, x, y });
+        let opened = c.pump(6, |c| c.created[before..].iter().any(|(_, r, p)| *r == rm_protocol::WindowRole::Popup && *p == Some(id)));
+        c.r.check("menu bar: a menu opened from it is shown as a popup of it", opened, format!("created={:?}", &c.created[before..]));
+        c.send(Message::Key { window_id: id, physical_key: "Escape".into(), modifiers: vec![], down: true });
+        c.send(Message::Key { window_id: id, physical_key: "Escape".into(), modifiers: vec![], down: false });
+        c.pump(1, |_| false);
+    }
+    c.send(Message::MenuBarStream { enabled: false });
+    c.pump(1, |_| false);
 }
 
 /// Sound while the Mac Desktop is open (every app is heard): asked for, received as valid PCM
