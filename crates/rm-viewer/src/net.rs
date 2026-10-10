@@ -193,6 +193,8 @@ pub enum UiEvent {
     /// The Mac's own Dock (Desktop Fusion): streamed as window `id` from this region of the
     /// Mac's screen (points), at `edge`; or why it cannot be shown.
     Dock { available: bool, id: u64, x: i32, y: i32, w: u32, h: u32, edge: String, reason: Option<String> },
+    /// The shape of window `id`'s pictures of `width`x`height` (alpha per pixel; None: opaque).
+    Mask { id: u64, width: u32, height: u32, alpha: Option<std::sync::Arc<Vec<u8>>> },
     Notice(String),
     Disconnected(String),
 }
@@ -620,6 +622,10 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
                 Message::AppLaunched { application_id, .. } => emit(UiEvent::Launched(application_id)),
                 Message::AudioStatus { state, reason } => crate::audio::audio().set_mac_status(&state, reason.as_deref()),
                 Message::DockStatus { available, window_id, bounds, edge, reason } => emit(UiEvent::Dock { available, id: window_id, x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, edge, reason }),
+                Message::WindowMask { window_id, width, height, rle } => {
+                    let alpha = rm_protocol::mask::from_message(width, height, &rle).map(std::sync::Arc::new);
+                    emit(UiEvent::Mask { id: window_id, width, height, alpha })
+                }
                 Message::WallpaperStatus { applied, reason } => eprintln!("wallpaper on the Mac: {}", if applied { "this PC's".to_string() } else { reason.unwrap_or_else(|| "the Mac's own".into()) }),
                 Message::Error { code, message } => emit(UiEvent::Notice(format!("{code}: {message}"))),
                 Message::CapabilityUnavailable { capability, reason } => emit(UiEvent::Notice(format!("{capability} unavailable: {reason}"))),

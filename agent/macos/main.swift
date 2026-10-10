@@ -238,13 +238,19 @@ func readJSON() throws -> [String: Any]? {
     return try JSONSerialization.jsonObject(with: payload) as? [String: Any]
 }
 
+/// What the viewer can do (its hello's features): new messages are only sent to one that has them.
+var viewerFeatures = Set<String>()
+/// The viewer shows windows as the Mac draws them, title bar and buttons included ("window_style").
+var exactWindows = false
+
 do {
     guard let hello = try readJSON(), hello["type"] as? String == "client_hello" else { fail("expected client_hello") }
+    viewerFeatures = Set(hello["features"] as? [String] ?? [])
     let cmin = int(hello["min_version"]), cmax = int(hello["max_version"])
     guard cmin <= 1 && cmax >= 1 else {
         try conn.send(["type": "error", "code": "version_mismatch", "message": "agent speaks protocol 1, client \(cmin)...\(cmax)"]); exit(1)
     }
-    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "fusion"],
+    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "fusion", "mask"],
                    "max_surface": [3840, 2160], "agent": "macbridge \(appVersion) \(ProcessInfo.processInfo.operatingSystemVersionString)"])
     try conn.send(probeCapabilities())
 } catch { fail("handshake: \(error)") }
@@ -341,10 +347,20 @@ func sendMenuBar(_ id: String) {
 func startStream(_ id: CGWindowID, inset: CGFloat, popup: Bool = false) {
     let ws = WindowStream(windowID: id, inset: inset) { pkt in sender.sendVideo(pkt) }
     ws.popup = popup
+    ws.keepButtons = exactWindows
+    if viewerFeatures.contains("mask") { ws.onShape = { w, h, a in sendShape(id, w, h, a) } }
     ws.setBitrate(sender.bitrate)
     streamsLock.lock(); streams[id] = ws; streamsLock.unlock()
     Task { do { try await ws.start(); log("stream started window=\(id)") } catch { log("stream start failed window=\(id): \(error)")
         send(["type": "capability_unavailable", "capability": "capture", "reason": "\(error)"]) } }
+}
+/// The shape of window `id`'s picture, for the viewer ("window_mask"), while its stream is the
+/// one measured (a newer stream of another size sends its own).
+func sendShape(_ id: CGWindowID, _ w: Int, _ h: Int, _ a: [UInt8]) {
+    guard let m = Shape.message(id, width: w, height: h, alpha: a) else { return }
+    let clear = a.reduce(0) { $0 + ($1 < 128 ? 1 : 0) }
+    log("window \(id) shape: \(w)x\(h) px, \(clear) clear (\((m["rle"] as? String)?.count ?? 0) bytes)")
+    send(m)
 }
 func stopStream(_ id: CGWindowID) {
     streamsLock.lock(); let ws = streams.removeValue(forKey: id); streamsLock.unlock()

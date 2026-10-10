@@ -423,6 +423,54 @@ pub enum Message {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// Agent -> client (feature "mask"): how opaque each pixel of window `window_id`'s picture
+    /// is (`width`x`height`, the picture's own size): its rounded corners, a menu's or the
+    /// Dock's shape, as the Mac draws them. Where it is 0 the window is not there and what is
+    /// behind it on this PC shows (the video, which has no transparency, is black there; at the
+    /// edges it is the window's colour already mixed with black, so it is used as premultiplied).
+    /// `rle`: base64 of [`mask`] runs; empty: fully opaque. Sent when a stream starts (after
+    /// each size change); a mask whose size is not the picture's is not used.
+    WindowMask {
+        window_id: u64,
+        width: u32,
+        height: u32,
+        #[serde(default)]
+        rle: String,
+    },
+    /// Client -> agent (feature "exact"): show windows as the Mac draws them, title bar and its
+    /// buttons included (`exact`), or with the title bar cut off for the viewer's own (false,
+    /// the default). Applies to the streams started after it (send it before launching).
+    WindowStyle { exact: bool },
+    /// Agent -> client (feature "exact"): the title bar of window `window_id` (an exact
+    /// window), in points from the top-left of its picture: `title_height` the band it is
+    /// dragged by; `close`, `minimize`, `zoom` its buttons; `controls` what else in that band
+    /// takes clicks (toolbar items, tabs, fields): those go to the Mac, the rest of the band
+    /// moves the window here.
+    WindowChrome {
+        window_id: u64,
+        title_height: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        close: Option<Rect>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        minimize: Option<Rect>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        zoom: Option<Rect>,
+        #[serde(default)]
+        controls: Vec<Rect>,
+    },
+    /// Client -> agent (feature "menubar"): stream the Mac's own menu bar (`enabled`), or stop.
+    /// The agent answers with `MenuBarStatus` and streams the bar as the window `window_id`;
+    /// the menus that open from it come as popups of that window.
+    MenuBarStream { enabled: bool },
+    /// Agent -> client: the Mac's menu bar (`bounds` in Mac points: its screen's top strip), or
+    /// why it cannot be shown (`available` false: it hides itself…).
+    MenuBarStatus {
+        available: bool,
+        window_id: u64,
+        bounds: Rect,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     /// Client -> agent (feature "audio"): send the sound of the session's apps (`enabled`), or
     /// stop. The Mac sends nothing on the Audio channel before this.
     AudioControl { enabled: bool },
@@ -444,7 +492,7 @@ impl Message {
         use Message::*;
         match self {
             MouseMove { .. } | MouseButton { .. } | Scroll { .. } | Key { .. } | TextInput { .. } => Channel::Input,
-            WindowCreated { .. } | WindowDestroyed { .. } | WindowMoved { .. } | WindowTitleChanged { .. } => {
+            WindowCreated { .. } | WindowDestroyed { .. } | WindowMoved { .. } | WindowTitleChanged { .. } | WindowMask { .. } | WindowChrome { .. } => {
                 Channel::WindowMetadata
             }
             Ping { .. } | Pong { .. } => Channel::Telemetry,
@@ -900,6 +948,18 @@ mod tests {
             let b = encode(&m).unwrap();
             assert_eq!(decode(&b).unwrap().unwrap().0, m);
         }
+        // the window shape and exact-window messages
+        for m in [
+            Message::WindowMask { window_id: 7, width: 4, height: 2, rle: base64_encode(&mask::encode(&[0, 255, 255, 0, 255, 255, 255, 255])) },
+            Message::WindowStyle { exact: true },
+            Message::WindowChrome { window_id: 7, title_height: 52, close: Some(Rect { x: 20, y: 20, w: 14, h: 14 }), minimize: None, zoom: None, controls: vec![Rect { x: 300, y: 12, w: 28, h: 28 }] },
+            Message::MenuBarStream { enabled: true },
+            Message::MenuBarStatus { available: true, window_id: 0x7FFF_0003, bounds: Rect { x: 0, y: 0, w: 1512, h: 33 }, reason: None },
+        ] {
+            let b = encode(&m).unwrap();
+            assert_eq!(decode(&b).unwrap().unwrap().0, m);
+        }
+        assert_eq!(Message::WindowMask { window_id: 1, width: 1, height: 1, rle: String::new() }.channel(), Channel::WindowMetadata);
         // an older agent's status without an edge still reads
         let j = r#"{"type":"dock_status","available":false,"window_id":0,"bounds":{"x":0,"y":0,"w":0,"h":0},"reason":"hidden"}"#;
         assert!(matches!(serde_json::from_str::<Message>(j).unwrap(), Message::DockStatus { available: false, .. }));
@@ -1004,6 +1064,7 @@ mod tests {
 /// Lets a real Mac session be replayed to a viewer elsewhere (`rm-fakeagent --replay`).
 pub mod audio;
 pub mod fec;
+pub mod mask;
 pub mod secure;
 pub mod udp;
 

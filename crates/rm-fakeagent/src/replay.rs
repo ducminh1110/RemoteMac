@@ -69,7 +69,7 @@ pub fn serve_replay<S: Read + Write + Send + 'static>(mut reader: S, writer: S, 
         Some(Message::ClientHello(_)) => {}
         _ => return Ok(()),
     }
-    let features: &[&str] = if rec.apps.contains_key(DOCK) { &["control", "video", "fusion"] } else { &["control", "video"] };
+    let features: &[&str] = if rec.apps.contains_key(DOCK) { &["control", "video", "fusion", "mask"] } else { &["control", "video", "mask"] };
     send(&w, &Message::ServerHello(Hello::ours("rm-replay (recorded Mac session)", &["h264"], features)))?;
     let caps = rec.session.iter().find_map(|m| if let Message::CapabilityReport(c) = m { Some(c.clone()) } else { None });
     send(&w, &Message::CapabilityReport(caps.unwrap_or_else(|| CapabilityReport::unknown("replay"))))?;
@@ -176,7 +176,7 @@ fn play<W: Write>(w: &Writer<W>, app: &str, records: &[Record], stop: &AtomicBoo
                 open.lock().unwrap().insert(window_id, app.to_string());
                 None
             }
-            Ok(Some(Frame::Msg(Message::WindowDestroyed { window_id } | Message::WindowMoved { window_id, .. } | Message::WindowTitleChanged { window_id, .. }))) => Some(window_id),
+            Ok(Some(Frame::Msg(Message::WindowDestroyed { window_id } | Message::WindowMoved { window_id, .. } | Message::WindowTitleChanged { window_id, .. } | Message::WindowMask { window_id, .. } | Message::WindowChrome { window_id, .. }))) => Some(window_id),
             _ => None,
         };
         if window.is_some_and(|id| closed.lock().unwrap().contains(&id)) {

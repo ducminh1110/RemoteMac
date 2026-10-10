@@ -146,12 +146,40 @@ fn open_window<W: Write + Send + 'static>(
         st.lock().unwrap().desktop = Some(id);
     }
     send(writer, &Message::WindowCreated { window_id: id, application_id: app.into(), title: t, bounds, parent_id: parent, role })?;
+    if app != "desktop" {
+        send_shape(writer, id, w, h, 10.0)?;
+    }
     let wr = writer.clone();
     let hue = (60 * id % 256) as u8;
     let st2 = st.clone();
     let handle = std::thread::spawn(move || video_loop(wr, st2, id, w, h, hue, stop));
     st.lock().unwrap().windows.get_mut(&id).unwrap().video = Some(handle);
     Ok(id)
+}
+
+/// A `w` x `h` alpha mask with corners rounded by `r` pixels (anti-aliased), as the Mac's
+/// windows have.
+pub fn rounded_mask(w: usize, h: usize, r: f32) -> Vec<u8> {
+    let mut m = vec![255u8; w * h];
+    if r <= 0.0 {
+        return m;
+    }
+    for y in 0..h {
+        for x in 0..w {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let (cx, cy) = (px.clamp(r, w as f32 - r), py.clamp(r, h as f32 - r));
+            let d = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
+            m[y * w + x] = ((r + 0.5 - d).clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+    }
+    m
+}
+
+/// The shape of window `id`'s pictures (`w` x `h`), rounded like a Mac window's (scripted).
+fn send_shape<W: Write>(writer: &Writer<W>, id: u64, w: usize, h: usize, r: f32) -> Result<(), ProtocolError> {
+    let m = rounded_mask(w, h, r);
+    let rle = if r <= 0.0 { String::new() } else { base64_encode(&mask::encode(&m)) };
+    send(writer, &Message::WindowMask { window_id: id, width: w as u32, height: h as u32, rle })
 }
 
 fn close_window<W: Write>(writer: &Writer<W>, st: &Arc<Mutex<State>>, id: u64) -> Result<(), ProtocolError> {
@@ -489,6 +517,7 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
                     let bounds = Rect { x: if on { 1920 } else { 200 }, y: if on { 25 } else { 216 }, w, h };
                     st.lock().unwrap().rects.insert(window_id, bounds);
                     send(&writer, &Message::WindowMoved { window_id, bounds })?;
+                    send_shape(&writer, window_id, w as usize, h as usize, if on { 0.0 } else { 10.0 })?;
                     let wr = writer.clone();
                     let hue = (60 * window_id % 256) as u8;
                     let st2 = st.clone();
@@ -516,6 +545,7 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
                     s.dock = Some(stop.clone());
                     drop(s);
                     send(&writer, &Message::DockStatus { available: true, window_id: DOCK_ID, bounds: Rect { x: 220, y: 1000, w: DOCK.0 as u32, h: DOCK.1 as u32 }, edge: "bottom".into(), reason: None })?;
+                    send_shape(&writer, DOCK_ID, DOCK.0, DOCK.1, 18.0)?;
                     let (wr, st2) = (writer.clone(), st.clone());
                     std::thread::spawn(move || video_loop(wr, st2, DOCK_ID, DOCK.0, DOCK.1, 200, stop));
                 }

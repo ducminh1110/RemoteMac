@@ -111,6 +111,8 @@ struct Remote {
     fullscreen: bool,
     saved: RECT,
     reveal: bool,
+    /// the shape of its pictures from the Mac (picture size, alpha per pixel)
+    mask: Option<(u32, u32, std::sync::Arc<Vec<u8>>)>,
 }
 
 struct App {
@@ -1737,6 +1739,7 @@ fn handle_event(ev: UiEvent) {
             }
         }
         UiEvent::Dock { available, id, x, y, w, h, edge, reason } => on_dock(available, id, (x, y, w, h), edge, reason),
+        UiEvent::Mask { id, width, height, alpha } => on_mask(id, width, height, alpha),
         UiEvent::AppExited(app) => eprintln!("remote app exited: {app}"),
         UiEvent::Launched(app) => crate::splash::step(&app, 3),
         UiEvent::Notice(n) => {
@@ -1824,7 +1827,7 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         let scale = native::dpi_scale(hwnd);
         let (cached, parent_origin) = with_app(|a| {
             a.remotes.insert(hwnd.0 as isize, Remote { id, app: app.into(), role, parent, rx: x, ry: y, rw: w, rh: h, scale, maximized: false, presenter: None, comp: None, picture: None, frames: 0,
-                high_surrogate: None, cmds: HashMap::new(), content: content.0 as isize, menu: 0, menu_x: vec![], open_menu: None, hover: false, pressed: None, active: false, owned, fullscreen: false, saved: RECT::default(), reveal: false });
+                high_surrogate: None, cmds: HashMap::new(), content: content.0 as isize, menu: 0, menu_x: vec![], open_menu: None, hover: false, pressed: None, active: false, owned, fullscreen: false, saved: RECT::default(), reveal: false, mask: None });
             a.by_id.insert(id, hwnd.0 as isize);
             let cached = a.icons.get(app).copied();
             if cached.is_none() && a.icons_requested.insert(app.to_string()) {
@@ -2109,14 +2112,43 @@ fn layout(frame: HWND) {
     unsafe { let _ = MoveWindow(content, 0, bar, cw, (ch - bar).max(1), true); }
     let square = unsafe { IsZoomed(frame).as_bool() } || is_fullscreen(frame);
     with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).map(|r| {
-        let radius = if square { 0.0 } else { (chrome::CORNER_RADIUS * r.scale) as f32 };
+        let (plain, shaped) = corner_radii(r, cw, bar, square);
         if let Some(c) = r.comp.as_mut() {
-            c.layout(cw, ch, bar, radius);
+            c.layout(cw, ch, bar, plain, shaped);
         }
     }));
     if bar == 0 {
         with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).and_then(|r| r.comp.as_mut()).map(|c| c.set_chrome(0, 0, &[])));
     }
+}
+
+/// The window's corner radii (pixels; top-left, top-right, bottom-right, bottom-left), for a
+/// picture without its shape and with it. The Mac's own rounding when its shape is known
+/// (measured from it), else a current macOS window's; a shaped picture makes its own corners,
+/// so only the chrome above it (when drawn) is rounded, like the Mac's.
+fn corner_radii(r: &Remote, cw: i32, bar: i32, square: bool) -> ([f32; 4], [f32; 4]) {
+    if square {
+        return ([0.0; 4], [0.0; 4]);
+    }
+    let measured = r.mask.as_ref().map(|(mw, mh, a)| rm_protocol::mask::corner_radius(a, *mw as usize, *mh as usize, false, true) * cw as f32 / (*mw).max(1) as f32).filter(|v| *v > 0.5);
+    let radius = measured.unwrap_or((chrome::CORNER_RADIUS * r.scale) as f32);
+    let top = if bar > 0 { radius } else { 0.0 };
+    ([radius; 4], [top, top, 0.0, 0.0])
+}
+
+/// The Mac sent the shape of a window's pictures.
+fn on_mask(id: u64, width: u32, height: u32, alpha: Option<std::sync::Arc<Vec<u8>>>) {
+    let Some(k) = with_app(|a| a.by_id.get(&id).copied()).flatten() else { return };
+    let mask = alpha.map(|a| (width, height, a));
+    with_app(|a| {
+        if let Some(r) = a.remotes.get_mut(&k) {
+            r.mask = mask.clone();
+            if let Some(c) = r.comp.as_mut() {
+                c.set_mask(mask);
+            }
+        }
+    });
+    layout(hwnd_of(k));
 }
 
 /// Current picture size of the window expressed in Mac points.

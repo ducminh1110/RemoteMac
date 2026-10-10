@@ -125,6 +125,12 @@ final class DockMirror {
             CGGetDisplaysWithPoint(CGPoint(x: r.midX, y: r.midY), 4, &ids, &n)
             let ws = WindowStream(windowID: dockWindowID) { [weak self] pkt in self?.onPacket?(pkt) }
             ws.region = (n > 0 ? ids[0] : CGMainDisplayID(), r, apps)
+            // its outline: the Dock's own windows without the desktop picture (the rest of the
+            // strip is clear on Windows)
+            if viewerFeatures.contains("mask") {
+                ws.shapeApps = [dockPid]
+                ws.onShape = { w, h, a in sendShape(dockWindowID, w, h, a) }
+            }
             lock.lock(); stream = ws; lock.unlock()
             onShown?((dockPid, r))
             onStatus?(["type": "dock_status", "available": true, "window_id": Int(dockWindowID), "bounds": rectJSON(r), "edge": edge])

@@ -98,6 +98,8 @@ struct Ctx<'a, S: Read + Write> {
     /// the Dock's last picture (to look at: printed with the report)
     dock_decoder: Option<rm_decode::H264Decoder>,
     dock_picture: Option<rm_decode::Picture>,
+    /// window shapes received: id -> (width, height, mask; None when opaque)
+    masks: std::collections::HashMap<u64, (u32, u32, Option<Vec<u8>>)>,
 }
 
 fn is_timeout(e: &ProtocolError) -> bool {
@@ -121,6 +123,9 @@ impl<S: Read + Write> Ctx<'_, S> {
             Frame::Msg(Message::AudioStatus { state, reason }) => self.audio_status = Some((state, reason)),
             Frame::Msg(Message::DockStatus { available, window_id, bounds, reason, .. }) => self.dock = Some((available, window_id, bounds.w, bounds.h, reason)),
             Frame::Msg(Message::WallpaperStatus { applied, reason }) => self.wallpaper = Some((applied, reason)),
+            Frame::Msg(Message::WindowMask { window_id, width, height, rle }) => {
+                self.masks.insert(window_id, (width, height, rm_protocol::mask::from_message(width, height, &rle)));
+            }
             Frame::Video(v) if self.dock.as_ref().is_some_and(|d| d.0 && d.1 == v.window_id) => {
                 self.dock_frames += 1;
                 self.dock_video = Some((v.width, v.height));
@@ -264,7 +269,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let caps_dump = serde_json::to_string(&sess.capabilities).unwrap_or_default();
     let mut c = Ctx { sess, r: Report::default(), started: Instant::now(), first_video: None, last_title: String::new(),
         destroyed: false, exited: false, launched_pid: None, errors: vec![], non_annexb: 0,
-        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None, main_rect: None, desktop: None, desktop_frames: 0, desktop_video: None, gs_tunnel: None, gs_out: None, audio_status: None, audio_packets: 0, audio_bad: 0, audio_peak: 0, audio_seq: None, audio_gaps: 0, created_apps: vec![], app: app.to_string(), dock: None, dock_frames: 0, dock_video: None, wallpaper: None, dock_decoder: None, dock_picture: None };
+        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None, main_rect: None, desktop: None, desktop_frames: 0, desktop_video: None, gs_tunnel: None, gs_out: None, audio_status: None, audio_packets: 0, audio_bad: 0, audio_peak: 0, audio_seq: None, audio_gaps: 0, created_apps: vec![], app: app.to_string(), dock: None, dock_frames: 0, dock_video: None, wallpaper: None, dock_decoder: None, dock_picture: None, masks: Default::default() };
 
     c.r.check("agent reports capture+input+GUI", caps_ok, caps_dump);
 
@@ -311,6 +316,14 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let pic_ok = matches!((pic, want), (Some((w, h, colors)), Some((ww, wh))) if (w, h) == (ww, wh) && colors > 8);
     c.r.check("frames decode to window-sized, non-blank pictures", dec >= 30 && pic_ok,
         format!("decoded={dec} decodeErrors={errs} lastPicture(w,h,colors)={pic:?} windowBounds={want:?}"));
+
+    // ---- its shape: the corners outside the Mac's rounding are not the window (clear on
+    // Windows instead of black), sent at the size of its pictures
+    c.pump(6, |c| c.masks.contains_key(&wid));
+    let shape = c.masks.get(&wid).map(|(w, h, m)| (*w, *h, m.as_ref().map(|m| (rm_protocol::mask::corner_radius(m, *w as usize, *h as usize, false, true), m.iter().filter(|a| **a == 0).count()))));
+    let size = pic.map(|(w, h, _)| (w as u32, h as u32));
+    let shaped = matches!(shape, Some((w, h, Some((r, clear)))) if Some((w, h)) == size && r >= 4.0 && clear > 0);
+    c.r.check("window shape: its rounded corners come clear, at its pictures' size", shaped, format!("shape(w,h,(radius,clear px))={shape:?} picture={size:?}"));
 
     // ---- keyboard: unicode text
     c.send(Message::TextInput { window_id: wid, text: "hello".into() });

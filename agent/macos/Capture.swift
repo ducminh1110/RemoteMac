@@ -103,7 +103,7 @@ final class WindowStream: NSObject, SCStreamOutput {
     ///  - a window whose title bar is part of its content (toolbar windows) carries the Mac's
     ///    own window buttons and macOS's purple "being captured" pill top-left: the viewer
     ///    draws its own buttons, so that area takes the colour beside it.
-    private func polish(_ pb: CVPixelBuffer, scale: CGFloat, hideButtons: Bool) {
+    private func polish(_ pb: CVPixelBuffer, scale: CGFloat, hideButtons: Bool, fillCorners: Bool) {
         guard CVPixelBufferGetPlaneCount(pb) == 2, CVPixelBufferLockBaseAddress(pb, []) == kCVReturnSuccess else { return }
         defer { CVPixelBufferUnlockBaseAddress(pb, []) }
         guard let yb = CVPixelBufferGetBaseAddressOfPlane(pb, 0), let cb = CVPixelBufferGetBaseAddressOfPlane(pb, 1) else { return }
@@ -122,8 +122,9 @@ final class WindowStream: NSObject, SCStreamOutput {
             return Y[y * ys + x] <= 24 && abs(Int(C[c]) - 128) < 12 && abs(Int(C[c + 1]) - 128) < 12
         }
         // corners: transparent (black) pixels outside a circle of radius r take the colour of
-        // the pixel diagonally inside the rounding
-        for (left, top) in [(true, true), (false, true), (true, false), (false, false)] {
+        // the pixel diagonally inside the rounding (not when the viewer has the window's shape:
+        // it shows the corners as clear, and the edge as the Mac draws it)
+        for (left, top) in [(true, true), (false, true), (true, false), (false, false)] where fillCorners {
             let sx = left ? r : w - 1 - r, sy = top ? r : h - 1 - r
             for dy in 0..<r {
                 for dx in 0..<r {
@@ -198,6 +199,19 @@ final class WindowStream: NSObject, SCStreamOutput {
     /// A pop-up menu or popover: ScreenCaptureKit does not capture those as a window of their own
     /// (it gave the whole display), so its rectangle of the display is captured instead.
     var popup = false
+    /// The window's own buttons stay in the picture (exact windows: the viewer draws none).
+    var keepButtons = false
+    /// Gets the alpha of the picture (its shape) once the stream runs: (width, height, alpha).
+    var onShape: ((Int, Int, [UInt8]) -> Void)?
+    /// For a region (the Dock): the apps whose windows make its shape (not the desktop picture).
+    var shapeApps: Set<pid_t>?
+
+    /// The shape of what this stream shows, measured once in the background.
+    private func measureShape(_ filter: SCContentFilter, _ cfg: SCStreamConfiguration, source: CGRect?) {
+        guard let done = onShape else { return }
+        let (w, h) = (cfg.width, cfg.height)
+        Task { if let a = await Shape.alpha(filter: filter, width: w, height: h, source: source) { done(w, h, a) } }
+    }
     /// A region of a display with only some apps' windows in it (the Mac's Dock over the
     /// desktop picture: Fusion.swift): (display, region in screen points, those apps).
     var region: (CGDirectDisplayID, CGRect, Set<pid_t>)?
@@ -232,6 +246,9 @@ final class WindowStream: NSObject, SCStreamOutput {
             config = cfg
             try await s.startCapture()
             scStream = s
+            if let own = shapeApps {
+                measureShape(SCContentFilter(display: d, including: content.applications.filter { own.contains($0.processID) }, exceptingWindows: []), cfg, source: cfg.sourceRect)
+            }
             return
         }
         if let did = display {
@@ -281,6 +298,8 @@ final class WindowStream: NSObject, SCStreamOutput {
             config = cfg
             try await s.startCapture()
             scStream = s
+            // its outline: the popup window alone, at the same size
+            measureShape(SCContentFilter(desktopIndependentWindow: w), cfg, source: nil)
             return
         }
         let cfg = SCStreamConfiguration()
@@ -292,12 +311,14 @@ final class WindowStream: NSObject, SCStreamOutput {
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
         cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
         cfg.queueDepth = 6; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true // fill the output at any capture density (never a corner of it, never cropped)
-        let s = SCStream(filter: SCContentFilter(desktopIndependentWindow: w), configuration: cfg, delegate: nil)
+        let filter = SCContentFilter(desktopIndependentWindow: w)
+        let s = SCStream(filter: filter, configuration: cfg, delegate: nil)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
         t0 = CFAbsoluteTimeGetCurrent()
         config = cfg
         try await s.startCapture()
         scStream = s
+        measureShape(filter, cfg, source: cut > 0 ? cfg.sourceRect : nil)
     }
 
     func stop() async {
@@ -362,7 +383,7 @@ final class WindowStream: NSObject, SCStreamOutput {
         let ptsUs = (capUs <= nowUs && nowUs - capUs < 1_000_000) ? capUs : nowUs
         // (not a popup: its first row is not window buttons, filling it hid the item there)
         if display == nil && region == nil && !popup && pointsWide > 0 {
-            polish(pb, scale: CGFloat(w) / pointsWide, hideButtons: inset == 0)
+            polish(pb, scale: CGFloat(w) / pointsWide, hideButtons: inset == 0 && !keepButtons, fillCorners: onShape == nil)
         }
         lock.lock(); lastPB = pb; lock.unlock()
         encode(pb, pts: CMSampleBufferGetPresentationTimeStamp(sb), ptsUs: ptsUs, key: key)

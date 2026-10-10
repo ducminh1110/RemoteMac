@@ -97,7 +97,7 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
                     }
                     Some(application_id.clone())
                 }
-                Frame::Msg(Message::WindowDestroyed { window_id } | Message::WindowMoved { window_id, .. } | Message::WindowTitleChanged { window_id, .. }) => owner.get(window_id).cloned(),
+                Frame::Msg(Message::WindowDestroyed { window_id } | Message::WindowMoved { window_id, .. } | Message::WindowTitleChanged { window_id, .. } | Message::WindowMask { window_id, .. } | Message::WindowChrome { window_id, .. }) => owner.get(window_id).cloned(),
                 Frame::Msg(Message::DockStatus { available, window_id, .. }) if app == DOCK => {
                     owner.insert(*window_id, app.clone());
                     if *available && first.is_none() {
