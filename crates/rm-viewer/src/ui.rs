@@ -372,7 +372,10 @@ pub fn run(opts: Options) -> i32 {
             shortcuts::remove_all(d);
         }
         link.send(&Message::ListApps);
-        let launcher = Launcher::create(hinst, opts.app.is_none() && !opts.smoke);
+        let mut launcher = Launcher::create(hinst, opts.app.is_none() && !opts.smoke);
+        if let Some(l) = launcher.as_mut() {
+            l.set_connection(&net::mac_label(), "Connected", &net::route_label());
+        }
         if launcher.is_none() {
             eprintln!("warning: launcher window could not be created");
         }
@@ -642,6 +645,7 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             stats_tick();
             shortcuts_tick();
             fusion_tick();
+            with_app(|a| a.launcher.as_mut().map(|l| l.poll()));
             smoke_tick();
             showcase_tick();
             LRESULT(0)
@@ -672,6 +676,25 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
 
 // ------------------------------------------------------------------ launcher
 
+/// What a click or key on the launcher asked for (done outside the app state's borrow).
+fn launcher_act(hwnd: HWND, act: Option<launcher::Act>) {
+    match act {
+        Some(launcher::Act::Launch(app)) => launch_app(&app),
+        Some(launcher::Act::Settings) => open_settings(Some(hwnd)),
+        None => {}
+    }
+}
+
+/// The launcher's dots under the apps open here, and the connection it shows.
+fn launcher_sync() {
+    with_app(|a| {
+        let open: Vec<String> = a.remotes.values().filter(|r| r.role != WindowRole::Popup && r.app != DOCK_APP).map(|r| r.app.clone()).collect();
+        if let Some(l) = a.launcher.as_mut() {
+            l.set_open(&open);
+        }
+    });
+}
+
 unsafe extern "system" fn launcher_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_DROPFILES => {
@@ -681,23 +704,73 @@ unsafe extern "system" fn launcher_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
-            with_app(|a| a.launcher.as_ref().map(|l| l.paint(hdc)));
+            with_app(|a| a.launcher.as_mut().map(|l| l.paint(hdc)));
             let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        WM_PRINTCLIENT => {
+            with_app(|a| a.launcher.as_mut().map(|l| l.paint(HDC(wp.0 as *mut c_void))));
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
         WM_SIZE => {
-            with_app(|a| a.launcher.as_ref().map(|l| l.fit()));
+            with_app(|a| a.launcher.as_mut().map(|l| l.fit()));
             LRESULT(0)
         }
-        WM_COMMAND if wp.0 & 0xffff == launcher::ID_SETTINGS => {
-            open_settings(Some(hwnd));
+        WM_DPICHANGED => {
+            let r = &*(lp.0 as *const RECT);
+            let _ = SetWindowPos(hwnd, None, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            with_app(|a| a.launcher.as_mut().map(|l| l.restyle()));
             LRESULT(0)
         }
-        WM_NOTIFY => {
-            if let Some(app) = with_app(|a| a.launcher.as_ref().and_then(|l| l.activated(lp))).flatten() {
-                launch_app(&app);
+        WM_SETTINGCHANGE | WM_THEMECHANGED => {
+            // light / dark switched: drawn again in the other appearance
+            with_app(|a| a.launcher.as_mut().map(|l| l.restyle()));
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+        WM_MOUSEMOVE => {
+            let (x, y) = lp_xy(lp);
+            with_app(|a| a.launcher.as_mut().map(|l| l.mouse_move(x, y)));
+            let mut tme = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+            let _ = TrackMouseEvent(&mut tme);
+            LRESULT(0)
+        }
+        WM_MOUSE_LEAVE => {
+            with_app(|a| a.launcher.as_mut().map(|l| l.mouse_leave()));
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            let (x, y) = lp_xy(lp);
+            SetCapture(hwnd);
+            let _ = SetFocus(Some(hwnd));
+            with_app(|a| a.launcher.as_mut().map(|l| l.mouse_down(x, y)));
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            let (x, y) = lp_xy(lp);
+            let _ = ReleaseCapture();
+            let act = with_app(|a| a.launcher.as_mut().and_then(|l| l.mouse_up(x, y))).flatten();
+            launcher_act(hwnd, act);
+            LRESULT(0)
+        }
+        WM_MOUSEWHEEL => {
+            let delta = ((wp.0 >> 16) & 0xffff) as i16 as i32;
+            with_app(|a| a.launcher.as_mut().map(|l| l.wheel(delta)));
+            LRESULT(0)
+        }
+        WM_KEYDOWN => {
+            let act = with_app(|a| a.launcher.as_mut().and_then(|l| l.key(wp.0 as u16))).flatten();
+            launcher_act(hwnd, act);
+            LRESULT(0)
+        }
+        WM_CHAR => {
+            if let Some(c) = char::from_u32(wp.0 as u32) {
+                with_app(|a| a.launcher.as_mut().map(|l| l.char(c)));
             }
+            LRESULT(0)
+        }
+        WM_TIMER if wp.0 == launcher::TIMER => {
+            with_app(|a| a.launcher.as_mut().map(|l| l.on_timer()));
             LRESULT(0)
         }
         WM_COPYDATA => {
@@ -1590,9 +1663,9 @@ fn handle_event(ev: UiEvent) {
                     l.set_apps(&rows);
                 }
                 for x in &apps {
-                    if let Some(icon) = a.icons.get(&x.id) {
-                        if let Some(l) = a.launcher.as_ref() {
-                            l.set_icon(&x.id, HICON(*icon as *mut c_void));
+                    if let Some((size, rgba)) = a.icon_rgba.get(&x.id) {
+                        if let Some(l) = a.launcher.as_mut() {
+                            l.set_icon(&x.id, *size, rgba);
                         }
                     } else if a.icons_requested.insert(x.id.clone()) {
                         a.link.send(&Message::GetAppIcon { application_id: x.id.clone() });
@@ -1656,8 +1729,8 @@ fn handle_event(ev: UiEvent) {
             }
             let windows: Vec<isize> = with_app(|a| {
                 a.icons.insert(app.clone(), icon.0 as isize);
-                if let Some(l) = a.launcher.as_ref() {
-                    l.set_icon(&app, icon);
+                if let Some(l) = a.launcher.as_mut() {
+                    l.set_icon(&app, size, &rgba);
                 }
                 a.remotes.iter().filter(|(_, r)| r.app == app).map(|(k, _)| *k).collect()
             })
@@ -1892,6 +1965,7 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         layout(hwnd);
         let _ = InvalidateRect(Some(hwnd), None, false);
         eprintln!("window created id={id} app={app} role={role:?} parent={parent:?} renderer={renderer} {w}x{h}pt scale={scale} title={title:?}");
+        launcher_sync();
         if app == DESKTOP_APP {
             // the whole Mac: straight to fullscreen, as a remote desktop is used
             toggle_fullscreen(hwnd);
@@ -2773,6 +2847,7 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 Some(r.menu)
             })
             .flatten();
+            launcher_sync();
             if let Some(m) = menu.filter(|m| *m != 0) {
                 let _ = DestroyMenu(HMENU(m as *mut c_void));
             }

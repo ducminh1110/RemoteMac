@@ -316,6 +316,12 @@ fn connect_steps(relay: Option<&str>, session: &str, token: &str, app: Option<&s
         rm_relay::lan::Route::Direct(a) => format!("straight to {a}"),
         rm_relay::lan::Route::Relay(r) => format!("through the relay {r}"),
     });
+    *ROUTE.lock().unwrap() = match &route {
+        rm_relay::lan::Route::Lan(_) => "This network".into(),
+        rm_relay::lan::Route::Direct(a) => format!("Direct to {}", a.ip()),
+        rm_relay::lan::Route::Relay(_) => "Through the relay".into(),
+    };
+    *SESSION.lock().unwrap() = session.to_string();
     // the password proved and the keys agreed end to end (the relay sees only ciphertext)
     set(Phase::Authenticating);
     let (stream, keys) = rm_protocol::secure::client_tcp(stream, session, token).map_err(|e| e.to_string())?;
@@ -384,6 +390,22 @@ fn connect_steps(relay: Option<&str>, session: &str, token: &str, app: Option<&s
 static GS_VIDEO: Mutex<Option<Arc<Video>>> = Mutex::new(None);
 
 static EXACT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ROUTE: Mutex<String> = Mutex::new(String::new());
+static SESSION: Mutex<String> = Mutex::new(String::new());
+
+/// How the Mac is reached, in words ("This network", "Through the relay"…); empty before.
+pub fn route_label() -> String {
+    ROUTE.lock().unwrap().clone()
+}
+
+/// The Mac as people know it: "Mac 123 456 789" from its ID (the session), else "Your Mac".
+pub fn mac_label() -> String {
+    let s = SESSION.lock().unwrap().clone();
+    match s.strip_prefix("rm-").filter(|id| id.len() == 9 && id.chars().all(|c| c.is_ascii_digit())) {
+        Some(id) => format!("Mac {} {} {}", &id[..3], &id[3..6], &id[6..]),
+        None => "Your Mac".into(),
+    }
+}
 
 /// Mac windows are shown as the Mac draws them (their own title bar and buttons, the Mac's menu
 /// bar at the top of the screen) rather than in MacBridge's frame.

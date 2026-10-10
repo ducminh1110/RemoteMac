@@ -13,7 +13,7 @@ It contains, or is derived from, code of these projects (all GPL-3.0 compatible)
 | [nanors](https://github.com/sleepybishop/nanors) | MIT | Reed-Solomon FEC |
 | [moonlight-qt](https://github.com/moonlight-stream/moonlight-qt) | GPL-3.0 | D3D11 NV12 renderer approach and shaders |
 | [Sunshine](https://github.com/LizardByte/Sunshine) | GPL-3.0 | Mac host: RTSP, control, video/FEC packetizing and input, ported |
-| [MobileLab](https://github.com/ducminh1110/MobileLab) | MIT | the Liquid Glass material (`crates/rm-viewer/src/glass.rs`), ported from its Qt implementation |
+| [MobileLab](https://github.com/ducminh1110/MobileLab) | MIT | the Liquid Glass material (`crates/rm-viewer/src/glass.rs`), ported from its Qt implementation; the launcher's look (`crates/rm-viewer/src/launcher.rs`: its colour tokens, tinted window, floating panel and status strip), after its interface design |
 
 ## MobileLab (MIT)
 

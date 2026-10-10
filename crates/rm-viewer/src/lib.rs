@@ -7,6 +7,7 @@ pub mod chrome;
 pub mod dock;
 pub mod ico;
 pub mod keymap;
+pub mod launchview;
 pub mod lifecycle;
 pub mod loadview;
 pub mod motion;
