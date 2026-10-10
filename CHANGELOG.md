@@ -32,6 +32,10 @@ be checked by hand on real machines is listed under **Not yet verified**.
   (two-line names, the selection on accent, a dot under apps open here), the scroll edge effect
   under the toolbar, and springs: icons lift and give, the grid flows as the search narrows it,
   the apps come in one after another. Click opens, typing searches, arrow keys move.
+- **A new Settings window**, after System Settings on macOS 26: a glass sidebar with the
+  sections (Video, Sound, Keyboard & Pointer, Appearance, Desktop Fusion), each setting in
+  rounded groups with menus that open as the Mac's do, switches whose knob springs across and a
+  volume slider. A change applies at once; there is no Save.
 - **A new connect window**, after Screen Sharing's sign-in: a Mac, a glass segmented control
   (**By ID** / **By Address**), rounded fields with their symbols and macOS's focus ring, the
   step under way with a spinner or the reason in red, glass Cancel / Connect. Its fields are

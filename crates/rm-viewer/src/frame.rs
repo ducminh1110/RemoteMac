@@ -70,7 +70,7 @@ pub fn calc_size(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
 
 /// WM_NCHITTEST at the screen point in `lp`: the resize edges (when `resizable`), the window's
 /// draggable parts (`caption(x, y)` in client pixels), else the client.
-pub fn hit_test(hwnd: HWND, lp: LPARAM, resizable: bool, caption: impl Fn(f32, f32) -> bool) -> LRESULT {
+pub fn hit_test(hwnd: HWND, lp: LPARAM, resizable: bool, caption: impl FnOnce(f32, f32) -> bool) -> LRESULT {
     unsafe {
         let (sx, sy) = ((lp.0 & 0xffff) as i16 as i32, ((lp.0 >> 16) & 0xffff) as i16 as i32);
         let mut r = RECT::default();

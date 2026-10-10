@@ -54,6 +54,10 @@ own drawing code (`RM_PREVIEW=dir cargo test -p rm-viewer preview`); the app ico
 |---|---|---|
 | ![The connect window by ID, a message in red](docs/images/connect-light.png) | ![The connect window by address: only the address and the password](docs/images/connect-address.png) | ![The connect window in dark mode while it connects](docs/images/connect-dark.png) |
 
+| Settings | A menu open in Settings |
+|---|---|
+| ![Settings after System Settings: a glass sidebar, rounded groups, menus and switches](docs/images/settings-light.png) | ![A menu of Settings, the choice ticked](docs/images/settings-menu.png) |
+
 ## Features
 
 - **One app, one window.** Every Mac window becomes a native Windows window with Mac-style

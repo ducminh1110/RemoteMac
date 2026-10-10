@@ -23,6 +23,7 @@ pub mod glass;
 pub mod glassmenu;
 pub mod gsdesktop;
 pub mod settings;
+pub mod settingsui;
 pub mod text;
 pub mod net;
 #[cfg(windows)]

@@ -226,6 +226,20 @@ pub enum Symbol {
     Number,
     /// "exclamationmark.circle.fill"
     Warning,
+    /// "speaker.wave.2.fill"
+    Speaker,
+    /// "keyboard"
+    Keyboard,
+    /// "circle.lefthalf.filled"
+    Appearance,
+    /// "macwindow"
+    Window,
+    /// "dock.rectangle"
+    Dock,
+    /// "chevron.up.chevron.down"
+    UpDown,
+    /// "checkmark"
+    Check,
 }
 
 pub fn symbol(c: &mut Canvas, sym: Symbol, x: f32, y: f32, d: f32, col: Rgba) {
@@ -292,6 +306,54 @@ pub fn symbol(c: &mut Canvas, sym: Symbol, x: f32, y: f32, d: f32, col: Rgba) {
             c.fill_capsule(x + 3.0 * k - 1.0 * k, y - v, x + 2.0 * k - 1.0 * k, y + v, w * 0.5, col);
             c.fill_capsule(x - h, y - 2.4 * k, x + h, y - 2.4 * k, w * 0.5, col);
             c.fill_capsule(x - h - 0.6 * k, y + 2.4 * k, x + h - 0.6 * k, y + 2.4 * k, w * 0.5, col);
+        }
+        Symbol::Speaker => {
+            // the box and cone, then two waves
+            c.fill_round_rect(x - 7.0 * k, y - 2.6 * k, 3.6 * k, 5.2 * k, 0.8 * k, col);
+            for i in 0..12 {
+                let t = i as f32 / 11.0;
+                let half = 2.6 + 3.6 * t;
+                c.fill_round_rect(x - 3.6 * k + t * 4.0 * k, y - half * k, 0.6 * k, 2.0 * half * k, 0.0, col);
+            }
+            c.arc(x + 1.0 * k, y, 3.6 * k, w * 0.9, 0.18 * std::f32::consts::PI, 0.82 * std::f32::consts::PI, |_| col);
+            c.arc(x + 1.0 * k, y, 6.2 * k, w * 0.9, 0.22 * std::f32::consts::PI, 0.78 * std::f32::consts::PI, |_| col);
+        }
+        Symbol::Keyboard => {
+            c.stroke_round_rect_with(x - 8.0 * k, y - 5.2 * k, 16.0 * k, 10.4 * k, 2.0 * k, w * 0.85, |_, _| col);
+            for row in 0..2 {
+                for i in 0..5 {
+                    c.fill_round_rect(x - 5.6 * k + i as f32 * 2.6 * k, y - 2.9 * k + row as f32 * 2.4 * k, 1.4 * k, 1.3 * k, 0.3 * k, col);
+                }
+            }
+            c.fill_capsule(x - 3.4 * k, y + 2.7 * k, x + 3.4 * k, y + 2.7 * k, 0.7 * k, col);
+        }
+        Symbol::Appearance => {
+            c.arc(x, y, 6.6 * k, w * 0.9, 0.0, std::f32::consts::TAU, |_| col);
+            // the left half filled
+            for i in 0..14 {
+                let dy = (i as f32 / 13.0 - 0.5) * 13.2 * k;
+                let half = ((6.6 * k).powi(2) - dy * dy).max(0.0).sqrt();
+                c.fill_round_rect(x - half, y + dy - 0.6 * k, half, 1.2 * k, 0.0, col);
+            }
+        }
+        Symbol::Window => {
+            c.stroke_round_rect_with(x - 8.0 * k, y - 6.0 * k, 16.0 * k, 12.0 * k, 2.4 * k, w * 0.85, |_, _| col);
+            c.fill_round_rect(x - 8.0 * k, y - 6.0 * k, 16.0 * k, 3.6 * k, 2.4 * k, col);
+        }
+        Symbol::Dock => {
+            c.stroke_round_rect_with(x - 8.0 * k, y - 6.0 * k, 16.0 * k, 12.0 * k, 2.4 * k, w * 0.85, |_, _| col);
+            c.fill_round_rect(x - 5.6 * k, y + 1.8 * k, 11.2 * k, 2.4 * k, 1.0 * k, col);
+        }
+        Symbol::UpDown => {
+            let (h, d) = (2.2 * k, 3.0 * k);
+            c.fill_capsule(x - d, y - 1.4 * k, x, y - 1.4 * k - h, w * 0.42, col);
+            c.fill_capsule(x, y - 1.4 * k - h, x + d, y - 1.4 * k, w * 0.42, col);
+            c.fill_capsule(x - d, y + 1.4 * k, x, y + 1.4 * k + h, w * 0.42, col);
+            c.fill_capsule(x, y + 1.4 * k + h, x + d, y + 1.4 * k, w * 0.42, col);
+        }
+        Symbol::Check => {
+            c.fill_capsule(x - 5.0 * k, y + 0.2 * k, x - 1.6 * k, y + 3.8 * k, w * 0.55, col);
+            c.fill_capsule(x - 1.6 * k, y + 3.8 * k, x + 5.4 * k, y - 4.6 * k, w * 0.55, col);
         }
         Symbol::Warning => {
             c.fill_circle(x, y, 7.0 * k, col);
