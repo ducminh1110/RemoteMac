@@ -11,6 +11,23 @@ be checked by hand on real machines is listed under **Not yet verified**.
 
 ### Added
 
+- **Mac windows as the Mac draws them** (Settings → **Mac windows**, the default with a Mac that
+  can): each window is streamed whole, its own title bar, toolbar and red, yellow and green
+  buttons included, with no frame of MacBridge's around it. The free part of its title bar moves
+  it here (snapping and double-click maximise as on Windows), its edges resize it, red closes,
+  yellow minimises it here, green makes it full screen; toolbar items, tabs and fields go to the
+  Mac. "With MacBridge's title bar and menus" keeps the previous frame.
+- **The Mac's own menu bar** at the top of the screen while a Mac window is in front: streamed
+  as it is (the front app's menus, the Apple menu, status items, the clock); menus open from it
+  under it; the window in front keeps its title bar below it.
+- **Window shapes**: rounded corners, menus and the Dock have the Mac's exact outline, with
+  nothing black at the corners (the Mac sends each picture's alpha once; the viewer draws through
+  it).
+- **A new launcher**, after MobileLab's look: a tinted window, a status capsule (which Mac,
+  connected how), a floating panel with a large title, a search field, the app grid (hover and
+  press animations, a dot under apps open here) and a status strip. Click opens, typing searches,
+  arrow keys move.
+
 - **Sound.** The Mac's sound plays on the PC. The Mac captures the session's apps (every app
   while the Mac Desktop is open, never MacBridge's own) with ScreenCaptureKit and sends 5 ms
   packets of 48 kHz stereo PCM, sealed like video, over UDP (or the encrypted stream without
@@ -69,6 +86,7 @@ be checked by hand on real machines is listed under **Not yet verified**.
 
 - The release tarball for macOS contains `macbridge.sh`, and its README starts MacBridge with it.
 - The navigation ball's menu has **Open an App…** and **Sound**.
+- The launcher opens an app with a single click (it was a double-click).
 
 ### Known limitations
 
@@ -88,6 +106,9 @@ be checked by hand on real machines is listed under **Not yet verified**.
 - Desktop Fusion with a real user's Dock (many items, magnification, a Dock on the left or
   right), and wallpaper restore with multiple monitors and Spaces.
 - The launcher's permission advice on a fresh Mac (CI runners have the permissions granted).
+- Exact windows with many toolbar layouts (the title bar's clickable items come from
+  Accessibility; an app that does not describe them could be moved where it should be clicked),
+  and the menu bar strip with several monitors.
 
 ## 1.0.2
 

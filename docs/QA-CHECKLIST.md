@@ -42,6 +42,18 @@ or headphones; both on the same network unless the item says otherwise. Note bot
 - [ ] In the Mac Desktop, double-click a document in Finder: its app's window also appears as
       a Windows window.
 
+## 3b. Exact windows, the menu bar, shapes
+
+- [ ] With **Mac windows** = as the Mac draws them: Safari, TextEdit, Finder windows show their own
+      title bar and buttons; dragging the empty title bar moves the window here (snap to the
+      screen edges works); toolbar buttons and the address field work; red closes, yellow
+      minimises, green goes full screen.
+- [ ] The Mac's menu bar is at the top while a Mac window is in front and goes with a Windows app
+      in front; its menus open under it; the Apple menu and the clock work.
+- [ ] Corners: on a coloured wallpaper, no black at the corners of windows, menus and popovers
+      (macOS 15 and 26).
+- [ ] The launcher: light and dark, search, arrow keys, the dot under open apps.
+
 ## 4. Files
 
 - [ ] Drop a `.txt` and a `.pdf` from Explorer onto TextEdit / Preview: they open there.

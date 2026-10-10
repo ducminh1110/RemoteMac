@@ -135,7 +135,9 @@ The connect window asks for:
 
 Press **Connect**. While it connects, the window shows the step it is at (finding the Mac,
 checking the password, agreeing on features, starting the picture). The launcher then opens
-with the Mac's apps, **Mac Desktop** first.
+with the Mac's apps, **Mac Desktop** first: click one to open it, type to search, use the arrow
+keys and Enter. The capsule at the top says which Mac it is and how it is connected; a dot under
+an app means it is open on this PC.
 
 Command-line options (for shortcuts and scripts):
 
@@ -183,14 +185,25 @@ still works, without the newer features.
 
 - **Each Mac window is a Windows window**, with its own taskbar button. While connected, the
   Mac's apps also appear in the Start menu and Windows Search.
+- **As the Mac draws it** (the default; Settings → **Mac windows**): the window comes whole,
+  with its own title bar and red, yellow and green buttons, and nothing of MacBridge's around
+  it. Drag it by the empty part of its title bar (it snaps and maximises as Windows windows do);
+  resize it by its edges. Red closes it, yellow minimises it to the taskbar, green makes it full
+  screen. Its rounded corners are the Mac's, over whatever is behind them.
+- **The Mac's menu bar** is at the top of the screen while a Mac window is in front, as on the
+  Mac: the app's menus, the Apple menu, the status items and the clock. It goes away when a
+  Windows app is in front. (The Mac's setting "Automatically hide and show the menu bar" must be
+  off for it.)
+- **With MacBridge's title bar and menus** (Settings → **Mac windows**) the window has a title
+  bar of MacBridge's with the app's menus in it instead, as in earlier versions.
 - **Opening an app** shows a loading window like the Mac's own: the app's icon and name
   with a spinner, over a blur of the app's main colour. It turns into the app's window when
   that appears.
 - **MacBridge Search** (**Ctrl+Alt+Space**, or **Open an App…** in the navigation ball's
   menu): type part of a Mac app's name, then Enter to open it, or to switch to it when it is
   already open. Arrow keys move, Escape closes.
-- **Menus**: the app's menu bar is under the title bar. Shortcuts are translated (Ctrl acts as
-  ⌘ by default).
+- **Menus**: in the Mac's menu bar at the top (or, with MacBridge's title bar, under it).
+  Shortcuts are translated (Ctrl acts as ⌘ by default).
 - **Fullscreen**: the green light or **F11**. The Mac app is sized exactly to your monitor.
 - **Closing** an app's last window quits the app on the Mac. Closing one of several windows
   closes only that window.
@@ -257,6 +270,7 @@ frame rate, bitrate, sharpness, the Mac screen size, pixel-for-pixel mode and th
 | **Keyboard** | **Windows**: Ctrl acts as ⌘ Command (the default). **Mac**: keys as on a Mac keyboard (Ctrl is Control, the Windows key is ⌘). **Fusion**: as Windows, plus Windows' text keys: Home/End go to the start/end of the line, Ctrl+Home/End to the start/end of the document, Ctrl+arrows move by word, Ctrl+Backspace/Delete delete a word, Ctrl+Y redoes. |
 | **Glass** | how MacBridge's own menus and panels are drawn: Liquid Glass, frosted (blur only), or solid (least GPU). Windows' "transparency effects" setting off also turns the glass solid. |
 | **Animations** | as Windows is set (Settings → Accessibility → Visual effects → Animation effects), reduced, or full. Reduced keeps fades but drops movement and springs. |
+| **Mac windows** | as the Mac draws them (its menu bar at the top), or with MacBridge's title bar and menus; from the next connection |
 | **Desktop Fusion** | see [Desktop Fusion](#7-desktop-fusion-experimental) |
 
 Keys still held down when a window loses the focus are let go on the Mac, so none stays

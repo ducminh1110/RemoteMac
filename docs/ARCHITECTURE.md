@@ -9,6 +9,7 @@ works. User-facing instructions are in the [user guide](USER-GUIDE.md).
 - [End-to-end encryption](#end-to-end-encryption)
 - [Session protocol](#session-protocol)
 - [Video and input over UDP](#video-and-input-over-udp)
+- [Window shapes, exact windows and the menu bar](#window-shapes-exact-windows-and-the-menu-bar)
 - [Sound](#sound)
 - [Opening files and adopting windows](#opening-files-and-adopting-windows)
 - [Desktop Fusion](#desktop-fusion)
@@ -133,6 +134,9 @@ the side's **features**; only those both list are used (`negotiate` in `rm-proto
 | `audio` | the Mac's sound (`audio_control`, the audio channel and datagram) |
 | `open_file` | `open_file` for uploaded documents |
 | `fusion` | `dock_stream`, `set_wallpaper`, `restore_wallpaper` |
+| `mask` | `window_mask` (pictures' shapes) |
+| `exact` | `window_style`, `window_chrome` (windows as the Mac draws them) |
+| `menubar` | `menu_bar_stream`, `menu_bar_status` (the Mac's menu bar) |
 
 An older Mac simply lacks the newer names, and the viewer hides what needs them.
 
@@ -155,6 +159,26 @@ menus and streams each window as its own H.264 stream.
   becomes the path for video and input. LAN addresses win over public ones.
 - **Input** goes over UDP as a reliable, ordered stream (sequence numbers, acks, resends) once
   a direct path exists, and over TCP otherwise.
+
+## Window shapes, exact windows and the menu bar
+
+- **Shapes** (`window_mask`, feature `mask`; `agent/macos/Shape.swift`, `crates/rm-protocol/src/mask.rs`):
+  the video has no alpha, so when a stream starts the Mac takes one BGRA screenshot of the same
+  thing (same filter, size and part) and sends its alpha as runs (u16 length, u8 alpha). The
+  viewer draws the picture through it in the NV12 shader on a premultiplied swap chain (the
+  video's edge pixels are already the window's colour mixed with black, i.e. premultiplied), so
+  corners, menus and the Dock are the Mac's outline over whatever is behind them. A shape of
+  another size than the picture is not used.
+- **Exact windows** (`window_style`, `window_chrome`, feature `exact`): the Mac stops cutting the
+  title bar and keeps its buttons in the picture, and describes the title bar through
+  Accessibility: the band (down to a toolbar at the top), the three buttons, and the controls in
+  the band. The viewer's frame is just the picture: the free band is HTCAPTION (Windows moves and
+  snaps it), the buttons act here (close, minimise, full screen), the rest goes to the Mac.
+- **The menu bar** (`menu_bar_stream`, `menu_bar_status`, feature `menubar`; `MenuStrip.swift`):
+  the main display's top strip, streamed as window 0x7FFF0003 (no window covers it, so it is the
+  bar as it is). Menus whose top is at the bar's bottom are popups of it, whoever owns them. On
+  Windows the strip is a top-most window at the top of the monitor of the Mac window in front,
+  shown only while a Mac window is in front.
 
 ## Sound
 
