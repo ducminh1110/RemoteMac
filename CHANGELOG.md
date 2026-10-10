@@ -102,6 +102,10 @@ be checked by hand on real machines is listed under **Not yet verified**.
   wait runs out, and App Nap no longer slows the background process. The viewer looks again for
   up to 8 seconds when the relay does not know the Mac yet (it waits again moments after each
   session).
+- **The window buttons of Mac windows are back.** While a window is captured, macOS draws a
+  "being shared" capsule where its red, yellow and green buttons are (on the Mac's screen and in
+  the capture). The Mac now draws the three buttons back in each picture, where the Mac lays
+  them out, in colour for the active window and grey for the others, as macOS does.
 - **The Mac's menu bar always shows a picture.** Its first frame could arrive (over UDP) before
   the viewer knew of the strip and be dropped, and a menu bar that does not change sends no
   other: every stream now sends its picture once more as a keyframe a moment after it starts,

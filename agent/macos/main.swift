@@ -385,9 +385,27 @@ func sendShape(_ id: CGWindowID, _ w: Int, _ h: Int, _ a: [UInt8]) {
 /// The title bar of exact window `id` as it is now ("window_chrome"), for the viewer to move it by.
 func sendChrome(_ id: CGWindowID) {
     guard let w = tracker.current(id), let m = windowChrome(id: id, pid: w.pid, rect: w.rect) else { return }
+    // its buttons are drawn back over macOS's "being shared" capsule (Capture.swift)
+    let lights: [CGRect] = ["close", "minimize", "zoom"].compactMap { k in
+        guard let d = m[k] as? [String: Any], let x = d["x"] as? Int, let y = d["y"] as? Int, let bw = d["w"] as? Int, let bh = d["h"] as? Int else { return nil }
+        return CGRect(x: x, y: y, width: bw, height: bh)
+    }
+    streamsLock.lock(); let ws = streams[id]; streamsLock.unlock()
+    ws?.setLights(lights)
+    ws?.setLightsActive(id == frontWindowID())
     log("window \(id) title bar: \(m["title_height"] ?? 0) points, \((m["controls"] as? [Any])?.count ?? 0) control(s) in it")
     send(m)
 }
+/// The active window: the front one of the app in front.
+func frontWindowID() -> CGWindowID? {
+    guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return nil }
+    let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+    for w in list where (w[kCGWindowOwnerPID as String] as? Int32) == pid && (w[kCGWindowLayer as String] as? Int) == 0 {
+        if let n = w[kCGWindowNumber as String] as? Int { return CGWindowID(n) }
+    }
+    return nil
+}
+
 func stopStream(_ id: CGWindowID) {
     streamsLock.lock(); let ws = streams.removeValue(forKey: id); streamsLock.unlock()
     if let ws = ws { Task { await ws.stop(); log("stream stopped window=\(id) packets=\(ws.sent)") } }
@@ -934,6 +952,12 @@ Thread {
         if ticks % 2 == 0 { audioCap.update(everything: desktop.isActive, pids: Set(apps.pids)) }
         if ticks % 2 == 1 { dockMirror.refresh() } // the Dock grew, moved, or restarted
         if ticks % 3 == 0 { menuBarMirror.refresh() } // the main display or the bar's height changed
+        if exactWindows {
+            // the active window's buttons in colour, the others grey (as on the Mac)
+            let front = frontWindowID()
+            streamsLock.lock(); let all = streams; streamsLock.unlock()
+            for (id, ws) in all { ws.setLightsActive(id == front) }
+        }
         let heard = max(heardOverTCP, sender.udp?.lastHeard ?? 0)
         let silent = CFAbsoluteTimeGetCurrent() - heard
         if viewerSendsHeartbeats && silent > 10 {
