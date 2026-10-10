@@ -92,6 +92,21 @@ be checked by hand on real machines is listed under **Not yet verified**.
 - The wallpaper is only changed on the viewer's request during Desktop Fusion, only to a
   picture uploaded by the viewer or a plain colour, and always restored.
 
+### Fixed
+
+- **A Mac left running stays reachable.** After a while (the Mac asleep and awake again, a router
+  forgetting an idle connection, the relay restarting) the Mac could stay "not online" for good:
+  its wait at the relay had died without a word. Its connection to the relay now has TCP
+  keepalive (a dead one is noticed within about 40 seconds), a wait that hears nothing for
+  longer than the relay's pair timeout starts over, the Mac waits again at once when the relay's
+  wait runs out, and App Nap no longer slows the background process. The viewer looks again for
+  up to 8 seconds when the relay does not know the Mac yet (it waits again moments after each
+  session).
+- **The Mac's menu bar always shows a picture.** Its first frame could arrive (over UDP) before
+  the viewer knew of the strip and be dropped, and a menu bar that does not change sends no
+  other: every stream now sends its picture once more as a keyframe a moment after it starts,
+  and the viewer asks for one when the menu bar is announced.
+
 ### Changed
 
 - The release tarball for macOS contains `macbridge.sh`, and its README starts MacBridge with it.

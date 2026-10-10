@@ -206,20 +206,42 @@ pub fn connect_direct(address: &str, session: &str, token: &str) -> Result<(TcpS
 /// Reach the Mac of `session` (token from ID and password): on this network if it answers there
 /// (RM_NO_LAN=1: never looked for), else through `relay`. Errors are in words for the user.
 pub fn connect(relay: Option<&str>, session: &str, token: &str, wait: bool) -> Result<(TcpStream, Route), String> {
-    if std::env::var_os("RM_NO_LAN").is_none() {
-        if let Some(at) = discover(session, Duration::from_millis(800)) {
-            return match join_direct(at, session, token) {
-                Ok(s) => Ok((s, Route::Lan(at))),
-                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(format!("the Mac refused: {e}")),
-                Err(e) => Err(format!("the Mac at {at} on this network: {e}")),
-            };
+    connect_patiently(relay, session, token, wait, OFFLINE_GRACE)
+}
+
+/// How long a Mac the relay does not know yet is looked for again: it waits under its ID again
+/// within moments after each session, after the relay's wait runs out, and after a lost link.
+pub const OFFLINE_GRACE: Duration = Duration::from_secs(8);
+
+/// [`connect`], looking again (on this network, then at the relay) for up to `grace` while the
+/// relay says the Mac is not there.
+pub fn connect_patiently(relay: Option<&str>, session: &str, token: &str, wait: bool, grace: Duration) -> Result<(TcpStream, Route), String> {
+    look(relay, session, token, wait, grace, std::env::var_os("RM_NO_LAN").is_none())
+}
+
+fn look(relay: Option<&str>, session: &str, token: &str, wait: bool, grace: Duration, lan: bool) -> Result<(TcpStream, Route), String> {
+    let start = Instant::now();
+    let mut first = true;
+    loop {
+        if lan {
+            if let Some(at) = discover(session, Duration::from_millis(if first { 800 } else { 300 })) {
+                return match join_direct(at, session, token) {
+                    Ok(s) => Ok((s, Route::Lan(at))),
+                    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(format!("the Mac refused: {e}")),
+                    Err(e) => Err(format!("the Mac at {at} on this network: {e}")),
+                };
+            }
+        }
+        first = false;
+        let Some(relay) = relay.map(str::trim).filter(|r| !r.is_empty()) else {
+            return Err("This Mac was not found on this network. To reach it over the internet, enter a relay server (host:port).".into());
+        };
+        match crate::join_with(relay, session, Role::Client, token, wait) {
+            Ok(s) => return Ok((s, Route::Relay(relay.to_string()))),
+            Err(e) if e.to_string().contains("no such session") && start.elapsed() < grace => std::thread::sleep(Duration::from_millis(700)),
+            Err(e) => return Err(format!("relay: {e}")),
         }
     }
-    let Some(relay) = relay.map(str::trim).filter(|r| !r.is_empty()) else {
-        return Err("This Mac was not found on this network. To reach it over the internet, enter a relay server (host:port).".into());
-    };
-    let s = crate::join_with(relay, session, Role::Client, token, wait).map_err(|e| format!("relay: {e}"))?;
-    Ok((s, Route::Relay(relay.to_string())))
 }
 
 #[cfg(test)]
@@ -274,6 +296,26 @@ mod tests {
         let t = Instant::now();
         assert!(connect_direct(&format!("127.0.0.1:{closed}"), "rm-1", "good").unwrap_err().contains("did not answer"));
         assert!(t.elapsed() < Duration::from_secs(6));
+    }
+
+    /// A Mac the relay does not know at first (it is waiting under its ID again) is reached once
+    /// it is back, within the grace; one that stays away is reported offline after it.
+    #[test]
+    fn a_mac_waiting_again_is_reached() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        std::thread::spawn(move || crate::serve(l, crate::Config::default()));
+        let a = addr.clone();
+        let agent = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1500));
+            crate::join(&a, "back-1", Role::Agent, "0123456789abcdef0123").map(|_| ())
+        });
+        let t = Instant::now();
+        assert!(look(Some(&addr), "back-1", "0123456789abcdef0123", false, Duration::from_secs(6), false).is_ok());
+        assert!(t.elapsed() >= Duration::from_millis(1400));
+        agent.join().unwrap().unwrap();
+        let e = look(Some(&addr), "gone-1", "0123456789abcdef0123", false, Duration::from_millis(1200), false).unwrap_err();
+        assert!(e.contains("no such session"), "{e}");
     }
 
     #[test]

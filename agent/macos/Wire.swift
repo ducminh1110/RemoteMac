@@ -47,6 +47,14 @@ final class Conn {
                     // sender sees a slow link at once instead of filling seconds of buffers
                     var lowat: Int32 = 128 * 1024
                     setsockopt(fd, IPPROTO_TCP, 0x201 /* TCP_NOTSENT_LOWAT */, &lowat, socklen_t(MemoryLayout<Int32>.size))
+                    // a connection that died without a word (the Mac slept, a router forgot it, the
+                    // relay restarted) is noticed within about 40 s instead of never: the Mac then
+                    // waits under its ID again instead of looking offline
+                    var on: Int32 = 1, idle: Int32 = 20, intvl: Int32 = 5, cnt: Int32 = 4
+                    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, socklen_t(MemoryLayout<Int32>.size))
+                    setsockopt(fd, IPPROTO_TCP, 0x10 /* TCP_KEEPALIVE: idle seconds */, &idle, socklen_t(MemoryLayout<Int32>.size))
+                    setsockopt(fd, IPPROTO_TCP, 0x101 /* TCP_KEEPINTVL */, &intvl, socklen_t(MemoryLayout<Int32>.size))
+                    setsockopt(fd, IPPROTO_TCP, 0x102 /* TCP_KEEPCNT */, &cnt, socklen_t(MemoryLayout<Int32>.size))
                     return Conn(fd: fd)
                 }
                 close(fd)
@@ -181,7 +189,14 @@ func joinRelay(_ conn: Conn, session: String) throws {
     if let key = relayKey() { join["key"] = key }
     let line = try JSONSerialization.data(withJSONObject: join)
     try conn.writeAll(line + Data([10]))
-    let reply = try conn.readLine()
+    // the relay answers within its pair timeout (5 minutes: READY, or "pair timeout"): silence
+    // past that means the connection is gone, and the Mac waits again
+    var tv = timeval(tv_sec: 330, tv_usec: 0)
+    setsockopt(conn.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    let reply: String
+    do { reply = try conn.readLine() } catch { throw WireError(description: "the relay went silent (\(error))") }
+    tv = timeval(tv_sec: 0, tv_usec: 0)
+    setsockopt(conn.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
     if reply != "READY" { throw WireError(description: "relay refused: \(reply)") }
 }
 

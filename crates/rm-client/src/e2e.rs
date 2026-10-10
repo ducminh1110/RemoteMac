@@ -694,6 +694,12 @@ fn exact_windows<S: Read + Write>(c: &mut Ctx<S>) {
 /// top strip), its menus shown as popups of it; a click on the Apple menu opens it.
 fn menu_bar<S: Read + Write>(c: &mut Ctx<S>) {
     c.send(Message::MenuBarStream { enabled: true });
+    // its first picture may come before its status (video over UDP, the status over TCP), and the
+    // menu bar hardly changes: ask for one once the status is in, as the viewer does
+    c.pump(4, |c| c.menubar.is_some());
+    if let Some((true, id, ..)) = c.menubar.clone() {
+        c.send(Message::RequestKeyframe { window_id: id });
+    }
     let ok = c.pump(12, |c| c.menubar.as_ref().is_some_and(|d| !d.0 || c.menubar_picture.is_some()));
     let d = c.menubar.clone();
     let shown = ok && d.as_ref().is_some_and(|d| d.0 && d.2 > 300 && (16..=80).contains(&d.3)) && c.menubar_picture.is_some();

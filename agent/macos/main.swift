@@ -60,6 +60,9 @@ if goBackground, let pid = runningInBackground() {
 // a session that ended without a word (a crash, power lost) may have left the PC's wallpaper
 // (not while another MacBridge runs: it may be showing it)
 if runningInBackground() == nil { Wallpaper.restore() }
+// never napped: a process in the background that waits for viewers must answer at once; App Nap
+// would slow its timers and its network after a while, and the Mac would look offline
+let noNap = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical], reason: "MacBridge waits for and serves viewers")
 // no relay: reachable from this network only (the viewer finds the Mac by its ID there)
 let relayAddr: String? = [relayArg, env["RM_RELAY"], defaultRelay].compactMap { $0?.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty }
 let sessionID: String, token: String
@@ -199,9 +202,12 @@ func waitForClient() -> (Conn, local: Bool, session: String) {
                 do { try joinRelay(c, session: sessionID) } catch {
                     race.waiting(nil); close(c.fd)
                     if race.taken { return }
-                    // nobody came within the relay's wait (or the relay refused): wait again
-                    if !lanToo { log("\(error); waiting again"); restartForNextClient(after: 2) }
-                    log("relay: \(error); waiting again"); sleep(2); continue
+                    // nobody came within the relay's wait: wait again at once (a viewer arriving
+                    // in between would find this Mac offline); the relay refused or went silent:
+                    // after a moment
+                    let pause: UInt32 = "\(error)".contains("pair timeout") ? 0 : 2
+                    if !lanToo { log("\(error); waiting again"); restartForNextClient(after: pause) }
+                    log("relay: \(error); waiting again"); sleep(pause); continue
                 }
                 race.waiting(nil)
                 race.offer(c, "through the relay")

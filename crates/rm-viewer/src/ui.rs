@@ -1065,6 +1065,9 @@ fn on_menu_bar(available: bool, id: u64, w: u32, h: u32, reason: Option<String>)
         }
         None => {
             create_remote_window(id, MENUBAR_APP, "Menu Bar", (0, 0, w, h), None, WindowRole::Popup);
+            // its first picture may have come before this (video over UDP, this over TCP): the
+            // menu bar hardly changes, so ask for one now
+            with_app(|a| a.link.send(&Message::RequestKeyframe { window_id: id }));
             if let Some(k) = with_app(|a| a.by_id.get(&id).copied()).flatten() {
                 MENU_BAR.with(|m| m.set(Some(k)));
                 unsafe {

@@ -146,6 +146,8 @@ final class WindowStream: NSObject, SCStreamOutput {
     }
     /// next encoded frame is an IDR (client asked, or frames were dropped)
     private var forceKey = true
+    /// the first picture was sent again (see the frame handler)
+    private var repeated = false
     private var bitrate = 20_000_000
 
     func requestKeyframe() { lock.lock(); forceKey = true; lock.unlock() }
@@ -389,8 +391,18 @@ final class WindowStream: NSObject, SCStreamOutput {
             // (the top corners sit under the viewer's own title bar unless the window is exact)
             polish(pb, scale: CGFloat(w) / pointsWide, hideButtons: inset == 0 && !keepButtons, fillTop: onShape == nil || !keepButtons, fillBottom: onShape == nil)
         }
-        lock.lock(); lastPB = pb; lock.unlock()
+        lock.lock(); lastPB = pb; let first = !repeated; repeated = true; lock.unlock()
         encode(pb, pts: CMSampleBufferGetPresentationTimeStamp(sb), ptsUs: ptsUs, key: key)
+        // a moment after the stream starts its picture goes once more as a keyframe: a viewer that
+        // learned of this window after its first frame (that came first, over UDP) still gets a
+        // picture of what never changes (the menu bar, the Dock, a still window)
+        if first {
+            q.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                guard let self = self else { return }
+                self.lock.lock(); let last = self.lastPB; self.lock.unlock()
+                if let last = last { self.encode(last, pts: CMClockGetTime(CMClockGetHostTimeClock()), ptsUs: agentClockUs(), key: true) }
+            }
+        }
     }
 
     private func encode(_ pb: CVPixelBuffer, pts: CMTime, ptsUs: UInt64, key: Bool) {
