@@ -123,15 +123,18 @@ password in plain text, so keep the file private (`chmod 600`).
 
 Unzip `MacBridge-windows.zip` anywhere and run `MacBridge.exe`. No installation is needed.
 
-The connect window asks for:
+The connect window has two ways in, chosen at the top:
 
-| Field | |
+| **By ID** | |
 |---|---|
-| **ID** | the 9 digits the Mac shows (spaces and dashes are fine) |
+| **Mac ID** | the 9 digits the Mac shows (spaces and dashes are fine). The PC looks for the Mac on this network, then through the relay. |
 | **Password** | the Mac's password |
-| **Find it by its ID** | the PC looks for the Mac on this network, then through the relay |
 | **Relay server** | only needed for a Mac on another network. Release builds fill in their relay. Type `host:port` for another relay. It is remembered. |
-| **Type its address** | connect straight to the Mac's address instead: `192.168.1.20`, `mac.example.com`, `fe80::1`, `[2001:db8::5]:7471` (7471 is the default port). The Mac prints its addresses when it starts. |
+
+| **By Address** | |
+|---|---|
+| **IP address or name** | the Mac's address: `192.168.1.20`, `mac.example.com`, `fe80::1`, `[2001:db8::5]:7471` (7471 is the default port). The Mac prints its addresses when it starts. |
+| **Password** | the Mac's password. No ID: the PC goes straight to the Mac, as Moonlight goes to Sunshine, and never uses a relay. |
 
 Press **Connect**. While it connects, the window shows the step it is at (finding the Mac,
 checking the password, agreeing on features, starting the picture). The launcher then opens
@@ -145,7 +148,7 @@ Command-line options (for shortcuts and scripts):
 |---|---|
 | `--id 123456789 --password PASS` | connect without the connect window |
 | `--relay HOST:PORT` | the relay for a Mac on another network |
-| `--direct HOST[:PORT]` | connect straight to the Mac's address (IPv4, IPv6 or a name) |
+| `--direct HOST[:PORT] --password PASS` | connect straight to the Mac's address (IPv4, IPv6 or a name): no ID, no relay |
 | `--app ID` | open this Mac app right away (as in the launcher, e.g. `com.apple.safari`) |
 | `--logs-enabled` | write a log |
 | `--raw-ctrl` | send Ctrl as Control (by default Ctrl acts as ⌘ Command; see **Keyboard** in Settings) |
@@ -159,7 +162,7 @@ Command-line options (for shortcuts and scripts):
 2. **Otherwise** it goes through the relay. Both sides connect out to it, so neither needs an
    open port.
    - **With an address typed in**, it connects straight to that address instead (TCP 7471, or
-     the port given) and never uses the relay. This is for a Mac reachable over a VPN, a
+     the port given), with the password alone (no ID), and never uses the relay. This is for a Mac reachable over a VPN, a
      routed network or a forwarded port. The connection is encrypted the same way; there is
      no unencrypted fallback.
 3. Either way, the two sides then run an **encrypted handshake** that proves the password

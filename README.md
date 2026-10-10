@@ -140,7 +140,7 @@ Security → Screen Recording** and **Accessibility**. Allow both, then run the 
 The ID stays the same on that Mac.
 
 **2. On Windows:** run `MacBridge.exe`, type the ID and the password, and press **Connect**
-(or choose **Type its address** and type the Mac's address). Pick an app from the launcher, or
+(or choose **By Address** and type only the Mac's address and the password). Pick an app from the launcher, or
 choose **Mac Desktop**.
 
 The [user guide](docs/USER-GUIDE.md) covers everything else: options, settings, shortcuts,
@@ -158,9 +158,10 @@ MacBridge picks the path for you:
    relay shown in the **Relay server** field of the connect window (remembered for next
    time). The Mac waits on both paths at once, and the first viewer to arrive gets the
    session.
-3. **By address.** With **Type its address** (or `--direct host[:port]`), the viewer connects
-   straight to the Mac's TCP port 7471 (or the Mac's `--port`), over IPv4 or IPv6, and never
-   uses a relay. Use it over a VPN or a forwarded port. The handshake and encryption are the
+3. **By address.** With **By Address** (or `--direct host[:port] --password PASS`), only the
+   address and the password are typed: the viewer connects straight to the Mac's TCP port 7471
+   (or the Mac's `--port`), over IPv4 or IPv6, as Moonlight connects to Sunshine, and never
+   uses a relay. The secret of that session is the password alone. Use it over a VPN or a forwarded port. The handshake and encryption are the
    same; there is no unencrypted fallback.
 
 **Where the Mac's ID comes from**

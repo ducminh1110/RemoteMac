@@ -23,10 +23,19 @@ be checked by hand on real machines is listed under **Not yet verified**.
 - **Window shapes**: rounded corners, menus and the Dock have the Mac's exact outline, with
   nothing black at the corners (the Mac sends each picture's alpha once; the viewer draws through
   it).
-- **A new launcher**, after MobileLab's look: a tinted window, a status capsule (which Mac,
-  connected how), a floating panel with a large title, a search field, the app grid (hover and
-  press animations, a dot under apps open here) and a status strip. Click opens, typing searches,
-  arrow keys move.
+- **Text as macOS draws it** on every surface MacBridge draws itself: Inter (variable: weight
+  and optical size), shaped with HarfBuzz's rules (kerning, ligatures, marks), Apple's tracking
+  for SF, unhinted at fractional positions; Windows' fonts for letters Inter lacks.
+- **A new launcher**, after Apple's Screen Sharing on macOS 26: no Windows title bar (the
+  toolbar is the title bar, with the red, yellow and green buttons), the Mac's name and how it is
+  connected, Liquid Glass controls (Mac Desktop, Settings, search), a Finder-like icon grid
+  (two-line names, the selection on accent, a dot under apps open here), the scroll edge effect
+  under the toolbar, and springs: icons lift and give, the grid flows as the search narrows it,
+  the apps come in one after another. Click opens, typing searches, arrow keys move.
+- **A new connect window**, after Screen Sharing's sign-in: a Mac, a glass segmented control
+  (**By ID** / **By Address**), rounded fields with their symbols and macOS's focus ring, the
+  step under way with a spinner or the reason in red, glass Cancel / Connect. Its fields are
+  MacBridge's own (caret, selection, words, paste, a secure password field).
 
 - **Sound.** The Mac's sound plays on the PC. The Mac captures the session's apps (every app
   while the Mac Desktop is open, never MacBridge's own) with ScreenCaptureKit and sends 5 ms
@@ -34,9 +43,10 @@ be checked by hand on real machines is listed under **Not yet verified**.
   UDP). The PC plays them through WASAPI on the default output device, following it when it
   changes, with an adaptive jitter buffer (40 ms to start, 30–150 ms), loss concealment and
   drift correction. Settings: **Sound**, **Volume**; **Ctrl+Alt+Shift+M** mutes.
-- **Connect by address.** The connect window's **Type its address** (and `--direct
-  host[:port]`) connects straight to the Mac by IPv4, IPv6 or name, with the same handshake
-  and encryption and no relay. The Mac listens on IPv4 and IPv6 (`--port`, 7471 by default)
+- **Connect by address.** The connect window's **By Address** (and `--direct host[:port]
+  --password PASS`) connects straight to the Mac by IPv4, IPv6 or name, as Moonlight connects
+  to Sunshine: only the address and the password, no ID and no relay, with the same handshake
+  and encryption (the secret is the password alone). The Mac listens on IPv4 and IPv6 (`--port`, 7471 by default)
   and prints its addresses.
 - **Drag and drop to open.** Files dropped onto a Mac app's window are uploaded and opened in
   that app; onto the launcher or Mac Desktop, in the Mac's default app.

@@ -1,8 +1,11 @@
 //! The connect window as it looks and behaves, after the sign-in sheet of Apple's Screen Sharing
 //! on macOS 26: the window buttons, a Mac at the top, a bold title and what to do, a segmented
 //! control (find the Mac by its ID, or type its address), rounded fields with their symbols,
-//! the step under way (a spinner) or what went wrong (in red), and Cancel / Connect. The fields
-//! are MacBridge's own (field.rs): typing, selecting, words, paste, a secure password field.
+//! the step under way (a spinner) or what went wrong (in red), and Cancel / Connect. By its ID:
+//! the ID, the password and (for a Mac elsewhere) a relay. By its address: only the address and
+//! the password, straight to the Mac as Moonlight goes to Sunshine (the Mac says which it is).
+//! The fields are MacBridge's own (field.rs): typing, selecting, words, paste, a secure password
+//! field.
 //!
 //! Portable: it draws into a Canvas and takes plain input; connect.rs puts it in a window.
 
@@ -77,7 +80,11 @@ pub enum Focus {
     Cancel,
 }
 
-const ORDER: [Focus; 6] = [Focus::Field(0), Focus::Field(1), Focus::Field(2), Focus::Segment, Focus::Connect, Focus::Cancel];
+/// The fields: the ID, the password, the relay (by ID), the address (by address).
+pub const ID: usize = 0;
+pub const PASSWORD: usize = 1;
+pub const RELAY: usize = 2;
+pub const ADDRESS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hot {
@@ -101,11 +108,11 @@ const GIVE: Curve = Curve::Spring { response: 0.16, damping: 1.0 };
 const BACK: Curve = Curve::Spring { response: 0.34, damping: 0.66 };
 
 type Mask = (Vec<u8>, usize, usize);
+/// What the drawn background depends on: size, scale, dark, by address.
+type BgKey = (usize, usize, u32, bool, bool);
 
 pub struct ConnectView {
-    fields: [Field; 3],
-    /// what the third field held in the other mode (kept while switching)
-    other: String,
+    fields: [Field; 4],
     by_address: bool,
     focus: Focus,
     status: Status,
@@ -120,27 +127,25 @@ pub struct ConnectView {
     /// a drag selecting in this field
     drag: Option<usize>,
     /// horizontal scroll of each field's text (px)
-    shift: [f32; 3],
+    shift: [f32; 4],
     w: usize,
     h: usize,
     s: f32,
     dark: bool,
     active: bool,
     level: Level,
-    bg: Option<((usize, usize, u32, bool), Canvas)>,
+    bg: Option<(BgKey, Canvas)>,
     glass: Vec<(u64, Canvas)>,
 }
 
 impl ConnectView {
     /// `id`, the relay and the address typed last, and whether the address was used last.
     pub fn new(id: &str, relay: &str, address: &str, by_address: bool) -> ConnectView {
-        let third = if by_address { address } else { relay };
-        let other = if by_address { relay } else { address };
+        let first = if by_address { (ADDRESS, address) } else { (ID, id) };
         ConnectView {
-            fields: [Field::new(id, false, 32), Field::new("", true, 128), Field::new(third, false, 255)],
-            other: other.into(),
+            fields: [Field::new(id, false, 32), Field::new("", true, 128), Field::new(relay, false, 255), Field::new(address, false, 255)],
             by_address,
-            focus: Focus::Field(if id.is_empty() { 0 } else { 1 }),
+            focus: Focus::Field(if first.1.is_empty() { first.0 } else { PASSWORD }),
             status: Status::None,
             busy: false,
             hot: Hot::None,
@@ -151,7 +156,7 @@ impl ConnectView {
             blink: Instant::now(),
             since: Instant::now(),
             drag: None,
-            shift: [0.0; 3],
+            shift: [0.0; 4],
             w: W as usize,
             h: H as usize,
             s: 1.0,
@@ -180,8 +185,8 @@ impl ConnectView {
     pub fn fail(&mut self, why: &str) {
         self.busy = false;
         self.status = Status::Error(why.into());
-        self.set_focus(Focus::Field(1));
-        self.fields[1].select_all();
+        self.set_focus(Focus::Field(PASSWORD));
+        self.fields[PASSWORD].select_all();
     }
 
     /// Start with this message (a lost connection, say).
@@ -223,8 +228,25 @@ impl ConnectView {
         (self.p(20.0 + look::LIGHT_D / 2.0), self.p(22.0))
     }
 
+    /// The fields shown, top to bottom.
+    pub fn rows(&self) -> &'static [usize] {
+        if self.by_address {
+            &[ADDRESS, PASSWORD]
+        } else {
+            &[ID, PASSWORD, RELAY]
+        }
+    }
+
+    /// Tab's order: the fields, the segmented control, Connect, Cancel.
+    fn order(&self) -> Vec<Focus> {
+        let mut o: Vec<Focus> = self.rows().iter().map(|&i| Focus::Field(i)).collect();
+        o.extend([Focus::Segment, Focus::Connect, Focus::Cancel]);
+        o
+    }
+
     fn field_rect(&self, i: usize) -> (f32, f32, f32, f32) {
-        (self.p(FX), self.p(FIELD_Y[i]), self.p(FW), self.p(FH))
+        let row = self.rows().iter().position(|&r| r == i).unwrap_or(0);
+        (self.p(FX), self.p(FIELD_Y[row]), self.p(FW), self.p(FH))
     }
 
     fn connect_rect(&self) -> (f32, f32, f32, f32) {
@@ -265,7 +287,7 @@ impl ConnectView {
         if inside(sr) {
             return Hot::Segment(x >= sr.0 + sr.2 / 2.0);
         }
-        for i in 0..3 {
+        for &i in self.rows() {
             if inside(self.field_rect(i)) {
                 return Hot::Field(i);
             }
@@ -361,15 +383,22 @@ impl ConnectView {
         }
     }
 
-    /// Find it by its ID (false) or type its address (true): the third field changes.
+    /// Find it by its ID (false) or type its address (true): the fields change (each keeps what
+    /// was typed in it), the keyboard to the first one still empty.
     fn switch(&mut self, by_address: bool) {
         if by_address == self.by_address {
             return;
         }
-        let now = self.fields[2].text().to_string();
-        self.fields[2].set_text(&std::mem::replace(&mut self.other, now));
         self.by_address = by_address;
         self.seg.retarget(if by_address { 1.0 } else { 0.0 }, Duration::from_millis(320), FLOW);
+        if let Focus::Field(f) = self.focus {
+            let first = self.rows()[0];
+            if self.fields[first].is_empty() {
+                self.set_focus(Focus::Field(first));
+            } else if !self.rows().contains(&f) {
+                self.set_focus(Focus::Field(PASSWORD));
+            }
+        }
         if let Status::Error(_) = self.status {
             self.status = Status::None;
         }
@@ -380,28 +409,31 @@ impl ConnectView {
         if self.busy {
             return None;
         }
-        let third = self.fields[2].text().trim().to_string();
-        if self.by_address {
-            if let Err(e) = rm_relay::lan::parse_address(&third) {
-                self.status = Status::Error(e);
-                self.set_focus(Focus::Field(2));
+        let password = self.fields[PASSWORD].text().to_string();
+        let (id, via) = if self.by_address {
+            // straight to the Mac at the address: no ID (the Mac says it), no relay
+            let address = self.fields[ADDRESS].text().trim().to_string();
+            if let Err(e) = rm_relay::lan::parse_address(&address) {
+                self.status = Status::Error(if address.is_empty() { "Type the Mac's IP address or name.".into() } else { e });
+                self.set_focus(Focus::Field(ADDRESS));
                 return None;
             }
-        }
-        let Some(id) = rm_protocol::session::normalize_id(self.fields[0].text()) else {
-            self.status = Status::Error("The ID is the 9 digits shown on the Mac.".into());
-            self.set_focus(Focus::Field(0));
-            return None;
+            (String::new(), Via::Address(address))
+        } else {
+            let Some(id) = rm_protocol::session::normalize_id(self.fields[ID].text()) else {
+                self.status = Status::Error("The ID is the 9 digits shown on the Mac.".into());
+                self.set_focus(Focus::Field(ID));
+                return None;
+            };
+            (id, Via::Id(self.fields[RELAY].text().trim().to_string()))
         };
-        let password = self.fields[1].text().to_string();
         if password.is_empty() {
             self.status = Status::Error("Type the password shown on the Mac.".into());
-            self.set_focus(Focus::Field(1));
+            self.set_focus(Focus::Field(PASSWORD));
             return None;
         }
         self.busy = true;
         self.status = Status::Busy("Connecting…".into());
-        let via = if self.by_address { Via::Address(third) } else { Via::Id(third) };
         Some(Act::Connect { id, password, via })
     }
 
@@ -409,9 +441,10 @@ impl ConnectView {
         self.blink = Instant::now();
         match k {
             Key::Tab => {
-                let i = ORDER.iter().position(|f| *f == self.focus).unwrap_or(0);
-                let n = ORDER.len();
-                let next = if shift { ORDER[(i + n - 1) % n] } else { ORDER[(i + 1) % n] };
+                let order = self.order();
+                let i = order.iter().position(|f| *f == self.focus).unwrap_or(0);
+                let n = order.len();
+                let next = if shift { order[(i + n - 1) % n] } else { order[(i + 1) % n] };
                 self.set_focus(next);
                 if let Focus::Field(f) = next {
                     self.fields[f].select_all();
@@ -481,7 +514,7 @@ impl ConnectView {
         }
         if let Focus::Field(i) = self.focus {
             // an ID pasted with its spaces or dashes is kept as the digits
-            let s = if i == 0 { s.trim().to_string() } else { s.trim_end_matches(['\r', '\n']).to_string() };
+            let s = if i == PASSWORD { s.trim_end_matches(['\r', '\n']).to_string() } else { s.trim().to_string() };
             self.fields[i].insert(&s);
             self.clear_error();
         }
@@ -512,7 +545,7 @@ impl ConnectView {
     }
 
     fn background(&mut self) -> Canvas {
-        let key = (self.w, self.h, (self.s * 100.0) as u32, self.dark);
+        let key = (self.w, self.h, (self.s * 100.0) as u32, self.dark, self.by_address);
         if let Some((k, c)) = &self.bg {
             if *k == key {
                 return c.clone();
@@ -529,7 +562,8 @@ impl ConnectView {
         look::mac_icon(&mut c, self.w as f32 / 2.0, self.p(92.0), self.p(104.0), self.dark);
         let title = self.text("Connect to Your Mac", 20.0, 700, self.p(380.0));
         Self::put(&mut c, &title, (self.w as f32 - title.1 as f32) / 2.0, self.p(150.0), t.text);
-        for (n, l) in text::wrap("Open MacBridge on the Mac, then type the ID and password it shows.", Style::dip(13.0, 400, s), self.p(330.0), 2).iter().enumerate() {
+        let what = if self.by_address { "Type the Mac's IP address or name and the password MacBridge shows on it." } else { "Open MacBridge on the Mac, then type the ID and password it shows." };
+        for (n, l) in text::wrap(what, Style::dip(13.0, 400, s), self.p(330.0), 2).iter().enumerate() {
             let m = self.text(l, 13.0, 400, self.p(340.0));
             Self::put(&mut c, &m, (self.w as f32 - m.1 as f32) / 2.0, self.p(180.0 + n as f32 * 17.0), t.text2);
         }
@@ -598,18 +632,15 @@ impl ConnectView {
             self.focus_ring(&mut c, sx, sy, sw, sh, sh / 2.0, now, &t);
         }
         // the fields
-        let labels: [(&str, Symbol); 3] = [
-            ("Mac ID (9 digits)", Symbol::Number),
-            ("Password", Symbol::Lock),
-            (if self.by_address { "Address: IP or name, e.g. 192.168.1.20" } else { "Relay server (optional)" }, Symbol::Globe),
-        ];
-        for (i, (placeholder, sym)) in labels.iter().enumerate() {
-            self.draw_field(&mut c, i, placeholder, *sym, now, &t);
+        let labels: [(&str, Symbol); 4] = [("Mac ID (9 digits)", Symbol::Number), ("Password", Symbol::Lock), ("Relay server (optional)", Symbol::Globe), ("IP address or name, e.g. 192.168.1.20", Symbol::Display)];
+        for &i in self.rows() {
+            let (placeholder, sym) = labels[i];
+            self.draw_field(&mut c, i, placeholder, sym, now, &t);
         }
         // a word under the last field
-        let hint = if self.by_address { "Any network that reaches the Mac (port 7471 unless given)." } else { "Only needed for a Mac on another network." };
+        let hint = if self.by_address { "Straight to the Mac, no relay (port 7471 unless given)." } else { "Only needed for a Mac on another network." };
         let hm = self.text(hint, 11.5, 400, self.p(FW - 16.0));
-        Self::put(&mut c, &hm, self.p(FX + 6.0), self.p(FIELD_Y[2] + FH + 8.0), t.text3);
+        Self::put(&mut c, &hm, self.p(FX + 6.0), self.p(FIELD_Y[self.rows().len() - 1] + FH + 8.0), t.text3);
         // the step under way, or what went wrong
         let line_y = self.p(452.0);
         match self.status.clone() {
@@ -756,12 +787,12 @@ mod tests {
     #[test]
     fn typing_the_id_and_password_connects_by_id() {
         let mut v = ConnectView::new("", "relay.example.com:7470", "", false);
-        assert_eq!(v.focus(), Focus::Field(0));
+        assert_eq!(v.focus(), Focus::Field(ID));
         for c in "123 456 789".chars() {
             v.char(c);
         }
         assert_eq!(v.key(Key::Tab, false, false), None);
-        assert_eq!(v.focus(), Focus::Field(1));
+        assert_eq!(v.focus(), Focus::Field(PASSWORD));
         for c in "pa55".chars() {
             v.char(c);
         }
@@ -775,10 +806,10 @@ mod tests {
         }
         assert!(v.is_busy());
         v.char('x');
-        assert_eq!(v.fields[1].text(), "pa55", "nothing is typed while it connects");
+        assert_eq!(v.fields[PASSWORD].text(), "pa55", "nothing is typed while it connects");
         v.fail("Wrong password.");
-        assert!(!v.is_busy() && v.focus() == Focus::Field(1));
-        assert_eq!(v.fields[1].selection(), (0, 4), "the password selected, to type it again");
+        assert!(!v.is_busy() && v.focus() == Focus::Field(PASSWORD));
+        assert_eq!(v.fields[PASSWORD].selection(), (0, 4), "the password selected, to type it again");
         let _ = v.render(later());
     }
 
@@ -786,53 +817,65 @@ mod tests {
     fn what_is_missing_is_said_and_focused() {
         let mut v = ConnectView::new("", "", "", false);
         assert_eq!(v.key(Key::Enter, false, false), None);
-        assert_eq!(v.focus(), Focus::Field(0));
+        assert_eq!(v.focus(), Focus::Field(ID));
         assert!(matches!(v.status(), Status::Error(e) if e.contains("9 digits")));
         for c in "123456789".chars() {
             v.char(c);
         }
         assert!(matches!(v.status(), Status::None), "typing clears the message");
         assert_eq!(v.key(Key::Enter, false, false), None);
-        assert_eq!(v.focus(), Focus::Field(1));
-        // by address: the address must be one
+        assert_eq!(v.focus(), Focus::Field(PASSWORD));
+    }
+
+    #[test]
+    fn by_its_address_only_the_address_and_the_password() {
+        let mut v = ConnectView::new("123456789", "relay:1", "", false);
         v.switch(true);
-        v.set_focus(Focus::Field(1));
+        assert_eq!(v.rows(), &[ADDRESS, PASSWORD], "no ID, no relay");
+        assert_eq!(v.focus(), Focus::Field(ADDRESS), "the address first");
+        v.set_focus(Focus::Field(PASSWORD));
         v.char('p');
         assert_eq!(v.key(Key::Enter, false, false), None);
-        assert_eq!(v.focus(), Focus::Field(2));
+        assert_eq!(v.focus(), Focus::Field(ADDRESS));
+        assert!(matches!(v.status(), Status::Error(e) if e.contains("address")));
         for c in "192.168.1.20".chars() {
             v.char(c);
         }
-        assert_eq!(v.key(Key::Enter, false, false), Some(Act::Connect { id: "123456789".into(), password: "p".into(), via: Via::Address("192.168.1.20".into()) }));
+        assert_eq!(v.key(Key::Tab, false, false), None);
+        assert_eq!(v.focus(), Focus::Field(PASSWORD));
+        assert_eq!(v.key(Key::Enter, false, false), Some(Act::Connect { id: String::new(), password: "p".into(), via: Via::Address("192.168.1.20".into()) }));
     }
 
     #[test]
     fn switching_keeps_what_each_mode_had() {
         let mut v = ConnectView::new("123456789", "relay:1", "mac.local", false);
-        assert_eq!(v.focus(), Focus::Field(1), "with the ID known, the password comes first");
-        assert_eq!(v.fields[2].text(), "relay:1");
+        assert_eq!(v.focus(), Focus::Field(PASSWORD), "with the ID known, the password comes first");
+        assert_eq!(v.rows(), &[ID, PASSWORD, RELAY]);
         v.switch(true);
-        assert_eq!(v.fields[2].text(), "mac.local");
+        assert_eq!(v.fields[ADDRESS].text(), "mac.local");
         v.switch(false);
-        assert_eq!(v.fields[2].text(), "relay:1");
+        assert_eq!((v.fields[ID].text(), v.fields[RELAY].text()), ("123456789", "relay:1"));
         // the segment by keyboard
         v.set_focus(Focus::Segment);
         v.key(Key::Right, false, false);
         assert!(v.by_address());
         v.key(Key::Space, false, false);
         assert!(!v.by_address());
+        // a new window by address starts on the address (or the password when it is known)
+        assert_eq!(ConnectView::new("", "", "", true).focus(), Focus::Field(ADDRESS));
+        assert_eq!(ConnectView::new("", "", "mac.local", true).focus(), Focus::Field(PASSWORD));
     }
 
     #[test]
     fn clicks_and_the_clipboard() {
         let mut v = ConnectView::new("", "", "", false);
         v.set_window(460, 572, 1.0, false, Level::Full);
-        let (x, y, _, h) = v.field_rect(2);
+        let (x, y, _, h) = v.field_rect(RELAY);
         v.mouse_down(x + 60.0, y + h / 2.0, false);
         v.mouse_up(x + 60.0, y + h / 2.0);
-        assert_eq!(v.focus(), Focus::Field(2));
+        assert_eq!(v.focus(), Focus::Field(RELAY));
         v.paste("relay.example.com\r\n");
-        assert_eq!(v.fields[2].text(), "relay.example.com");
+        assert_eq!(v.fields[RELAY].text(), "relay.example.com");
         v.key(Key::SelectAll, false, true);
         assert_eq!(v.key(Key::Copy, false, true), Some(Act::Copy("relay.example.com".into())));
         // Cancel, the red light; the zoom light does nothing
@@ -898,7 +941,7 @@ mod preview {
         // by address, the address being typed
         let mut v = ConnectView::new("", "", "192.168.1.", true);
         v.set_window((W * s) as usize, (H * s) as usize, s, false, Level::Full);
-        v.set_focus(Focus::Field(2));
+        v.set_focus(Focus::Field(ADDRESS));
         save(&v.render(later), &dir.join("connect-address.ppm"));
     }
 }

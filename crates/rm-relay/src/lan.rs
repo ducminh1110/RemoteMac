@@ -8,6 +8,10 @@
 //!
 //! After READY the stream is the same as a paired relay stream. The token is the hash of ID and
 //! password (`rm_protocol::session::token`): only someone who knows the password gets in.
+//!
+//! A viewer that typed the Mac's address goes straight there, as Moonlight goes to Sunshine: no
+//! ID, no discovery, no relay. It joins the session `direct` on the same TCP port, and its secret
+//! is made from the password alone (`rm_protocol::session::direct_token`).
 
 use crate::{Join, Role};
 use std::io::{Read, Write};

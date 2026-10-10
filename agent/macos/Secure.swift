@@ -136,4 +136,5 @@ func secureSelfTest() -> Bool {
     let hex = g.compressedRepresentation.map { String(format: "%02x", $0) }.joined()
     return hex == "0257182b0a31970df563ea4f030bab772b0b852eccaf68d3b651d737058a8b05f8"
         && relayToken("rm-123456789") == "9ad6e704b2c652cfafac52f6da98942bdb9fbb428b2894fc"
+        && directToken(password: "s3cret") == "5ac160a7467369b58d0ac10dc876745f4d9163fc3fdb4815"
 }

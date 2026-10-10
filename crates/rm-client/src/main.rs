@@ -1,7 +1,7 @@
 use rm_client::Session;
 
 fn usage() -> ! {
-    eprintln!("usage: remote-mac [--relay HOST:PORT | --direct HOST[:PORT]] (--id ID --password PASS | --session NAME) [--launch APP_ID | --e2e APP_ID | --record FILE --apps a,b [--settle SECS] [--shots DIR]]\n       --session takes its token from $RM_SESSION_TOKEN; a Mac on this network is found by its ID; otherwise the relay is --relay, $RM_RELAY or the one built in");
+    eprintln!("usage: remote-mac [--relay HOST:PORT] (--id ID --password PASS | --session NAME)\n       remote-mac --direct HOST[:PORT] --password PASS     (straight to the Mac: no ID, no relay) [--launch APP_ID | --e2e APP_ID | --record FILE --apps a,b [--settle SECS] [--shots DIR]]\n       --session takes its token from $RM_SESSION_TOKEN; a Mac on this network is found by its ID; otherwise the relay is --relay, $RM_RELAY or the one built in");
     std::process::exit(2)
 }
 
@@ -36,6 +36,8 @@ fn main() {
     // ID + password (what the Mac prints) or the legacy session name + RM_SESSION_TOKEN
     let (session, token, wait) = match (session, id, password) {
         (Some(s), _, _) => (s, std::env::var("RM_SESSION_TOKEN").unwrap_or_else(|_| usage()), true),
+        // straight to an address: the password alone, no ID (as Moonlight to Sunshine)
+        (None, None, Some(pw)) if direct.is_some() => (rm_protocol::session::DIRECT.to_string(), rm_protocol::session::direct_token(&pw), false),
         (None, Some(id), Some(pw)) => {
             let id = rm_protocol::session::normalize_id(&id).unwrap_or_else(|| fail("--id", "expected the 9-digit ID the Mac prints"));
             (rm_protocol::session::relay_session(&id), rm_protocol::session::token(&id, &pw), false)

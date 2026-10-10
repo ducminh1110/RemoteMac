@@ -2,7 +2,8 @@
 // side): a broadcast "RMLAN?<session>" on UDP 7471 is answered with "RMLAN!<session> <tcp port>",
 // and that TCP port takes the same join line a relay does. After "READY" the end-to-end
 // handshake proves the password, as through a relay. The same TCP port takes a viewer that
-// typed this Mac's address (IPv4 or IPv6, any network that reaches it): `--port` fixes it.
+// typed this Mac's address (IPv4 or IPv6, any network that reaches it): `--port` fixes it. That
+// viewer joins the session "direct" (no ID: the password alone is its secret).
 import Foundation
 
 let lanPort: UInt16 = 7471
@@ -80,8 +81,9 @@ final class LanListener {
         }
     }
 
-    /// The next viewer asking for this session. nil once closed.
-    func accept(token: String) -> Conn? {
+    /// The next viewer asking for this session, or for the direct one (a viewer that typed this
+    /// Mac's address): the connection and the session it joined. nil once closed.
+    func accept() -> (Conn, String)? {
         while !closed {
             var from = sockaddr_storage(); var flen = socklen_t(MemoryLayout<sockaddr_storage>.size)
             let fd = withUnsafeMutablePointer(to: &from) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.accept(tcp, $0, &flen) } }
@@ -93,7 +95,8 @@ final class LanListener {
             guard let line = try? c.readLine(maxLen: 512),
                   let j = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { Darwin.close(fd); continue }
             // the password is proved in the end-to-end handshake that follows (Secure.swift)
-            guard j["session_id"] as? String == session, j["token"] as? String == token else {
+            let asked = j["session_id"] as? String ?? ""
+            guard asked == session || asked == directSession, j["token"] as? String == relayToken(asked) else {
                 try? c.writeAll(Data("ERR no such session\n".utf8)); Darwin.close(fd); continue
             }
             tv = timeval(tv_sec: 0, tv_usec: 0)
@@ -101,7 +104,7 @@ final class LanListener {
             var one: Int32 = 1
             setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, socklen_t(MemoryLayout<Int32>.size))
             do { try c.writeAll(Data("READY\n".utf8)) } catch { Darwin.close(fd); continue }
-            return c
+            return (c, asked)
         }
         return nil
     }

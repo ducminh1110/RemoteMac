@@ -327,7 +327,12 @@ pub fn run(opts: Options) -> i32 {
             let app = opts.app.clone();
             let id = crate::connect::last_id();
             let got = crate::connect::connect_window(id.as_deref(), None, |typed, password, via| {
-                let (session, token) = (rm_protocol::session::relay_session(typed), rm_protocol::session::token(typed, password));
+                // by its ID: the session of that ID; straight to an address: the direct session,
+                // the password alone (no ID, no relay)
+                let (session, token) = match via {
+                    crate::connect::Via::Address(_) => (rm_protocol::session::DIRECT.to_string(), rm_protocol::session::direct_token(password)),
+                    crate::connect::Via::Id(_) => (rm_protocol::session::relay_session(typed), rm_protocol::session::token(typed, password)),
+                };
                 let relay = match via {
                     crate::connect::Via::Id(r) => {
                         net::set_direct(None);
@@ -341,7 +346,10 @@ pub fn run(opts: Options) -> i32 {
                 net::connect_with(relay, &session, &token, app.as_deref(), false, wake)
                     .map(|x| {
                         remember_session(relay, &session, &token);
-                        (x, rm_protocol::session::display_id(typed))
+                        (x, match via {
+                            crate::connect::Via::Address(a) => a.trim().to_string(),
+                            crate::connect::Via::Id(_) => rm_protocol::session::display_id(typed),
+                        })
                     })
                     .map_err(|e| {
                         eprintln!("connect failed: {e}");

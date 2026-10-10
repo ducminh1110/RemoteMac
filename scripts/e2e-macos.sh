@@ -70,11 +70,12 @@ else
 fi
 kill $VANISH 2>/dev/null
 
-# a viewer that typed the Mac's address (IPv4 or IPv6, any network): no discovery, no relay,
-# the same end-to-end handshake; a wrong password is refused the same way
+# a viewer that typed the Mac's address (IPv4 or IPv6, any network): straight to the Mac, as
+# Moonlight to Sunshine: only the address and the password (no ID, no discovery, no relay), the
+# same end-to-end handshake; a wrong password is refused the same way
 for ADDR in 127.0.0.1:7471 "[::1]:7471"; do
   sleep 3
-  if ./target/release/remote-mac --direct "$ADDR" --id $ID --password "$PASS" >out/client-direct.log 2>&1 \
+  if ./target/release/remote-mac --direct "$ADDR" --password "$PASS" >out/client-direct.log 2>&1 \
      && grep -q "straight to" out/client-direct.log && grep -q "end-to-end encrypted" out/client-direct.log; then
     echo "connected by the typed address $ADDR: ok"
   else
@@ -82,7 +83,8 @@ for ADDR in 127.0.0.1:7471 "[::1]:7471"; do
   fi
 done
 sleep 3
-if ./target/release/remote-mac --direct 127.0.0.1:7471 --id $ID --password wrong-password >out/client-direct-wrong.log 2>&1; then
+grep -q "straight to this Mac's address" out/agent.log || { echo "the agent did not take the direct session"; [[ $RC == 0 ]] && RC=1; }
+if ./target/release/remote-mac --direct 127.0.0.1:7471 --password wrong-password >out/client-direct-wrong.log 2>&1; then
   echo "wrong password was accepted (typed address)"; [[ $RC == 0 ]] && RC=1
 fi
 grep -q "wrong password" out/client-direct-wrong.log || { echo "wrong password (typed address): unexpected reply: $(cat out/client-direct-wrong.log)"; [[ $RC == 0 ]] && RC=1; }

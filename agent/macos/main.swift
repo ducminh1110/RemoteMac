@@ -63,6 +63,9 @@ if runningInBackground() == nil { Wallpaper.restore() }
 // no relay: reachable from this network only (the viewer finds the Mac by its ID there)
 let relayAddr: String? = [relayArg, env["RM_RELAY"], defaultRelay].compactMap { $0?.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty }
 let sessionID: String, token: String
+/// the secret of a viewer that typed this Mac's address (the password alone; none in the legacy
+/// session mode)
+var directSecret: String?
 if let s = sessionArg {
     guard let t = env["RM_SESSION_TOKEN"] else { fail(usage) }
     sessionID = s; token = t
@@ -85,6 +88,7 @@ if let s = sessionArg {
     guard password.count >= 4 else { fail("the password must have at least 4 characters") }
     setenv("RM_ID", id, 1); setenv("RM_PASSWORD", password, 1)
     sessionID = relaySession(id: id); token = sessionToken(id: id, password: password)
+    directSecret = directToken(password: password)
     if env["RM_QUIET_BANNER"] == nil {
         print("")
         print("  MacBridge is ready — connect from Windows with:")
@@ -96,7 +100,7 @@ if let s = sessionArg {
             print("    Reachable on this network only (from anywhere: start with --relay HOST:PORT)")
         }
         if let ip = lanAddresses().first {
-            print("    Or type this Mac's address in the viewer: \(ip)\(directPort == lanPort ? "" : ":\(directPort)")")
+            print("    Or type this Mac's address in the viewer: \(ip)\(directPort == lanPort ? "" : ":\(directPort)") (By Address: only the password, no ID)")
         }
         print("    Connections are end-to-end encrypted.")
         for w in permissionWarnings() { print("  ! \(w)") }
@@ -148,16 +152,19 @@ final class ClientRace {
     private var winner: Conn?
     /// the winner came straight over the local network
     private(set) var local = false
+    /// the session it joined (ours, or the direct one)
+    private(set) var joined = sessionID
     /// a relay connection still waiting for its client
     private var pending: Conn?
     static let lan = "on this network"
     var taken: Bool { lock.lock(); defer { lock.unlock() }; return winner != nil }
     func waiting(_ c: Conn?) { lock.lock(); pending = c; lock.unlock() }
     /// `c` is the connection taken, unless another came first (then it is closed).
-    func offer(_ c: Conn, _ how: String) {
+    func offer(_ c: Conn, _ how: String, session: String = sessionID) {
         lock.lock(); defer { lock.unlock() }
         guard winner == nil else { close(c.fd); return }
-        winner = c; local = how == ClientRace.lan; log("client connected (\(how))"); done.signal()
+        winner = c; local = how == ClientRace.lan; joined = session
+        log("client connected (\(session == directSession ? "straight to this Mac's address" : how))"); done.signal()
     }
     func wait() -> Conn {
         done.wait()
@@ -168,7 +175,7 @@ final class ClientRace {
     }
 }
 
-func waitForClient() -> (Conn, local: Bool) {
+func waitForClient() -> (Conn, local: Bool, session: String) {
     let lan = env["RM_NO_LAN"] == nil && sessionArg == nil ? LanListener(session: sessionID) : nil
     if let l = lan { log("on this network at port \(l.tcpPort) (found by the viewer through UDP \(lanPort))") }
     guard lan != nil || relayAddr != nil else { fail("no relay given and the local network port is unavailable: start with --relay HOST:PORT") }
@@ -205,13 +212,13 @@ func waitForClient() -> (Conn, local: Bool) {
         log("waiting for a client on this network (no relay)")
     }
     if let l = lan {
-        Thread { if let c = l.accept(token: relayToken(sessionID)) { race.offer(c, ClientRace.lan) } }.start()
+        Thread { if let got = l.accept() { race.offer(got.0, ClientRace.lan, session: got.1) } }.start()
     }
     let c = race.wait()
     lan?.close() // the LAN port closes once a client is in
-    return (c, race.local)
+    return (c, race.local, race.joined)
 }
-let (conn, cameLocally) = waitForClient()
+let (conn, cameLocally, joinedSession) = waitForClient()
 
 // ---- end-to-end encryption: the viewer proves the password, both agree on the keys ---------------
 /// Wrong passwords in a row (kept across the restart for the next client): five lock it for a minute.
@@ -219,7 +226,9 @@ let failState = (env["RM_PAKE_FAILS"] ?? "0:0").split(separator: ":").compactMap
 let failCount = Int(failState.first ?? 0), lockedUntil = failState.count > 1 ? failState[1] : 0
 let sessionKeys: SessionKeys
 do {
-    sessionKeys = try agentHandshake(conn, session: sessionID, secret: token, locked: Date().timeIntervalSince1970 < lockedUntil)
+    // by ID: the ID's secret; straight to this Mac's address: the password's alone
+    guard let secret = joinedSession == directSession ? directSecret : token else { throw SecureError.failed("no password for a direct connection (legacy session mode)") }
+    sessionKeys = try agentHandshake(conn, session: joinedSession, secret: secret, locked: Date().timeIntervalSince1970 < lockedUntil)
     setenv("RM_PAKE_FAILS", "0:0", 1)
 } catch SecureError.wrongPassword {
     let n = failCount + 1
@@ -306,7 +315,7 @@ sender.onBitrate = { b in
 // video over UDP + FEC beside the TCP connection (RM_NO_UDP=1: TCP only)
 // (with the client on this network, or no relay, a port that ignores it stands in for the
 // relay: the direct path comes from the offer)
-if env["RM_NO_UDP"] == nil, let u = UdpLink(hostPort: cameLocally ? "127.0.0.1:9" : relayAddr ?? "127.0.0.1:9", session: sessionID, token: relayToken(sessionID), key: relayKey(), cipher: DatagramCipher(sessionKeys), quickOffer: cameLocally) {
+if env["RM_NO_UDP"] == nil, let u = UdpLink(hostPort: cameLocally ? "127.0.0.1:9" : relayAddr ?? "127.0.0.1:9", session: joinedSession, token: relayToken(joinedSession), key: relayKey(), cipher: DatagramCipher(sessionKeys), quickOffer: cameLocally) {
     sender.udp = u
     u.requestKeyframe = { wid in sender.requestKeyframe?(wid) }
     u.onAlive = { up in

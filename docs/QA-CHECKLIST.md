@@ -24,7 +24,7 @@ or headphones; both on the same network unless the item says otherwise. Note bot
 
 - [ ] By ID on the same network: connects without a relay (the stats overlay shows LAN).
 - [ ] By ID through the relay from another network.
-- [ ] **Type its address** with the Mac's IPv4 address; with an IPv6 address (`[addr]` or bare);
+- [ ] **By Address** (only the address and the password, no ID) with the Mac's IPv4 address; with an IPv6 address (`[addr]` or bare);
       with a name; with a wrong port (a clear message, no hang).
 - [ ] A wrong password is refused, and five in a row lock for a minute.
 - [ ] The connect window shows the steps while connecting, and the spinner stops on an error.

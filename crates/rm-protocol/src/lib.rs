@@ -1209,6 +1209,16 @@ pub mod session {
         h.iter().map(|b| format!("{b:02x}")).collect::<String>()[..48].to_string()
     }
 
+    /// The session a viewer joins when it goes straight to the Mac at an address it typed (as
+    /// Moonlight to Sunshine): no ID there, no relay; the password alone is its secret.
+    pub const DIRECT: &str = "direct";
+
+    /// The secret of the direct session (48 hex chars), from the password alone.
+    pub fn direct_token(password: &str) -> String {
+        let h = Sha256::digest(format!("remotemac/v1/direct:{password}").as_bytes());
+        h.iter().map(|b| format!("{b:02x}")).collect::<String>()[..48].to_string()
+    }
+
     /// The session secret (48 hex chars) from ID and password: the input of the end-to-end
     /// handshake, never sent anywhere.
     pub fn token(id: &str, password: &str) -> String {
@@ -1229,6 +1239,10 @@ pub mod session {
             assert_eq!(relay_session("123456789"), "rm-123456789");
             // shared vector with the Swift agent (scripts/e2e-macos.sh connects both with it)
             assert_eq!(token("123456789", "s3cret"), "3a6365467c85f122da38bf3b7192b081049bbf94ace2a9e0");
+            // the direct session: the password alone (the Swift agent checks the same vector)
+            assert_eq!(direct_token("s3cret"), "5ac160a7467369b58d0ac10dc876745f4d9163fc3fdb4815");
+            assert_ne!(direct_token("s3cret"), direct_token("s3cret!"));
+            assert_ne!(direct_token("s3cret"), token("123456789", "s3cret"));
         }
     }
 }

@@ -162,7 +162,10 @@ pub fn connect_window<T: Send>(id: Option<&str>, error: Option<&str>, try_connec
                     let ((typed, via), h) = attempt.take().unwrap();
                     match h.join().unwrap_or_else(|_| Err("internal error while connecting".into())) {
                         Ok(t) => {
-                            remember_id(&typed);
+                            // (by address no ID was typed: the one remembered stays)
+                            if !typed.is_empty() {
+                                remember_id(&typed);
+                            }
                             remember_via(&via);
                             break Some(t);
                         }
