@@ -13,7 +13,11 @@ It contains, or is derived from, code of these projects (all GPL-3.0 compatible)
 | [nanors](https://github.com/sleepybishop/nanors) | MIT | Reed-Solomon FEC |
 | [moonlight-qt](https://github.com/moonlight-stream/moonlight-qt) | GPL-3.0 | D3D11 NV12 renderer approach and shaders |
 | [Sunshine](https://github.com/LizardByte/Sunshine) | GPL-3.0 | Mac host: RTSP, control, video/FEC packetizing and input, ported |
-| [MobileLab](https://github.com/ducminh1110/MobileLab) | MIT | the Liquid Glass material (`crates/rm-viewer/src/glass.rs`), ported from its Qt implementation; the launcher's look (`crates/rm-viewer/src/launcher.rs`: its colour tokens, tinted window, floating panel and status strip), after its interface design |
+| [MobileLab](https://github.com/ducminh1110/MobileLab) | MIT | the Liquid Glass material (`crates/rm-viewer/src/glass.rs`), ported from its Qt implementation; the colour tokens and tinted window of MacBridge's own windows (`crates/rm-viewer/src/look.rs`), after its interface design |
+| [rustybuzz](https://github.com/harfbuzz/rustybuzz) | MIT | shaping MacBridge's own text (kerning, ligatures, marks) (`crates/rm-viewer/src/text.rs`) |
+| [ab_glyph_rasterizer](https://github.com/alexheretic/ab-glyph) | Apache-2.0 | drawing that text's outlines (exact coverage) |
+| [Inter](https://rsms.me/inter/) | OFL-1.1 | the typeface of MacBridge's own windows (bundled, `crates/rm-viewer/fonts`, licence beside it) |
+| [JetBrains Mono](https://www.jetbrains.com/lp/mono/) | OFL-1.1 | technical details (bundled, licence beside it) |
 
 ## MobileLab (MIT)
 

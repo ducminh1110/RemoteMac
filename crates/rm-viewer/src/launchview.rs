@@ -15,8 +15,8 @@ pub struct Tile {
 }
 
 /// Grid geometry (DIPs; the window scales them).
-pub const CELL_W: f32 = 108.0;
-pub const CELL_H: f32 = 112.0;
+pub const CELL_W: f32 = 112.0;
+pub const CELL_H: f32 = 122.0;
 pub const ICON: f32 = 64.0;
 /// panel margin in the window, panel corner radius, the toolbar above the panel
 pub const GAP: f32 = 8.0;
@@ -168,21 +168,21 @@ mod tests {
 
     #[test]
     fn the_grid_fits_the_width_and_finds_tiles() {
-        // 600 DIPs at 1x: 5 columns of 108
+        // 600 DIPs at 1x: 5 columns of 112
         let g = Grid::new(12, 0.0, 100.0, 600.0, 1.0);
         assert_eq!((g.cols, g.rows), (5, 3));
-        assert_eq!(g.cell(0, 0.0).0, 30.0, "centred");
-        assert_eq!(g.cell(6, 0.0), (30.0 + 108.0, 212.0, 108.0, 112.0));
-        assert_eq!(g.at(12, 30.0 + 108.0 + 5.0, 215.0, 0.0), Some(6));
-        assert_eq!(g.at(12, 30.0 + 2.0 * 108.0 + 1.0, 100.0 + 2.0 * 112.0 + 1.0, 0.0), None, "past the last tile");
+        assert_eq!(g.cell(0, 0.0).0, 20.0, "centred");
+        assert_eq!(g.cell(6, 0.0), (20.0 + 112.0, 222.0, 112.0, 122.0));
+        assert_eq!(g.at(12, 20.0 + 112.0 + 5.0, 225.0, 0.0), Some(6));
+        assert_eq!(g.at(12, 20.0 + 2.0 * 112.0 + 1.0, 100.0 + 2.0 * 122.0 + 1.0, 0.0), None, "past the last tile");
         assert_eq!(g.at(12, 10.0, 150.0, 0.0), None, "left of the grid");
         // scrolled by a row: the first visible row is the second
-        assert_eq!(g.at(12, 35.0, 101.0, 112.0), Some(5));
+        assert_eq!(g.at(12, 25.0, 101.0, 122.0), Some(5));
         // at 1.5x: wider cells, fewer columns
         assert_eq!(Grid::new(12, 0.0, 0.0, 600.0, 1.5).cols, 3);
         // scrolling: the last row whole, a tile revealed
-        assert_eq!(g.max_scroll(200.0), 336.0 - 200.0);
-        assert_eq!(g.reveal(11, 0.0, 200.0), 336.0 - 200.0);
+        assert_eq!(g.max_scroll(200.0), 366.0 - 200.0);
+        assert_eq!(g.reveal(11, 0.0, 200.0), 366.0 - 200.0);
         assert_eq!(g.reveal(0, 100.0, 200.0), 0.0);
         assert_eq!(g.reveal(5, 100.0, 200.0), 100.0, "already whole");
     }

@@ -299,6 +299,22 @@ impl Canvas {
         o
     }
 
+    /// The part (x, y, w, h) of this canvas; outside it, its nearest edge pixel.
+    pub fn crop(&self, x: isize, y: isize, w: usize, h: usize) -> Canvas {
+        let mut out = Canvas::new(w, h);
+        if self.w == 0 || self.h == 0 {
+            return out;
+        }
+        for oy in 0..h {
+            let sy = (y + oy as isize).clamp(0, self.h as isize - 1) as usize;
+            for ox in 0..w {
+                let sx = (x + ox as isize).clamp(0, self.w as isize - 1) as usize;
+                out.px[oy * w + ox] = self.px[sy * self.w + sx];
+            }
+        }
+        out
+    }
+
     /// Place `src` 1:1 at (x, y) (source-over).
     pub fn composite(&mut self, src: &Canvas, x: isize, y: isize, opacity: f32) {
         for sy in 0..src.h {
@@ -329,6 +345,13 @@ impl Canvas {
     /// how text and shadows are put on.
     pub fn fill_mask(&mut self, mask: &[u8], mw: usize, x: isize, y: isize, color: Rgba) {
         let mh = mask.len() / mw.max(1);
+        // light on dark reads thinner than dark on light when blended as sRGB: its partial
+        // coverage is lifted, as text rendering's contrast enhancement does
+        let lift = color.luma() > 0.5;
+        let lut: [f32; 256] = std::array::from_fn(|i| {
+            let v = i as f32 / 255.0;
+            if lift { v.powf(0.78) } else { v }
+        });
         for my in 0..mh {
             let dy = y + my as isize;
             if dy < 0 || dy as usize >= self.h {
@@ -340,7 +363,7 @@ impl Canvas {
                 if m == 0 || dx < 0 || dx as usize >= self.w {
                     continue;
                 }
-                self.blend(dx as usize, dy as usize, color, m as f32 / 255.0);
+                self.blend(dx as usize, dy as usize, color, lut[m as usize]);
             }
         }
     }
@@ -540,9 +563,13 @@ mod tests {
         c.draw(&src, 0.0, 0.0, 10.0, 10.0, 0.0, 1.0);
         assert_eq!(c.get(5, 5), [0, 255, 0, 255]);
         let mut t = Canvas::new(4, 1);
-        t.fill_mask(&[0, 128, 255, 0], 4, 0, 0, Rgba::WHITE);
+        t.fill_mask(&[0, 128, 255, 0], 4, 0, 0, Rgba::BLACK);
         assert_eq!(t.get(0, 0)[3], 0);
         assert!((t.get(1, 0)[3] as i32 - 128).abs() <= 1 && t.get(2, 0)[3] == 255);
+        // light text: its partial coverage lifted (it reads as heavy as dark text)
+        let mut l = Canvas::new(4, 1);
+        l.fill_mask(&[0, 128, 255, 0], 4, 0, 0, Rgba::WHITE);
+        assert!(l.get(1, 0)[3] > 140 && l.get(2, 0)[3] == 255 && l.get(0, 0)[3] == 0);
     }
 
     #[test]

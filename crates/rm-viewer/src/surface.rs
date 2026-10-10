@@ -187,44 +187,9 @@ pub enum Align {
 }
 
 /// Text as a coverage mask: (mask, width, height) at `px` pixels high, `weight` (400, 600…),
-/// at most `max_w` wide (cut with an ellipsis), one line.
+/// at most `max_w` wide (cut with an ellipsis), one line; set as macOS sets it (text.rs).
 pub fn text_mask(text: &str, px: i32, weight: i32, max_w: usize) -> (Vec<u8>, usize, usize) {
-    unsafe {
-        let screen = GetDC(None);
-        let dc = CreateCompatibleDC(Some(screen));
-        ReleaseDC(None, screen);
-        let font = CreateFontW(-px, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, 0, &HSTRING::from(crate::native::ui_face(weight)));
-        let oldf = SelectObject(dc, font.into());
-        let mut wide: Vec<u16> = text.encode_utf16().collect();
-        let mut r = RECT { left: 0, top: 0, right: max_w as i32, bottom: px * 2 };
-        DrawTextW(dc, &mut wide, &mut r, DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT | DT_END_ELLIPSIS);
-        let (w, h) = ((r.right.clamp(1, max_w.max(1) as i32)) as usize, (r.bottom.max(1)) as usize);
-        let bi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w as i32, biHeight: -(h as i32), biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
-            ..Default::default()
-        };
-        let mut bits: *mut c_void = std::ptr::null_mut();
-        let mut mask = vec![0u8; w * h];
-        if let Ok(bmp) = CreateDIBSection(Some(dc), &bi, DIB_RGB_COLORS, &mut bits, None, 0) {
-            let oldb = SelectObject(dc, bmp.into());
-            SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, COLORREF(0x00FF_FFFF));
-            let mut r = RECT { left: 0, top: 0, right: w as i32, bottom: h as i32 };
-            let mut wide: Vec<u16> = text.encode_utf16().collect();
-            DrawTextW(dc, &mut wide, &mut r, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-            let _ = GdiFlush();
-            let raw = std::slice::from_raw_parts(bits as *const [u8; 4], w * h);
-            for (m, p) in mask.iter_mut().zip(raw) {
-                *m = p[1];
-            }
-            SelectObject(dc, oldb);
-            let _ = DeleteObject(bmp.into());
-        }
-        SelectObject(dc, oldf);
-        let _ = DeleteObject(font.into());
-        let _ = DeleteDC(dc);
-        (mask, w, h)
-    }
+    crate::text::mask(text, px, weight, max_w)
 }
 
 /// A line of text painted in `color` inside (x, w) at top `y`, aligned.

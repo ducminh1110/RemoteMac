@@ -61,7 +61,7 @@ public struct RECT { public int Left, Top, Right, Bottom; }
 "@
   $cv = Start-Process -PassThru -NoNewWindow -FilePath target\release\remote-mac-viewer.exe -RedirectStandardError "out\viewer-connect.log"
   $h = [IntPtr]::Zero
-  for ($i = 0; $i -lt 40 -and $h -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 250; $h = [W.U]::FindWindow("RmConnect", $null) }
+  for ($i = 0; $i -lt 120 -and $h -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 250; $h = [W.U]::FindWindow("RmConnect", $null) }
   if ($h -ne [IntPtr]::Zero) {
     [W.U]::SetForegroundWindow($h) | Out-Null
     Start-Sleep -Seconds 2
@@ -77,7 +77,10 @@ public struct RECT { public int Left, Top, Right, Bottom; }
     for ($i = 0; $i -lt $b64.Length; $i += 4000) { Write-Host $b64.Substring($i, [Math]::Min(4000, $b64.Length - $i)) }
     Write-Host "GALLERY-END"
     $g.Dispose(); $bmp.Dispose(); $ms.Dispose()
-  } else { Write-Host "the connect window did not show" }
+  } else {
+    Write-Host "the connect window did not show (viewer exited: $($cv.HasExited))"
+    Get-Content "out\viewer-connect.log" -ErrorAction SilentlyContinue | Select-Object -First 40
+  }
   if (-not $cv.HasExited) { $cv.Kill() }
 } catch { Write-Host "connect window picture failed: $_" }
 exit $failed

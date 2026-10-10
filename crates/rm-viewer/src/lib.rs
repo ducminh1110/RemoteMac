@@ -4,10 +4,13 @@ pub mod audio;
 #[cfg(windows)]
 pub mod banner;
 pub mod chrome;
+pub mod connectui;
 pub mod dock;
+pub mod field;
 pub mod ico;
 pub mod keymap;
 pub mod launchview;
+pub mod launchui;
 pub mod lifecycle;
 pub mod loadview;
 pub mod look;
@@ -19,6 +22,7 @@ pub mod glass;
 pub mod glassmenu;
 pub mod gsdesktop;
 pub mod settings;
+pub mod text;
 pub mod net;
 #[cfg(windows)]
 pub mod d3d;
@@ -26,6 +30,8 @@ pub mod d3d;
 pub mod comp;
 #[cfg(windows)]
 pub mod connect;
+#[cfg(windows)]
+pub mod frame;
 #[cfg(windows)]
 pub mod gpu;
 #[cfg(windows)]

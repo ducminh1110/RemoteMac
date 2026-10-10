@@ -698,6 +698,18 @@ fn launcher_sync() {
 
 unsafe extern "system" fn launcher_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
+        // no Windows title bar: the launcher's toolbar is its title bar (frame.rs)
+        WM_NCCALCSIZE => crate::frame::calc_size(hwnd, wp, lp),
+        WM_NCHITTEST => with_app(|a| a.launcher.as_ref().map(|l| l.hit_test(lp))).flatten().unwrap_or_else(|| DefWindowProcW(hwnd, msg, wp, lp)),
+        WM_NCACTIVATE => {
+            with_app(|a| a.launcher.as_mut().map(|l| l.set_active(wp.0 != 0)));
+            // nothing of the old title bar is drawn again
+            DefWindowProcW(hwnd, msg, wp, LPARAM(-1))
+        }
+        WM_GETMINMAXINFO => {
+            crate::frame::min_size(hwnd, lp, launcher::MIN_W, launcher::MIN_H);
+            LRESULT(0)
+        }
         WM_DROPFILES => {
             drop_files(hwnd, windows::Win32::UI::Shell::HDROP(wp.0 as *mut c_void));
             LRESULT(0)

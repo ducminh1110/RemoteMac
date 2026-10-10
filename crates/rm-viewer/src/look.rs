@@ -102,6 +102,243 @@ pub fn mark(c: &mut Canvas, x: f32, y: f32, d: f32, accent: Rgba) {
     c.fill_capsule(x + d / 2.0 - 3.5 * k, y + 19.5 * k, x + d / 2.0 + 3.5 * k, y + 19.5 * k, 0.9 * k, Rgba::WHITE);
 }
 
+/// The window buttons, as macOS draws them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Light {
+    Close,
+    Minimize,
+    Zoom,
+}
+
+pub const LIGHTS: [Light; 3] = [Light::Close, Light::Minimize, Light::Zoom];
+/// a light's diameter, and from one light's centre to the next (DIPs)
+pub const LIGHT_D: f32 = 12.0;
+pub const LIGHT_STEP: f32 = 20.0;
+
+/// The three window buttons, the first centred at (x, y): red, yellow, green; grey when the
+/// window is not the active one (unless the pointer is over them), their marks shown while the
+/// pointer is over the group (`hover`), `down` darker.
+#[allow(clippy::too_many_arguments)]
+pub fn traffic_lights(c: &mut Canvas, x: f32, y: f32, s: f32, active: bool, hover: bool, down: Option<Light>, maximized: bool, dark: bool) {
+    let r = LIGHT_D * s / 2.0;
+    for (i, l) in LIGHTS.iter().enumerate() {
+        let cx = x + i as f32 * LIGHT_STEP * s;
+        let (fill, rim, mark) = match l {
+            Light::Close => (Rgba::rgb(0xff, 0x5f, 0x57), Rgba::rgb(0xe2, 0x46, 0x3f), Rgba::rgb(0x7e, 0x0a, 0x04)),
+            Light::Minimize => (Rgba::rgb(0xfe, 0xbc, 0x2e), Rgba::rgb(0xe1, 0xa1, 0x16), Rgba::rgb(0x98, 0x57, 0x00)),
+            Light::Zoom => (Rgba::rgb(0x28, 0xc8, 0x40), Rgba::rgb(0x14, 0xae, 0x2c), Rgba::rgb(0x00, 0x64, 0x00)),
+        };
+        let (fill, rim) = if active || hover {
+            (fill, rim)
+        } else if dark {
+            (Rgba::rgb(0x46, 0x46, 0x4b), Rgba::rgb(0x52, 0x52, 0x57))
+        } else {
+            (Rgba::rgb(0xdc, 0xdc, 0xde), Rgba::rgb(0xcb, 0xcb, 0xcf))
+        };
+        let pressed = down == Some(*l);
+        let (fill, rim) = if pressed { (fill.shade(-0.18), rim.shade(-0.18)) } else { (fill, rim) };
+        c.fill_circle(cx, y, r, rim);
+        c.fill_circle(cx, y, r - 0.5 * s.max(1.0), fill);
+        if hover {
+            let m = mark.alpha(0.78);
+            let k = r * 0.42;
+            let w = (0.85 * s).max(0.75);
+            match l {
+                Light::Close => {
+                    c.fill_capsule(cx - k, y - k, cx + k, y + k, w, m);
+                    c.fill_capsule(cx - k, y + k, cx + k, y - k, w, m);
+                }
+                Light::Minimize => c.fill_capsule(cx - k * 1.15, y, cx + k * 1.15, y, w, m),
+                Light::Zoom => {
+                    // two arrowheads in opposite corners (pointing in when it would restore)
+                    let t = r * 0.46;
+                    let leg = t * 1.35;
+                    if maximized {
+                        tri(c, cx - t * 0.12, y - t * 0.12, leg, -1.0, -1.0, m);
+                        tri(c, cx + t * 0.12, y + t * 0.12, leg, 1.0, 1.0, m);
+                    } else {
+                        tri(c, cx - t, y - t, leg, 1.0, 1.0, m);
+                        tri(c, cx + t, y + t, leg, -1.0, -1.0, m);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A right triangle: its right angle at (x, y), legs `leg` long towards (dx, dy).
+fn tri(c: &mut Canvas, x: f32, y: f32, leg: f32, dx: f32, dy: f32, col: Rgba) {
+    let (a, b, d) = ((x, y), (x + dx * leg, y), (x, y + dy * leg));
+    let (x0, x1) = (a.0.min(b.0).floor().max(0.0) as usize, a.0.max(b.0).ceil().max(0.0) as usize);
+    let (y0, y1) = (a.1.min(d.1).floor().max(0.0) as usize, a.1.max(d.1).ceil().max(0.0) as usize);
+    for py in y0..=y1 {
+        for px in x0..=x1 {
+            // 4x4 samples of the triangle
+            let mut n = 0;
+            for sy in 0..4 {
+                for sx in 0..4 {
+                    let (qx, qy) = (px as f32 + (sx as f32 + 0.5) / 4.0, py as f32 + (sy as f32 + 0.5) / 4.0);
+                    if inside(qx, qy, a, b, d) {
+                        n += 1;
+                    }
+                }
+            }
+            if n > 0 {
+                c.blend(px, py, col, n as f32 / 16.0);
+            }
+        }
+    }
+}
+
+fn inside(x: f32, y: f32, a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> bool {
+    let s = |p: (f32, f32), q: (f32, f32)| (q.0 - p.0) * (y - p.1) - (q.1 - p.1) * (x - p.0);
+    let (d1, d2, d3) = (s(a, b), s(b, c), s(c, a));
+    !((d1 < 0.0 || d2 < 0.0 || d3 < 0.0) && (d1 > 0.0 || d2 > 0.0 || d3 > 0.0))
+}
+
+/// Which light is at (x, y) for lights starting at (x0, y0) (centre of the first), if any.
+pub fn light_at(x: f32, y: f32, x0: f32, y0: f32, s: f32) -> Option<Light> {
+    if (y - y0).abs() > LIGHT_STEP * s / 2.0 {
+        return None;
+    }
+    let i = ((x - (x0 - LIGHT_STEP * s / 2.0)) / (LIGHT_STEP * s)).floor();
+    (0.0..3.0).contains(&i).then(|| LIGHTS[i as usize])
+}
+
+/// Symbols in SF Symbols' manner (regular weight), `d` px tall, centred at (x, y).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Symbol {
+    /// "display": a screen on a stand
+    Display,
+    /// "gearshape"
+    Gear,
+    /// "magnifyingglass"
+    Search,
+    /// "xmark.circle.fill"
+    Clear,
+    /// "plus"
+    Plus,
+    /// "lock"
+    Lock,
+    /// "globe"
+    Globe,
+    /// "number"
+    Number,
+    /// "exclamationmark.circle.fill"
+    Warning,
+}
+
+pub fn symbol(c: &mut Canvas, sym: Symbol, x: f32, y: f32, d: f32, col: Rgba) {
+    let k = d / 16.0;
+    let w = 1.45 * k;
+    match sym {
+        Symbol::Display => {
+            c.stroke_round_rect_with(x - 8.0 * k, y - 6.5 * k, 16.0 * k, 10.5 * k, 2.2 * k, w, |_, _| col);
+            c.fill_capsule(x, y + 4.0 * k, x, y + 6.6 * k, w * 0.55, col);
+            c.fill_capsule(x - 3.4 * k, y + 7.0 * k, x + 3.4 * k, y + 7.0 * k, w * 0.55, col);
+        }
+        Symbol::Gear => {
+            // "gearshape": eight rounded teeth on a ring, an open hub
+            let teeth = 8;
+            for i in 0..teeth {
+                let a = (i as f32 + 0.5) / teeth as f32 * std::f32::consts::TAU;
+                let (sn, cs) = a.sin_cos();
+                let (t0, t1) = (5.6 * k, 7.3 * k);
+                let (px, py) = (-sn, cs);
+                let hw = 1.05 * k;
+                c.fill_capsule(x + cs * t0 + px * hw * 0.35, y + sn * t0 + py * hw * 0.35, x + cs * t1, y + sn * t1, hw, col);
+                c.fill_capsule(x + cs * t0 - px * hw * 0.35, y + sn * t0 - py * hw * 0.35, x + cs * t1, y + sn * t1, hw, col);
+            }
+            c.arc(x, y, 4.9 * k, 1.6 * k, 0.0, std::f32::consts::TAU, |_| col);
+            c.arc(x, y, 1.9 * k, w * 0.9, 0.0, std::f32::consts::TAU, |_| col);
+        }
+        Symbol::Search => {
+            let (cx, cy, r) = (x - 1.2 * k, y - 1.2 * k, 5.0 * k);
+            c.arc(cx, cy, r, w, 0.0, std::f32::consts::TAU, |_| col);
+            c.fill_capsule(cx + r * 0.74, cy + r * 0.74, x + 6.6 * k, y + 6.6 * k, w * 0.62, col);
+        }
+        Symbol::Clear => {
+            c.fill_circle(x, y, 7.0 * k, col);
+            let m = 2.6 * k;
+            c.fill_capsule(x - m, y - m, x + m, y + m, 0.7 * k, Rgba::WHITE);
+            c.fill_capsule(x - m, y + m, x + m, y - m, 0.7 * k, Rgba::WHITE);
+        }
+        Symbol::Plus => {
+            c.fill_capsule(x - 6.5 * k, y, x + 6.5 * k, y, w * 0.55, col);
+            c.fill_capsule(x, y - 6.5 * k, x, y + 6.5 * k, w * 0.55, col);
+        }
+        Symbol::Lock => {
+            // the shackle: the top half of a ring (arc angles run clockwise from 12 o'clock)
+            c.arc(x, y - 2.2 * k, 3.6 * k, w, 1.5 * std::f32::consts::PI, 2.5 * std::f32::consts::PI, |_| col);
+            c.fill_capsule(x - 3.6 * k, y - 2.2 * k, x - 3.6 * k, y + 0.5 * k, w * 0.5, col);
+            c.fill_capsule(x + 3.6 * k, y - 2.2 * k, x + 3.6 * k, y + 0.5 * k, w * 0.5, col);
+            c.fill_round_rect(x - 6.0 * k, y + 0.2 * k, 12.0 * k, 8.4 * k, 2.0 * k, col);
+        }
+        Symbol::Globe => {
+            let r = 7.0 * k;
+            c.arc(x, y, r, w, 0.0, std::f32::consts::TAU, |_| col);
+            c.fill_capsule(x - r, y, x + r, y, w * 0.45, col);
+            c.fill_capsule(x, y - r, x, y + r, w * 0.45, col);
+            // a meridian: an ellipse half as wide
+            let n = 28;
+            for i in 0..n {
+                let (a0, a1) = (i as f32 / n as f32 * std::f32::consts::TAU, (i + 1) as f32 / n as f32 * std::f32::consts::TAU);
+                c.fill_capsule(x + a0.cos() * r * 0.45, y + a0.sin() * r, x + a1.cos() * r * 0.45, y + a1.sin() * r, w * 0.45, col);
+            }
+        }
+        Symbol::Number => {
+            let (h, v) = (5.2 * k, 6.4 * k);
+            c.fill_capsule(x - 1.6 * k - 1.0 * k, y - v, x - 2.6 * k - 1.0 * k, y + v, w * 0.5, col);
+            c.fill_capsule(x + 3.0 * k - 1.0 * k, y - v, x + 2.0 * k - 1.0 * k, y + v, w * 0.5, col);
+            c.fill_capsule(x - h, y - 2.4 * k, x + h, y - 2.4 * k, w * 0.5, col);
+            c.fill_capsule(x - h - 0.6 * k, y + 2.4 * k, x + h - 0.6 * k, y + 2.4 * k, w * 0.5, col);
+        }
+        Symbol::Warning => {
+            c.fill_circle(x, y, 7.0 * k, col);
+            c.fill_capsule(x, y - 3.8 * k, x, y + 0.8 * k, 0.95 * k, Rgba::WHITE);
+            c.fill_circle(x, y + 3.6 * k, 1.05 * k, Rgba::WHITE);
+        }
+    }
+}
+
+/// A Mac laptop, `w` px wide, its screen centred at (x, y): an aluminium lid with a black
+/// bezel and a bright wallpaper, the base under it.
+pub fn mac_icon(c: &mut Canvas, x: f32, y: f32, w: f32, dark: bool) {
+    let k = w / 100.0;
+    let (sw, sh) = (78.0 * k, 52.0 * k);
+    let (sx, sy) = (x - sw / 2.0, y - sh / 2.0);
+    c.shadow(sx, sy, sw, sh + 6.0 * k, 5.0 * k, 10.0 * k, 4.0 * k, Rgba::BLACK.alpha(if dark { 0.5 } else { 0.18 }));
+    // the lid and its bezel
+    c.fill_round_rect(sx, sy, sw, sh, 5.0 * k, Rgba::rgb(0x2a, 0x2b, 0x30));
+    let (bx, by, bw, bh) = (sx + 3.0 * k, sy + 3.0 * k, sw - 6.0 * k, sh - 6.5 * k);
+    // the wallpaper: blue into violet, with two soft waves of light
+    let (a, b, cc) = (Rgba::rgb(0x2b, 0x7b, 0xff), Rgba::rgb(0x7a, 0x4c, 0xff), Rgba::rgb(0xff, 0x8a, 0xc8));
+    c.fill_round_rect_with(bx, by, bw, bh, 2.0 * k, |px, py| {
+        let u = ((px - bx) / bw).clamp(0.0, 1.0);
+        let v = ((py - by) / bh).clamp(0.0, 1.0);
+        let wave = (-(((v - 0.62 + 0.18 * (u * 3.1).sin()) * 5.0).powi(2))).exp();
+        let wave2 = (-(((v - 0.35 + 0.12 * (u * 4.0 + 1.0).cos()) * 7.0).powi(2))).exp();
+        a.lerp(b, u * 0.8 + v * 0.2).lerp(cc, wave * 0.55).lerp(Rgba::WHITE, wave2 * 0.25)
+    });
+    // the base: a thin slab, wider than the lid, with the notch to open it
+    let (fw, fh) = (96.0 * k, 5.0 * k);
+    let fy = sy + sh;
+    c.fill_round_rect_with(x - fw / 2.0, fy, fw, fh, fh / 2.0, |_, py| Rgba::rgb(0xe3, 0xe4, 0xe8).lerp(Rgba::rgb(0x9a, 0x9c, 0xa3), ((py - fy) / fh).clamp(0.0, 1.0)));
+    c.fill_round_rect(x - 9.0 * k, fy, 18.0 * k, 1.8 * k, 0.9 * k, Rgba::rgb(0xb2, 0xb4, 0xba));
+}
+
+/// Apple's spinning progress indicator: twelve spokes, the lead one darkest, `t` seconds in.
+pub fn spinner(c: &mut Canvas, cx: f32, cy: f32, d: f32, col: Rgba, t: f32) {
+    let lead = (t * 12.0).floor() % 12.0;
+    let (r0, r1, w) = (d * 0.25, d * 0.48, d * 0.045);
+    for i in 0..12 {
+        let a = i as f32 / 12.0 * std::f32::consts::TAU;
+        let (sn, cs) = a.sin_cos();
+        let age = (lead - i as f32).rem_euclid(12.0) / 12.0;
+        c.fill_capsule(cx + sn * r0, cy - cs * r0, cx + sn * r1, cy - cs * r1, w, col.fade(1.0 - 0.78 * age));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -18,6 +18,8 @@ rm-decode = { path = "../rm-decode" }
 moonlight-sys = { path = "../moonlight-sys" }
 rm-gamestream = { path = "../rm-gamestream" }
 serde_json.workspace = true
+rustybuzz = "0.20"
+ab_glyph_rasterizer = "0.1"
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.61"
