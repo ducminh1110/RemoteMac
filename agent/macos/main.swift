@@ -383,8 +383,14 @@ func sendShape(_ id: CGWindowID, _ w: Int, _ h: Int, _ a: [UInt8]) {
     send(m)
 }
 /// The title bar of exact window `id` as it is now ("window_chrome"), for the viewer to move it by.
-func sendChrome(_ id: CGWindowID) {
-    guard let w = tracker.current(id), let m = windowChrome(id: id, pid: w.pid, rect: w.rect) else { return }
+func sendChrome(_ id: CGWindowID, tries: Int = 6) {
+    guard let w = tracker.current(id) else { return }
+    guard let m = windowChrome(id: id, pid: w.pid, rect: w.rect) else {
+        // Accessibility may not have the window yet (it is still opening, or still moving into
+        // place): ask again in a moment
+        if tries > 1 { DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { sendChrome(id, tries: tries - 1) } }
+        return
+    }
     // its buttons are drawn back over macOS's "being shared" capsule (Capture.swift)
     let lights: [CGRect] = ["close", "minimize", "zoom"].compactMap { k in
         guard let d = m[k] as? [String: Any], let x = d["x"] as? Int, let y = d["y"] as? Int, let bw = d["w"] as? Int, let bh = d["h"] as? Int else { return nil }
