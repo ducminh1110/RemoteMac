@@ -27,6 +27,10 @@ the connection when it opens. Update both sides.
   does not understand instead of ending the session. The Mac sends shapes in 16 steps of
   transparency (only the outline when even that is too large), menu entries of at most 200
   characters, and a message past 1 MiB where an older Windows app takes it too.
+- **The Mac Desktop sometimes stayed on the usual stream instead of GameStream.** Windows
+  connects through the tunnel as soon as it learns of the desktop's window, and the Mac
+  announced the window before its GameStream session was up (it was still setting up the
+  sound): the first connection was dropped and timed out. The session now starts first.
 
 ## 1.2.0
 

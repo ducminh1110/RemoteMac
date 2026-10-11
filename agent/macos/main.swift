@@ -788,12 +788,15 @@ func handle(_ m: [String: Any]) {
             }
         }
         inputQueue.async { injector.resetDesktopClicks() }
-        send(desktop.start(display: fitted))
-        audioCap.update(everything: true, pids: Set(apps.pids)) // the whole Mac is heard
-        // full GameStream mode: the client's Moonlight core gets the desktop through a host session
+        // full GameStream mode: the client's Moonlight core gets the desktop through a host
+        // session, up before the window is announced: the client connects through the tunnel as
+        // soon as it learns of the window, and an "open" that came before the session (while the
+        // sound was still being set up) was dropped, its RTSP handshake then timing out
         if let gs = (m["arguments"] as? [String])?.first(where: { $0.hasPrefix("gamestream=") }) {
             if !gsStart(keyHex: String(gs.dropFirst(11))) { log("Mac Desktop: GameStream host session failed; streaming the usual way") }
         }
+        send(desktop.start(display: fitted))
+        audioCap.update(everything: true, pids: Set(apps.pids)) // the whole Mac is heard
         let ws = WindowStream(windowID: desktopWindowID, display: desktop.displayID) { pkt in
             if let t = gsTunnel {
                 let age = agentClockUs() > pkt.ptsMicros ? agentClockUs() - pkt.ptsMicros : 0
