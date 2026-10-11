@@ -207,8 +207,11 @@ pub enum UiEvent {
 pub struct Link {
     /// messages for the Mac, written by their own thread: a Mac that is slow to read (busy, or
     /// the link stalling) must never hold up the window that sends (Windows then marks the
-    /// viewer "Not Responding")
-    writer: Sender<Message>,
+    /// viewer "Not Responding"); `None` says a file chunk is waiting in `bulk`
+    writer: Sender<Option<Message>>,
+    /// file chunks, written only when nothing else waits (pings and keys never queue behind a
+    /// file); a few at most, so an upload is read from disk as it goes, not all into memory
+    bulk: std::sync::mpsc::SyncSender<Message>,
     /// messages queued and not written yet (pointer moves are dropped while many are)
     pending: Arc<std::sync::atomic::AtomicUsize>,
     /// UDP video path (FEC); None when it could not be started
@@ -236,26 +239,73 @@ impl Link {
             return; // stale pointer positions behind a stalled link: the next one says where it is
         }
         self.pending.fetch_add(1, Relaxed);
-        if self.writer.send(m.clone()).is_err() {
+        if self.writer.send(Some(m.clone())).is_err() {
             self.pending.fetch_sub(1, Relaxed);
+        }
+    }
+
+    /// A file chunk: written when nothing else waits; blocks while a few are already queued
+    /// (call it from the upload's own thread).
+    pub fn send_bulk(&self, m: Message) {
+        if self.bulk.send(m).is_ok() {
+            let _ = self.writer.send(None);
+        }
+    }
+
+    /// Tell the Mac this viewer is closing on purpose (the session's apps quit with it), and give
+    /// it a moment to go out.
+    pub fn bye(&self) {
+        if !mac_has("bye") {
+            return;
+        }
+        self.send(&Message::Bye);
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while self.pending.load(std::sync::atomic::Ordering::Relaxed) > 0 && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 
     /// The writer thread for `stream`.
     fn start(stream: Secure) -> Link {
-        let (tx, rx) = channel::<Message>();
+        use std::sync::mpsc::TryRecvError;
+        let (tx, rx) = channel::<Option<Message>>();
+        let (btx, brx) = std::sync::mpsc::sync_channel::<Message>(4);
         let pending = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let p = pending.clone();
         let _ = std::thread::Builder::new().name("rm-link-writer".into()).spawn(move || {
             let mut w = stream;
-            for m in rx {
-                p.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            // file chunks announced and not written yet
+            let mut chunks = 0usize;
+            loop {
+                let next = if chunks == 0 { rx.recv().map_err(|_| TryRecvError::Disconnected) } else { rx.try_recv() };
+                let m = match next {
+                    Ok(Some(m)) => {
+                        p.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        m
+                    }
+                    Ok(None) => {
+                        chunks += 1;
+                        continue;
+                    }
+                    // nothing else waits: one chunk of the file
+                    Err(TryRecvError::Empty) => match brx.try_recv() {
+                        Ok(m) => {
+                            chunks -= 1;
+                            m
+                        }
+                        Err(_) => {
+                            chunks = 0;
+                            continue;
+                        }
+                    },
+                    Err(TryRecvError::Disconnected) => break,
+                };
                 if write_message(&mut w, &m).is_err() {
                     break;
                 }
             }
         });
-        Link { writer: tx, pending, udp: None }
+        Link { writer: tx, bulk: btx, pending, udp: None }
     }
 }
 
@@ -340,7 +390,7 @@ fn connect_steps(relay: Option<&str>, session: &str, token: &str, app: Option<&s
     let (tx, rx) = channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     let mut link = Link::start(writer);
-    let video = Arc::new(Video { decoders: Mutex::new(HashMap::new()), link: Mutex::new(link.clone()), tx: tx.clone(), wake: wake.clone(), udp: Mutex::new(None) });
+    let video = Arc::new(Video { decoders: Mutex::new(HashMap::new()), link: Mutex::new(link.clone()), tx: tx.clone(), wake: wake.clone(), udp: Mutex::new(None), asked: Mutex::new(HashMap::new()) });
     // UDP video beside the TCP connection (RM_NO_UDP=1 keeps everything on TCP)
     if std::env::var_os("RM_NO_UDP").is_none() {
         let v = video.clone();
@@ -466,6 +516,8 @@ struct Video {
     tx: Sender<UiEvent>,
     wake: Arc<dyn Fn() + Send + Sync>,
     udp: Mutex<Option<Arc<rm_client::udp::UdpVideo>>>,
+    /// keyframes asked for and not come yet, per window
+    asked: Mutex<HashMap<u64, std::time::Instant>>,
 }
 
 impl Video {
@@ -478,13 +530,29 @@ impl Video {
             rm_protocol::udp::Out::Frame(v) if !crate::gsdesktop::owns(v.window_id) => self.push(v, true),
             rm_protocol::udp::Out::Frame(_) => {}
             // lost even with FEC: the decoder needs a fresh keyframe
-            rm_protocol::udp::Out::Lost(id) => self.link().send(&Message::RequestKeyframe { window_id: id }),
+            rm_protocol::udp::Out::Lost(id) => self.ask_keyframe(id),
             rm_protocol::udp::Out::Audio(a) => crate::audio::audio().push(&a),
         }
     }
 
+    /// Ask the Mac for a keyframe of window `id`, once until one comes (or 0.5 s went by): on a
+    /// lossy link every lost frame would ask again, and keyframes are what fills the link most.
+    fn ask_keyframe(&self, id: u64) {
+        let now = std::time::Instant::now();
+        let mut asked = self.asked.lock().unwrap();
+        if asked.get(&id).is_some_and(|t| now.duration_since(*t) < std::time::Duration::from_millis(500)) {
+            return;
+        }
+        asked.insert(id, now);
+        drop(asked);
+        self.link().send(&Message::RequestKeyframe { window_id: id });
+    }
+
     fn push(&self, v: rm_protocol::VideoFrame, via_udp: bool) {
         let id = v.window_id;
+        if v.keyframe {
+            self.asked.lock().unwrap().remove(&id);
+        }
         let received_agent_us = self.udp.lock().unwrap().as_ref().and_then(|u| u.agent_now_us());
         let meta = FrameMeta { pts_us: v.pts_us, received_agent_us, decode_us: 0, via_udp, bytes: v.data.len() as u32 };
         let mut decoders = self.decoders.lock().unwrap();
@@ -499,7 +567,8 @@ impl Video {
                 // decoding cannot keep up: skip ahead to a fresh keyframe instead of showing an
                 // ever older picture
                 w.resync = true;
-                self.link().send(&Message::RequestKeyframe { window_id: id });
+                drop(decoders);
+                self.ask_keyframe(id);
             }
             Err(TrySendError::Disconnected(_)) => {
                 decoders.remove(&id);
@@ -618,13 +687,20 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
             wake();
         }
     };
-    struct StopOnExit(Arc<Heartbeat>);
+    // the session is over: its heartbeat, its UDP path (whose thread would otherwise run on,
+    // holding the session's video, and steal the next session's place at the relay) and its
+    // decoders go with it
+    struct StopOnExit(Arc<Heartbeat>, Arc<Video>);
     impl Drop for StopOnExit {
         fn drop(&mut self) {
             self.0.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(u) = self.1.udp.lock().unwrap().take() {
+                u.stop();
+            }
+            self.1.decoders.lock().unwrap().clear();
         }
     }
-    let _stop = StopOnExit(alive.clone());
+    let _stop = StopOnExit(alive.clone(), video.clone());
     loop {
         let r = sess.recv();
         if matches!(r, Ok(Some(_))) {
@@ -717,10 +793,11 @@ pub fn upload_file_as(link: &Link, transfer_id: u64, path: &std::path::Path, nam
         if n == 0 {
             break;
         }
-        link.send(&Message::FileUploadChunk { transfer_id, offset, data_base64: rm_protocol::base64_encode(&buf[..n]) });
+        link.send_bulk(Message::FileUploadChunk { transfer_id, offset, data_base64: rm_protocol::base64_encode(&buf[..n]) });
         offset += n as u64;
     }
-    link.send(&Message::FileUploadEnd { transfer_id });
+    // after the last chunk, in the same queue
+    link.send_bulk(Message::FileUploadEnd { transfer_id });
     Ok(offset)
 }
 

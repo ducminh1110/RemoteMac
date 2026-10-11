@@ -632,6 +632,10 @@ fn shortcuts_tick() {
 
 fn quit(code: i32) {
     crate::lifecycle::set(crate::lifecycle::Phase::Disconnecting);
+    // closed on purpose: the Mac closes the session's apps (a cut connection keeps them open)
+    if let Some(l) = with_app(|a| a.link.clone()) {
+        l.bye();
+    }
     on_mac_gone();
     crate::lifecycle::set(crate::lifecycle::Phase::Disconnected);
     with_app(|a| a.exit = Some(code));

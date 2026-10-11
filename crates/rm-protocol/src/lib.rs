@@ -485,6 +485,9 @@ pub enum Message {
     Error { code: String, message: String },
     Ping { nonce: u64 },
     Pong { nonce: u64 },
+    /// Client -> agent (feature "bye"): the viewer is closing because its user closed it (the
+    /// session's apps quit); a connection that ends without it was cut and they stay open.
+    Bye,
 }
 
 impl Message {
@@ -495,7 +498,7 @@ impl Message {
             WindowCreated { .. } | WindowDestroyed { .. } | WindowMoved { .. } | WindowTitleChanged { .. } | WindowMask { .. } | WindowChrome { .. } => {
                 Channel::WindowMetadata
             }
-            Ping { .. } | Pong { .. } => Channel::Telemetry,
+            Ping { .. } | Pong { .. } | Bye => Channel::Telemetry,
             ClipboardSet { .. } | ClipboardImage { .. } => Channel::Clipboard,
             FileUploadBegin { .. } | FileUploadChunk { .. } | FileUploadEnd { .. } => Channel::Files,
             _ => Channel::Control,
@@ -954,6 +957,7 @@ mod tests {
             Message::WindowStyle { exact: true },
             Message::WindowChrome { window_id: 7, title_height: 52, close: Some(Rect { x: 20, y: 20, w: 14, h: 14 }), minimize: None, zoom: None, controls: vec![Rect { x: 300, y: 12, w: 28, h: 28 }] },
             Message::MenuBarStream { enabled: true },
+            Message::Bye,
             Message::MenuBarStatus { available: true, window_id: 0x7FFF_0003, bounds: Rect { x: 0, y: 0, w: 1512, h: 33 }, reason: None },
         ] {
             let b = encode(&m).unwrap();
