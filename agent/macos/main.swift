@@ -297,7 +297,7 @@ do {
     guard cmin <= 1 && cmax >= 1 else {
         try conn.send(["type": "error", "code": "version_mismatch", "message": "agent speaks protocol 1, client \(cmin)...\(cmax)"]); exit(1)
     }
-    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "fusion", "mask", "exact", "menubar", "bye"],
+    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "mask", "exact", "menubar", "bye"],
                    "max_surface": [3840, 2160], "agent": "macbridge \(appVersion) \(ProcessInfo.processInfo.operatingSystemVersionString)"])
     try conn.send(probeCapabilities())
 } catch { fail("handshake: \(error)") }
@@ -311,7 +311,6 @@ let apps = AppManager()
 let tracker = WindowTracker(apps: apps)
 let desktop = DesktopSession()
 let injector = InputInjector(tracker: tracker, desktop: desktop)
-injector.dockRect = { dockMirror.rect }
 injector.menuBarRect = { menuBarMirror.rect }
 let streamsLock = NSLock()
 var streams: [CGWindowID: WindowStream] = [:]
@@ -352,7 +351,6 @@ sender.onBitrate = { b in
     log("bitrate -> \(b / 1000) kbit/s (dropped frames so far: \(sender.dropped + (sender.udp?.dropped ?? 0)))")
     streamsLock.lock(); let all = Array(streams.values); streamsLock.unlock()
     for ws in all { ws.setBitrate(b) }
-    dockMirror.setBitrate(b)
     menuBarMirror.setBitrate(b)
 }
 // video over UDP + FEC beside the TCP connection (RM_NO_UDP=1: TCP only)
@@ -592,12 +590,6 @@ audioCap.onStatus = { state, why in
     if let w = why { m["reason"] = w }
     send(m)
 }
-
-// Desktop Fusion: the Mac's own Dock streamed to Windows, over the PC's wallpaper
-let dockMirror = DockMirror()
-dockMirror.onPacket = { pkt in sender.sendVideo(pkt) }
-dockMirror.onStatus = { m in send(m) }
-dockMirror.onShown = { d in tracker.setDock(d) }
 
 // exact windows' menus: the Mac's own menu bar streamed to Windows
 let menuBarMirror = MenuBarMirror()
@@ -841,22 +833,25 @@ func handle(_ m: [String: Any]) {
         let id = m["application_id"] as? String ?? ""
         guard let pid = apps.pidFor(id) else { send(["type": "error", "code": "not_running", "message": id]); break }
         if id == "finder" { apps.forget(id); send(["type": "app_exited", "application_id": id, "code": NSNull()]); break } // Finder never quits
+        apps.markQuitting(id)
         DispatchQueue.global().async {
             let app = NSRunningApplication(processIdentifier: pid)
             if let a = app { a.terminate() } else { _ = apps.terminate(id: id) }
+            // (gone: asked of the process, `isTerminated` is never updated here: no main run loop)
             var gone = false
             for _ in 0..<30 {
-                gone = app?.isTerminated ?? (kill(pid, 0) != 0)
+                gone = kill(pid, 0) != 0
                 if gone { break }
                 usleep(100_000)
             }
             // still running: unless it is asking something (a dialog is up), stop a process we started
-            if !gone && !tracker.hasDialog(pid: pid) && apps.launchedByUs(id) { _ = apps.terminate(id: id); gone = true }
+            if !gone && !tracker.hasDialog(pid: pid) && apps.launchedByUs(id) && apps.pidFor(id) == pid { _ = apps.terminate(id: id); gone = true }
             if gone {
-                apps.forget(id)
+                apps.forget(id, pid: pid)
                 log("quit \(id)")
                 send(["type": "app_exited", "application_id": id, "code": NSNull()])
             } else {
+                apps.forget(id, pid: -1) // no longer quitting (kept: it is asking something)
                 log("\(id) did not quit (it is asking something, or was open before)")
             }
         }
@@ -931,8 +926,6 @@ func handle(_ m: [String: Any]) {
         clipboard.apply(t)
     case "clipboard_image":
         if let d = Data(base64Encoded: m["bmp_base64"] as? String ?? "") { clipboard.applyImage(d) }
-    case "request_keyframe" where CGWindowID(clamping: int(m["window_id"])) == dockWindowID:
-        dockMirror.requestKeyframe()
     case "request_keyframe" where CGWindowID(clamping: int(m["window_id"])) == menuBarWindowID:
         menuBarMirror.requestKeyframe()
     case "request_keyframe":
@@ -987,28 +980,6 @@ func handle(_ m: [String: Any]) {
         let on = m["enabled"] as? Bool ?? false
         log("Mac menu bar on Windows: \(on ? "asked for" : "no longer wanted")")
         if on { menuBarMirror.start() } else { menuBarMirror.stop() }
-    case "dock_stream":
-        let on = m["enabled"] as? Bool ?? false
-        log("Mac Dock on Windows: \(on ? "asked for" : "no longer wanted")")
-        if on { dockMirror.start() } else { dockMirror.stop() }
-    case "set_wallpaper":
-        let path = m["path"] as? String
-        if let p = path, let why = Wallpaper.rejection(p, uploads: uploads.dir) {
-            send(["type": "wallpaper_status", "applied": false, "reason": why]); break
-        }
-        let (style, color) = (m["style"] as? String ?? "fill", m["color"] as? String ?? "#000000")
-        DispatchQueue.global().async {
-            if let why = Wallpaper.apply(path: path, style: style, color: color) {
-                send(["type": "wallpaper_status", "applied": false, "reason": why])
-            } else {
-                send(["type": "wallpaper_status", "applied": true])
-            }
-        }
-    case "restore_wallpaper":
-        DispatchQueue.global().async {
-            Wallpaper.restore()
-            send(["type": "wallpaper_status", "applied": false])
-        }
     case "audio_control":
         let on = m["enabled"] as? Bool ?? false
         log("sound \(on ? "asked for" : "no longer wanted") by the viewer")
@@ -1076,7 +1047,6 @@ Thread {
         // the sound follows the session's apps (one launched, one quit)
         ticks += 1
         if ticks % 2 == 0 { audioCap.update(everything: desktop.isActive, pids: Set(apps.pids)) }
-        if ticks % 2 == 1 { dockMirror.refresh() } // the Dock grew, moved, or restarted
         if ticks % 3 == 0 { menuBarMirror.refresh() } // the main display or the bar's height changed
         if exactWindows {
             // the active window's buttons in colour, the others grey (as on the Mac)

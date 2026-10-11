@@ -338,8 +338,8 @@ final class WindowStream: NSObject, SCStreamOutput {
         let (w, h) = (cfg.width, cfg.height)
         Task { if let a = await Shape.alpha(filter: filter, width: w, height: h, source: source) { done(w, h, a) } }
     }
-    /// A region of a display with only some apps' windows in it (the Mac's Dock over the
-    /// desktop picture: Fusion.swift): (display, region in screen points, those apps).
+    /// A region of a display with only some apps' windows in it (none given: everything there,
+    /// the menu bar's strip: MenuStrip.swift): (display, region in screen points, those apps).
     var region: (CGDirectDisplayID, CGRect, Set<pid_t>)?
     private var config: SCStreamConfiguration?
 

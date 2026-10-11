@@ -234,8 +234,6 @@ pub enum Symbol {
     Appearance,
     /// "macwindow"
     Window,
-    /// "dock.rectangle"
-    Dock,
     /// "chevron.up.chevron.down"
     UpDown,
     /// "checkmark"
@@ -339,10 +337,6 @@ pub fn symbol(c: &mut Canvas, sym: Symbol, x: f32, y: f32, d: f32, col: Rgba) {
         Symbol::Window => {
             c.stroke_round_rect_with(x - 8.0 * k, y - 6.0 * k, 16.0 * k, 12.0 * k, 2.4 * k, w * 0.85, |_, _| col);
             c.fill_round_rect(x - 8.0 * k, y - 6.0 * k, 16.0 * k, 3.6 * k, 2.4 * k, col);
-        }
-        Symbol::Dock => {
-            c.stroke_round_rect_with(x - 8.0 * k, y - 6.0 * k, 16.0 * k, 12.0 * k, 2.4 * k, w * 0.85, |_, _| col);
-            c.fill_round_rect(x - 5.6 * k, y + 1.8 * k, 11.2 * k, 2.4 * k, 1.0 * k, col);
         }
         Symbol::UpDown => {
             let (h, d) = (2.2 * k, 3.0 * k);

@@ -190,9 +190,6 @@ pub enum UiEvent {
     AppExited(String),
     /// The Mac started the app (the launch card moves on).
     Launched(String),
-    /// The Mac's own Dock (Desktop Fusion): streamed as window `id` from this region of the
-    /// Mac's screen (points), at `edge`; or why it cannot be shown.
-    Dock { available: bool, id: u64, x: i32, y: i32, w: u32, h: u32, edge: String, reason: Option<String> },
     /// The Mac's own menu bar, streamed as window `id` (its strip in Mac points), or why not.
     MacMenuBar { available: bool, id: u64, w: u32, h: u32, reason: Option<String> },
     /// The title bar of exact window `id` (Mac points from its picture's top-left).
@@ -747,7 +744,6 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
                 Message::AppExited { application_id, .. } => emit(UiEvent::AppExited(application_id)),
                 Message::AppLaunched { application_id, .. } => emit(UiEvent::Launched(application_id)),
                 Message::AudioStatus { state, reason } => crate::audio::audio().set_mac_status(&state, reason.as_deref()),
-                Message::DockStatus { available, window_id, bounds, edge, reason } => emit(UiEvent::Dock { available, id: window_id, x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, edge, reason }),
                 Message::MenuBarStatus { available, window_id, bounds, reason } => emit(UiEvent::MacMenuBar { available, id: window_id, w: bounds.w, h: bounds.h, reason }),
                 Message::WindowChrome { window_id, title_height, close, minimize, zoom, controls } => {
                     let r = |r: rm_protocol::Rect| (r.x, r.y, r.w, r.h);
@@ -757,7 +753,6 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
                     let alpha = rm_protocol::mask::from_message(width, height, &rle).map(std::sync::Arc::new);
                     emit(UiEvent::Mask { id: window_id, width, height, alpha })
                 }
-                Message::WallpaperStatus { applied, reason } => eprintln!("wallpaper on the Mac: {}", if applied { "this PC's".to_string() } else { reason.unwrap_or_else(|| "the Mac's own".into()) }),
                 Message::Error { code, message } => emit(UiEvent::Notice(format!("{code}: {message}"))),
                 Message::CapabilityUnavailable { capability, reason } => emit(UiEvent::Notice(format!("{capability} unavailable: {reason}"))),
                 Message::P2pOffer { secret, candidates } => {

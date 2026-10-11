@@ -48,7 +48,10 @@ enum Launched {
     case app(NSRunningApplication)
     case process(Process)
     var processIdentifier: pid_t { switch self { case .app(let a): return a.processIdentifier; case .process(let p): return p.processIdentifier } }
-    var isRunning: Bool { switch self { case .app(let a): return !a.isTerminated; case .process(let p): return p.isRunning } }
+    /// (asked of the process itself too: `isTerminated` is only kept up to date by a main run
+    /// loop, which the agent does not run: an app that quit looked alive for good, and opening
+    /// it again was refused as "already running")
+    var isRunning: Bool { switch self { case .app(let a): return !a.isTerminated && kill(a.processIdentifier, 0) == 0; case .process(let p): return p.isRunning } }
     var terminationStatus: Int32 { switch self { case .app: return 0; case .process(let p): return p.terminationStatus } }
 }
 
@@ -112,8 +115,25 @@ final class AppManager {
             lock.lock(); adopted[id] = f.processIdentifier; lock.unlock()
             return (f.processIdentifier, nil)
         }
+        // quitting (its close button, a moment ago): opened again once it is gone, as a new copy
+        if let p = pidFor(id), quitting(id) {
+            for _ in 0..<80 where kill(p, 0) == 0 { usleep(100_000) }
+            lock.lock(); if running[id]?.processIdentifier == p { running.removeValue(forKey: id) }; lock.unlock()
+        }
         lock.lock(); defer { lock.unlock() }
-        if let p = running[id], p.isRunning { return (nil, ("already_running", id)) }
+        if let p = running[id] {
+            if p.isRunning, case .app(let a) = p, let bundle = bundlePath(d.executable) {
+                // still open (its windows closed, the app not): shown again as a click on its Dock
+                // icon does, a window opened if it has none (the reopen event)
+                let cfg = NSWorkspace.OpenConfiguration()
+                cfg.activates = true
+                cfg.addsToRecentItems = false
+                NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: bundle), configuration: cfg) { _, _ in }
+                return (a.processIdentifier, nil)
+            }
+            if p.isRunning { return (nil, ("already_running", id)) }
+            running.removeValue(forKey: id) // gone without us noticing yet: started anew
+        }
         // already open on the Mac (started there, not by us): show that one, never a second copy
         if let bid = d.bundleID, let r = NSRunningApplication.runningApplications(withBundleIdentifier: bid).first(where: { !$0.isTerminated }) {
             adopted[id] = r.processIdentifier
@@ -219,8 +239,20 @@ final class AppManager {
     /// Started by us (not an app that was already open on the Mac).
     func launchedByUs(_ id: String) -> Bool { lock.lock(); defer { lock.unlock() }; return running[id] != nil }
 
-    /// The app is gone: forget it.
-    func forget(_ id: String) { lock.lock(); running.removeValue(forKey: id); adopted.removeValue(forKey: id); lock.unlock() }
+    /// The app is gone: forget it. `pid`: only if that is still the one known by `id` (the app
+    /// may have been opened again meanwhile: the new copy is not forgotten).
+    func forget(_ id: String, pid: pid_t? = nil) {
+        lock.lock()
+        if pid == nil || running[id]?.processIdentifier == pid { running.removeValue(forKey: id) }
+        if pid == nil || adopted[id] == pid { adopted.removeValue(forKey: id) }
+        quittingIDs.remove(id)
+        lock.unlock()
+    }
+
+    /// Apps asked to quit (their close button) that have not gone yet.
+    private var quittingIDs: Set<String> = []
+    func markQuitting(_ id: String) { lock.lock(); quittingIDs.insert(id); lock.unlock() }
+    func quitting(_ id: String) -> Bool { lock.lock(); defer { lock.unlock() }; return quittingIDs.contains(id) }
 
     /// The .app bundle of a listed app.
     func bundle(of id: String) -> String? { descriptor(id).flatMap { bundlePath($0.executable) } }

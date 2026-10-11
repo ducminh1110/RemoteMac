@@ -40,7 +40,6 @@ pub enum Field {
     Glass,
     Motion,
     Frame,
-    Fusion,
 }
 
 enum Control {
@@ -66,13 +65,12 @@ impl Field {
             Field::Glass => "Glass",
             Field::Motion => "Animations",
             Field::Frame => "Mac windows",
-            Field::Fusion => "Desktop Fusion",
         }
     }
 
     fn control(self) -> Control {
         match self {
-            Field::Pacing | Field::Audio | Field::Cursor | Field::Fusion => Control::Switch,
+            Field::Pacing | Field::Audio | Field::Cursor => Control::Switch,
             Field::Volume => Control::Slider,
             _ => Control::Menu,
         }
@@ -87,7 +85,7 @@ struct Section {
     groups: &'static [(&'static [Field], &'static str)],
 }
 
-const SECTIONS: [Section; 5] = [
+const SECTIONS: [Section; 4] = [
     Section {
         name: "Video",
         icon: Symbol::Display,
@@ -111,7 +109,6 @@ const SECTIONS: [Section; 5] = [
         colour: Rgba::rgb(0x5e, 0x5c, 0xe6),
         groups: &[(&[Field::Frame], "The app's menus sit in each window's title bar, beside its buttons. As the Mac draws them (experimental): the Mac's own title bars, and its menu bar at the top of the screen. Applies from the next connection."), (&[Field::Glass, Field::Motion], "")],
     },
-    Section { name: "Desktop Fusion", icon: Symbol::Dock, colour: Rgba::rgb(0xaf, 0x52, 0xde), groups: &[(&[Field::Fusion], "Experimental: the Mac's own Dock at the bottom of this PC's screen, on this PC's wallpaper (the Mac takes it while connected and gets its own back after).")] },
 ];
 
 /// What the pointer is over.
@@ -179,7 +176,7 @@ impl SettingsView {
     /// `workspaces`: the Mac screen sizes offered (worked out from this PC's screen).
     pub fn new(settings: Settings, workspaces: Vec<String>) -> SettingsView {
         let mut knobs = HashMap::new();
-        for f in [Field::Pacing, Field::Audio, Field::Cursor, Field::Fusion] {
+        for f in [Field::Pacing, Field::Audio, Field::Cursor] {
             knobs.insert(f, Anim::at(if Self::switch_of(&settings, f) { 1.0 } else { 0.0 }));
         }
         SettingsView { settings, workspaces, section: 0, hot: Hot::None, down: Hot::None, menu: None, knobs, dragging: false, w: W as usize, h: H as usize, s: 1.0, dark: false, active: true, level: Level::Full, texts: HashMap::new(), glass: None, menu_glass: None }
@@ -207,7 +204,6 @@ impl SettingsView {
             Field::Pacing => s.pacing,
             Field::Audio => s.audio,
             Field::Cursor => s.local_cursor,
-            Field::Fusion => s.dock,
             _ => false,
         }
     }
@@ -277,10 +273,6 @@ impl SettingsView {
             Field::Cursor => {
                 s.local_cursor = !s.local_cursor;
                 s.local_cursor
-            }
-            Field::Fusion => {
-                s.dock = !s.dock;
-                s.dock
             }
             _ => return,
         };

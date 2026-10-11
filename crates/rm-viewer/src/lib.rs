@@ -5,7 +5,6 @@ pub mod audio;
 pub mod banner;
 pub mod chrome;
 pub mod connectui;
-pub mod dock;
 pub mod field;
 pub mod ico;
 pub mod keymap;
@@ -56,7 +55,6 @@ pub mod splash;
 #[cfg(windows)]
 pub mod surface;
 #[cfg(windows)]
-pub mod wallpaper;
 #[cfg(windows)]
 pub mod ui;
 
