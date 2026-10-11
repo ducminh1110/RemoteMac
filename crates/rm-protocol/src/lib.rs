@@ -943,7 +943,7 @@ mod tests {
         for m in [
             Message::DockStream { enabled: true },
             Message::DockStatus { available: true, window_id: 9, bounds: Rect { x: 300, y: 1000, w: 900, h: 80 }, edge: "bottom".into(), reason: None },
-            Message::SetWallpaper { path: Some("/Users/me/Downloads/RemoteMac Uploads/w.jpg".into()), style: "fill".into(), color: "#1E1E1E".into() },
+            Message::SetWallpaper { path: Some("/Users/me/Downloads/Taro Uploads/w.jpg".into()), style: "fill".into(), color: "#1E1E1E".into() },
             Message::SetWallpaper { path: None, style: "fill".into(), color: "#003366".into() },
             Message::RestoreWallpaper,
             Message::WallpaperStatus { applied: false, reason: Some("x".into()) },

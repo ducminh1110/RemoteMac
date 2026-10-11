@@ -309,27 +309,27 @@ impl Link {
 /// Why connecting failed, in words for the user (the relay's `ERR ...` replies mapped).
 pub fn friendly_error(e: &str) -> String {
     let m = if e.contains("no such session") {
-        "This Mac is not online. Start remotemac on the Mac and check the ID."
+        "This Mac is not online. Start Taro on the Mac and check the ID."
     } else if e.contains("session mismatch") {
         "Wrong password (or the Mac is already in use)."
     } else if e.contains("locked") {
         "Too many wrong passwords. Wait a minute and try again."
     } else if e.contains("not admitted") {
-        "The server refused this app (key mismatch). Use the current MacBridge build."
+        "The server refused this app (key mismatch). Use the current Taro build."
     } else if e.contains("pair timeout") {
         "The Mac did not answer in time. Try again."
     } else if e.contains("relay busy") {
         "The server is busy. Try again shortly."
     } else if e.contains("handshake") {
-        "Connected, but the Mac did not complete the handshake. Update remotemac on the Mac."
+        "Connected, but the Mac did not complete the handshake. Update Taro on the Mac."
     } else if e.contains("wrong password") {
         "Wrong password."
-    } else if e.contains("older MacBridge") {
-        "The Mac runs an older MacBridge without encryption. Update the Mac and this PC to the same version."
+    } else if e.contains("older Taro") {
+        "The Mac runs an older Taro without encryption. Update the Mac and this PC to the same version."
     } else if e.contains("not found on this network") || e.contains("did not answer at") || e.contains("is not a Mac address") || e.contains("could not be resolved") {
         return e.to_string();
     } else {
-        return format!("Cannot reach the MacBridge server: {e}");
+        return format!("Cannot reach the Taro server: {e}");
     };
     m.to_string()
 }
@@ -461,7 +461,7 @@ pub fn mac_label() -> String {
 }
 
 /// Mac windows are shown as the Mac draws them (their own title bar and buttons, the Mac's menu
-/// bar at the top of the screen) rather than in MacBridge's frame (the default: the app's menus
+/// bar at the top of the screen) rather than in Taro's frame (the default: the app's menus
 /// in its title bar).
 pub fn exact_windows() -> bool {
     EXACT.load(std::sync::atomic::Ordering::Relaxed)

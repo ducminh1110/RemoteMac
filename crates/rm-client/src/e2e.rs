@@ -444,7 +444,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     c.send(Message::FileUploadEnd { transfer_id: tid });
     let ok = c.pump(15, |c| c.uploaded.is_some());
     let path = c.uploaded.clone().unwrap_or_default();
-    c.r.check("upload lands in the uploads folder with a sanitised name", ok && path.ends_with("/RemoteMac Uploads/rm e2e upload.bin") && !path.contains(".."), format!("path={path:?} errors={:?}", c.errors));
+    c.r.check("upload lands in the uploads folder with a sanitised name", ok && path.ends_with("/Taro Uploads/rm e2e upload.bin") && !path.contains(".."), format!("path={path:?} errors={:?}", c.errors));
     if let (Some((pid, _, _)), true) = (panel, ok) {
         c.send(Message::PanelChooseFile { window_id: pid, remote_path: path });
         let ok = c.pump(15, |c| c.last_title.contains("[opened rm e2e upload.bin 716800 bytes]"));
@@ -560,7 +560,7 @@ fn documents<S: Read + Write>(c: &mut Ctx<S>, wid: u64) {
     if let Some(p) = upload(c, 21, "rm e2e.command", b"#!/bin/sh\necho hi\n") {
         refused(c, p, "an uploaded script");
     }
-    let Some(note) = upload(c, 22, "rm e2e note.txt", b"MacBridge e2e note\n") else {
+    let Some(note) = upload(c, 22, "rm e2e note.txt", b"Taro e2e note\n") else {
         c.r.check("a document from Windows opens in its Mac app (TextEdit), shown on Windows", false, "upload failed");
         return;
     };
@@ -631,9 +631,9 @@ fn relaunch<S: Read + Write>(c: &mut Ctx<S>) {
 
 /// Exact windows ("window_style"): a window opened then comes whole, its own title bar and
 /// buttons in the picture, with that title bar described (to move it by) and all four corners
-/// in its shape; back to MacBridge's frame afterwards.
+/// in its shape; back to Taro's frame afterwards.
 fn exact_windows<S: Read + Write>(c: &mut Ctx<S>) {
-    let Some(note) = upload(c, 23, "rm e2e exact.txt", b"MacBridge exact window\n") else {
+    let Some(note) = upload(c, 23, "rm e2e exact.txt", b"Taro exact window\n") else {
         c.r.check("exact window: shown as the Mac draws it", false, "upload failed");
         return;
     };

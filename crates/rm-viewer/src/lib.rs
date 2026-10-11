@@ -69,7 +69,7 @@ pub fn log_hint() -> String {
     if logs_enabled() {
         format!("Log: {}", log_path().display())
     } else {
-        "For a log, start MacBridge.exe with --logs-enabled.".into()
+        "For a log, start Taro.exe with --logs-enabled.".into()
     }
 }
 

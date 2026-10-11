@@ -1,4 +1,4 @@
-//! A small software painter for MacBridge's own surfaces (the app loading window, glass menus,
+//! A small software painter for Taro's own surfaces (the app loading window, glass menus,
 //! the search palette, banners, the Dock): premultiplied BGRA pixels, anti-aliased rounded
 //! rectangles and circles from signed distances, gradients, scaled images, blur and shadows.
 //! The pixels are what `UpdateLayeredWindow` takes, so a surface is drawn here and shown as is.

@@ -33,7 +33,7 @@ function Save-Desktop([string] $path) {
   } catch { Write-Host "desktop screenshot failed: $_" }
 }
 
-# a picture of one of MacBridge's own surfaces (the viewer asks: shot.req = "name x y w h")
+# a picture of one of Taro's own surfaces (the viewer asks: shot.req = "name x y w h")
 function Save-Region([string] $name, [int] $x, [int] $y, [int] $w, [int] $h) {
   try {
     $m = 32

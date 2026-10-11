@@ -1,7 +1,7 @@
-//! The title bar of a Mac app's window here (MacBridge's frame), after macOS 26: the window's
+//! The title bar of a Mac app's window here (Taro's frame), after macOS 26: the window's
 //! own surface with the red, yellow and green buttons, the app's menus beside them (the app's
 //! name in bold) and the window's title in the middle of the room left. Its text is set as the
-//! rest of MacBridge's (text.rs: Inter, Apple's tracking), its buttons are the launcher's
+//! rest of Taro's (text.rs: Inter, Apple's tracking), its buttons are the launcher's
 //! (look.rs), light or dark as Windows is; the menu title under the pointer, or open, sits on a
 //! small glass pill that comes in with a quick fade. Drawn into a canvas (previewed in the
 //! tests); ui.rs puts it on the window and opens the menus (glassmenu.rs).

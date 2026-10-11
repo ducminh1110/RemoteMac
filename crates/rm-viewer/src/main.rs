@@ -6,7 +6,7 @@ fn main() {
     let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let has = |k: &str| args.iter().any(|a| a == k);
     if has("-h") || has("--help") {
-        eprintln!("usage: MacBridge.exe                      (asks for the Mac's ID and password)\n       MacBridge.exe --id 123456789 --password PASS\n       RM_SESSION_TOKEN=.. MacBridge.exe --session NAME   (legacy)\n  [--relay HOST:PORT | --direct HOST[:PORT]] [--app testapp] [--logs-enabled] [--raw-ctrl] [--no-clipboard] [--renderer d3d11|gdi] [--mac-file-panel] [--no-shortcuts] [--smoke] [--showcase DIR --apps xcode,textedit --settle SECS --type TEXT]");
+        eprintln!("usage: Taro.exe                      (asks for the Mac's ID and password)\n       Taro.exe --id 123456789 --password PASS\n       RM_SESSION_TOKEN=.. Taro.exe --session NAME   (legacy)\n  [--relay HOST:PORT | --direct HOST[:PORT]] [--app testapp] [--logs-enabled] [--raw-ctrl] [--no-clipboard] [--renderer d3d11|gdi] [--mac-file-panel] [--no-shortcuts] [--smoke] [--showcase DIR --apps xcode,textedit --settle SECS --type TEXT]");
         std::process::exit(0)
     }
     // a Mac on this network is found by its ID; for one elsewhere: --relay, $RM_RELAY, the relay
@@ -35,13 +35,13 @@ fn main() {
         }
         let quiet = has("--smoke") || has("--showcase");
         std::panic::set_hook(Box::new(move |info| {
-            let msg = format!("MacBridge stopped because of an internal error:\n\n{info}\n\n{}", rm_viewer::log_hint());
+            let msg = format!("Taro stopped because of an internal error:\n\n{info}\n\n{}", rm_viewer::log_hint());
             eprintln!("{msg}");
             if !quiet {
-                rm_viewer::native::message_box("MacBridge", &msg);
+                rm_viewer::native::message_box("Taro", &msg);
             }
         }));
-        eprintln!("MacBridge {} starting (relay {})", env!("CARGO_PKG_VERSION"), relay.as_deref().unwrap_or("none: this network only"));
+        eprintln!("Taro {} starting (relay {})", env!("CARGO_PKG_VERSION"), relay.as_deref().unwrap_or("none: this network only"));
         let opts = rm_viewer::ui::Options { relay, session, token, prompt: prompt && !has("--smoke") && !has("--showcase"), app: get("--app"), ctrl_as_command: !has("--raw-ctrl"), smoke: has("--smoke"), clipboard: !has("--no-clipboard"), d3d: get("--renderer").as_deref() != Some("gdi"), windows_file_picker: !has("--mac-file-panel") && !has("--showcase"), shortcuts: !has("--no-shortcuts"),
             showcase: get("--showcase").map(|dir| rm_viewer::ui::ShowcaseOptions {
                 apps: get("--apps").unwrap_or_else(|| "xcode".into()).split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
@@ -55,7 +55,7 @@ fn main() {
     #[cfg(not(windows))]
     {
         let _ = (relay, session, token, prompt);
-        eprintln!("the RemoteMac viewer needs Windows (the portable parts are covered by `cargo test -p rm-viewer`)");
+        eprintln!("Taro needs Windows (the portable parts are covered by `cargo test -p rm-viewer`)");
         std::process::exit(2);
     }
 }

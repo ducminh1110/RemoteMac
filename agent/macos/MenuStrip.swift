@@ -6,7 +6,7 @@
 // Apple menu, the status items and the clock). App windows never cover the menu bar, so the
 // strip shows nothing else. Clicks go to the menu bar at that spot; the menus that open from it
 // are shown under it as popups of it (WindowTracker). A menu bar that hides itself is left
-// alone: MacBridge never changes that setting.
+// alone: Taro never changes that setting.
 import Foundation
 import AppKit
 

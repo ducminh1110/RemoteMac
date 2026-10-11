@@ -7,18 +7,18 @@ user's Dock. Write the result next to each item (✓, ✗ with a note, or "n/a")
 
 Setup: a Mac with macOS 14 or later and a logged-in user; a Windows 10 or 11 PC with speakers
 or headphones; both on the same network unless the item says otherwise. Note both versions
-(`./macbridge --version`, the first line of `MacBridge.exe --logs-enabled`'s log).
+(`./taro --version`, the first line of `Taro.exe --logs-enabled`'s log).
 
 ## 1. Installing and starting
 
-- [ ] On a Mac that never ran MacBridge, `./macbridge.sh --check` lists Screen Recording and
+- [ ] On a Mac that never ran Taro, `./taro.sh --check` lists Screen Recording and
       Accessibility as missing, names the terminal app, and exits with 3.
-- [ ] A copy downloaded with a browser (quarantined): `./macbridge.sh` says so and shows the
+- [ ] A copy downloaded with a browser (quarantined): `./taro.sh` says so and shows the
       `xattr` command; after it, it starts.
-- [ ] After allowing both permissions and reopening the terminal, `./macbridge.sh --check`
-      exits with 0 and `./macbridge.sh --password …` shows the ID, the password and the Mac's
+- [ ] After allowing both permissions and reopening the terminal, `./taro.sh --check`
+      exits with 0 and `./taro.sh --password …` shows the ID, the password and the Mac's
       addresses, then goes to the background.
-- [ ] `./macbridge.sh --stop` stops it.
+- [ ] `./taro.sh --stop` stops it.
 
 ## 2. Connecting
 
@@ -37,14 +37,14 @@ or headphones; both on the same network unless the item says otherwise. Note bot
       the app's colour), which turns into the app's window. Try Safari, Notes, Xcode, a
       third-party app.
 - [ ] An app that fails to open: the loading window says so and closes.
-- [ ] **Ctrl+Alt+Space** opens MacBridge Search; typing filters; Enter opens the app, or
+- [ ] **Ctrl+Alt+Space** opens Taro Search; typing filters; Enter opens the app, or
       switches to it when it is already open; Escape closes; arrow keys move.
 - [ ] In the Mac Desktop, double-click a document in Finder: its app's window also appears as
       a Windows window.
 
 ## 3b. Exact windows, the menu bar, shapes
 
-- [ ] By default (menus in the title bar): Finder, Safari, TextEdit windows have MacBridge's
+- [ ] By default (menus in the title bar): Finder, Safari, TextEdit windows have Taro's
       title bar with the app's menus; clicks and typing in them work at once, also with the
       pointer moving fast; resizing by the edges and the green button work.
 - [ ] The title bar's text matches the launcher's (same font and spacing), light and dark; the
@@ -61,7 +61,7 @@ or headphones; both on the same network unless the item says otherwise. Note bot
 - [ ] Cut the network for 15 s, then restore it: the viewer reconnects, the apps are still open
       on the Mac, video comes over UDP again (not TCP). Close the viewer: the apps quit.
 - [ ] Drop a 50 MB file on a Mac window on a slow link: the session stays up while it uploads.
-- [ ] TextEdit, Finder and Safari windows show only MacBridge's title bar (no "Untitled ⌄" row
+- [ ] TextEdit, Finder and Safari windows show only Taro's title bar (no "Untitled ⌄" row
       or grey capsule under it).
 - [ ] With **Mac windows** = as the Mac draws them: Safari, TextEdit, Finder windows show their own
       title bar and buttons; dragging the empty title bar moves the window here (snap to the
@@ -115,9 +115,9 @@ or headphones; both on the same network unless the item says otherwise. Note bot
 - [ ] Clicking an app in the Dock opens it as a Windows window; a right-click menu of a Dock
       icon shows over the Dock.
 - [ ] Change the PC's wallpaper while connected: the Mac follows within 4–5 s.
-- [ ] Turn Desktop Fusion off, disconnect, and `./macbridge --stop`: each time the Mac's own
+- [ ] Turn Desktop Fusion off, disconnect, and `./taro --stop`: each time the Mac's own
       desktop picture is back.
-- [ ] Kill MacBridge on the Mac (`kill -9`) while Fusion is on, then start it again: the Mac's
+- [ ] Kill Taro on the Mac (`kill -9`) while Fusion is on, then start it again: the Mac's
       own desktop picture is back.
 - [ ] With automatic hiding of the Dock on the Mac: the setting is left as it is and the
       viewer's own Dock stands in.
@@ -126,5 +126,5 @@ or headphones; both on the same network unless the item says otherwise. Note bot
 ## 9. Stopping and uninstalling
 
 - [ ] Disconnect from the ball's menu: the Mac's Start-menu entries disappear on the PC.
-- [ ] Follow the user guide's uninstall steps on both sides; nothing of MacBridge is left
+- [ ] Follow the user guide's uninstall steps on both sides; nothing of Taro is left
       (`~/Library/Application Support/RemoteMac`, `%APPDATA%\RemoteMac`).

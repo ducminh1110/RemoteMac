@@ -1,4 +1,4 @@
-//! MacBridge's own look, after MobileLab's interface (MIT; its Xcode 26 layout and colour tokens,
+//! Taro's own look, after MobileLab's interface (MIT; its Xcode 26 layout and colour tokens,
 //! docs/design/xcode-interface.md there): the colour tokens in light and dark, the softly tinted
 //! window, the floating rounded panel, the round accent mark. The launcher and the connect window
 //! draw with these (paint.rs), so both look the same.
@@ -30,12 +30,12 @@ pub struct Theme {
 pub fn theme(dark: bool) -> Theme {
     if dark {
         Theme {
-            win: [Rgba::rgb(0x17, 0x1b, 0x23), Rgba::rgb(0x1e, 0x22, 0x2b), Rgba::rgb(0x1a, 0x1e, 0x27)],
+            win: [Rgba::rgb(0x1b, 0x17, 0x25), Rgba::rgb(0x22, 0x1d, 0x2d), Rgba::rgb(0x1e, 0x19, 0x29)],
             panel: Rgba::rgb(0x1f, 0x1f, 0x24),
             text: Rgba::rgb(0xec, 0xec, 0xee),
             text2: Rgba::rgb(0xa0, 0xa0, 0xa8),
             text3: Rgba::rgb(0x6f, 0x6f, 0x78),
-            accent: Rgba::rgb(0x0a, 0x84, 0xff),
+            accent: Rgba::rgb(0xa0, 0x72, 0xff),
             field: Rgba::rgb(0x33, 0x33, 0x38),
             hover: Rgba::WHITE.alpha(0.07),
             pressed: Rgba::WHITE.alpha(0.12),
@@ -49,19 +49,19 @@ pub fn theme(dark: bool) -> Theme {
         }
     } else {
         Theme {
-            win: [Rgba::rgb(0xd5, 0xe6, 0xf8), Rgba::rgb(0xe6, 0xee, 0xf8), Rgba::rgb(0xd9, 0xe3, 0xf2)],
+            win: [Rgba::rgb(0xe3, 0xda, 0xf8), Rgba::rgb(0xee, 0xe9, 0xfa), Rgba::rgb(0xe0, 0xd7, 0xf3)],
             panel: Rgba::WHITE,
             text: Rgba::rgb(0x1d, 0x1d, 0x1f),
             text2: Rgba::rgb(0x6c, 0x6c, 0x72),
             text3: Rgba::rgb(0xa1, 0xa1, 0xa8),
-            accent: Rgba::rgb(0x0a, 0x7a, 0xff),
+            accent: Rgba::rgb(0x7c, 0x4a, 0xe8),
             field: Rgba::rgb(0xef, 0xef, 0xf1),
             hover: Rgba::BLACK.alpha(0.05),
             pressed: Rgba::BLACK.alpha(0.09),
             capsule: Rgba::WHITE,
             divider: Rgba::rgb(0xe4, 0xe4, 0xe8),
-            ring: Rgba::rgba(30, 50, 90, 31),
-            shade: Rgba::rgba(20, 40, 80, 26),
+            ring: Rgba::rgba(50, 30, 90, 31),
+            shade: Rgba::rgba(40, 20, 80, 26),
             pass: Rgba::rgb(0x30, 0xb3, 0x56),
             warn: Rgba::rgb(0xff, 0x9f, 0x0a),
             fail: Rgba::rgb(0xff, 0x3b, 0x30),
@@ -94,7 +94,7 @@ pub fn panel(c: &mut Canvas, x: f32, y: f32, w: f32, h: f32, r: f32, s: f32, t: 
     c.fill_round_rect(x, y, w, h, r, t.panel);
 }
 
-/// MacBridge's mark, `d` pixels square at (x, y): an accent rounded square with a white display.
+/// Taro's mark, `d` pixels square at (x, y): an accent rounded square with a white display.
 pub fn mark(c: &mut Canvas, x: f32, y: f32, d: f32, accent: Rgba) {
     let k = d / 26.0;
     c.fill_round_rect_with(x, y, d, d, 6.5 * k, |_, py| accent.lerp(accent.shade(-0.18), ((py - y) / d).clamp(0.0, 1.0)));

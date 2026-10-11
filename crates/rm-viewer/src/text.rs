@@ -1,4 +1,4 @@
-//! Text as macOS draws it, on every surface MacBridge paints itself. Windows' GDI snaps each
+//! Text as macOS draws it, on every surface Taro paints itself. Windows' GDI snaps each
 //! letter to the pixel grid (hinting) and to whole pixels of advance, which made the text look
 //! jagged and the letters crowd; macOS does neither. Here:
 //!

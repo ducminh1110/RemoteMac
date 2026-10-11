@@ -1,6 +1,6 @@
-# MacBridge architecture
+# Taro architecture
 
-How the pieces fit together, for contributors and anyone who wants to check how MacBridge
+How the pieces fit together, for contributors and anyone who wants to check how Taro
 works. User-facing instructions are in the [user guide](USER-GUIDE.md).
 
 - [Components](#components)
@@ -21,8 +21,8 @@ works. User-facing instructions are in the [user guide](USER-GUIDE.md).
 
 | Component | Language | Where | Role |
 |---|---|---|---|
-| Mac app (`macbridge`) | Swift + a little Objective-C | `agent/macos/` | captures windows (ScreenCaptureKit), encodes H.264 (VideoToolbox), injects input, reads menus and windows (Accessibility), launches apps (LaunchServices), virtual displays |
-| Windows app (`MacBridge.exe`) | Rust (Win32) | `crates/rm-viewer/` | one native window per Mac window, decoding (Media Foundation / openh264), presentation (D3D11, DirectComposition), input, clipboard, launcher |
+| Mac app (`taro`) | Swift + a little Objective-C | `agent/macos/` | captures windows (ScreenCaptureKit), encodes H.264 (VideoToolbox), injects input, reads menus and windows (Accessibility), launches apps (LaunchServices), virtual displays |
+| Windows app (`Taro.exe`) | Rust (Win32) | `crates/rm-viewer/` | one native window per Mac window, decoding (Media Foundation / openh264), presentation (D3D11, DirectComposition), input, clipboard, launcher |
 | Relay (`rm-relay`) | Rust | `crates/rm-relay/` | pairs the two sides, forwards TCP and UDP, hands out Mac IDs |
 | Protocol | Rust (mirrored in Swift) | `crates/rm-protocol/`, `agent/macos/Wire.swift` | framing, messages, UDP/FEC, sessions, encryption |
 | GameStream | Rust + C | `crates/rm-gamestream/`, `crates/moonlight-sys/` | the Mac Desktop: a host ported from Sunshine, the Moonlight client core |
@@ -183,7 +183,7 @@ menus and streams each window as its own H.264 stream.
 ## Sound
 
 - **Capture** (`agent/macos/Audio.swift`): ScreenCaptureKit's audio of the session's apps (all
-  apps while the Mac Desktop is open), never MacBridge's own (`excludesCurrentProcessAudio`).
+  apps while the Mac Desktop is open), never Taro's own (`excludesCurrentProcessAudio`).
   It starts on the viewer's `audio_control {enabled: true}` and answers `audio_status`
   (`playing`, `unavailable` with a reason). After one second of digital silence nothing is
   sent.
@@ -221,7 +221,7 @@ menus and streams each window as its own H.264 stream.
 - **Wallpaper**: the viewer uploads the PC's desktop picture (or sends its plain colour) and asks
   `set_wallpaper`. The Mac saves its own desktop pictures once to
   `~/Library/Application Support/RemoteMac/wallpaper-restore.json`, then sets the new one;
-  `restore_wallpaper`, the session's end, `--stop` and the next start (when no other MacBridge
+  `restore_wallpaper`, the session's end, `--stop` and the next start (when no other Taro
   runs) put the saved ones back and remove the file.
 - **On Windows** (`ui.rs`, `fusion_*`): the Dock window is borderless, top-most, placed at the
   bottom of the monitor and slid in and out by the pointer; the wallpaper is checked every 4 s
@@ -237,7 +237,7 @@ encrypted session stream, and the UDP flows ride the session's encrypted datagra
 
 ## The Windows app's own surfaces
 
-MacBridge's own menus, search, loading window and banners are small layered windows drawn on
+Taro's own menus, search, loading window and banners are small layered windows drawn on
 the CPU (`paint.rs`: premultiplied BGRA, SDF rounded shapes, blur, shadows), never over the
 live video.
 
@@ -259,6 +259,6 @@ live video.
 | What | Where | Runs on |
 |---|---|---|
 | unit tests of every Rust crate (protocol, encryption, relay, LAN discovery, FEC, decoder…) | `cargo test --workspace` | any OS |
-| the Windows viewer against the scripted stand-in Mac, rendering checked, screenshots of the loading window, glass menu, MacBridge Search and reconnect banner | `.github/workflows/windows-viewer.yml` | Windows runners |
+| the Windows viewer against the scripted stand-in Mac, rendering checked, screenshots of the loading window, glass menu, Taro Search and reconnect banner | `.github/workflows/windows-viewer.yml` | Windows runners |
 | the real Mac app end to end (encryption, LAN, typed address over IPv4 and IPv6, relay, video, input, menus, dialogs, files, opening documents and refusing programs, adoption, sound packets, the streamed Dock, wallpaper set and restored, fullscreen, Mac Desktop, the launcher script) | `scripts/e2e-macos.sh` | macOS runners |
 | a recorded real Mac session replayed into the viewer | `.github/workflows/mac-to-windows.yml` | macOS + Windows runners |

@@ -1,12 +1,12 @@
-# Running a MacBridge relay
+# Running a Taro relay
 
-The relay is the meeting point between a Mac (`macbridge`) and a Windows PC (`MacBridge.exe`)
+The relay is the meeting point between a Mac (`taro`) and a Windows PC (`Taro.exe`)
 that are **not** on the same network. Both connect *out* to it, so neither opens a port, and a
 Mac behind home NAT or Wi-Fi is reachable. The relay pairs the two sides by session ID and
 forwards bytes; it does not need to understand the stream.
 
 ```
-  Windows (MacBridge.exe) ──TCP/UDP──►  relay.example.com:7470  ◄──TCP/UDP── Mac (macbridge)
+  Windows (Taro.exe) ──TCP/UDP──►  relay.example.com:7470  ◄──TCP/UDP── Mac (taro)
                                         (rm-relay, systemd)
 ```
 
@@ -29,7 +29,7 @@ broadcast (port 7471) and connects straight to it.
 From the latest release, on an Ubuntu / Debian server (x86_64 or ARM64):
 
 ```bash
-tar -xzf macbridge-relay.tar.gz && cd remotemac-relay
+tar -xzf taro-relay.tar.gz && cd remotemac-relay
 sudo ./remotemac-relay-setup.sh --name relay.example.com      # --port 7470 --key KEY optional
 ```
 
@@ -43,7 +43,7 @@ Then:
 
 ```bash
 # Mac
-RM_RELAY_KEY=<key> ./macbridge --relay relay.example.com:7470 --password PASS
+RM_RELAY_KEY=<key> ./taro --relay relay.example.com:7470 --password PASS
 ```
 
 On Windows type `relay.example.com:7470` under **Relay server** in the connect window, with
@@ -82,7 +82,7 @@ echo "$KEY"    # give it to your Mac and PC; keep it out of chats and repositori
 ```bash
 sudo tee /etc/systemd/system/rm-relay.service >/dev/null <<'UNIT'
 [Unit]
-Description=MacBridge relay
+Description=Taro relay
 After=network-online.target
 Wants=network-online.target
 

@@ -1,6 +1,6 @@
-// Running in the background: `./macbridge --password X` shows the ID and the password, then
+// Running in the background: `./taro --password X` shows the ID and the password, then
 // leaves the terminal (a copy of itself carries on in its own session, so closing the terminal
-// window does not end it); `./macbridge --stop` ends it. Scripts (stdout not a terminal) and
+// window does not end it); `./taro --stop` ends it. Scripts (stdout not a terminal) and
 // --foreground stay in the foreground.
 import Foundation
 import ApplicationServices
@@ -11,9 +11,9 @@ var supportDirectory: URL {
 }
 private var pidFile: URL { supportDirectory.appendingPathComponent("macbridge.pid") }
 
-let backgroundLogPath = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/MacBridge/macbridge.log").path
+let backgroundLogPath = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Taro/taro.log").path
 
-/// The pid of the MacBridge running in the background, if one is.
+/// The pid of the Taro running in the background, if one is.
 func runningInBackground() -> pid_t? {
     guard let s = try? String(contentsOf: pidFile, encoding: .utf8), let pid = pid_t(s.trimmingCharacters(in: .whitespacesAndNewlines)),
           pid > 0, pid != getpid(), pid != getppid(), kill(pid, 0) == 0 else { return nil }
@@ -62,7 +62,7 @@ func becomeDaemon() {
 /// The worker the background copy watches over (for its signal handler).
 private var supervisedWorker: pid_t = 0
 
-/// The background copy watches over the MacBridge that does the work: a worker that dies (a
+/// The background copy watches over the Taro that does the work: a worker that dies (a
 /// crash) is started again at once, so the Mac never stays unreachable. `--stop` ends both.
 func superviseWorker() -> Never {
     signal(SIGTERM) { _ in
@@ -95,10 +95,10 @@ func superviseWorker() -> Never {
     }
 }
 
-/// `--stop`: end the MacBridge running in the background.
+/// `--stop`: end the Taro running in the background.
 func stopBackground() -> Bool {
     guard let pid = runningInBackground() else {
-        print("MacBridge is not running in the background.")
+        print("Taro is not running in the background.")
         return false
     }
     kill(pid, SIGTERM)
@@ -106,7 +106,7 @@ func stopBackground() -> Bool {
     if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
     try? FileManager.default.removeItem(at: pidFile)
     Wallpaper.restore() // the Mac's own wallpaper, if a session had changed it
-    print("MacBridge stopped (pid \(pid)).")
+    print("Taro stopped (pid \(pid)).")
     return true
 }
 
@@ -117,8 +117,8 @@ func checkPermissions() -> Int32 {
     let ax = AXIsProcessTrusted()
     let gui = CGSessionCopyCurrentDictionary() != nil
     func line(_ ok: Bool, _ what: String, _ why: String) -> String { "  \(ok ? "ok     " : "MISSING") \(what)\(ok ? "" : ": \(why)")" }
-    print("MacBridge permissions:")
-    print(line(gui, "logged-in desktop session", "run MacBridge from a logged-in user's desktop (not over SSH alone)"))
+    print("Taro permissions:")
+    print(line(gui, "logged-in desktop session", "run Taro from a logged-in user's desktop (not over SSH alone)"))
     print(line(screen, "Screen Recording", "System Settings > Privacy & Security > Screen Recording"))
     print(line(ax, "Accessibility", "System Settings > Privacy & Security > Accessibility"))
     return gui && screen && ax ? 0 : 3

@@ -1,6 +1,6 @@
-# MacBridge user guide
+# Taro user guide
 
-This guide covers everyday use of MacBridge: installing it, connecting, the options of both
+This guide covers everyday use of Taro: installing it, connecting, the options of both
 apps, keyboard shortcuts, logs, troubleshooting and removal. For running your own relay
 server, see [deploy/RELAY-SETUP.md](../deploy/RELAY-SETUP.md).
 
@@ -24,7 +24,7 @@ server, see [deploy/RELAY-SETUP.md](../deploy/RELAY-SETUP.md).
 | PC | Windows 10 or 11, 64-bit; a GPU with D3D11 is recommended (software rendering works) |
 | Network | same network; or the PC able to reach the Mac's address (TCP and UDP 7471); or both able to reach a relay on TCP and UDP port 7470 |
 
-Both sides must run the same MacBridge version: the Windows app tells you when the Mac runs an
+Both sides must run the same Taro version: the Windows app tells you when the Mac runs an
 older one.
 
 ## 2. The Mac app
@@ -32,16 +32,16 @@ older one.
 ### First start
 
 ```bash
-tar -xzf MacBridge-macos.tar.gz && cd MacBridge
-xattr -d com.apple.quarantine macbridge 2>/dev/null; chmod +x macbridge
-./macbridge.sh --password choose-a-password
+tar -xzf Taro-macos.tar.gz && cd Taro
+xattr -d com.apple.quarantine taro 2>/dev/null; chmod +x taro
+./taro.sh --password choose-a-password
 ```
 
-`macbridge.sh` is the launcher. Before it starts `macbridge` it checks that the program is next
+`taro.sh` is the launcher. Before it starts `taro` it checks that the program is next
 to it and runnable, that the Mac runs macOS 14 or later, that Gatekeeper's quarantine mark is
 gone, and which permissions are still missing, and says how to fix each. It then runs
-`macbridge` with the same options (`./macbridge` on its own works as well).
-`./macbridge.sh --check` only checks: it exits with 0 when everything is in place.
+`taro` with the same options (`./taro` on its own works as well).
+`./taro.sh --check` only checks: it exits with 0 when everything is in place.
 
 The first time, macOS asks for two permissions for your terminal app (Terminal, iTerm, …):
 
@@ -51,22 +51,22 @@ The first time, macOS asks for two permissions for your terminal app (Terminal, 
 
 Allow both in **System Settings → Privacy & Security**, quit the terminal app completely and
 open it again (macOS applies the change at its next start), then run the command again.
-MacBridge never changes these settings itself.
+Taro never changes these settings itself.
 
 ### What it shows
 
 ```
-  MacBridge is ready — connect from Windows with:
+  Taro is ready — connect from Windows with:
     ID session to connect: 123 456 789
     Password: choose-a-password
     Reachable on this network directly, and from anywhere through the relay …
     Connections are end-to-end encrypted.
 
-  Running in the background (pid 4242). Stop it with: ./macbridge --stop
+  Running in the background (pid 4242). Stop it with: ./taro --stop
 ```
 
 Then it gives the prompt back and keeps running in the background. Closing the terminal window
-does not stop it. Only one MacBridge runs in the background at a time.
+does not stop it. Only one Taro runs in the background at a time.
 
 ### Options
 
@@ -78,8 +78,8 @@ does not stop it. Only one MacBridge runs in the background at a time.
 | `--port PORT` | the TCP port a PC types this Mac's address with (7471 by default) |
 | `--foreground` | stay in the terminal (Ctrl+C stops it) |
 | `--logs-enabled` | write a log (see [Logs](#9-logs)) |
-| `--stop` | stop the MacBridge running in the background |
-| `--check-permissions` | list the permissions macOS gives MacBridge here (exit 3 when one is missing) |
+| `--stop` | stop the Taro running in the background |
+| `--check-permissions` | list the permissions macOS gives Taro here (exit 3 when one is missing) |
 | `--version` | print the version |
 | `--help` | list the options |
 
@@ -97,16 +97,16 @@ it has one), `RM_NO_LAN=1` (do not answer on the local network), `RM_PORT` (as `
 
 ### Starting at login (optional)
 
-To have MacBridge start whenever you log in, create
-`~/Library/LaunchAgents/com.macbridge.agent.plist`, using your own path and password:
+To have Taro start whenever you log in, create
+`~/Library/LaunchAgents/com.taro.agent.plist`, using your own path and password:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.macbridge.agent</string>
+  <key>Label</key><string>com.taro.agent</string>
   <key>ProgramArguments</key><array>
-    <string>/Users/you/MacBridge/macbridge</string>
+    <string>/Users/you/Taro/taro</string>
     <string>--foreground</string>
     <string>--password</string><string>choose-a-password</string>
   </array>
@@ -115,13 +115,13 @@ To have MacBridge start whenever you log in, create
 </dict></plist>
 ```
 
-Then run `launchctl load ~/Library/LaunchAgents/com.macbridge.agent.plist`. macOS asks for
-Screen Recording and Accessibility for `macbridge` itself the first time. The plist holds the
+Then run `launchctl load ~/Library/LaunchAgents/com.taro.agent.plist`. macOS asks for
+Screen Recording and Accessibility for `taro` itself the first time. The plist holds the
 password in plain text, so keep the file private (`chmod 600`).
 
 ## 3. The Windows app
 
-Unzip `MacBridge-windows.zip` anywhere and run `MacBridge.exe`. No installation is needed.
+Unzip `Taro-windows.zip` anywhere and run `Taro.exe`. No installation is needed.
 
 The connect window has two ways in, chosen at the top:
 
@@ -181,24 +181,24 @@ the apps you had open and the banner says "Connected again". Clicking the banner
 (connecting goes on).
 
 **Features** are agreed when connecting: each side lists what it can do (sound, opening
-files, Desktop Fusion, …) and only what both have is used. A Mac with an older MacBridge
+files, Desktop Fusion, …) and only what both have is used. A Mac with an older Taro
 still works, without the newer features.
 
 ## 5. Working with Mac apps
 
 - **Each Mac window is a Windows window**, with its own taskbar button. While connected, the
   Mac's apps also appear in the Start menu and Windows Search.
-- **The title bar** (the default) is MacBridge's, with the red, yellow and green buttons, the
+- **The title bar** (the default) is Taro's, with the red, yellow and green buttons, the
   app's menus beside them and the window's title. Drag it to move the window; resize it by its
   edges. Red closes it, yellow minimises it to the taskbar, green makes it full screen.
 - **As the Mac draws it** (Settings → **Mac windows**, experimental): the window comes whole,
-  with its own title bar and buttons, and nothing of MacBridge's around it; the Mac's menu bar
+  with its own title bar and buttons, and nothing of Taro's around it; the Mac's menu bar
   is then at the top of the screen while a Mac window is in front. (The Mac's setting
   "Automatically hide and show the menu bar" must be off for it.)
 - **Opening an app** shows a loading window like the Mac's own: the app's icon and name
   with a spinner, over a blur of the app's main colour. It turns into the app's window when
   that appears.
-- **MacBridge Search** (**Ctrl+Alt+Space**, or **Open an App…** in the navigation ball's
+- **Taro Search** (**Ctrl+Alt+Space**, or **Open an App…** in the navigation ball's
   menu): type part of a Mac app's name, then Enter to open it, or to switch to it when it is
   already open. Arrow keys move, Escape closes.
 - **Menus**: in the window's title bar, beside its buttons (as the Mac draws them: in the Mac's
@@ -210,7 +210,7 @@ still works, without the newer features.
 - **Closing** an app's last window quits the app on the Mac. Closing one of several windows
   closes only that window.
 - **Files**: in an app's Open dialog you can pick a file from this PC, and it is uploaded to
-  the Mac (into `~/Downloads/RemoteMac Uploads`).
+  the Mac (into `~/Downloads/Taro Uploads`).
 - **Drag and drop**: drop files from Explorer onto a Mac app's window to open them in that
   app, or onto the launcher or Mac Desktop to open them in the Mac's default app for them.
   They are uploaded first. Files that run code (`.app`, `.command`, `.sh`, `.pkg`, scripts
@@ -222,7 +222,7 @@ still works, without the newer features.
 - **Mac Desktop** shows the whole Mac screen, in fullscreen. A small round **navigation
   ball** floats over it:
   - drag it anywhere; it settles at the nearest side;
-  - click it for the menu: exit fullscreen, minimize, open an app (MacBridge Search), show
+  - click it for the menu: exit fullscreen, minimize, open an app (Taro Search), show
     this PC's pointer, sound on or off, settings, disconnect.
 
 ## 6. Sound
@@ -231,7 +231,7 @@ The Mac's sound plays on this PC (on by default; **Sound** and **Volume** in Set
 **Ctrl+Alt+Shift+M** to mute and unmute).
 
 - Only the apps you opened from Windows are heard; with **Mac Desktop** open, every app is.
-  MacBridge's own sound is never sent back.
+  Taro's own sound is never sent back.
 - It plays on Windows' default output device and follows it when you switch (headphones
   plugged in, a Bluetooth headset).
 - It is sent as plain PCM (48 kHz stereo), encrypted like everything else, in small packets
@@ -253,9 +253,9 @@ The Mac's sound plays on this PC (on by default; **Sound** and **Volume** in Set
 - Only the Dock and the desktop picture are captured for it; app windows behind it never
   show.
 - The Mac's own desktop picture is saved first and put back when Desktop Fusion is turned
-  off, when you disconnect, on `./macbridge --stop`, and at the next start of MacBridge if it
+  off, when you disconnect, on `./taro --stop`, and at the next start of Taro if it
   ever stopped without doing so.
-- If the Mac's Dock hides itself (automatic hiding), MacBridge leaves that setting alone and
+- If the Mac's Dock hides itself (automatic hiding), Taro leaves that setting alone and
   shows a Dock of the apps opened from Windows instead.
 - The Windows taskbar and Explorer are never changed or replaced.
 
@@ -276,7 +276,7 @@ last step), the Mac Desktop scale, the decoder and frame pacing; and:
 | **Sound**, **Volume** | the Mac's sound on this PC (see [Sound](#6-sound)) |
 | **Use this PC's pointer** | this PC's pointer over the picture instead of the Mac's (Ctrl+Alt+Shift+C) |
 | **Keyboard** | **Windows**: Ctrl acts as ⌘ Command (the default). **Mac**: keys as on a Mac keyboard (Ctrl is Control, the Windows key is ⌘). **Fusion**: as Windows, plus Windows' text keys: Home/End go to the start/end of the line, Ctrl+Home/End to the start/end of the document, Ctrl+arrows move by word, Ctrl+Backspace/Delete delete a word, Ctrl+Y redoes. |
-| **Glass** | how MacBridge's own menus and panels are drawn: Liquid Glass, frosted (blur only), or solid (least GPU). Windows' "transparency effects" setting off also turns the glass solid. |
+| **Glass** | how Taro's own menus and panels are drawn: Liquid Glass, frosted (blur only), or solid (least GPU). Windows' "transparency effects" setting off also turns the glass solid. |
 | **Animations** | as Windows is set (Settings → Accessibility → Visual effects → Animation effects), reduced, or full. Reduced keeps fades but drops movement and springs. |
 | **Mac windows** | with the app's menus in the title bar, or as the Mac draws them (experimental: its menu bar at the top); from the next connection |
 | **Desktop Fusion** | see [Desktop Fusion](#7-desktop-fusion-experimental) |
@@ -287,7 +287,7 @@ stuck.
 | Shortcut | Action |
 |---|---|
 | F11 | fullscreen on / off |
-| Ctrl+Alt+Space | MacBridge Search |
+| Ctrl+Alt+Space | Taro Search |
 | Ctrl+Alt+Shift+P | Settings |
 | Ctrl+Alt+Shift+M | the Mac's sound off / on |
 | Ctrl+Alt+Shift+S | stream statistics overlay |
@@ -300,9 +300,9 @@ Neither app writes a log unless asked to:
 
 | Side | How | Where |
 |---|---|---|
-| Windows | `MacBridge.exe --logs-enabled` | `%APPDATA%\RemoteMac\viewer.log` (overwritten at each start) |
-| Mac, background | `./macbridge --password … --logs-enabled` | `~/Library/Logs/MacBridge/macbridge.log` (appended) |
-| Mac, foreground | `./macbridge --foreground --logs-enabled …` | the terminal |
+| Windows | `Taro.exe --logs-enabled` | `%APPDATA%\RemoteMac\viewer.log` (overwritten at each start) |
+| Mac, background | `./taro --password … --logs-enabled` | `~/Library/Logs/Taro/taro.log` (appended) |
+| Mac, foreground | `./taro --foreground --logs-enabled …` | the terminal |
 
 Logs never contain the password or the keys. When you share one in a bug report, remove the ID
 and any relay key.
@@ -312,36 +312,36 @@ and any relay key.
 | Message or symptom | What to do |
 |---|---|
 | "This Mac was not found on this network" | The Mac is on another network: enter a relay under **Relay server** and start the Mac with the same relay. |
-| "This Mac is not online" | MacBridge is not running on the Mac, or it uses another relay. Check the ID. |
+| "This Mac is not online" | Taro is not running on the Mac, or it uses another relay. Check the ID. |
 | "Wrong password." | Type the password the Mac shows. After five wrong ones, wait a minute. |
 | "Too many wrong passwords" | Wait a minute, then try again. |
-| "The Mac runs an older MacBridge" | Install the same version on both sides. |
+| "The Mac runs an older Taro" | Install the same version on both sides. |
 | "The server refused this app (key mismatch)" | The relay requires a key: set `RM_RELAY_KEY` on both sides, or use builds made for that relay. |
-| Black or frozen picture | Check that Screen Recording is allowed for the terminal app, then restart MacBridge on the Mac. |
-| Clicks and keys do nothing | Allow Accessibility for the terminal app, then restart MacBridge on the Mac. |
+| Black or frozen picture | Check that Screen Recording is allowed for the terminal app, then restart Taro on the Mac. |
+| Clicks and keys do nothing | Allow Accessibility for the terminal app, then restart Taro on the Mac. |
 | Choppy video; the stats show TCP | UDP is blocked between the machines or to the relay. Open UDP 7470 on the relay (and UDP/TCP 7471 on the Mac's firewall for the local network). |
-| "MacBridge is already running in the background" | Stop it first with `./macbridge --stop`. |
+| "Taro is already running in the background" | Stop it first with `./taro --stop`. |
 | No connection to a typed address | Check the address the Mac prints, that the Mac's firewall lets TCP and UDP 7471 in (or the `--port` used), and that a VPN or router passes them. |
 | No sound | Check **Sound** in Settings and the Windows volume mixer; the Mac needs Screen Recording; only apps opened from Windows are heard unless Mac Desktop is open. |
 | A dropped file is not opened | Files that run code are refused. Files must be regular documents. |
-| The Mac's desktop picture did not come back | Start MacBridge again on the Mac (it puts it back at start), or run `./macbridge --stop`. |
-| `macbridge.sh` says a permission is missing | Allow the terminal app it names under Privacy & Security, quit that app completely, open it again. |
+| The Mac's desktop picture did not come back | Start Taro again on the Mac (it puts it back at start), or run `./taro --stop`. |
+| `taro.sh` says a permission is missing | Allow the terminal app it names under Privacy & Security, quit that app completely, open it again. |
 
 ## 11. Updating and uninstalling
 
-**Update:** stop the Mac app (`./macbridge --stop`), replace `macbridge`, `macbridge.sh` and
-`MacBridge.exe` with the new versions, and start again. The ID is kept.
+**Update:** stop the Mac app (`./taro --stop`), replace `taro`, `taro.sh` and
+`Taro.exe` with the new versions, and start again. The ID is kept.
 
 **Uninstall on the Mac:**
 
 ```bash
-./macbridge --stop
-rm -rf ~/Library/Application\ Support/RemoteMac ~/Library/Logs/MacBridge
-rm -f ~/Library/LaunchAgents/com.macbridge.agent.plist   # if you set up start at login
+./taro --stop
+rm -rf ~/Library/Application\ Support/RemoteMac ~/Library/Logs/Taro
+rm -f ~/Library/LaunchAgents/com.taro.agent.plist   # if you set up start at login
 ```
 
 Then remove the terminal app from **Screen Recording** and **Accessibility** in System
 Settings if you no longer need it there.
 
-**Uninstall on Windows:** delete the folder with `MacBridge.exe` and `%APPDATA%\RemoteMac`.
-The Start-menu entries for Mac apps are removed when MacBridge disconnects.
+**Uninstall on Windows:** delete the folder with `Taro.exe` and `%APPDATA%\RemoteMac`.
+The Start-menu entries for Mac apps are removed when Taro disconnects.

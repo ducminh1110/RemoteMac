@@ -1,4 +1,4 @@
-//! Surfaces: borderless layered windows MacBridge draws itself (paint.rs) — the app loading
+//! Surfaces: borderless layered windows Taro draws itself (paint.rs) — the app loading
 //! window, glass menus, the search palette, the reconnect banner, the Dock. A surface keeps one
 //! DIB the size of the window; a frame is painted into a `Canvas`, copied in (only the part
 //! that changed, when told) and shown with per-pixel alpha by `UpdateLayeredWindowIndirect`.
@@ -241,14 +241,9 @@ pub fn transparency_off() -> bool {
     personalize("EnableTransparency") == Some(0)
 }
 
-/// The user's accent colour (Windows settings), else system blue.
+/// Taro's colour: its violet (brighter in dark mode), whatever Windows' accent is.
 pub fn accent() -> Rgba {
-    let mut c = 0u32;
-    let mut opaque = windows::core::BOOL(0);
-    if unsafe { windows::Win32::Graphics::Dwm::DwmGetColorizationColor(&mut c, &mut opaque) }.is_ok() && c != 0 {
-        return Rgba::rgb((c >> 16) as u8, (c >> 8) as u8, c as u8);
-    }
-    Rgba::rgb(10, 132, 255)
+    crate::look::theme(dark_mode()).accent
 }
 
 /// The display scale of the monitor at a screen point.

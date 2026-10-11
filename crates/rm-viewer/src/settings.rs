@@ -38,7 +38,7 @@ pub struct Settings {
     /// the Dock ([`DOCK_EDGES`]): 0 off, 1 at the left edge of the screen, 2 at the right; it
     /// comes out when the pointer is pushed against that edge
     pub dock: u8,
-    /// how Mac windows look ([`WINDOW_FRAMES`]): 0 with MacBridge's own title bar, the app's
+    /// how Mac windows look ([`WINDOW_FRAMES`]): 0 with Taro's own title bar, the app's
     /// menus in it; 1 as the Mac draws them (title bar, buttons; the Mac's menu bar at the top of
     /// the screen; experimental)
     pub frame: u8,

@@ -1,4 +1,4 @@
-//! Motion: how MacBridge's own surfaces move, in one place. Durations come from a small set of
+//! Motion: how Taro's own surfaces move, in one place. Durations come from a small set of
 //! tokens (as a design system names them), curves are Apple's standard ones or a spring, and
 //! every animation can be interrupted: a new target starts from where the value is now, with
 //! the speed it has now, so nothing jumps. With reduced motion (Windows' "Animation effects"

@@ -20,7 +20,7 @@ pub fn aumid(app: &str) -> String {
     format!("RemoteMac.{}", app.replace(|c: char| !c.is_ascii_alphanumeric(), "_"))
 }
 
-/// `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Remote Mac` (overridable for tests).
+/// `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Taro` (overridable for tests).
 pub fn folder() -> Option<PathBuf> {
     if let Some(d) = std::env::var_os("RM_SHORTCUT_DIR") {
         return Some(PathBuf::from(d));
@@ -29,7 +29,7 @@ pub fn folder() -> Option<PathBuf> {
         let p = SHGetKnownFolderPath(&FOLDERID_Programs, KNOWN_FOLDER_FLAG(0), None).ok()?;
         let s = p.to_string().ok();
         CoTaskMemFree(Some(p.0 as *const _));
-        s.map(|s| PathBuf::from(s).join("MacBridge"))
+        s.map(|s| PathBuf::from(s).join("Taro"))
     }
 }
 

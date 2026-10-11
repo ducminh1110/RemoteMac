@@ -70,7 +70,7 @@ pub fn show(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: i
     unsafe {
         UI.with(|u| *u.borrow_mut() = Some(Ui { hwnd: HWND::default(), view: SettingsView::new(current, workspaces()), on_save: Rc::new(on_save), timer: false }));
         let style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME;
-        let Ok(hwnd) = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("MacBridge Settings"), style, CW_USEDEFAULT, CW_USEDEFAULT, 720, 560, owner, None, Some(hinst), None) else {
+        let Ok(hwnd) = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("Taro Settings"), style, CW_USEDEFAULT, CW_USEDEFAULT, 720, 560, owner, None, Some(hinst), None) else {
             UI.with(|u| u.borrow_mut().take());
             return;
         };

@@ -90,27 +90,27 @@ fi
 grep -q "wrong password" out/client-direct-wrong.log || { echo "wrong password (typed address): unexpected reply: $(cat out/client-direct-wrong.log)"; [[ $RC == 0 ]] && RC=1; }
 grep -q "Or type this Mac's address" out/agent-banner.txt || { echo "the banner does not show the Mac's address"; [[ $RC == 0 ]] && RC=1; }
 
-# the launcher users start (./macbridge.sh): it passes options on, says when the program is
+# the launcher users start (./taro.sh): it passes options on, says when the program is
 # missing, and reports the privacy permissions (granted or not depends on this runner)
 L=out/launcher; rm -rf $L; mkdir -p $L
-cp agent/macos/macbridge.sh $L/
-"$L/macbridge.sh" --version >/dev/null 2>out/launcher-missing.txt; LRC=$?
+cp agent/macos/taro.sh $L/
+"$L/taro.sh" --version >/dev/null 2>out/launcher-missing.txt; LRC=$?
 [[ $LRC == 2 ]] && grep -q "not next to this script" out/launcher-missing.txt \
   || { echo "launcher without the program: exit $LRC, $(cat out/launcher-missing.txt)"; [[ $RC == 0 ]] && RC=1; }
-cp out/remote-agent-mac $L/macbridge
-[[ "$("$L/macbridge.sh" --version)" == "macbridge "* ]] || { echo "the launcher does not pass --version on"; [[ $RC == 0 ]] && RC=1; }
-"$L/macbridge.sh" --check >out/launcher-check.txt 2>&1; LRC=$?
+cp out/remote-agent-mac $L/taro
+[[ "$("$L/taro.sh" --version)" == "taro "* ]] || { echo "the launcher does not pass --version on"; [[ $RC == 0 ]] && RC=1; }
+"$L/taro.sh" --check >out/launcher-check.txt 2>&1; LRC=$?
 echo "=== launcher --check (exit $LRC)"; cat out/launcher-check.txt
-{ [[ $LRC == 0 || $LRC == 3 ]] && grep -q "MacBridge permissions:" out/launcher-check.txt; } \
+{ [[ $LRC == 0 || $LRC == 3 ]] && grep -q "Taro permissions:" out/launcher-check.txt; } \
   || { echo "the launcher's permission check failed"; [[ $RC == 0 ]] && RC=1; }
 
 # in the background, as users start it from a terminal (a pseudo-terminal here): the copy in
 # the background watches over the one doing the work; that one dying (a crash) is started again
 # and the Mac is reachable again; --stop ends both
-B=out/bg; rm -rf $B; mkdir -p $B; cp out/remote-agent-mac $B/macbridge
+B=out/bg; rm -rf $B; mkdir -p $B; cp out/remote-agent-mac $B/taro
 BG_ID=456789123
 bgconnect() { RM_NO_LAN=1 ./target/release/remote-mac --relay 127.0.0.1:$PORT --id $BG_ID --password "$PASS" >out/client-bg-$1.log 2>&1; }
-RM_NO_LAN=1 script -q /dev/null $B/macbridge --logs-enabled --relay 127.0.0.1:$PORT --id $BG_ID --password "$PASS" >out/bg-banner.txt 2>&1 </dev/null
+RM_NO_LAN=1 script -q /dev/null $B/taro --logs-enabled --relay 127.0.0.1:$PORT --id $BG_ID --password "$PASS" >out/bg-banner.txt 2>&1 </dev/null
 sleep 3
 SUP=$(tr -d '[:space:]' <"$HOME/Library/Application Support/RemoteMac/macbridge.pid" 2>/dev/null)
 W1=$(pgrep -P "${SUP:-0}" | head -1)
@@ -127,10 +127,10 @@ if [[ -n "$W2" && "$W2" != "$W1" ]] && bgconnect 2; then
 else
   echo "after the worker died: not reachable (worker '$W2'): $(tail -3 out/client-bg-2.log)"; [[ $RC == 0 ]] && RC=1
 fi
-$B/macbridge --stop >out/bg-stop.txt 2>&1 || { echo "--stop failed: $(cat out/bg-stop.txt)"; [[ $RC == 0 ]] && RC=1; }
+$B/taro --stop >out/bg-stop.txt 2>&1 || { echo "--stop failed: $(cat out/bg-stop.txt)"; [[ $RC == 0 ]] && RC=1; }
 sleep 2
-if pgrep -f "$B/macbridge" >/dev/null; then echo "--stop left MacBridge running: $(pgrep -fl "$B/macbridge")"; [[ $RC == 0 ]] && RC=1; fi
-echo "=== background log"; tail -25 "$HOME/Library/Logs/MacBridge/macbridge.log" 2>/dev/null
+if pgrep -f "$B/taro" >/dev/null; then echo "--stop left Taro running: $(pgrep -fl "$B/taro")"; [[ $RC == 0 ]] && RC=1; fi
+echo "=== background log"; tail -25 "$HOME/Library/Logs/Taro/taro.log" 2>/dev/null
 
 # far, lossy link: a relay limited to 6 Mbit/s that drops 5% of UDP packets; FEC rebuilds them
 # and the agent adapts its bitrate instead of queueing video (informational, not gating)

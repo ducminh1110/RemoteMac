@@ -279,7 +279,7 @@ pub fn run(opts: Options) -> i32 {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         // Windows' timers tick every 15.6 ms by default, so a 16 ms animation timer fired every
-        // 31 ms: animations ran at 30 frames a second. 1 ms while MacBridge runs (as a video
+        // 31 ms: animations ran at 30 frames a second. 1 ms while Taro runs (as a video
         // player or Moonlight does) gives them their 60.
         let _ = windows::Win32::Media::timeBeginPeriod(1);
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
@@ -313,7 +313,7 @@ pub fn run(opts: Options) -> i32 {
             }
         };
         let ctl = controller.0 as isize;
-        // Ctrl+Alt+Space anywhere: MacBridge Search (another app may own it: then the ball and
+        // Ctrl+Alt+Space anywhere: Taro Search (another app may own it: then the ball and
         // the launcher still open it)
         if RegisterHotKey(Some(controller), HOTKEY_SEARCH, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_SPACE.0 as u32).is_err() {
             eprintln!("Ctrl+Alt+Space is taken by another app: open the search from the launcher or the navigation ball");
@@ -394,6 +394,12 @@ pub fn run(opts: Options) -> i32 {
         let shortcut_dir = if opts.shortcuts { shortcuts::folder() } else { None };
         if let Some(d) = &shortcut_dir {
             shortcuts::remove_all(d);
+            // and those of the names Taro had before (MacBridge, Remote Mac)
+            if let Some(parent) = d.parent() {
+                for old in ["MacBridge", "Remote Mac"] {
+                    shortcuts::remove_all(&parent.join(old));
+                }
+            }
         }
         link.send(&Message::ListApps);
         let mut launcher = Launcher::create(hinst, opts.app.is_none() && !opts.smoke);
@@ -528,7 +534,7 @@ fn start_reconnect() -> bool {
     }
     if let Some(l) = with_app(|a| a.launcher.as_ref().map(|l| l.hwnd.0 as isize)).flatten() {
         unsafe {
-            let _ = SetWindowTextW(hwnd_of(l), w!("MacBridge — connection lost, connecting again…"));
+            let _ = SetWindowTextW(hwnd_of(l), w!("Taro — connection lost, connecting again…"));
             let _ = ShowWindow(hwnd_of(l), SW_SHOW);
         }
     }
@@ -575,7 +581,7 @@ fn take_reconnected() {
             .flatten();
             if let Some(l) = launcher {
                 unsafe {
-                    let _ = SetWindowTextW(hwnd_of(l), w!("MacBridge"));
+                    let _ = SetWindowTextW(hwnd_of(l), w!("Taro"));
                 }
             }
             // the apps that were open come back (still running on the Mac: their windows reappear)
@@ -587,7 +593,7 @@ fn take_reconnected() {
         Err(why) => {
             crate::banner::hide();
             crate::lifecycle::set(crate::lifecycle::Phase::Disconnected);
-            native::message_box("MacBridge", &format!("The connection to the Mac was lost and could not be made again.\n\n{}\n\n{}", net::friendly_error(&why), crate::log_hint()));
+            native::message_box("Taro", &format!("The connection to the Mac was lost and could not be made again.\n\n{}\n\n{}", net::friendly_error(&why), crate::log_hint()));
             quit(0);
         }
     }
@@ -1027,7 +1033,7 @@ fn dock_tick() {
 /// The id of the Ctrl+Alt+Space hot key.
 const HOTKEY_SEARCH: i32 = 1;
 
-/// MacBridge Search: type to open a Mac app or switch to one already open.
+/// Taro Search: type to open a Mac app or switch to one already open.
 fn open_palette() {
     let Some((hinst, entries, icons)) = with_app(|a| {
         let running: std::collections::HashSet<&str> = a.remotes.values().filter(|r| r.role == WindowRole::Window).map(|r| r.app.as_str()).collect();
@@ -1196,7 +1202,7 @@ fn drop_files(target: HWND, hdrop: windows::Win32::UI::Shell::HDROP) {
         DragFinish(hdrop);
     }
     if !net::mac_has("open_file") {
-        eprintln!("files dropped, but this Mac's MacBridge cannot open them (update it)");
+        eprintln!("files dropped, but this Mac's Taro cannot open them (update it)");
         return;
     }
     // the app of the window it landed on (the Mac Desktop and the launcher: the default app)
@@ -1700,7 +1706,7 @@ fn handle_event(ev: UiEvent) {
             }
             if interactive {
                 // never vanish without a word
-                native::message_box("MacBridge", &format!("The connection to the Mac was closed.\n\n{why}\n\n{}", crate::log_hint()));
+                native::message_box("Taro", &format!("The connection to the Mac was closed.\n\n{why}\n\n{}", crate::log_hint()));
             }
             on_mac_gone();
             quit(if with_app(|a| a.smoke.is_some()).unwrap_or(false) { 1 } else { 0 });
@@ -2216,7 +2222,7 @@ fn corner_radii(r: &Remote, cw: i32, bar: i32, square: bool) -> ([f32; 4], [f32;
 }
 
 /// What is at (`x`, `y`) (client pixels of the picture) of an exact window: its Mac title bar's
-/// buttons, the band it is moved by, or the Mac's; None for a window in MacBridge's frame.
+/// buttons, the band it is moved by, or the Mac's; None for a window in Taro's frame.
 fn mac_hit(frame: HWND, x: i32, y: i32) -> Option<chrome::MacHit> {
     let cs = content_of(frame).map(client_size).unwrap_or_else(|| client_size(frame));
     with_app(|a| {
@@ -3887,8 +3893,8 @@ fn showcase_note(line: String) {
 
 // ------------------------------------------------------------------ UI gallery (CI)
 //
-// RM_UI_GALLERY=1 with --showcase: once the apps are open, each of MacBridge's own surfaces is
-// shown in turn (the app loading window, the glass menu, MacBridge Search, the reconnect banner)
+// RM_UI_GALLERY=1 with --showcase: once the apps are open, each of Taro's own surfaces is
+// shown in turn (the app loading window, the glass menu, Taro Search, the reconnect banner)
 // and a screenshot of it is asked for: `shot.req` holds "name x y w h" (screen px); the script
 // takes it and answers with `<name>.done`. The pictures are for people to look at.
 
@@ -3981,7 +3987,7 @@ fn gallery_tick(dir: &std::path::Path) -> bool {
             }
         }
         2 => {
-            // MacBridge Search with "te" typed
+            // Taro Search with "te" typed
             if fresh && !crate::palette::showing() {
                 open_palette();
                 crate::palette::type_text("te");
@@ -4021,7 +4027,7 @@ fn gallery_tick(dir: &std::path::Path) -> bool {
             }
         }
         5 => {
-            // a Mac window in front with its menus: in its title bar (MacBridge's frame), or the
+            // a Mac window in front with its menus: in its title bar (Taro's frame), or the
             // Mac's own menu bar above it at the top of the screen (exact windows)
             let win = with_app(|a| a.remotes.iter().find(|(_, r)| r.role == WindowRole::Window && r.app != DESKTOP_APP).map(|(k, r)| (*k, r.exact))).flatten();
             if let Some((k, exact)) = win.filter(|(_, exact)| !exact || MENU_BAR.with(|m| m.get()).is_some()) {
@@ -4168,7 +4174,7 @@ fn showcase_tick() {
         return;
     }
     if let Some(t) = ready_at {
-        // MacBridge's own surfaces, one by one, for screenshots (RM_UI_GALLERY=1)
+        // Taro's own surfaces, one by one, for screenshots (RM_UI_GALLERY=1)
         if dir.join("desktop.done").exists() && t.elapsed() < Duration::from_secs(150) && gallery_tick(&dir) {
             return;
         }

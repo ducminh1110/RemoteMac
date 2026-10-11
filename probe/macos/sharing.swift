@@ -91,7 +91,7 @@ func run() async {
     let scale = CGFloat(screen.pointPixelScale)
 
     picture("SHARE0", await shot(screen, config(onDisplay, scale)))
-    // 1: the window alone (desktop independent), as MacBridge streams windows now
+    // 1: the window alone (desktop independent), as Taro streams windows now
     let f1 = SCContentFilter(desktopIndependentWindow: w)
     let (s1, p1) = await stream(f1, config(local, scale))
     picture("SHARE1", p1)

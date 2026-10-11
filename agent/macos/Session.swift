@@ -4,7 +4,7 @@
 import Foundation
 import CryptoKit
 
-/// MacBridge's version (the same as the Windows app's, Cargo.toml).
+/// Taro's version (the same as the Windows app's, Cargo.toml).
 let appVersion = "1.2.0-beta.3"
 
 /// The relay used when none is given: built in by release builds, none from source.

@@ -44,7 +44,7 @@ uint32_t rm_virtual_display_create(uint32_t width, uint32_t height, int hidpi, c
         uint32_t scale = hidpi ? 2 : 1;
         CGVirtualDisplayDescriptor *d = [[D alloc] init];
         d.queue = dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0);
-        d.name = @"MacBridge Display";
+        d.name = @"Taro Display";
         d.maxPixelsWide = width * scale;
         d.maxPixelsHigh = height * scale;
         // ~110 ppi at 1x, so macOS picks sensible UI sizes

@@ -1,6 +1,6 @@
 //! The reconnect banner: when the connection to the Mac is lost, a small glass capsule at the
 //! top of the screen says so, with the Mac's spinner and the step the new attempt is at, while
-//! MacBridge connects again by itself. Once connected it shows a check mark for a moment and
+//! Taro connects again by itself. Once connected it shows a check mark for a moment and
 //! fades. It never takes the focus; a click hides it (connecting goes on).
 
 use crate::motion::{tokens, Anim, Curve};
@@ -55,7 +55,7 @@ pub fn show(hinst: HINSTANCE, x: i32, y: i32) {
     let (w, h) = (460.0 * scale, 52.0 * scale);
     let pos = (wa.left + ((wa.right - wa.left) as f32 - w) as i32 / 2, wa.top + (14.0 * scale) as i32);
     let (base, margin) = surface::glass_panel(pos.0, pos.1, w as usize, h as usize, h / 2.0, crate::glass::Kind::Sheet, scale);
-    let Some(surf) = Surface::new(hinst, CLASS, "MacBridge — connecting again", None, true, false) else { return };
+    let Some(surf) = Surface::new(hinst, CLASS, "Taro — connecting again", None, true, false) else { return };
     let (dark, _, _) = surface::glass_look();
     let title = surface::text_mask("Connection lost — connecting again…", (14.0 * scale).round() as i32, 600, (w * 0.75) as usize);
     let hwnd = surf.hwnd;

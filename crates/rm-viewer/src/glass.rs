@@ -1,4 +1,4 @@
-//! Liquid Glass: the material of MacBridge's floating surfaces (menus, the search palette, the
+//! Liquid Glass: the material of Taro's floating surfaces (menus, the search palette, the
 //! reconnect banner, the Dock, the loading window's bar). A Rust port of MobileLab's glass
 //! (github.com/ducminh1110/MobileLab, MIT, Copyright (c) 2026 Minh; see NOTICE.md), without Qt:
 //!

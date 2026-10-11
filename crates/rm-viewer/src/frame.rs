@@ -1,4 +1,4 @@
-//! MacBridge's own windows drawn as macOS draws a window: no Windows title bar, the window's
+//! Taro's own windows drawn as macOS draws a window: no Windows title bar, the window's
 //! own toolbar at the top with the three window buttons in it. The window stays a normal
 //! resizable Windows window underneath (snapping, Win+arrows, the taskbar, the shadow and
 //! rounded corners of Windows 11): only the title bar is taken away, and its jobs (moving the
@@ -11,7 +11,7 @@ use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// MacBridge's icon (logo.rs) on the window: the taskbar and Alt+Tab show it.
+/// Taro's icon (logo.rs) on the window: the taskbar and Alt+Tab show it.
 fn own_icon(hwnd: HWND) {
     thread_local! { static ICON: std::cell::Cell<Option<isize>> = const { std::cell::Cell::new(None) }; }
     let icon = ICON.with(|c| {

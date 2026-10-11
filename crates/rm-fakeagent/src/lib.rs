@@ -21,7 +21,7 @@ pub const HEIGHT: usize = 352;
 const PANEL: (usize, usize) = (320, 240);
 /// the fake Mac's screen
 const DESKTOP: (usize, usize) = (960, 600);
-pub const UPLOAD_DIR: &str = "/Users/runner/Downloads/RemoteMac Uploads";
+pub const UPLOAD_DIR: &str = "/Users/runner/Downloads/Taro Uploads";
 
 /// "desktop" is the whole Mac (one window showing the screen); input on it goes to the window
 /// under the pointer, like on the real agent.

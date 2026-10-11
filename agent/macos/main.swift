@@ -1,8 +1,8 @@
-// macbridge (remote-agent-mac): the Mac side of MacBridge, started from Terminal.
-//   ./macbridge --password SECRET     -> shows the ID and the password, then runs in the background
-//   ./macbridge                       -> same, with a random password
-//   ./macbridge --stop                -> stops the one running in the background
-//   RM_SESSION_TOKEN=... ./macbridge --relay HOST:PORT --session NAME   (scripts, CI)
+// taro (remote-agent-mac): the Mac side of Taro, started from Terminal.
+//   ./taro --password SECRET     -> shows the ID and the password, then runs in the background
+//   ./taro                       -> same, with a random password
+//   ./taro --stop                -> stops the one running in the background
+//   RM_SESSION_TOKEN=... ./taro --relay HOST:PORT --session NAME   (scripts, CI)
 // Nothing is logged unless --logs-enabled is given.
 import Foundation
 import AppKit
@@ -10,21 +10,21 @@ import ApplicationServices
 import VideoToolbox
 
 /// Logs only when asked for (--logs-enabled, or RM_LOGS=1): to stderr, or in the background to
-/// ~/Library/Logs/MacBridge/macbridge.log.
+/// ~/Library/Logs/Taro/taro.log.
 let logsEnabled = CommandLine.arguments.contains("--logs-enabled") || ProcessInfo.processInfo.environment["RM_LOGS"] == "1"
 func log(_ s: String) { if logsEnabled { FileHandle.standardError.write(Data("[agent] \(s)\n".utf8)) } }
 /// Errors that stop the app are always shown.
-func fail(_ s: String) -> Never { FileHandle.standardError.write(Data("macbridge: \(s)\n".utf8)); exit(1) }
+func fail(_ s: String) -> Never { FileHandle.standardError.write(Data("taro: \(s)\n".utf8)); exit(1) }
 
 let usage = """
-usage: macbridge [--password SECRET] [--id 123456789] [--relay HOST:PORT] [--port N] [--foreground] [--logs-enabled]
-       macbridge --stop
-       RM_SESSION_TOKEN=.. macbridge --relay HOST:PORT --session NAME
+usage: taro [--password SECRET] [--id 123456789] [--relay HOST:PORT] [--port N] [--foreground] [--logs-enabled]
+       taro --stop
+       RM_SESSION_TOKEN=.. taro --relay HOST:PORT --session NAME
   --relay HOST:PORT  reachable from anywhere through this relay (it also gives this Mac its ID)
   --port N           the TCP port viewers on this network, or typing this Mac's address, join on (7471)
   --foreground       stay in the terminal instead of going to the background
-  --logs-enabled     write a log (stderr; in the background ~/Library/Logs/MacBridge/macbridge.log)
-  --stop             stop the MacBridge running in the background
+  --logs-enabled     write a log (stderr; in the background ~/Library/Logs/Taro/taro.log)
+  --stop             stop the Taro running in the background
   --check-permissions  say which macOS permissions are missing (exit 3 when one is)
   --version          show the version
 """
@@ -43,7 +43,7 @@ while let a = argv.next() {
     case "--logs-enabled": break
     case "--stop": exit(stopBackground() ? 0 : 1)
     case "-h", "--help": print(usage); exit(0)
-    case "--version": print("macbridge \(appVersion)"); exit(0)
+    case "--version": print("taro \(appVersion)"); exit(0)
     case "--check-permissions": exit(checkPermissions())
     default: fail(usage)
     }
@@ -57,15 +57,15 @@ if env["RM_DAEMON"] != nil && env["RM_WORKER"] == nil { becomeDaemon(); supervis
 /// From a terminal (not a script) with the ID and password: show them, then go to the background.
 let goBackground = !foreground && env["RM_DAEMON"] == nil && sessionArg == nil && isatty(STDOUT_FILENO) == 1
 if goBackground, let pid = runningInBackground() {
-    print("MacBridge is already running in the background (pid \(pid)). Stop it with: \(CommandLine.arguments[0]) --stop")
+    print("Taro is already running in the background (pid \(pid)). Stop it with: \(CommandLine.arguments[0]) --stop")
     exit(1)
 }
 // a session that ended without a word (a crash, power lost) may have left the PC's wallpaper
-// (not while another MacBridge runs: it may be showing it)
+// (not while another Taro runs: it may be showing it)
 if runningInBackground() == nil { Wallpaper.restore() }
 // never napped: a process in the background that waits for viewers must answer at once; App Nap
 // would slow its timers and its network after a while, and the Mac would look offline
-let noNap = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical], reason: "MacBridge waits for and serves viewers")
+let noNap = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical], reason: "Taro waits for and serves viewers")
 // no relay: reachable from this network only (the viewer finds the Mac by its ID there)
 let relayAddr: String? = [relayArg, env["RM_RELAY"], defaultRelay].compactMap { $0?.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty }
 let sessionID: String, token: String
@@ -97,7 +97,7 @@ if let s = sessionArg {
     directSecret = directToken(password: password)
     if env["RM_QUIET_BANNER"] == nil {
         print("")
-        print("  MacBridge is ready — connect from Windows with:")
+        print("  Taro is ready — connect from Windows with:")
         print("    ID session to connect: \(displayID(id))")
         print("    Password: \(password)")
         if let r = relayAddr {
@@ -298,7 +298,7 @@ do {
         try conn.send(["type": "error", "code": "version_mismatch", "message": "agent speaks protocol 1, client \(cmin)...\(cmax)"]); exit(1)
     }
     try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "mask", "exact", "menubar", "bye"],
-                   "max_surface": [3840, 2160], "agent": "macbridge \(appVersion) \(ProcessInfo.processInfo.operatingSystemVersionString)"])
+                   "max_surface": [3840, 2160], "agent": "taro \(appVersion) \(ProcessInfo.processInfo.operatingSystemVersionString)"])
     try conn.send(probeCapabilities())
 } catch { fail("handshake: \(error)") }
 log("handshake complete")
