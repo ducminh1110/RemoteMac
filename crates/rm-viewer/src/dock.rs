@@ -309,7 +309,19 @@ mod win {
                 Edge::Right => m.right - inset - thick,
             };
             self.rect = (left, top, thick as usize, len as usize);
+            // what is behind it, without itself (its apps changed while it was out)
+            let shown = unsafe { IsWindowVisible(self.surf.hwnd).as_bool() };
+            if shown {
+                unsafe {
+                    let _ = ShowWindow(self.surf.hwnd, SW_HIDE);
+                }
+            }
             let (c, margin) = surface::glass_panel(left, top, thick as usize, len as usize, 18.0 * s, crate::glass::Kind::Tabs, s);
+            if shown {
+                unsafe {
+                    let _ = ShowWindow(self.surf.hwnd, SW_SHOWNOACTIVATE);
+                }
+            }
             self.glass = Some((c, margin));
             self.dark = surface::glass_look().0;
         }
