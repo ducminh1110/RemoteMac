@@ -234,6 +234,24 @@ pub struct MenuNode {
 
 pub const MAX_MENU_ITEMS: usize = 3000;
 
+/// One item of the Mac's Dock, as the Mac shows it (feature "dock").
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DockEntry {
+    /// what the client names it by ("app:com.apple.Safari", "path:/Users/me/Downloads",
+    /// "trash", "separator:1")
+    pub id: String,
+    /// "app", "launcher" (Launchpad, Apps), "folder", "file", "trash" or "separator"
+    pub kind: String,
+    #[serde(default)]
+    pub title: String,
+    /// for an app the client can open itself (one of `Apps`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+    /// the app runs on the Mac (its dot under it there)
+    #[serde(default)]
+    pub running: bool,
+}
+
 impl MenuNode {
     /// Total number of nodes (bounded so a hostile agent cannot make the client build huge menus).
     pub fn count(nodes: &[MenuNode]) -> usize {
@@ -488,6 +506,22 @@ pub enum Message {
     /// Client -> agent (feature "bye"): the viewer is closing because its user closed it (the
     /// session's apps quit); a connection that ends without it was cut and they stay open.
     Bye,
+
+    /// Client -> agent (feature "dock"): the Mac's Dock as it is now.
+    DockList,
+    /// Agent -> client: the Mac's Dock, in its order (the apps kept in it and the open ones,
+    /// the lines between, folders, the Trash).
+    DockItems { items: Vec<DockEntry> },
+    /// Client -> agent: open Dock item `id` as a click on it does (an app the client cannot
+    /// open itself, a folder, a document, the Trash).
+    DockOpen { id: String },
+    /// Client -> agent: the menu of Dock item `id` (a right-click on it), as the Mac shows it.
+    DockMenuGet { id: String },
+    /// Agent -> client: that menu.
+    DockMenu { id: String, menus: Vec<MenuNode> },
+    /// Client -> agent: choose the item at `path` (indices into `DockMenu.menus`) of Dock item
+    /// `id`'s menu.
+    DockMenuInvoke { id: String, path: Vec<u32> },
 }
 
 impl Message {
@@ -958,6 +992,12 @@ mod tests {
             Message::WindowChrome { window_id: 7, title_height: 52, close: Some(Rect { x: 20, y: 20, w: 14, h: 14 }), minimize: None, zoom: None, controls: vec![Rect { x: 300, y: 12, w: 28, h: 28 }] },
             Message::MenuBarStream { enabled: true },
             Message::Bye,
+            Message::DockList,
+            Message::DockItems { items: vec![DockEntry { id: "app:com.apple.finder".into(), kind: "app".into(), title: "Finder".into(), app_id: Some("finder".into()), running: true }, DockEntry { id: "separator:1".into(), kind: "separator".into(), ..Default::default() }] },
+            Message::DockOpen { id: "trash".into() },
+            Message::DockMenuGet { id: "app:com.apple.finder".into() },
+            Message::DockMenu { id: "trash".into(), menus: vec![MenuNode { title: "Empty Trash".into(), enabled: true, ..Default::default() }] },
+            Message::DockMenuInvoke { id: "trash".into(), path: vec![0] },
             Message::MenuBarStatus { available: true, window_id: 0x7FFF_0003, bounds: Rect { x: 0, y: 0, w: 1512, h: 33 }, reason: None },
         ] {
             let b = encode(&m).unwrap();

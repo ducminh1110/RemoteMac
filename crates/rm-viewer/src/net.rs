@@ -174,6 +174,9 @@ pub enum UiEvent {
     WindowCreated { id: u64, app: String, title: String, x: i32, y: i32, w: u32, h: u32, parent: Option<u64>, role: rm_protocol::WindowRole },
     Apps(Vec<rm_protocol::AppInfo>),
     MenuBar { app: String, menus: Vec<rm_protocol::MenuNode> },
+    /// The Mac's own Dock (feature "dock"), and the menu of one of its items.
+    MacDock(Vec<rm_protocol::DockEntry>),
+    DockMenu { id: String, menus: Vec<rm_protocol::MenuNode> },
     /// The Mac's virtual display (Mac points), or why there is none.
     Display { available: bool, width: u32, height: u32, reason: Option<String> },
     Uploaded { transfer_id: u64, remote_path: String },
@@ -717,6 +720,8 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
                 }
                 Message::Apps { apps } => emit(UiEvent::Apps(apps)),
                 Message::DisplayStatus { available, width, height, reason, .. } => emit(UiEvent::Display { available, width, height, reason }),
+                Message::DockItems { items } if items.len() <= 200 => emit(UiEvent::MacDock(items)),
+                Message::DockMenu { id, menus } if rm_protocol::MenuNode::count(&menus) <= rm_protocol::MAX_MENU_ITEMS => emit(UiEvent::DockMenu { id, menus }),
                 Message::MenuBar { application_id, menus } if rm_protocol::MenuNode::count(&menus) <= rm_protocol::MAX_MENU_ITEMS => {
                     emit(UiEvent::MenuBar { app: application_id, menus })
                 }

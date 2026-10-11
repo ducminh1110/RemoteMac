@@ -136,6 +136,7 @@ the side's **features**; only those both list are used (`negotiate` in `rm-proto
 | `mask` | `window_mask` (pictures' shapes) |
 | `exact` | `window_style`, `window_chrome` (windows as the Mac draws them) |
 | `menubar` | `menu_bar_stream`, `menu_bar_status` (the Mac's menu bar) |
+| `dock` | `dock_list`, `dock_items`, `dock_open`, `dock_menu_get`, `dock_menu`, `dock_menu_invoke` |
 
 An older Mac simply lacks the newer names, and the viewer hides what needs them.
 
@@ -212,8 +213,16 @@ menus and streams each window as its own H.264 stream.
 ## The Dock and full screen
 
 - **The Dock** (`dock.rs`) is drawn by the viewer: a layered, top-most window of Liquid Glass
-  at the left or right edge of the monitor (`dock_edge` in Settings), with the Mac Desktop, the
-  session's open apps (from its remote windows) and Open an App. It registers for the mouse's
+  at the left or right edge of the monitor (`dock_edge` in Settings). With feature `dock` it
+  mirrors the Mac's Dock (`MacDock.swift`): `dock_list` → `dock_items` (the children of the
+  Dock's AXList: app, folder, document, Trash and separator items, `AXIsApplicationRunning`),
+  asked every 4 s; pictures of items that are not listed apps come through `get_app_icon`
+  with `dock:<id>`; a click opens a listed app as the launcher does, anything else through
+  `dock_open` (AXPress, or a Finder window of a folder or the Trash); a right-click sends
+  `dock_menu_get`: the Mac performs the item's AXShowMenu, reads the menu, cancels it, and
+  `dock_menu_invoke` opens it again and presses the entry. Icons shrink to fit the monitor
+  (`dock::layout`). Without the feature: the Mac Desktop, the session's open apps and Open an
+  App. It registers for the mouse's
   raw input (`RIDEV_INPUTSINK`, so also while another window is in front); while the pointer
   is at that edge of the screen (with no other monitor past it), the relative movement outward
   is added up, and reset by a pause of 300 ms or a move back. At 160 counts it slides out

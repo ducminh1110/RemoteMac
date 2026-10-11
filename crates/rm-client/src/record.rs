@@ -34,6 +34,61 @@ fn is_timeout(e: &ProtocolError) -> bool {
     matches!(e, ProtocolError::Io(io) if matches!(io.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut))
 }
 
+/// The Mac's Dock into the session's records: its items, a picture of each, the first item's
+/// (Finder's) menu.
+fn record_dock<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, t0: Instant) -> Result<(), ProtocolError> {
+    let put = |out: &mut W, m: &Message| -> Result<(), ProtocolError> { Ok(recording::write_record(out, &Record { app: recording::SESSION.into(), t_ms: t0.elapsed().as_millis() as u32, frame: encode(m)? })?) };
+    sess.send(&Message::DockList)?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut items = None;
+    while items.is_none() && Instant::now() < deadline {
+        match sess.recv() {
+            Ok(Some(Frame::Msg(m @ Message::DockItems { .. }))) => {
+                put(out, &m)?;
+                if let Message::DockItems { items: i } = m {
+                    items = Some(i);
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(ProtocolError::Malformed("agent closed the session".into())),
+            Err(e) if is_timeout(&e) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let items = items.unwrap_or_default();
+    let mut want: std::collections::HashSet<String> = items.iter().filter(|e| e.kind != "separator").map(|e| e.app_id.clone().unwrap_or_else(|| format!("dock:{}", e.id))).collect();
+    for key in &want {
+        sess.send(&Message::GetAppIcon { application_id: key.clone() })?;
+    }
+    let menu_of = items.iter().find(|e| e.kind != "separator").map(|e| e.id.clone());
+    if let Some(id) = &menu_of {
+        sess.send(&Message::DockMenuGet { id: id.clone() })?;
+    }
+    let mut menu = menu_of.is_none();
+    let deadline = Instant::now() + Duration::from_secs(12);
+    while (!want.is_empty() || !menu) && Instant::now() < deadline {
+        match sess.recv() {
+            Ok(Some(Frame::Msg(m @ Message::AppIcon { .. }))) => {
+                if let Message::AppIcon { application_id, .. } = &m {
+                    if want.remove(application_id) {
+                        put(out, &m)?;
+                    }
+                }
+            }
+            Ok(Some(Frame::Msg(m @ Message::DockMenu { .. }))) => {
+                put(out, &m)?;
+                menu = true;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(ProtocolError::Malformed("agent closed the session".into())),
+            Err(e) if is_timeout(&e) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    eprintln!("recorded the Mac's Dock: {} items, {} pictures missing, menu {}", items.len(), want.len(), if menu { "read" } else { "missing" });
+    Ok(())
+}
+
 /// The stream needs a short read timeout (the caller sets ~1 s).
 pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut plan: Plan) -> Result<Summary, ProtocolError> {
     recording::write_header(out)?;
@@ -67,6 +122,11 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
             Err(e) if is_timeout(&e) => {}
             Err(e) => return Err(e),
         }
+    }
+    // the Mac's own Dock (feature "dock"): its items, their pictures and Finder's menu, for the
+    // Dock the replay shows
+    if sess.negotiated.features.iter().any(|f| f == "dock") {
+        record_dock(sess, out, t0)?;
     }
     for app in plan.apps.clone() {
         let start = Instant::now();

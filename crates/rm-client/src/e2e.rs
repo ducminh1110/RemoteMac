@@ -89,6 +89,9 @@ struct Ctx<'a, S: Read + Write> {
     created_apps: Vec<(u64, String)>,
     /// video frames seen per window
     frames_of: std::collections::HashMap<u64, usize>,
+    /// the Mac's Dock as last listed, and the last Dock menu read (item, entries)
+    mac_dock: Option<Vec<rm_protocol::DockEntry>>,
+    dock_menu: Option<(String, Vec<rm_protocol::MenuNode>)>,
     /// the app under test
     app: String,
     /// window shapes received: id -> (width, height, mask; None when opaque)
@@ -213,6 +216,8 @@ impl<S: Read + Write> Ctx<'_, S> {
             Frame::Msg(Message::FileUploaded { remote_path, .. }) => self.uploaded = Some(remote_path),
             Frame::Msg(Message::FileUploadFailed { reason, .. }) => self.errors.push(format!("upload: {reason}")),
             Frame::Msg(Message::MenuBar { menus, .. }) => self.menus = Some(menus),
+            Frame::Msg(Message::DockItems { items }) => self.mac_dock = Some(items),
+            Frame::Msg(Message::DockMenu { id, menus }) => self.dock_menu = Some((id, menus)),
             Frame::Msg(Message::DisplayStatus { available, width, height, reason, .. }) => self.display = Some((available, width, height, reason)),
             Frame::Msg(Message::WindowMoved { window_id, bounds }) if self.r.window.map(|w| w.0) == Some(window_id) => {
                 self.moved = Some((bounds.w, bounds.h));
@@ -276,7 +281,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     let caps_dump = serde_json::to_string(&sess.capabilities).unwrap_or_default();
     let mut c = Ctx { sess, r: Report::default(), started: Instant::now(), first_video: None, last_title: String::new(),
         destroyed: false, exited: false, launched_pid: None, errors: vec![], non_annexb: 0,
-        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None, main_rect: None, desktop: None, desktop_frames: 0, desktop_video: None, gs_tunnel: None, gs_out: None, audio_status: None, audio_packets: 0, audio_bad: 0, audio_peak: 0, audio_seq: None, audio_gaps: 0, created_apps: vec![], frames_of: Default::default(), app: app.to_string(), masks: Default::default(), chromes: Default::default(), menubar: None, menubar_frames: 0, menubar_decoder: None, menubar_picture: None };
+        decoder: rm_decode::H264Decoder::new().ok(), clipboard: None, icon: None, created: vec![], destroyed_ids: vec![], uploaded: None, menus: None, display: None, moved: None, video_size: None, main_rect: None, desktop: None, desktop_frames: 0, desktop_video: None, gs_tunnel: None, gs_out: None, audio_status: None, audio_packets: 0, audio_bad: 0, audio_peak: 0, audio_seq: None, audio_gaps: 0, created_apps: vec![], frames_of: Default::default(), mac_dock: None, dock_menu: None, app: app.to_string(), masks: Default::default(), chromes: Default::default(), menubar: None, menubar_frames: 0, menubar_decoder: None, menubar_picture: None };
 
     c.r.check("agent reports capture+input+GUI", caps_ok, caps_dump);
 
@@ -453,6 +458,7 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
 
     documents(&mut c, wid);
     relaunch(&mut c);
+    mac_dock(&mut c);
     exact_windows(&mut c);
     menu_bar(&mut c);
 
@@ -627,6 +633,40 @@ fn relaunch<S: Read + Write>(c: &mut Ctx<S>) {
     c.send(Message::AppTerminate { application_id: "textedit".into() });
     c.pump(10, |c| ids.iter().all(|w| c.destroyed_ids.contains(w)));
     c.created_apps.retain(|(_, a)| a != "textedit");
+}
+
+/// The Mac's own Dock for the Dock drawn on Windows: its items in its order (Finder first, the
+/// Trash last), a right-click menu read as the Mac shows it, the Trash opened as a Finder window
+/// shown on Windows.
+fn mac_dock<S: Read + Write>(c: &mut Ctx<S>) {
+    c.mac_dock = None;
+    c.send(Message::DockList);
+    c.pump(10, |c| c.mac_dock.is_some());
+    let items = c.mac_dock.clone().unwrap_or_default();
+    let names: Vec<String> = items.iter().map(|i| format!("{}:{}{}", i.kind, i.title, if i.running { "•" } else { "" })).collect();
+    let finder = items.first().is_some_and(|i| i.id == "app:com.apple.finder" && i.app_id.as_deref() == Some("finder") && i.running);
+    let trash = items.last().is_some_and(|i| i.kind == "trash");
+    c.r.check("Mac Dock: its items in its order (Finder first and running, the Trash last)", finder && trash, format!("{names:?}"));
+    for id in ["app:com.apple.finder", "trash"] {
+        c.dock_menu = None;
+        c.send(Message::DockMenuGet { id: id.into() });
+        c.pump(10, |c| c.dock_menu.is_some());
+        let menu = c.dock_menu.clone();
+        let titles: Vec<String> = menu.as_ref().map(|(_, m)| m.iter().filter(|n| !n.separator).map(|n| n.title.clone()).collect()).unwrap_or_default();
+        c.r.check(&format!("Mac Dock: the right-click menu of {id} as the Mac shows it"), menu.as_ref().is_some_and(|(i, _)| i == id) && !titles.is_empty(), format!("{titles:?}"));
+    }
+    // (the real Mac only: the scripted one opens no Finder)
+    if trash && cfg!(target_os = "macos") {
+        let before = c.created_apps.len();
+        c.send(Message::DockOpen { id: "trash".into() });
+        let shown = c.pump(12, move |c| c.created_apps[before..].iter().any(|(_, a)| a == "finder"));
+        c.r.check("Mac Dock: the Trash opens as a Finder window shown on Windows", shown, format!("created={:?} errors={:?}", &c.created_apps[before..], c.errors));
+        let ids: Vec<u64> = c.created_apps[before..].iter().filter(|(_, a)| a == "finder").map(|(w, _)| *w).collect();
+        for w in &ids {
+            c.send(Message::WindowClose { window_id: *w });
+        }
+        c.pump(6, |c| ids.iter().all(|w| c.destroyed_ids.contains(w)));
+    }
 }
 
 /// Exact windows ("window_style"): a window opened then comes whole, its own title bar and

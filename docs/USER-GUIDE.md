@@ -241,18 +241,28 @@ The Mac's sound plays on this PC (on by default; **Sound** and **Volume** in Set
 
 ## 7. The Dock and full screen
 
-**The Dock** is a column of glass at the **left edge** of the screen (Settings → **Dock**: at
-the left edge, at the right edge, or off) with the **Mac Desktop**, the Mac apps open here (a
-dot beside each) and **Open an App…** after a line.
+**The Dock** is the Mac's own Dock, as a column of glass at the **left edge** of the screen
+(Settings → **Dock**: at the left edge, at the right edge, or off): the same items in the same
+order as on the Mac (the apps kept in it and the open ones, the lines between them, Downloads
+and other folders, the Trash), a dot beside each app that runs on the Mac. It follows the Mac's
+Dock as it changes. Its icons are as large as the Mac's by default and smaller when there are
+many of them or the screen is short.
 
 - It stays out of the way until you **push the pointer against that edge**: move the mouse
   on towards the edge for a moment after the pointer has reached it. Passing by the edge, or
   leaving the pointer there, does nothing. (With a pen or in a remote session, where there is
   no such push, leaving the pointer at the edge for about a second brings it out.)
-- The icon under the pointer grows, with its name beside it. A click opens the app, or brings
-  its window to the front (back from the taskbar if it was minimised).
+- The icon under the pointer grows, with its name beside it. A click opens the app (with its
+  loading window), or brings its window to the front (back from the taskbar if it was
+  minimised); a folder or the Trash opens as a Finder window; Launchpad or Apps opens Taro's
+  launcher.
+- **A right-click shows the item's menu as the Mac's Dock shows it** (the app's windows,
+  Options, Show in Finder, Quit, Empty Trash…): the menu is read from the Mac and what you
+  choose is done there.
 - It slides away once the pointer has left it.
-- It is drawn by Taro on this PC: it changes nothing on the Mac, and nothing of Windows.
+- It is drawn by Taro on this PC (no picture of the Mac's Dock is streamed) and changes
+  nothing of Windows. A Mac running an older Taro gets a Dock of the Mac Desktop, the apps open
+  here and Open an App.
 
 **Full screen** (the green button, or F11) gives a Mac app the whole monitor, over the
 taskbar, at the monitor's size on the Mac (Taro makes the Mac a display of this size):

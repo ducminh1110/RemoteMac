@@ -297,7 +297,7 @@ do {
     guard cmin <= 1 && cmax >= 1 else {
         try conn.send(["type": "error", "code": "version_mismatch", "message": "agent speaks protocol 1, client \(cmin)...\(cmax)"]); exit(1)
     }
-    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "mask", "exact", "menubar", "bye"],
+    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "mask", "exact", "menubar", "bye", "dock"],
                    "max_surface": [3840, 2160], "agent": "taro \(appVersion) \(ProcessInfo.processInfo.operatingSystemVersionString)"])
     try conn.send(probeCapabilities())
 } catch { fail("handshake: \(error)") }
@@ -893,6 +893,13 @@ func handle(_ m: [String: Any]) {
             NSRunningApplication(processIdentifier: w.pid)?.activate(options: [.activateIgnoringOtherApps])
             if let aw = axWindowFor(pid: w.pid, id: wid, rect: w.rect) { AXUIElementPerformAction(aw, kAXRaiseAction as CFString) }
         }
+    case "get_app_icon" where (m["application_id"] as? String ?? "").hasPrefix("dock:"):
+        // a Dock item's icon (a folder, a document, the Trash)
+        let key = String((m["application_id"] as? String ?? "").dropFirst(5))
+        iconQueue.async {
+            guard let item = readDock(apps: apps).first(where: { $0.id == key }), let rgba = dockIconRGBA(item, size: 64) else { return }
+            try? sender.sendBulk(["type": "app_icon", "application_id": "dock:" + key, "size": 64, "rgba_base64": rgba.base64EncodedString()])
+        }
     case "get_app_icon":
         // drawn off the reader thread and sent at low priority: a viewer asks for all the
         // icons at once, and a launch must not wait behind them
@@ -932,6 +939,35 @@ func handle(_ m: [String: Any]) {
         }
     case "get_menu_bar":
         sendMenuBar(m["application_id"] as? String ?? "")
+    // the Mac's own Dock, for the Dock drawn on Windows (MacDock.swift)
+    case "dock_list":
+        send(["type": "dock_items", "items": readDock(apps: apps).map { $0.entry }])
+    case "dock_open":
+        let id = m["id"] as? String ?? ""
+        guard let item = readDock(apps: apps).first(where: { $0.id == id }) else { send(["type": "error", "code": "not_in_dock", "message": id]); break }
+        let kind = item.entry["kind"] as? String ?? ""
+        tracker.noteInput() // what it opens is shown on Windows
+        if let p = item.path, kind == "folder" || kind == "trash" {
+            // a folder (a stack on the Mac) or the Trash: a Finder window of it, shown on Windows
+            // as Finder's
+            if let f = apps.adoptFinder() {
+                tracker.adopt(pid: f)
+                send(["type": "app_launched", "application_id": "finder", "pid": Int(f)])
+            }
+            NSWorkspace.shared.open(URL(fileURLWithPath: p))
+        } else if !openDockItem(item) {
+            send(["type": "error", "code": "dock_open_failed", "message": id])
+        }
+    case "dock_menu_get":
+        let id = m["id"] as? String ?? ""
+        guard let item = readDock(apps: apps).first(where: { $0.id == id }) else { send(["type": "error", "code": "not_in_dock", "message": id]); break }
+        send(["type": "dock_menu", "id": id, "menus": readDockMenu(item)])
+    case "dock_menu_invoke":
+        let id = m["id"] as? String ?? ""
+        let path = (m["path"] as? [Any] ?? []).map { int($0) }
+        guard let item = readDock(apps: apps).first(where: { $0.id == id }) else { send(["type": "error", "code": "not_in_dock", "message": id]); break }
+        tracker.noteInput() // a window it opens is shown on Windows
+        if !invokeDockMenu(item, path: path) { send(["type": "error", "code": "dock_menu_failed", "message": id]) }
     case "menu_invoke":
         let id = m["application_id"] as? String ?? ""
         let path = (m["path"] as? [Any] ?? []).map { int($0) }

@@ -67,8 +67,11 @@ pub fn serve_replay<S: Read + Write + Send + 'static>(mut reader: S, writer: S, 
         Some(Message::ClientHello(_)) => {}
         _ => return Ok(()),
     }
-    // what the recording has: windows as the Mac drew them (exact)
+    // what the recording has: windows as the Mac drew them (exact), the Mac's Dock
     let mut features = vec!["control", "video", "mask"];
+    if rec.session.iter().any(|m| matches!(m, Message::DockItems { .. })) {
+        features.push("dock");
+    }
     if rec.session.contains(&Message::WindowStyle { exact: true }) {
         features.push("exact");
     }
@@ -109,9 +112,21 @@ pub fn serve_replay<S: Read + Write + Send + 'static>(mut reader: S, writer: S, 
                 }
             }
             Message::GetAppIcon { application_id } => {
-                if let Some(m) = rec.last(&application_id, |m| matches!(m, Message::AppIcon { .. })) {
+                // an app's (recorded with it), or a Dock item's (with the session)
+                let dock = || rec.session.iter().find(|m| matches!(m, Message::AppIcon { application_id: a, .. } if *a == application_id)).cloned();
+                if let Some(m) = rec.last(&application_id, |m| matches!(m, Message::AppIcon { .. })).or_else(dock) {
                     send(&w, &m)?;
                 }
+            }
+            Message::DockList => {
+                if let Some(m) = rec.session.iter().find(|m| matches!(m, Message::DockItems { .. })) {
+                    send(&w, m)?;
+                }
+            }
+            Message::DockMenuGet { id } => {
+                // as recorded (the first item's); none for the others
+                let m = rec.session.iter().find(|m| matches!(m, Message::DockMenu { id: i, .. } if *i == id)).cloned();
+                send(&w, &m.unwrap_or(Message::DockMenu { id, menus: vec![] }))?;
             }
             Message::WindowClose { window_id } => {
                 if open.lock().unwrap().remove(&window_id).is_some() {

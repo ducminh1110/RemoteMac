@@ -985,9 +985,28 @@ fn menu_bar_tick() {
 }
 
 // ------------------------------------------------------------------ the Dock (dock.rs)
+//
+// The Dock mirrors the Mac's own (feature "dock"): its items in its order, their dots, the lines
+// between groups, and a right-click shows the item's menu as the Mac does (read from it, chosen
+// on it). An app the viewer can open itself opens as from the launcher (its loading window);
+// anything else (a folder, a document, the Trash) opens as a click on the Mac's Dock does. A
+// Mac that cannot tell its Dock gets one of the Mac Desktop, the apps open here and Open an App.
 
-/// Every 100 ms: the Dock at the edge the setting says, with the Mac Desktop, the Mac apps open
-/// here and Open an App; gone while the Mac is (and in tests, but for the gallery's picture).
+#[derive(Default)]
+struct MacDock {
+    /// the Mac's Dock as it last said, and when it was last asked
+    items: Option<Vec<rm_protocol::DockEntry>>,
+    asked: Option<Instant>,
+    /// pictures of its items asked for (folders, documents, the Trash, apps not in the list)
+    icons_asked: std::collections::HashSet<String>,
+    /// a right-click waiting for its menu: the item, where the menu goes, since when
+    menu: Option<(String, POINT, Instant)>,
+}
+
+thread_local! { static MAC_DOCK: RefCell<MacDock> = RefCell::new(MacDock::default()); }
+
+/// Every 100 ms: the Dock at the edge the setting says; gone while the Mac is (and in tests, but
+/// for the gallery's picture).
 fn dock_tick() {
     let edge = crate::dock::Edge::from_setting(crate::settings::Settings::load_cached().dock);
     let connected = !MAC_GONE.load(std::sync::atomic::Ordering::Acquire);
@@ -995,39 +1014,149 @@ fn dock_tick() {
     let headless = with_app(|a| a.smoke.is_some() || a.showcase.is_some()).unwrap_or(true) && !gallery;
     let Some(edge) = edge.filter(|_| connected && !headless) else {
         crate::dock::close();
+        MAC_DOCK.with(|m| m.borrow_mut().asked = None);
         return;
     };
-    let Some((hinst, items, icons)) = with_app(|a| {
-        let mut items = vec![crate::dock::DockItem { id: DESKTOP_APP.into(), name: "Mac Desktop".into(), running: a.remotes.values().any(|r| r.app == DESKTOP_APP) }];
-        let mut seen = std::collections::HashSet::new();
-        for r in a.remotes.values().filter(|r| r.role == WindowRole::Window && r.parent.is_none() && r.app != DESKTOP_APP && r.app != MENUBAR_APP) {
-            if seen.insert(r.app.clone()) {
-                let name = a.app_names.iter().find(|(id, _)| *id == r.app).map_or(r.app.clone(), |(_, n)| n.clone());
-                items.push(crate::dock::DockItem { id: r.app.clone(), name, running: true });
-            }
+    // the Mac's Dock, asked again every few seconds (apps opened or quit, kept or removed)
+    if net::mac_has("dock") {
+        let due = MAC_DOCK.with(|m| m.borrow().asked.is_none_or(|t| t.elapsed() > Duration::from_secs(4)));
+        if due {
+            MAC_DOCK.with(|m| m.borrow_mut().asked = Some(Instant::now()));
+            with_app(|a| a.link.send(&Message::DockList));
         }
-        // the open apps in a steady order (by name), the Mac Desktop first, Open an App last
-        items[1..].sort_by_key(|a| a.name.to_lowercase());
-        items.push(crate::dock::DockItem { id: "\u{1}search".into(), name: "Open an App…".into(), running: false });
-        (a.hinst, items, a.icon_rgba.clone())
+    }
+    let mirror = MAC_DOCK.with(|m| m.borrow().items.clone()).filter(|l| !l.is_empty() && net::mac_has("dock"));
+    let Some((hinst, items)) = with_app(|a| {
+        let items = match &mirror {
+            Some(list) => {
+                let mut ask = vec![];
+                let items: Vec<crate::dock::DockItem> = list
+                    .iter()
+                    .map(|e| {
+                        let icon = e.app_id.clone().unwrap_or_else(|| format!("dock:{}", e.id));
+                        if e.app_id.is_none() && e.kind != "separator" {
+                            ask.push(icon.clone());
+                        }
+                        crate::dock::DockItem { id: e.id.clone(), name: e.title.clone(), running: e.running, separator: e.kind == "separator", icon }
+                    })
+                    .collect();
+                for key in ask {
+                    if MAC_DOCK.with(|m| m.borrow_mut().icons_asked.insert(key.clone())) {
+                        a.link.send(&Message::GetAppIcon { application_id: key });
+                    }
+                }
+                items
+            }
+            None => {
+                let mut items = vec![crate::dock::DockItem { id: DESKTOP_APP.into(), name: "Mac Desktop".into(), running: a.remotes.values().any(|r| r.app == DESKTOP_APP), icon: DESKTOP_APP.into(), ..Default::default() }];
+                let mut seen = std::collections::HashSet::new();
+                for r in a.remotes.values().filter(|r| r.role == WindowRole::Window && r.parent.is_none() && r.app != DESKTOP_APP && r.app != MENUBAR_APP) {
+                    if seen.insert(r.app.clone()) {
+                        let name = a.app_names.iter().find(|(id, _)| *id == r.app).map_or(r.app.clone(), |(_, n)| n.clone());
+                        items.push(crate::dock::DockItem { id: r.app.clone(), name, running: true, icon: r.app.clone(), ..Default::default() });
+                    }
+                }
+                // the open apps in a steady order (by name), the Mac Desktop first, Open an App last
+                items[1..].sort_by_key(|a| a.name.to_lowercase());
+                items.push(crate::dock::DockItem { id: "\u{1}search".into(), name: "Open an App…".into(), separator: false, running: false, icon: "\u{1}search".into() });
+                items
+            }
+        };
+        (a.hinst, items)
     }) else { return };
-    crate::dock::sync(HINSTANCE(hinst as *mut c_void), edge, items, &icons, |id| {
-        if id == "\u{1}search" {
-            open_palette();
+    crate::dock::sync(HINSTANCE(hinst as *mut c_void), edge, items, |key| with_app(|a| a.icon_rgba.get(key).cloned()).flatten(), dock_open, dock_menu_asked);
+}
+
+/// A click on a Dock item.
+fn dock_open(id: String) {
+    if id == "\u{1}search" {
+        open_palette();
+        return;
+    }
+    // an item of the Mac's Dock: what it is
+    let entry = MAC_DOCK.with(|m| m.borrow().items.as_ref().and_then(|l| l.iter().find(|e| e.id == id).cloned()));
+    let app = match &entry {
+        Some(e) if e.kind == "launcher" => {
+            // Launchpad, Apps: Taro's own launcher
+            if let Some(h) = with_app(|a| a.launcher.as_ref().map(|l| l.hwnd)).flatten() {
+                unsafe {
+                    if IsIconic(h).as_bool() {
+                        let _ = ShowWindow(h, SW_RESTORE);
+                    }
+                    let _ = ShowWindow(h, SW_SHOW);
+                    let _ = SetForegroundWindow(h);
+                }
+            }
             return;
         }
-        let window = with_app(|a| a.remotes.iter().find(|(_, r)| r.app == id && r.role == WindowRole::Window && r.parent.is_none()).map(|(k, _)| *k)).flatten();
-        match window {
-            Some(h) => unsafe {
-                let h = hwnd_of(h);
-                if IsIconic(h).as_bool() {
-                    let _ = ShowWindow(h, SW_RESTORE);
-                }
-                let _ = SetForegroundWindow(h);
-            },
-            None => launch_app(&id),
+        Some(e) => match &e.app_id {
+            Some(app) => app.clone(),
+            None => {
+                // a folder, a document, the Trash, an app the viewer does not list: as a click on
+                // the Mac's Dock
+                with_app(|a| a.link.send(&Message::DockOpen { id }));
+                return;
+            }
+        },
+        None => id,
+    };
+    let window = with_app(|a| a.remotes.iter().find(|(_, r)| r.app == app && r.role == WindowRole::Window && r.parent.is_none()).map(|(k, _)| *k)).flatten();
+    match window {
+        Some(h) => unsafe {
+            let h = hwnd_of(h);
+            if IsIconic(h).as_bool() {
+                let _ = ShowWindow(h, SW_RESTORE);
+            }
+            let _ = SetForegroundWindow(h);
+        },
+        None => launch_app(&app),
+    }
+}
+
+/// A right-click on a Dock item: its menu is asked of the Mac (shown when it comes).
+fn dock_menu_asked(id: String, at: POINT) {
+    let mirrored = MAC_DOCK.with(|m| m.borrow().items.as_ref().is_some_and(|l| l.iter().any(|e| e.id == id)));
+    if !mirrored || !net::mac_has("dock") {
+        crate::dock::hold(false);
+        return;
+    }
+    MAC_DOCK.with(|m| m.borrow_mut().menu = Some((id.clone(), at, Instant::now())));
+    with_app(|a| a.link.send(&Message::DockMenuGet { id }));
+}
+
+/// The Mac sent the menu of a Dock item: shown beside it, as glass; the choice is made on the Mac.
+fn on_dock_menu(id: String, menus: Vec<MenuNode>) {
+    let pending = MAC_DOCK.with(|m| {
+        let mut m = m.borrow_mut();
+        match m.menu.take() {
+            Some((want, at, since)) if want == id && since.elapsed() < Duration::from_secs(4) => Some(at),
+            other => {
+                m.menu = other;
+                None
+            }
         }
     });
+    let Some(at) = pending else { return };
+    if menus.is_empty() {
+        crate::dock::hold(false);
+        return;
+    }
+    // the menu as one menu of a bar (ids handed out as for an app's menus), its path without
+    // the bar's index
+    let cc = with_app(|a| a.key_mode.ctrl_as_command()).unwrap_or(true);
+    let wrapped = vec![MenuNode { title: String::new(), enabled: true, children: menus, ..Default::default() }];
+    let items = glass_menus(&wrapped, cc).into_iter().next().unwrap_or_default();
+    let paths: HashMap<u16, Vec<u32>> = menu::commands(&wrapped).into_iter().collect();
+    let hinst = with_app(|a| a.hinst).unwrap_or(0);
+    let owner = crate::dock::hwnd().unwrap_or_default();
+    let right = crate::dock::Edge::from_setting(crate::settings::Settings::load_cached().dock) == Some(crate::dock::Edge::Right);
+    let chosen = crate::glassmenu::show(HINSTANCE(hinst as *mut c_void), owner, at, right, items);
+    crate::dock::hold(false);
+    if let Some(path) = chosen.and_then(|c| paths.get(&(c as u16))) {
+        with_app(|a| a.link.send(&Message::DockMenuInvoke { id, path: path[1..].to_vec() }));
+        // what it changed (kept in the Dock, removed, quit): the Dock asked again at once
+        MAC_DOCK.with(|m| m.borrow_mut().asked = Some(Instant::now() - Duration::from_millis(3500)));
+    }
 }
 
 /// The id of the Ctrl+Alt+Space hot key.
@@ -1534,6 +1663,8 @@ fn handle_event(ev: UiEvent) {
             });
             sync_shortcuts();
         }
+        UiEvent::MacDock(items) => MAC_DOCK.with(|m| m.borrow_mut().items = Some(items)),
+        UiEvent::DockMenu { id, menus } => on_dock_menu(id, menus),
         UiEvent::MenuBar { app, menus } => {
             let windows = with_app(|a| {
                 if a.menus.get(&app) == Some(&menus) {
@@ -3931,7 +4062,10 @@ fn gallery_tick(dir: &std::path::Path) -> bool {
             1 => crate::glassmenu::cancel(),
             2 => crate::palette::close(),
             3 => crate::banner::hide(),
-            4 => crate::dock::close(),
+            4 => {
+                crate::glassmenu::cancel();
+                crate::dock::close();
+            }
             7 => crate::glassmenu::cancel(),
             6 => {
                 // the launcher back to its size
@@ -4006,8 +4140,10 @@ fn gallery_tick(dir: &std::path::Path) -> bool {
             }
         }
         4 => {
-            // the Dock out at the left edge (as a push against it brings it), with the open apps
+            // the Dock out at the left edge (as a push against it brings it), as the Mac's own,
+            // then its first icon's menu (a right-click on Finder) as the Mac shows it
             // (the Mac Desktop closed first, as the user would)
+            let t = since.elapsed();
             if fresh {
                 GALLERY_KEYS.with(|g| g.set(0));
                 let desktop = with_app(|a| a.remotes.iter().find(|(_, r)| r.app == DESKTOP_APP).map(|(k, _)| *k)).flatten();
@@ -4016,14 +4152,20 @@ fn gallery_tick(dir: &std::path::Path) -> bool {
                         let _ = PostMessageW(Some(hwnd_of(k)), WM_CLOSE, WPARAM(0), LPARAM(0));
                     }
                 }
-            } else if since.elapsed() > Duration::from_millis(900) && GALLERY_KEYS.with(|g| g.get()) == 0 {
+            } else if t > Duration::from_millis(900) && GALLERY_KEYS.with(|g| g.get()) == 0 {
                 GALLERY_KEYS.with(|g| g.set(1));
                 let wa = crate::surface::work_area_at(0, 0);
                 crate::dock::reveal_now(POINT { x: wa.left, y: (wa.top + wa.bottom) / 2 });
-            } else if since.elapsed() > Duration::from_millis(1900) {
+            } else if t > Duration::from_millis(1600) && GALLERY_KEYS.with(|g| g.get()) == 1 {
+                GALLERY_KEYS.with(|g| g.set(2));
+                if let Some((id, at)) = crate::dock::first_item() {
+                    crate::dock::hold(true);
+                    dock_menu_asked(id, at);
+                }
+            } else if t > Duration::from_millis(3000) {
                 let wa = crate::surface::work_area_at(0, 0);
                 let s = crate::surface::scale_at(0, 0);
-                ask("14-dock", Some(RECT { left: wa.left, top: wa.top, right: wa.left + (380.0 * s) as i32, bottom: wa.bottom }));
+                ask("14-dock", Some(RECT { left: wa.left, top: wa.top, right: wa.left + (520.0 * s) as i32, bottom: wa.bottom }));
             }
         }
         5 => {

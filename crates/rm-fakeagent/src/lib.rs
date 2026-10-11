@@ -269,7 +269,7 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
     }
     // exact windows only when asked for (RM_FAKE_EXACT=1): the viewer's smoke test checks its own frame
     let exact = std::env::var_os("RM_FAKE_EXACT").is_some_and(|v| v != "0");
-    let features: &[&str] = if exact { &["control", "video", "files", "audio", "open_file", "mask", "exact"] } else { &["control", "video", "files", "audio", "open_file", "mask"] };
+    let features: &[&str] = if exact { &["control", "video", "files", "audio", "open_file", "mask", "exact", "dock"] } else { &["control", "video", "files", "audio", "open_file", "mask", "dock"] };
     send(&writer, &Message::ServerHello(Hello::ours("rm-fakeagent", &["h264"], features)))?;
     send(&writer, &Message::CapabilityReport(caps()))?;
     // TCP messages and input that came over UDP (the direct path) go through one loop
@@ -557,6 +557,27 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
                 }
             }
             Message::Ping { nonce } => send(&writer, &Message::Pong { nonce })?,
+            // the Mac's Dock (scripted): Finder, the apps, a line, Downloads, the Trash
+            Message::DockList => {
+                let open: Vec<String> = st.lock().unwrap().windows.values().map(|w| w.app.clone()).collect();
+                let app = |id: &str, title: &str| DockEntry { id: format!("app:{id}"), kind: "app".into(), title: title.into(), app_id: Some(id.into()), running: open.iter().any(|a| a == id) };
+                let mut items = vec![DockEntry { id: "app:com.apple.finder".into(), kind: "app".into(), title: "Finder".into(), app_id: Some("finder".into()), running: true }];
+                items.extend([app("testapp", "RM Test App"), app("notes", "Notes Test"), app("textedit", "TextEdit")]);
+                items.push(DockEntry { id: "separator:1".into(), kind: "separator".into(), ..Default::default() });
+                items.push(DockEntry { id: "path:/Users/runner/Downloads".into(), kind: "folder".into(), title: "Downloads".into(), ..Default::default() });
+                items.push(DockEntry { id: "trash".into(), kind: "trash".into(), title: "Trash".into(), ..Default::default() });
+                send(&writer, &Message::DockItems { items })?;
+            }
+            Message::DockMenuGet { id } => {
+                let node = |t: &str| MenuNode { title: t.into(), enabled: true, ..Default::default() };
+                let menus = if id == "trash" {
+                    vec![node("Open"), MenuNode { separator: true, ..Default::default() }, node("Empty Trash")]
+                } else {
+                    vec![MenuNode { title: "Options".into(), enabled: true, children: vec![node("Keep in Dock"), node("Open at Login"), node("Show in Finder")], ..Default::default() }, MenuNode { separator: true, ..Default::default() }, node("Show All Windows"), node("Hide"), node("Quit")]
+                };
+                send(&writer, &Message::DockMenu { id, menus })?;
+            }
+            Message::DockOpen { .. } | Message::DockMenuInvoke { .. } => {}
             Message::WindowStyle { exact } => st.lock().unwrap().exact = exact,
             Message::MenuBarStream { enabled } => {
                 let mut s = st.lock().unwrap();

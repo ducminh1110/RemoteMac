@@ -20,8 +20,11 @@ the files are now `Taro-windows.zip` (`Taro.exe`), `Taro-macos.tar.gz` (`./taro.
   accent colour is. On the Mac: `./taro`, `./taro.sh`, the log in `~/Library/Logs/Taro`,
   uploads in `~/Downloads/Taro Uploads`.
 - **The Dock is back, at the left or right edge of the screen** (Settings → Dock; left by
-  default). Drawn by Taro in Liquid Glass with the Mac Desktop, the Mac apps open here and Open
-  an App. It comes out only when the pointer is **pushed against that edge** (the mouse keeps
+  default), **as the Mac's own Dock**: the same items in the same order (apps kept and open,
+  the lines between, folders, the Trash), the running dots, kept in step as it changes, and a
+  **right-click shows the item's menu as the Mac does** (read from the Mac, chosen there). Its
+  icons shrink to fit when there are many or the screen is short. Drawn by Taro in Liquid
+  Glass, it comes out only when the pointer is **pushed against that edge** (the mouse keeps
   moving outward once the pointer is there): passing by the edge or resting there leaves it
   hidden. Icons grow under the pointer with their name beside them.
 - **The Mac's own Dock is no longer streamed** (Desktop Fusion and its wallpaper sync are

@@ -110,7 +110,12 @@ or headphones; both on the same network unless the item says otherwise. Note bot
 
 - [ ] Move the pointer quickly to the left edge and away, or leave it resting there: the Dock
       stays hidden. Push the mouse on against the edge: the Dock slides out, centred on that
-      edge, with the Mac Desktop, the open apps (a dot beside each) and Open an App.
+      edge, with the Mac Dock's items in its order (lines, folders, the Trash), dots on the
+      running apps.
+- [ ] Right-click an app, a folder and the Trash: the menu is the Mac Dock's (Options, Show
+      in Finder, Quit, Empty Trash…); choose Quit, Keep in Dock / Remove from Dock: done on the
+      Mac, and the Dock here follows within a few seconds.
+- [ ] Many apps open (or a short screen): the icons shrink so the whole Dock fits.
 - [ ] Hover an icon: it grows, its name beside it; click it: the app's window comes to the
       front (back from the taskbar when minimised); Open an App opens Taro Search.
 - [ ] Move away: the Dock slides away within half a second. Settings → Dock → At the right

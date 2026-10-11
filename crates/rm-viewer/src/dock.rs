@@ -8,12 +8,16 @@
 
 use std::time::{Duration, Instant};
 
-/// One icon of the Dock.
-#[derive(Debug, Clone, PartialEq)]
+/// One item of the Dock: an icon, or a line between groups (as the Mac's Dock has).
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct DockItem {
     pub id: String,
     pub name: String,
+    /// its dot (the app runs)
     pub running: bool,
+    pub separator: bool,
+    /// where its picture is found (the viewer's icons: an app's id, or the Dock item's)
+    pub icon: String,
 }
 
 /// The side of the screen the Dock is at.
@@ -34,31 +38,47 @@ impl Edge {
     }
 }
 
-/// Icon size, spacing, padding, and the room of the line before the last icon (logical px).
+/// Icon size, spacing, padding and the room of a line between groups, at their largest
+/// (logical px); the Dock's distance from the edge; the smallest icons it shrinks to.
 pub const ICON: f32 = 46.0;
-pub const GAP: f32 = 10.0;
-pub const PAD: f32 = 12.0;
+pub const GAP: f32 = 8.0;
+pub const PAD: f32 = 10.0;
 pub const DIVIDER: f32 = 12.0;
-/// The Dock's thickness across the edge (logical px), and its distance from the edge.
-pub const THICK: f32 = ICON + 2.0 * PAD;
 pub const INSET: f32 = 8.0;
+pub const MIN_ICON: f32 = 20.0;
 
-/// The Dock's length along the edge for `n` icons, the last one after a dividing line.
-pub fn length(n: usize) -> f32 {
-    PAD * 2.0 + n as f32 * ICON + n.saturating_sub(1) as f32 * GAP + if n > 1 { DIVIDER } else { 0.0 }
+/// Where everything of a Dock goes along its edge (logical px from its top): its icon size, where
+/// each item starts, its length and its thickness.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Layout {
+    pub icon: f32,
+    pub starts: Vec<f32>,
+    pub length: f32,
+    pub thick: f32,
 }
 
-/// Where icon `i` of `n` starts along the Dock.
-pub fn start(n: usize, i: usize) -> f32 {
-    PAD + i as f32 * (ICON + GAP) + if n > 1 && i == n - 1 { DIVIDER } else { 0.0 }
+/// The Dock of `items` within `room` along the edge: icons as large as the Mac's are by
+/// default, smaller (as on the Mac) when there are many of them or the screen is short.
+pub fn layout(items: &[DockItem], room: f32) -> Layout {
+    let n = items.len();
+    let lines = items.iter().filter(|i| i.separator).count();
+    let icons = n - lines;
+    let natural = icons as f32 * ICON + lines as f32 * DIVIDER + n.saturating_sub(1) as f32 * GAP;
+    let k = if natural <= 0.0 || 2.0 * PAD + natural <= room { 1.0 } else { ((room - 2.0 * PAD) / natural).clamp(MIN_ICON / ICON, 1.0) };
+    let mut starts = Vec::with_capacity(n);
+    let mut pos = PAD;
+    for it in items {
+        starts.push(pos);
+        pos += if it.separator { DIVIDER } else { ICON } * k + GAP * k;
+    }
+    let length = if n == 0 { 2.0 * PAD } else { pos - GAP * k + PAD };
+    Layout { icon: ICON * k, starts, length, thick: ICON * k + 2.0 * PAD }
 }
 
-/// The icon at `along` (logical px from the Dock's top).
-pub fn icon_at(n: usize, along: f32) -> Option<usize> {
-    (0..n).find(|&i| {
-        let s = start(n, i);
-        along >= s - GAP / 2.0 && along < s + ICON + GAP / 2.0
-    })
+/// The icon at `along` (logical px from the Dock's top); never a line.
+pub fn icon_at(items: &[DockItem], l: &Layout, along: f32) -> Option<usize> {
+    let gap = GAP * l.icon / ICON;
+    (0..items.len()).find(|&i| !items[i].separator && along >= l.starts[i] - gap / 2.0 && along < l.starts[i] + l.icon + gap / 2.0)
 }
 
 /// How much each icon grows with the pointer over icon `hover`: the icon itself, its
@@ -117,7 +137,7 @@ impl Push {
 }
 
 #[cfg(windows)]
-pub use win::{close, register, reveal_now, sync};
+pub use win::{close, first_item, hold, hwnd, register, reveal_now, sync};
 
 #[cfg(windows)]
 mod win {
@@ -140,6 +160,8 @@ mod win {
     const TIMER_REST: usize = 2;
 
     type Mask = (Vec<u8>, usize, usize);
+    /// An item's picture, looked up when the Dock first needs it: (size, straight RGBA).
+    type IconOf = Box<dyn Fn(&str) -> Option<(u32, Vec<u8>)>>;
 
     struct Dock {
         surf: Surface,
@@ -148,8 +170,11 @@ mod win {
         icons: HashMap<String, Canvas>,
         placeholders: HashMap<String, Canvas>,
         names: HashMap<String, Mask>,
-        /// the monitor it is out on, its scale, and its rectangle there (device px: x, y, w, h)
+        icon_of: IconOf,
+        /// its scale, its layout (logical px) and its rectangle on the screen (device px: x, y,
+        /// w, h) where it last came out
         scale: f32,
+        layout: Layout,
         rect: (i32, i32, usize, usize),
         /// 0 hidden past the edge .. 1 out
         shown: Anim,
@@ -158,7 +183,7 @@ mod win {
         /// the glass made when it comes out (what is behind it then), and its margin
         glass: Option<(Canvas, usize)>,
         left_at: Option<Instant>,
-        /// kept out until then whatever the pointer does (the gallery's picture)
+        /// kept out until then whatever the pointer does (a menu of it is open, the gallery)
         held: Option<Instant>,
         push: Push,
         /// the pointer moves the cursor directly (no relative moves to add up): resting at the
@@ -166,6 +191,8 @@ mod win {
         absolute: bool,
         resting: Option<Instant>,
         on_click: Box<dyn Fn(String)>,
+        /// a right-click on an item: its id and where its menu goes (screen px, beside it)
+        on_menu: Box<dyn Fn(String, POINT)>,
         dark: bool,
     }
 
@@ -177,10 +204,36 @@ mod win {
         surface::register(hinst, CLASS, Some(proc), IDC_HAND);
     }
 
-    /// The Dock at `edge` with these apps (made the first time; moved to another edge when the
-    /// setting changes); `on_click(id)` opens or switches to one.
-    pub fn sync(hinst: HINSTANCE, edge: Edge, items: Vec<DockItem>, icons: &HashMap<String, (u32, Vec<u8>)>, on_click: impl Fn(String) + 'static) {
-        let canvas_of = |id: &str| icons.get(id).filter(|(s, px)| px.len() == (*s * *s * 4) as usize).map(|(s, px)| Canvas::from_rgba(*s as usize, *s as usize, px));
+    /// The Dock's window, while there is one (a menu of it is owned by it).
+    pub fn hwnd() -> Option<HWND> {
+        DOCK.with(|d| d.borrow().as_ref().map(|k| k.surf.hwnd))
+    }
+
+    /// Its first icon while it is out, and where that icon's menu goes (the gallery's picture of
+    /// a right-click).
+    pub fn first_item() -> Option<(String, POINT)> {
+        DOCK.with(|d| {
+            let b = d.borrow();
+            let k = b.as_ref()?;
+            let i = k.items.iter().position(|i| !i.separator)?;
+            Some((k.items[i].id.clone(), k.beside(i)))
+        })
+    }
+
+    /// Keep it out (a menu of it is open) or let it go again.
+    pub fn hold(on: bool) {
+        DOCK.with(|d| {
+            if let Some(k) = d.borrow_mut().as_mut() {
+                k.held = on.then(|| Instant::now() + Duration::from_secs(600));
+                k.left_at = None;
+            }
+        });
+    }
+
+    /// The Dock at `edge` with these items (made the first time; moved to another edge when the
+    /// setting changes). `icon_of(key)` gives an item's picture; `on_click(id)` opens it,
+    /// `on_menu(id, at)` shows its menu.
+    pub fn sync(hinst: HINSTANCE, edge: Edge, items: Vec<DockItem>, icon_of: impl Fn(&str) -> Option<(u32, Vec<u8>)> + 'static, on_click: impl Fn(String) + 'static, on_menu: impl Fn(String, POINT) + 'static) {
         let exists = DOCK.with(|d| d.borrow().as_ref().map(|k| k.edge));
         if exists.is_some_and(|e| e != edge) {
             close();
@@ -188,22 +241,22 @@ mod win {
         if exists == Some(edge) {
             DOCK.with(|d| {
                 if let Some(k) = d.borrow_mut().as_mut() {
-                    for it in &items {
-                        if !k.icons.contains_key(&it.id) {
-                            if let Some(c) = canvas_of(&it.id) {
-                                k.icons.insert(it.id.clone(), c);
-                            }
-                        }
-                    }
                     if k.items != items {
                         k.grow = items.iter().map(|_| Anim::at(1.0)).collect();
                         k.items = items;
                         k.hover = None;
-                        // a new length: its glass is made again (when it is out, at once)
+                        // another length: placed and its glass made again (at once when it is out)
                         if k.shown.target() > 0.5 {
                             k.place_and_glass();
                         } else {
                             k.glass = None;
+                        }
+                    }
+                    // pictures that came since
+                    let missing: Vec<String> = k.items.iter().filter(|i| !i.separator && !k.icons.contains_key(&i.icon)).map(|i| i.icon.clone()).collect();
+                    for key in missing {
+                        if let Some(c) = (k.icon_of)(&key).filter(|(s, px)| px.len() == (*s * *s * 4) as usize).map(|(s, px)| Canvas::from_rgba(s as usize, s as usize, &px)) {
+                            k.icons.insert(key, c);
                         }
                     }
                 }
@@ -212,16 +265,17 @@ mod win {
         }
         let Some(surf) = Surface::new(hinst, CLASS, "Taro Dock", None, true, false) else { return };
         let hwnd = surf.hwnd;
-        let icons_c = items.iter().filter_map(|it| canvas_of(&it.id).map(|c| (it.id.clone(), c))).collect();
         DOCK.with(|d| {
             *d.borrow_mut() = Some(Dock {
                 surf,
                 edge,
                 grow: items.iter().map(|_| Anim::at(1.0)).collect(),
+                layout: layout(&items, 10_000.0),
                 items,
-                icons: icons_c,
+                icons: HashMap::new(),
                 placeholders: HashMap::new(),
                 names: HashMap::new(),
+                icon_of: Box::new(icon_of),
                 scale: 1.0,
                 rect: (0, 0, 1, 1),
                 shown: Anim::at(0.0),
@@ -233,6 +287,7 @@ mod win {
                 absolute: false,
                 resting: None,
                 on_click: Box::new(on_click),
+                on_menu: Box::new(on_menu),
                 dark: false,
             })
         });
@@ -293,15 +348,16 @@ mod win {
         }
 
         /// Its place on the monitor it comes out on (centred along the edge, within the work
-        /// area), and its glass from what is behind it now.
+        /// area, its icons as large as fit), and its glass from what is behind it now.
         fn place_and_glass(&mut self) {
             let (x, y, w, h) = self.rect;
             let at = POINT { x: x + w as i32 / 2, y: y + h as i32 / 2 };
             let (_, m, wa) = monitor(at);
             let s = surface::scale_at(at.x, at.y);
             self.scale = s;
-            let len = ((length(self.items.len()) * s).round() as i32).min(wa.bottom - wa.top - (16.0 * s) as i32).max(1);
-            let thick = (THICK * s).round() as i32;
+            self.layout = layout(&self.items, (wa.bottom - wa.top) as f32 / s - 16.0);
+            let len = (self.layout.length * s).round() as i32;
+            let thick = (self.layout.thick * s).round() as i32;
             let inset = (INSET * s).round() as i32;
             let top = wa.top + ((wa.bottom - wa.top) - len) / 2;
             let left = match self.edge {
@@ -309,14 +365,15 @@ mod win {
                 Edge::Right => m.right - inset - thick,
             };
             self.rect = (left, top, thick as usize, len as usize);
-            // what is behind it, without itself (its apps changed while it was out)
+            // what is behind it, without itself (its items changed while it was out)
             let shown = unsafe { IsWindowVisible(self.surf.hwnd).as_bool() };
             if shown {
                 unsafe {
                     let _ = ShowWindow(self.surf.hwnd, SW_HIDE);
                 }
             }
-            let (c, margin) = surface::glass_panel(left, top, thick as usize, len as usize, 18.0 * s, crate::glass::Kind::Tabs, s);
+            let radius = (self.layout.thick * 0.36).min(18.0) * s;
+            let (c, margin) = surface::glass_panel(left, top, thick as usize, len as usize, radius, crate::glass::Kind::Tabs, s);
             if shown {
                 unsafe {
                     let _ = ShowWindow(self.surf.hwnd, SW_SHOWNOACTIVATE);
@@ -343,6 +400,18 @@ mod win {
         fn go_away(&mut self) {
             self.shown.retarget(0.0, tokens::pick(tokens::WINDOW, 0.2), Curve::Accelerate);
             self.hover = None;
+            self.held = None;
+        }
+
+        /// Screen point beside icon `i`, on the screen's side: where its menu opens.
+        fn beside(&self, i: usize) -> POINT {
+            let (x, y, w, _) = self.rect;
+            let s = self.scale;
+            let cy = y + ((self.layout.starts[i] + self.layout.icon / 2.0) * s).round() as i32;
+            match self.edge {
+                Edge::Left => POINT { x: x + w as i32 + (6.0 * s) as i32, y: cy },
+                Edge::Right => POINT { x: x - (6.0 * s) as i32, y: cy },
+            }
         }
     }
 
@@ -362,7 +431,7 @@ mod win {
         if m.usFlags.0 & 1 != 0 {
             let start = DOCK.with(|d| d.borrow_mut().as_mut().map(|k| !std::mem::replace(&mut k.absolute, true)).unwrap_or(false));
             if start {
-                if let Some(h) = DOCK.with(|d| d.borrow().as_ref().map(|k| k.surf.hwnd)) {
+                if let Some(h) = hwnd() {
                     unsafe {
                         SetTimer(Some(h), TIMER_REST, 100, None);
                     }
@@ -443,7 +512,7 @@ mod win {
                 }
             }
             let inside = cur.x >= x && cur.x < x + w as i32;
-            let hover = if inside && k.shown.target() > 0.5 { icon_at(k.items.len(), (cur.y - y) as f32 / s) } else { None };
+            let hover = if inside && k.shown.target() > 0.5 { icon_at(&k.items, &k.layout, (cur.y - y) as f32 / s) } else if held { k.hover } else { None };
             if hover != k.hover {
                 k.hover = hover;
                 let g = growth(k.items.len(), hover);
@@ -472,7 +541,7 @@ mod win {
             let Some((base, margin)) = k.glass.as_ref() else { return };
             let (x, y, _, _) = k.rect;
             let s = k.scale;
-            let n = k.items.len();
+            let lay = k.layout.clone();
             // room beside it for the name of the icon under the pointer (on the screen's side)
             let room = (230.0 * s) as usize;
             let left = k.edge == Edge::Left;
@@ -481,16 +550,23 @@ mod win {
             c.composite(base, bx as isize, 0, 1.0);
             let (mx, my) = ((bx + *margin) as f32, *margin as f32);
             let (fg, fg2) = surface::glass_text(k.dark);
-            let thick = THICK * s;
+            let thick = lay.thick * s;
+            let icon = lay.icon * s;
             for (i, it) in k.items.iter().enumerate() {
+                let top = my + lay.starts[i] * s;
+                if it.separator {
+                    // the line between groups, across the Dock
+                    let ly = top + DIVIDER * lay.icon / ICON * s / 2.0;
+                    c.fill_round_rect(mx + 10.0 * s, ly - 0.5 * s, thick - 20.0 * s, 1.0 * s, 0.5 * s, fg2.fade(0.6));
+                    continue;
+                }
                 let g = k.grow.get(i).map_or(1.0, |a| a.value_at(now));
-                let size = ICON * s * g;
-                let cy = my + (start(n, i) + ICON / 2.0) * s;
+                let size = icon * g;
+                let cy = top + icon / 2.0;
                 // grows away from the edge, as the Mac's Dock grows up from the bottom
-                let base_x = if left { mx + PAD * s } else { mx + thick - PAD * s - ICON * s };
-                let ix = if left { base_x } else { base_x + ICON * s - size };
+                let ix = if left { mx + PAD * s } else { mx + thick - PAD * s - size };
                 let iy = cy - size / 2.0;
-                match k.icons.get(&it.id) {
+                match k.icons.get(&it.icon) {
                     Some(ic) => c.draw(ic, ix, iy, size, size, 0.0, 1.0),
                     None if it.id.starts_with('\u{1}') => {
                         // Open an App: a magnifying glass on a disc of glass
@@ -498,19 +574,15 @@ mod win {
                         crate::look::symbol(&mut c, crate::look::Symbol::Search, ix + size / 2.0, iy + size / 2.0, size * 0.42, fg.fade(0.85));
                     }
                     None => {
-                        // until the Mac's icon comes (the Mac Desktop: a display)
+                        // until its picture comes (the Mac Desktop: a display)
                         let px = (ICON * s).round() as usize;
-                        let ph = k.placeholders.entry(it.id.clone()).or_insert_with(|| crate::launchui::placeholder(&it.id, &it.name, px, s));
+                        let ph = k.placeholders.entry(it.icon.clone()).or_insert_with(|| crate::launchui::placeholder(&it.icon, &it.name, px, s));
                         c.draw(ph, ix, iy, size, size, 0.0, 1.0);
                     }
                 }
                 if it.running {
                     let dx = if left { mx + 4.0 * s } else { mx + thick - 4.0 * s };
                     c.fill_circle(dx, cy, 2.0 * s, fg.fade(0.8));
-                }
-                if n > 1 && i == n - 1 {
-                    let ly = my + (start(n, i) - GAP / 2.0 - DIVIDER / 2.0) * s;
-                    c.fill_round_rect(mx + 14.0 * s, ly - 0.5 * s, thick - 28.0 * s, 1.0 * s, 0.5 * s, fg2.fade(0.6));
                 }
                 if k.hover == Some(i) {
                     let mask = k.names.entry(it.name.clone()).or_insert_with(|| surface::text_mask(&it.name, (12.0 * s).round() as i32, 500, (200.0 * s) as usize));
@@ -523,12 +595,17 @@ mod win {
                 }
             }
             // slides in from past the edge
-            let travel = (THICK + INSET) * s + *margin as f32;
+            let travel = (lay.thick + INSET) * s + *margin as f32;
             let off = ((1.0 - t) * travel).round() as i32;
             let a = (t.clamp(0.0, 1.0).sqrt() * 255.0) as u8;
             let wx = if left { x - *margin as i32 - off } else { x - *margin as i32 - room as i32 + off };
             k.surf.present(&c, wx, y - *margin as i32, a, None);
         });
+    }
+
+    /// The item under the pointer, and where its menu goes.
+    fn picked() -> Option<(String, POINT)> {
+        DOCK.with(|d| d.borrow().as_ref().and_then(|k| k.hover.and_then(|i| k.items.get(i).map(|it| (it.id.clone(), k.beside(i))))))
     }
 
     unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -547,8 +624,7 @@ mod win {
             }
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             WM_LBUTTONUP => {
-                let pick = DOCK.with(|d| d.borrow().as_ref().and_then(|k| k.hover.and_then(|i| k.items.get(i).map(|it| it.id.clone()))));
-                if let Some(id) = pick {
+                if let Some((id, _)) = picked() {
                     DOCK.with(|d| d.borrow_mut().as_mut().map(|k| k.go_away()));
                     // called with nothing borrowed: it may open windows
                     let cb = DOCK.with(|d| d.borrow_mut().as_mut().map(|k| std::mem::replace(&mut k.on_click, Box::new(|_| {}))));
@@ -557,6 +633,22 @@ mod win {
                         DOCK.with(|d| {
                             if let Some(k) = d.borrow_mut().as_mut() {
                                 k.on_click = cb;
+                            }
+                        });
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_RBUTTONUP => {
+                if let Some((id, at)) = picked() {
+                    // its menu, as the Mac shows it: the Dock stays out meanwhile
+                    hold(true);
+                    let cb = DOCK.with(|d| d.borrow_mut().as_mut().map(|k| std::mem::replace(&mut k.on_menu, Box::new(|_, _| {}))));
+                    if let Some(cb) = cb {
+                        cb(id, at);
+                        DOCK.with(|d| {
+                            if let Some(k) = d.borrow_mut().as_mut() {
+                                k.on_menu = cb;
                             }
                         });
                     }
@@ -572,16 +664,32 @@ mod win {
 mod tests {
     use super::*;
 
+    fn items(spec: &str) -> Vec<DockItem> {
+        spec.chars().enumerate().map(|(i, c)| DockItem { id: i.to_string(), separator: c == '|', ..Default::default() }).collect()
+    }
+
     #[test]
-    fn icons_are_laid_out_and_found() {
-        assert_eq!(length(1), PAD * 2.0 + ICON);
-        assert_eq!(length(3), PAD * 2.0 + 3.0 * ICON + 2.0 * GAP + DIVIDER);
-        assert_eq!(icon_at(3, PAD + 1.0), Some(0));
-        assert_eq!(icon_at(3, start(3, 1) + 2.0), Some(1));
-        // the last one comes after the line
-        assert_eq!(start(3, 2), PAD + 2.0 * (ICON + GAP) + DIVIDER);
-        assert_eq!(icon_at(3, start(3, 2) + ICON / 2.0), Some(2));
-        assert_eq!(icon_at(3, length(3) + 20.0), None);
+    fn icons_and_lines_are_laid_out_and_found() {
+        let it = items("ab|c");
+        let l = layout(&it, 2000.0);
+        assert_eq!(l.icon, ICON);
+        assert_eq!(l.starts, vec![PAD, PAD + ICON + GAP, PAD + 2.0 * (ICON + GAP), PAD + 2.0 * (ICON + GAP) + DIVIDER + GAP]);
+        assert_eq!(l.length, 2.0 * PAD + 3.0 * ICON + DIVIDER + 3.0 * GAP);
+        assert_eq!(icon_at(&it, &l, PAD + 1.0), Some(0));
+        assert_eq!(icon_at(&it, &l, l.starts[2] + 2.0), None, "never the line");
+        assert_eq!(icon_at(&it, &l, l.starts[3] + ICON / 2.0), Some(3));
+        assert_eq!(icon_at(&it, &l, l.length + 20.0), None);
+    }
+
+    #[test]
+    fn many_icons_shrink_to_fit_the_screen() {
+        let it = items(&"a".repeat(30));
+        let l = layout(&it, 900.0);
+        assert!(l.icon < ICON && l.icon >= MIN_ICON, "{}", l.icon);
+        assert!((l.length - 900.0).abs() < 0.5, "{}", l.length);
+        assert_eq!(l.thick, l.icon + 2.0 * PAD);
+        // never below the smallest size, even if it then runs past
+        assert_eq!(layout(&items(&"a".repeat(200)), 900.0).icon, MIN_ICON);
     }
 
     #[test]

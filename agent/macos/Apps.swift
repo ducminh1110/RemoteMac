@@ -254,6 +254,14 @@ final class AppManager {
     func markQuitting(_ id: String) { lock.lock(); quittingIDs.insert(id); lock.unlock() }
     func quitting(_ id: String) -> Bool { lock.lock(); defer { lock.unlock() }; return quittingIDs.contains(id) }
 
+    /// Finder shown in the session (as when it is opened from Windows), without a window of its
+    /// own opened: a Dock folder opens one. Returns its pid.
+    func adoptFinder() -> pid_t? {
+        guard let f = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first else { return nil }
+        lock.lock(); adopted["finder"] = f.processIdentifier; lock.unlock()
+        return f.processIdentifier
+    }
+
     /// The .app bundle of a listed app.
     func bundle(of id: String) -> String? { descriptor(id).flatMap { bundlePath($0.executable) } }
 
