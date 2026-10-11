@@ -65,6 +65,13 @@ the document's title (light and dark).
 ![The title bar of TextEdit on Windows: traffic lights, the app's menus, its title](docs/images/titlebar-light.png)
 ![The same title bar in dark mode](docs/images/titlebar-dark.png)
 
+On Windows, from a real Mac: these two come from CI, a session recorded on a Mac with macOS 26
+and played into the Windows viewer.
+
+| The Mac's own Dock at the left edge, Finder's right-click menu | An app's menu, as glass (TextEdit's Format menu) |
+|---|---|
+| ![The Mac's Dock on Windows: Finder, Apps, Safari, Messages and the rest in the Mac's order, Downloads and the Trash at the end, Finder's right-click menu open beside it](docs/images/dock.jpg) | ![TextEdit's window on Windows with its Format menu open: Font, Text, Make Plain Text with Shift+Ctrl+T](docs/images/app-menu.jpg) |
+
 ## Features
 
 - **One app, one window.** Every Mac window becomes a native Windows window with Mac-style
