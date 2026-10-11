@@ -128,8 +128,10 @@ or headphones; both on the same network unless the item says otherwise. Note bot
       the Mac's menu bar and Dock are as before.
 - [ ] Open TextEdit, Notes, Finder: no thin band of the desktop between the title bar and the
       app, no dark curve at the top corners.
-- [ ] Close an app with its red button and open it again at once from the launcher or the
-      Dock: it opens (no endless loading), the connection stays.
+- [ ] Close an app's window with its red button: the window goes, the app keeps its dot in the
+      Dock; a click on it there brings a window back. Quit it from the Dock and open it again at
+      once from the launcher or the Dock: it opens (no endless loading), the connection stays.
+- [ ] The Dock comes out with a short nudge against its edge (not by passing by it).
 
 ## 9. Stopping and uninstalling
 

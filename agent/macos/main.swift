@@ -884,7 +884,13 @@ func handle(_ m: [String: Any]) {
             send(["type": "error", "code": "no_such_window", "message": "\(wid)"]); break
         }
         if type == "window_close" {
-            if let cb = axAttr(aw, kAXCloseButtonAttribute as String) { AXUIElementPerformAction(cb as! AXUIElement, kAXPressAction as CFString) }
+            // as its red button does: the window closes, the app stays open (it may ask to save
+            // first); a window without that button gets Command-W, as File > Close does
+            let pressed = axAttr(aw, kAXCloseButtonAttribute as String).map { AXUIElementPerformAction($0 as! AXUIElement, kAXPressAction as CFString) == .success } ?? false
+            if !pressed {
+                AXUIElementPerformAction(aw, kAXRaiseAction as CFString)
+                keyTo(w.pid, 13, .maskCommand)
+            }
         } else {
             var size = CGSize(width: num(m["width"]), height: num(m["height"]) + w.inset) // the viewer asks for the picture size
             if let v = AXValueCreate(.cgSize, &size) { AXUIElementSetAttributeValue(aw, kAXSizeAttribute as CFString, v) }

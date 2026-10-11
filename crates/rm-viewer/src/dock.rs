@@ -103,8 +103,8 @@ pub struct Push {
 }
 
 impl Push {
-    /// How far to push (about 4 mm of a usual mouse, a short swipe on a touchpad).
-    pub const NEEDED: f32 = 160.0;
+    /// How far to push (about 2 mm of a usual mouse, a flick on a touchpad).
+    pub const NEEDED: f32 = 70.0;
     /// A longer pause between moves starts the push again.
     pub const PAUSE: Duration = Duration::from_millis(300);
 
@@ -478,7 +478,7 @@ mod win {
                 return;
             }
             let since = *k.resting.get_or_insert_with(Instant::now);
-            if since.elapsed() > Duration::from_millis(900) {
+            if since.elapsed() > Duration::from_millis(500) {
                 k.resting = None;
                 k.come_out(p);
             }
@@ -707,14 +707,14 @@ mod tests {
         assert!(!p.add(30.0, ms(0)));
         assert!(!p.add(0.0, ms(10)));
         assert!(!p.add(-5.0, ms(20)), "back into the screen ends it");
-        assert!(!p.add(140.0, ms(30)), "started again: not deep enough");
+        assert!(!p.add(60.0, ms(30)), "started again: not deep enough");
         // a push in steps, without a pause, is
         let mut p = Push::default();
         let mut out = false;
-        for i in 0..8 {
+        for i in 0..3 {
             out |= p.add(25.0, ms(i * 16));
         }
-        assert!(out);
+        assert!(out, "a short push, three moves");
         // the same amount with pauses between is not
         let mut p = Push::default();
         let mut out = false;

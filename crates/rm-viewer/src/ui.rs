@@ -832,8 +832,8 @@ unsafe extern "system" fn launcher_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             LRESULT(1)
         }
         WM_CLOSE => {
-            // Closing the launcher keeps running apps open (and one still opening); the viewer
-            // exits with the last window. The menu bar strip is not an app's window.
+            // Closing the launcher keeps the apps' windows open (and one still opening); with
+            // none, Taro ends. The menu bar strip is not an app's window.
             let open = with_app(|a| a.remotes.values().any(|r| r.app != MENUBAR_APP)).unwrap_or(false);
             if !open && !crate::splash::any() {
                 quit(0);
@@ -1802,10 +1802,19 @@ fn handle_event(ev: UiEvent) {
             }
             with_app(|a| a.panels.remove(&id));
             smoke_note_destroyed(id);
-            // Last remote window gone and the launcher is not on screen: the viewer is done.
-            let idle = with_app(|a| a.smoke.is_none() && a.showcase.is_none() && a.remotes.is_empty() && !a.launcher.as_ref().is_some_and(|l| unsafe { IsWindowVisible(l.hwnd).as_bool() })).unwrap_or(false);
-            if idle {
-                quit(0);
+            // The last remote window gone (closed as on the Mac: its app may still run, in the
+            // Dock) and the launcher not on screen: the launcher comes back, never Taro left
+            // running with nothing on screen, nor ended (that would quit the apps closed only to
+            // the Dock). An app still opening has its loading window.
+            let alone = with_app(|a| a.smoke.is_none() && a.showcase.is_none() && a.remotes.is_empty() && !a.launcher.as_ref().is_some_and(|l| unsafe { IsWindowVisible(l.hwnd).as_bool() })).unwrap_or(false);
+            if alone && !crate::splash::any() {
+                match with_app(|a| a.launcher.as_ref().map(|l| l.hwnd)).flatten() {
+                    Some(l) => unsafe {
+                        let _ = ShowWindow(l, SW_SHOW);
+                        let _ = SetForegroundWindow(l);
+                    },
+                    None => quit(0),
+                }
             }
         }
         UiEvent::Mask { id, width, height, alpha } => on_mask(id, width, height, alpha),
@@ -2998,23 +3007,10 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             LRESULT(0)
         }
         WM_CLOSE => {
-            // The close button quits the app when this is its last main window (as Windows apps
-            // do), instead of leaving it running in the Mac's Dock; with other windows of the app
-            // still open, only this one closes. Either way we disappear when the Mac says so.
-            let quit = with_app(|a| {
-                let r = a.remotes.get(&(hwnd.0 as isize))?;
-                let last = r.role == WindowRole::Window
-                    && r.parent.is_none()
-                    && r.app != DESKTOP_APP
-                    && r.app != "finder"
-                    && !a.remotes.iter().any(|(k, o)| *k != hwnd.0 as isize && o.app == r.app && o.role == WindowRole::Window && o.parent.is_none());
-                last.then(|| r.app.clone())
-            })
-            .flatten();
-            match quit {
-                Some(app) => with_app(|a| a.link.send(&Message::AppTerminate { application_id: app })).unwrap_or(()),
-                None => send_for(hwnd, |r, _| Some(Message::WindowClose { window_id: r.id })),
-            }
+            // The close button (and Alt+F4) closes this window as the Mac's red button does: the
+            // app stays open, in the Dock, as on the Mac (it may ask to save first); it is quit
+            // from the Dock (its menu's Quit) or its own menu. We disappear when the Mac says so.
+            send_for(hwnd, |r, _| Some(Message::WindowClose { window_id: r.id }));
             LRESULT(0)
         }
         WM_DESTROY => {

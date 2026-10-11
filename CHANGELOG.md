@@ -4,6 +4,23 @@ Each version of Taro (called MacBridge until 1.2.0), newest first. Both sides sh
 same version; a newer Windows app works with an older Mac app without the features the Mac
 lacks.
 
+## 1.2.2
+
+Closing a window works as on the Mac, and the Dock comes out with a shorter push. Update both
+sides.
+
+### Changed
+
+- **The close button closes the window, not the app**, as the red button does on the Mac: the
+  app stays open, with its dot in the Dock, and a click on it there (or in the launcher) brings
+  a window back. To quit it, right-click it in the Dock and choose Quit, or use Quit in its own
+  menu (⌘Q). Alt+F4 does the same as the close button. A window without a close button on the
+  Mac gets ⌘W, as File > Close does. With no window left, the launcher comes back (Taro used
+  to end there, quitting the apps).
+- **The Dock comes out with a short nudge** against its edge (about half of the push it took
+  before); with a pen or in a remote session, half a second at the edge. Passing by the edge
+  still leaves it hidden.
+
 ## 1.2.1
 
 A Mac app in its own window is as smooth as the same app on the Mac Desktop, and no app loses

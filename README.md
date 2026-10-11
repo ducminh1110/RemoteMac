@@ -312,7 +312,7 @@ publishes a GitHub release with all three packages.
 | Show this PC's pointer over the picture | **Ctrl+Alt+Shift+C** |
 | Stream statistics overlay | **Ctrl+Alt+Shift+S** |
 | Copy / paste | Ctrl+C / Ctrl+V. The clipboard syncs both ways, including images |
-| Close an app | close its last window (quits the app on the Mac) |
+| Close a window / quit an app | the red light closes the window, the app stays open (as on the Mac); quit it from the Dock (right-click, Quit) or with ⌘Q |
 
 **Logs** are off by default. Start either side with `--logs-enabled` to get one:
 

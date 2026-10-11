@@ -207,8 +207,11 @@ still works, without the newer features.
   Right) to go from one menu to the next; a row with a chevron opens another menu beside it.
   Shortcuts are translated (Ctrl acts as ⌘ by default).
 - **Fullscreen**: the green light or **F11**. The Mac app is sized exactly to your monitor.
-- **Closing** an app's last window quits the app on the Mac. Closing one of several windows
-  closes only that window.
+- **Closing** a window (its red light, the close button or Alt+F4) closes that window, as the
+  red button does on the Mac: the app stays open, its dot stays in the Dock. Click it in the
+  Dock (or the launcher) to get a window again; to **quit** it, right-click it in the Dock and
+  choose **Quit** (or use Quit in its own menu, ⌘Q). With no window left, Taro's launcher comes
+  back; closing it ends Taro.
 - **Files**: in an app's Open dialog you can pick a file from this PC, and it is uploaded to
   the Mac (into `~/Downloads/Taro Uploads`).
 - **Drag and drop**: drop files from Explorer onto a Mac app's window to open them in that
@@ -248,10 +251,10 @@ and other folders, the Trash), a dot beside each app that runs on the Mac. It fo
 Dock as it changes. Its icons are as large as the Mac's by default and smaller when there are
 many of them or the screen is short.
 
-- It stays out of the way until you **push the pointer against that edge**: move the mouse
-  on towards the edge for a moment after the pointer has reached it. Passing by the edge, or
-  leaving the pointer there, does nothing. (With a pen or in a remote session, where there is
-  no such push, leaving the pointer at the edge for about a second brings it out.)
+- It stays out of the way until you **push the pointer against that edge**: a short nudge on
+  towards the edge after the pointer has reached it. Passing by the edge, or leaving the
+  pointer there, does nothing. (With a pen or in a remote session, where there is no such
+  push, leaving the pointer at the edge for half a second brings it out.)
 - The icon under the pointer grows, with its name beside it. A click opens the app (with its
   loading window), or brings its window to the front (back from the taskbar if it was
   minimised); a folder or the Trash opens as a Finder window; Launchpad or Apps opens Taro's
