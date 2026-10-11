@@ -58,9 +58,14 @@ fn workspaces() -> Vec<String> {
 pub fn show(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: impl Fn(Settings) + 'static) {
     if let Some(h) = with(|u| u.hwnd) {
         unsafe {
-            let _ = SetForegroundWindow(h);
+            if IsWindow(Some(h)).as_bool() {
+                let _ = ShowWindow(h, SW_SHOW);
+                let _ = SetForegroundWindow(h);
+                return;
+            }
         }
-        return;
+        // its window went with the window it belonged to: made again
+        UI.with(|u| u.borrow_mut().take());
     }
     unsafe {
         UI.with(|u| *u.borrow_mut() = Some(Ui { hwnd: HWND::default(), view: SettingsView::new(current, workspaces()), on_save: Rc::new(on_save), timer: false }));
@@ -241,6 +246,18 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_CLOSE => {
             close(hwnd);
+            LRESULT(0)
+        }
+        // destroyed with the window it belonged to (a Mac window closed, the connection dropped):
+        // it can be opened again
+        WM_DESTROY => {
+            UI.with(|u| {
+                if let Ok(mut g) = u.try_borrow_mut() {
+                    if g.as_ref().is_some_and(|ui| ui.hwnd == hwnd) {
+                        g.take();
+                    }
+                }
+            });
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),

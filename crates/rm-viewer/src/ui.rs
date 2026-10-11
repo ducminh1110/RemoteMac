@@ -107,6 +107,13 @@ struct Remote {
     hot_since: Instant,
     /// Pointer over the traffic lights (they show their glyphs).
     hover: bool,
+    /// mouse buttons held on the Mac (left 1, right 2, middle 4), and where the pointer last was
+    /// there (points)
+    buttons: u8,
+    last_pointer: (f64, f64),
+    /// when the last pointer move went, and whether a newer one waits
+    move_at: Instant,
+    pending_move: bool,
     pressed: Option<chrome::Light>,
     active: bool,
     /// Owned by its parent window (a dialog or panel with a parent): no menu, only the red light.
@@ -487,6 +494,11 @@ fn start_reconnect() -> bool {
             }
         }
         let windows: Vec<isize> = a.remotes.keys().copied().collect();
+        for r in a.remotes.values().filter(|r| r.menu != 0) {
+            unsafe {
+                let _ = DestroyMenu(HMENU(r.menu as *mut c_void));
+            }
+        }
         a.remotes.clear();
         a.by_id.clear();
         a.panels.clear();
@@ -814,8 +826,10 @@ unsafe extern "system" fn launcher_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             LRESULT(1)
         }
         WM_CLOSE => {
-            // Closing the launcher keeps running apps open; the viewer exits with the last window.
-            if with_app(|a| a.remotes.is_empty()).unwrap_or(true) {
+            // Closing the launcher keeps running apps open (and one still opening); the viewer
+            // exits with the last window. The Dock and the menu bar strip are not apps' windows.
+            let open = with_app(|a| a.remotes.values().any(|r| r.app != DOCK_APP && r.app != MENUBAR_APP)).unwrap_or(false);
+            if !open && !crate::splash::any() {
                 quit(0);
             } else {
                 let _ = ShowWindow(hwnd, SW_HIDE);
@@ -1256,7 +1270,15 @@ fn dock_autohide() {
 
 /// The 16 ms timer while the Dock slides.
 fn dock_slide_tick() {
-    let Some((k, _)) = FUSION.with(|f| f.borrow().dock.clone()) else { return };
+    let Some((k, _)) = FUSION.with(|f| f.borrow().dock.clone()) else {
+        // the Dock went (Fusion off, the Mac's Dock unavailable) while it slid
+        if let Some(ctl) = with_app(|a| a.controller) {
+            unsafe {
+                let _ = KillTimer(Some(hwnd_of(ctl)), TIMER_DOCK);
+            }
+        }
+        return;
+    };
     let done = FUSION.with(|f| f.borrow().shown.as_ref().is_none_or(|a| a.done()));
     place_dock(hwnd_of(k));
     if done {
@@ -1399,7 +1421,10 @@ fn launch_app(app: &str) {
     let existing = with_app(|a| a.remotes.iter().find(|(_, r)| r.app == app && r.parent.is_none()).map(|(k, _)| *k)).flatten();
     match existing {
         Some(h) => unsafe {
-            let _ = ShowWindow(hwnd_of(h), SW_RESTORE);
+            // back from the taskbar if minimised; a maximised window stays maximised
+            if IsIconic(hwnd_of(h)).as_bool() {
+                let _ = ShowWindow(hwnd_of(h), SW_RESTORE);
+            }
             let _ = SetForegroundWindow(hwnd_of(h));
         },
         None => {
@@ -1915,10 +1940,9 @@ fn handle_event(ev: UiEvent) {
                 let r = a.remotes.get_mut(&key)?;
                 r.rw = w;
                 r.rh = h;
-                if r.role == WindowRole::Popup {
-                    r.rx = x;
-                    r.ry = y;
-                }
+                // where it is on the Mac: its popups and dialogs are placed from it
+                r.rx = x;
+                r.ry = y;
                 Some((key, pic_scale(r.scale), r.maximized || r.fullscreen, r.role == WindowRole::Popup))
             })
             .flatten();
@@ -1944,8 +1968,14 @@ fn handle_event(ev: UiEvent) {
                 crate::gsdesktop::stop();
             }
             if let Some(h) = with_app(|a| a.by_id.remove(&id)).flatten() {
-                with_app(|a| a.remotes.remove(&h));
-                unsafe { let _ = DestroyWindow(hwnd_of(h)); }
+                // its menu goes with it (WM_DESTROY no longer finds the window to free it)
+                let menu = with_app(|a| a.remotes.remove(&h).map(|r| r.menu)).flatten().unwrap_or(0);
+                unsafe {
+                    if menu != 0 {
+                        let _ = DestroyMenu(HMENU(menu as *mut c_void));
+                    }
+                    let _ = DestroyWindow(hwnd_of(h));
+                }
             }
             with_app(|a| a.panels.remove(&id));
             smoke_note_destroyed(id);
@@ -2051,7 +2081,7 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         let scale = native::dpi_scale(hwnd);
         let (cached, parent_origin) = with_app(|a| {
             a.remotes.insert(hwnd.0 as isize, Remote { id, app: app.into(), role, parent, rx: x, ry: y, rw: w, rh: h, scale, maximized: false, presenter: None, comp: None, picture: None, frames: 0,
-                high_surrogate: None, cmds: HashMap::new(), content: content.0 as isize, menu: 0, menu_x: vec![], open_menu: None, menus: vec![], hot: None, hot_since: Instant::now(), hover: false, pressed: None, active: false, owned, fullscreen: false, saved: RECT::default(), reveal: false, mask: None,
+                high_surrogate: None, cmds: HashMap::new(), content: content.0 as isize, menu: 0, menu_x: vec![], open_menu: None, menus: vec![], hot: None, hot_since: Instant::now(), hover: false, buttons: 0, last_pointer: (0.0, 0.0), move_at: Instant::now(), pending_move: false, pressed: None, active: false, owned, fullscreen: false, saved: RECT::default(), reveal: false, mask: None,
                 exact: net::exact_windows() && !popup && app != DESKTOP_APP && app != DOCK_APP, mac_chrome: None });
             a.by_id.insert(id, hwnd.0 as isize);
             let cached = a.icons.get(app).copied();
@@ -2584,8 +2614,30 @@ fn open_menu_popup(frame: HWND, mut i: usize) {
 
 // ------------------------------------------------------------------ remote windows
 
+/// A pointer move held back (moves come at most every 4 ms) goes now.
+fn flush_move(frame: HWND) {
+    let waiting = with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).map(|r| std::mem::take(&mut r.pending_move))).flatten().unwrap_or(false);
+    if waiting {
+        with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).map(|r| r.move_at = Instant::now()));
+        send_for(frame, |r, _| Some(Message::MouseMove { window_id: r.id, x: r.last_pointer.0, y: r.last_pointer.1 }));
+    }
+}
+
+const TIMER_MOVE: usize = 0x49;
+
+/// Every mouse button still held on the Mac in this window goes up there.
+fn release_buttons(frame: HWND) {
+    let held = with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).map(|r| std::mem::take(&mut r.buttons))).flatten().unwrap_or(0);
+    for (bit, button) in [(1u8, MouseButton::Left), (2, MouseButton::Right), (4, MouseButton::Middle)] {
+        if held & bit != 0 {
+            send_for(frame, |r, _| Some(Message::MouseButton { window_id: r.id, button, down: false, x: r.last_pointer.0, y: r.last_pointer.1 }));
+        }
+    }
+}
+
 /// The window lost the focus: every key still held there is let go on the Mac.
 fn release_keys(frame: HWND) {
+    release_buttons(frame);
     let held = with_app(|a| a.keys_down.remove(&(frame.0 as isize))).flatten().unwrap_or_default();
     for name in held {
         send_for(frame, |r, _| Some(Message::Key { window_id: r.id, physical_key: name.into(), modifiers: vec![], down: false }));
@@ -3111,13 +3163,37 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 }
             }
             let cs = client_size(hwnd);
-            send_for(frame, |r, _| {
-                let (px, py) = scale_point(x, y, cs, (r.rw, r.rh));
-                Some(Message::MouseMove { window_id: r.id, x: px, y: py })
-            });
+            // at most one move every 4 ms (a gaming mouse reports up to 1000 a second, each a
+            // message to the Mac): the latest one waiting goes 8 ms later, or before a click
+            let now = Instant::now();
+            let send = with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).map(|r| {
+                let p = scale_point(x, y, cs, (r.rw, r.rh));
+                r.last_pointer = p;
+                if now.duration_since(r.move_at) < Duration::from_millis(4) {
+                    r.pending_move = true;
+                    false
+                } else {
+                    r.move_at = now;
+                    r.pending_move = false;
+                    true
+                }
+            }))
+            .flatten()
+            .unwrap_or(false);
+            if send {
+                send_for(frame, |r, _| Some(Message::MouseMove { window_id: r.id, x: r.last_pointer.0, y: r.last_pointer.1 }));
+            } else {
+                SetTimer(Some(hwnd), TIMER_MOVE, 8, None);
+            }
+            LRESULT(0)
+        }
+        WM_TIMER if wp.0 == TIMER_MOVE => {
+            let _ = KillTimer(Some(hwnd), TIMER_MOVE);
+            flush_move(frame);
             LRESULT(0)
         }
         WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN | WM_MBUTTONUP => {
+            flush_move(frame);
             let (x, y) = lp_xy(lp);
             let cs = client_size(hwnd);
             let (button, down) = match msg {
@@ -3128,16 +3204,34 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 WM_MBUTTONDOWN => (MouseButton::Middle, true),
                 _ => (MouseButton::Middle, false),
             };
+            // the buttons held on the Mac: the pointer stays ours until the last goes up
+            let bit = match button {
+                MouseButton::Left => 1u8,
+                MouseButton::Right => 2,
+                MouseButton::Middle => 4,
+            };
+            let held = with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).map(|r| {
+                if down { r.buttons |= bit } else { r.buttons &= !bit }
+                r.buttons
+            }))
+            .flatten()
+            .unwrap_or(0);
             if down {
                 let _ = SetFocus(Some(hwnd));
                 SetCapture(hwnd);
-            } else {
+            } else if held == 0 {
                 let _ = ReleaseCapture();
             }
             send_for(frame, |r, _| {
                 let (px, py) = scale_point(x, y, cs, (r.rw, r.rh));
                 Some(Message::MouseButton { window_id: r.id, button, down, x: px, y: py })
             });
+            LRESULT(0)
+        }
+        // the pointer was taken away (Alt+Tab, another app) with a button held: it goes up on the
+        // Mac too, or every move there would drag
+        WM_CAPTURECHANGED if lp.0 != hwnd.0 as isize => {
+            release_buttons(frame);
             LRESULT(0)
         }
         WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
@@ -3159,8 +3253,10 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             if is_modifier_vk(vk) {
                 return LRESULT(0);
             }
+            // a key held down repeats: the toggles below act once per press
+            let repeat = lp.0 & (1 << 30) != 0;
             if vk == VK_F11.0 as u32 {
-                if msg == WM_KEYDOWN {
+                if msg == WM_KEYDOWN && !repeat {
                     toggle_fullscreen(frame); // the Windows fullscreen key; the green light does the same
                 }
                 return LRESULT(0);
@@ -3168,28 +3264,28 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             let mods = current_mods();
             // Ctrl+Alt+Shift+P: Settings (frame rate, bitrate, sharpness, ...)
             if vk == 'P' as u32 && mods.ctrl && mods.alt && mods.shift {
-                if down {
+                if down && !repeat {
                     open_settings(Some(frame));
                 }
                 return LRESULT(0);
             }
             // Ctrl+Alt+Shift+C: this PC's pointer over the picture on/off, as in Moonlight
             if vk == 'C' as u32 && mods.ctrl && mods.alt && mods.shift {
-                if down {
+                if down && !repeat {
                     set_local_pointer(!local_cursor().load(std::sync::atomic::Ordering::Relaxed));
                 }
                 return LRESULT(0);
             }
             // Ctrl+Alt+Shift+M: the Mac's sound off / on
             if vk == 'M' as u32 && mods.ctrl && mods.alt && mods.shift {
-                if down {
+                if down && !repeat {
                     toggle_mute();
                 }
                 return LRESULT(0);
             }
             // Ctrl+Alt+Shift+S: the stats overlay, as in Moonlight
             if vk == 'S' as u32 && mods.ctrl && mods.alt && mods.shift {
-                if down {
+                if down && !repeat {
                     let (on, lines) = with_app(|a| {
                         a.overlay = !a.overlay;
                         (a.overlay, a.overlay_lines.clone())
@@ -3199,10 +3295,34 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 }
                 return LRESULT(0);
             }
+            let mode = with_app(|a| a.key_mode).unwrap_or(KeyMode::Windows);
+            // a key goes up on the Mac only if it went down there, whatever the modifiers are now
+            // (Ctrl let go before Z: the Z of Ctrl+Z still goes up)
+            if !down {
+                if let Some((name, modifiers)) = map_key(vk, mods, mode) {
+                    let held = with_app(|a| a.keys_down.get_mut(&(frame.0 as isize)).is_some_and(|h| {
+                        let was = h.contains(&name);
+                        h.retain(|k| *k != name);
+                        was
+                    }))
+                    .unwrap_or(false);
+                    if held {
+                        send_for(frame, |r, _| Some(Message::Key { window_id: r.id, physical_key: name.into(), modifiers, down: false }));
+                    }
+                }
+                return LRESULT(0);
+            }
             if sends_as_text(vk, mods) {
                 return LRESULT(0); // WM_CHAR delivers the character, layout-correct
             }
-            let mode = with_app(|a| a.key_mode).unwrap_or(KeyMode::Windows);
+            // AltGr (Windows reports it as Ctrl+Alt) typing @ { } [ ] \ | ~ € on a German, French,
+            // Spanish… keyboard: a character follows, and it is text, not a Ctrl+Alt shortcut
+            if mods.ctrl && mods.alt {
+                let mut next = MSG::default();
+                if PeekMessageW(&mut next, Some(hwnd), WM_CHAR, WM_DEADCHAR, PM_NOREMOVE).as_bool() && (next.message == WM_DEADCHAR || is_text_char(next.wParam.0 as u16)) {
+                    return LRESULT(0);
+                }
+            }
             if let Some((name, modifiers)) = map_key(vk, mods, mode) {
                 with_app(|a| {
                     let held = a.keys_down.entry(frame.0 as isize).or_default();
@@ -3215,9 +3335,13 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             }
             LRESULT(0)
         }
+        // Alt+letter: no beep from a menu that is not there
+        WM_SYSCHAR | WM_SYSDEADCHAR | WM_DEADCHAR => LRESULT(0),
         WM_CHAR => {
             let unit = wp.0 as u16;
-            if current_mods().ctrl || current_mods().alt {
+            // with Ctrl or Alt it was a shortcut, sent as a key; with both it is AltGr: text
+            let m = current_mods();
+            if (m.ctrl || m.alt) && !(m.ctrl && m.alt) {
                 return LRESULT(0);
             }
             if is_text_char(unit) || (0xD800..=0xDFFF).contains(&unit) {
