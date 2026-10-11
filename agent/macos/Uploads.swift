@@ -54,7 +54,7 @@ final class UploadStore {
     }
 
     func handle(_ m: [String: Any]) {
-        let id = UInt64(int(m["transfer_id"]))
+        let id = UInt64(clamping: int(m["transfer_id"]))
         switch m["type"] as? String ?? "" {
         case "file_upload_begin":
             let size = UInt64(max(0, int(m["size"])))

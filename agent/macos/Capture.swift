@@ -243,8 +243,28 @@ final class WindowStream: NSObject, SCStreamOutput {
     }
     private var bitrate = 20_000_000
 
+    /// when the last keyframe went, and a request waiting for the next allowed moment
+    private var lastKeyAt: CFAbsoluteTime = 0, keyPending = false
     func requestKeyframe() {
-        lock.lock(); forceKey = true; let pb = lastPB; lock.unlock()
+        // one keyframe per 0.3 s at most: on a lossy link every lost frame asks for one, and a
+        // keyframe each frame would choke the link it is meant to repair; the requests in
+        // between become one, at the end of that time
+        lock.lock()
+        let wait = lastKeyAt + 0.3 - CFAbsoluteTimeGetCurrent()
+        if wait > 0 {
+            let first = !keyPending
+            keyPending = true
+            lock.unlock()
+            if first {
+                q.asyncAfter(deadline: .now() + wait) { [weak self] in
+                    guard let self = self else { return }
+                    self.lock.lock(); self.keyPending = false; self.lock.unlock()
+                    self.requestKeyframe()
+                }
+            }
+            return
+        }
+        forceKey = true; let pb = lastPB; lock.unlock()
         // a picture that does not change brings no next frame to make the keyframe of (a dialog,
         // the menu bar): the last one goes again as a keyframe, unless a new frame took it first
         // (a moving window's next frame comes within a few ms: it is the keyframe then, nothing more)
@@ -263,7 +283,7 @@ final class WindowStream: NSObject, SCStreamOutput {
     private func noteFrameSize(_ bytes: Int, keyframe: Bool) {
         let now = CFAbsoluteTimeGetCurrent()
         lock.lock()
-        if keyframe { refined = true; lock.unlock(); return }
+        if keyframe { refined = true; lastKeyAt = now; lock.unlock(); return }
         let moving = bytes > 2_000
         if moving { lastChange = now; refined = false }
         lock.unlock()
@@ -344,7 +364,7 @@ final class WindowStream: NSObject, SCStreamOutput {
             (cfg.width, cfg.height) = capturePixels(r.width, r.height, backing: backingScale(of: r))
             cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2
-            cfg.queueDepth = 6; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true
+            cfg.queueDepth = 4; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true
             // only those apps' windows (the Dock and the desktop picture), or everything there (no
             // apps given: the menu bar's strip, which no window covers)
             let apps = content.applications.filter { pids.contains($0.processID) }
@@ -354,7 +374,7 @@ final class WindowStream: NSObject, SCStreamOutput {
             t0 = CFAbsoluteTimeGetCurrent()
             config = cfg
             try await s.startCapture()
-            scStream = s
+            guard await keep(s) else { return }
             if let own = shapeApps {
                 measureShape(SCContentFilter(display: d, including: content.applications.filter { own.contains($0.processID) }, exceptingWindows: []), cfg, source: cfg.sourceRect)
             }
@@ -373,7 +393,7 @@ final class WindowStream: NSObject, SCStreamOutput {
             }
             cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
-            cfg.queueDepth = 6; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true // the Mac's pointer is in the picture (as Sunshine); content fills the output at any density
+            cfg.queueDepth = 4; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true // the Mac's pointer is in the picture (as Sunshine); content fills the output at any density
             let filter = SCContentFilter(display: d, excludingWindows: [])
             // what the display really draws per point (a display left at 1x enlarged to 2x is blurry)
             var drawn = "?"
@@ -384,7 +404,7 @@ final class WindowStream: NSObject, SCStreamOutput {
             t0 = CFAbsoluteTimeGetCurrent()
             config = cfg
             try await s.startCapture()
-            scStream = s
+            guard await keep(s) else { return }
             let mode = CGDisplayCopyDisplayMode(did).map { "\($0.pixelWidth)x\($0.pixelHeight) px" } ?? "?"
             log("display \(did) captured at \(cfg.width)x\(cfg.height) (display draws \(d.width)x\(d.height) points, \(mode))")
             return
@@ -400,13 +420,13 @@ final class WindowStream: NSObject, SCStreamOutput {
             pointsWide = w.frame.width
             cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2
-            cfg.queueDepth = 6; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true
+            cfg.queueDepth = 4; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true
             let s = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: cfg, delegate: nil)
             try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
             t0 = CFAbsoluteTimeGetCurrent()
             config = cfg
             try await s.startCapture()
-            scStream = s
+            guard await keep(s) else { return }
             // its outline: the popup window alone, at the same size
             measureShape(SCContentFilter(desktopIndependentWindow: w), cfg, source: nil)
             return
@@ -419,20 +439,36 @@ final class WindowStream: NSObject, SCStreamOutput {
         pointsWide = w.frame.width
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
         cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
-        cfg.queueDepth = 6; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true // fill the output at any capture density (never a corner of it, never cropped)
+        cfg.queueDepth = 4; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true // fill the output at any capture density (never a corner of it, never cropped)
         let filter = SCContentFilter(desktopIndependentWindow: w)
         let s = SCStream(filter: filter, configuration: cfg, delegate: nil)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
         t0 = CFAbsoluteTimeGetCurrent()
         config = cfg
         try await s.startCapture()
-        scStream = s
+        guard await keep(s) else { return }
         measureShape(filter, cfg, source: cut > 0 ? cfg.sourceRect : nil)
     }
 
+    /// Stopped (or about to be): a start still under way drops what it started, and frames
+    /// still coming are not sent.
+    private var stopped = false
+    func cancel() { lock.lock(); stopped = true; lock.unlock() }
+    private var isStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
+
+    /// The stream just started is kept, unless this one was stopped meanwhile (the stop ran
+    /// before it had started and found nothing to stop): then it is stopped now, never left
+    /// capturing and sending for a window that is gone or has another size.
+    private func keep(_ s: SCStream) async -> Bool {
+        lock.lock(); let dead = stopped; if !dead { scStream = s }; lock.unlock()
+        if dead { try? await s.stopCapture() }
+        return !dead
+    }
+
     func stop() async {
-        if let s = scStream { try? await s.stopCapture() }
-        scStream = nil
+        cancel()
+        lock.lock(); let st = scStream; scStream = nil; lock.unlock()
+        if let s = st { try? await s.stopCapture() }
         lock.lock(); let sess = session; session = nil; lastPB = nil; lock.unlock()
         if let s = sess { VTCompressionSessionCompleteFrames(s, untilPresentationTimeStamp: .invalid); VTCompressionSessionInvalidate(s) }
     }
@@ -473,7 +509,7 @@ final class WindowStream: NSObject, SCStreamOutput {
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, sb.isValid,
+        guard !isStopped, type == .screen, sb.isValid,
               let atts = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let raw = atts.first?[.status] as? Int, raw == SCFrameStatus.complete.rawValue,
               let pb = CMSampleBufferGetImageBuffer(sb) else { return }

@@ -95,7 +95,7 @@ final class DockMirror {
     func stop() {
         lock.lock(); wanted = false; let s = stream; stream = nil; region = nil; lock.unlock()
         onShown?(nil)
-        if let s = s { Task { await s.stop() } }
+        if let s = s { s.cancel(); Task { await s.stop() } }
     }
 
     /// Follow the Dock (apps added make it wider, the Dock restarting): called every few seconds.
@@ -106,7 +106,7 @@ final class DockMirror {
         case .failure(let e):
             let had = old != nil || force
             lock.lock(); let s = stream; stream = nil; region = nil; lock.unlock()
-            if let s = s { Task { await s.stop() } }
+            if let s = s { s.cancel(); Task { await s.stop() } }
             onShown?(nil)
             if had {
                 log("Mac Dock not shown: \(e.description)")
@@ -115,7 +115,7 @@ final class DockMirror {
         case .success(let (r, edge, dockPid)):
             guard force || r != old || dockPid != oldPid else { return }
             lock.lock(); region = r; self.edge = edge; pid = dockPid; let s = stream; lock.unlock()
-            if let s = s { Task { await s.stop() } }
+            if let s = s { s.cancel(); Task { await s.stop() } }
             // only the Dock and the desktop picture: no app window behind the Dock shows
             let level = Int(CGWindowLevelForKey(.desktopWindow))
             let all = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []

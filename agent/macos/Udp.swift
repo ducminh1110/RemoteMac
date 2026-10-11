@@ -142,6 +142,7 @@ final class UdpLink {
         defer { freeaddrinfo(res) }
         let s = socket(ai.pointee.ai_family, SOCK_DGRAM, IPPROTO_UDP)
         guard s >= 0 else { return nil }
+        _ = fcntl(s, F_SETFD, FD_CLOEXEC) // not inherited by the restart for the next viewer
         family = ai.pointee.ai_family
         var rs = sockaddr_storage()
         withUnsafeMutableBytes(of: &rs) { $0.copyMemory(from: UnsafeRawBufferPointer(start: ai.pointee.ai_addr, count: Int(ai.pointee.ai_addrlen))) }

@@ -40,6 +40,11 @@ final class Conn {
         while let ai = p {
             let fd = socket(ai.pointee.ai_family, ai.pointee.ai_socktype, ai.pointee.ai_protocol)
             if fd >= 0 {
+                // not inherited by the restart for the next viewer; a write to a peer that is gone
+                // fails instead of killing the process
+                _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
+                var nosig: Int32 = 1
+                setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosig, socklen_t(MemoryLayout<Int32>.size))
                 if Darwin.connect(fd, ai.pointee.ai_addr, ai.pointee.ai_addrlen) == 0 {
                     var one: Int32 = 1
                     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, socklen_t(MemoryLayout<Int32>.size))
@@ -176,6 +181,8 @@ struct VideoPacket {
 
 func num(_ v: Any?) -> Double { (v as? NSNumber)?.doubleValue ?? 0 }
 func int(_ v: Any?) -> Int { (v as? NSNumber)?.intValue ?? 0 }
+/// A distance from the viewer as whole pixels (nothing it sends can trap the conversion).
+func pixels(_ d: Double) -> Int32 { d.isFinite ? Int32(max(-100_000, min(100_000, d.rounded()))) : 0 }
 
 /// Admission key of a relay on a public address: the environment, else the one built in.
 func relayKey() -> String? {
@@ -312,7 +319,12 @@ final class Sender {
             else if !bulk.isEmpty && (video.isEmpty || bulkTurn) { item = (bulk.removeFirst(), nil); bulkTurn = false }
             else { let v = video.removeFirst(); item = (v.data, v.queued); bulkTurn = true }
             cond.unlock()
-            do { try conn.writeAll(item.0) } catch { log("send failed: \(error)"); return }
+            do { try conn.writeAll(item.0) } catch {
+                // the connection is gone: the reader ends the session (nothing piles up here)
+                log("send failed: \(error)")
+                Darwin.shutdown(conn.fd, SHUT_RDWR)
+                return
+            }
             if let q = item.1 { note(delay: CFAbsoluteTimeGetCurrent() - q) }
         }
     }

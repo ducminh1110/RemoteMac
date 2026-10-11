@@ -38,7 +38,8 @@ final class ClipboardSync {
     /// A picture from Windows (a .bmp file) on the Mac pasteboard.
     func applyImage(_ bmp: Data) {
         guard let img = NSImage(data: bmp) else { log("clipboard: picture from Windows not readable"); return }
-        queue.sync {
+        // not waited for: the pasteboard's queue may be busy with an app slow to give its data
+        queue.async { [self] in
             pb.clearContents()
             pb.writeObjects([img])
             lastCount = pb.changeCount
@@ -51,7 +52,8 @@ final class ClipboardSync {
     private func bmpFile(_ data: Data) -> Data? {
         guard let rep = NSBitmapImageRep(data: data), let cg = rep.cgImage else { return nil }
         let (w, h) = (cg.width, cg.height)
-        guard w > 0, h > 0, w * h <= 40_000_000 else { return nil }
+        // up to a 4K screen's picture (33 MB here): a larger one is not sent rather than held twice
+        guard w > 0, h > 0, w * h <= 8_400_000 else { return nil }
         var px = [UInt8](repeating: 0, count: w * h * 4)
         // BGRA, premultiplied (Windows' CF_DIB has no alpha meaning; opaque pixels are exact)
         guard let ctx = CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
@@ -70,7 +72,7 @@ final class ClipboardSync {
 
     /// Apply text from the client; the resulting changeCount bump is not echoed back.
     func apply(_ text: String) {
-        queue.sync {
+        queue.async { [self] in
             pb.clearContents()
             pb.setString(text, forType: .string)
             lastCount = pb.changeCount

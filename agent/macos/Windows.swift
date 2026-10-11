@@ -178,16 +178,26 @@ func isWholeDisplay(_ rect: CGRect) -> Bool {
 
 /// Height of a plain title bar (traffic lights + title, nothing else in it), else 0. Windows whose
 /// toolbar shares the title bar (Xcode, Finder) or whose content runs under it keep it.
-func titleBarInset(pid: pid_t, rect: CGRect) -> CGFloat {
+/// The height of the window's title row to cut from its picture (the viewer draws its own title
+/// bar), 0 to keep it (toolbar items share it), or nil when Accessibility cannot tell yet (the
+/// window is still opening: asked again shortly).
+func titleBarInset(pid: pid_t, rect: CGRect) -> CGFloat? {
     // exact windows: the viewer shows the Mac's own title bar
     if exactWindows { return 0 }
-    guard let w = axWindowMatching(pid: pid, rect: rect),
-          wAXString(w, kAXSubroleAttribute as String) == (kAXStandardWindowSubrole as String) else { return 0 }
+    guard let w = axWindowMatching(pid: pid, rect: rect) else { return nil }
+    guard wAXString(w, kAXSubroleAttribute as String) == (kAXStandardWindowSubrole as String) else { return 0 }
     let kids = wAX(w, kAXChildrenAttribute as String) as? [AXUIElement] ?? []
     func top(_ el: AXUIElement) -> CGFloat? {
         var p = CGPoint.zero
-        guard let pv = wAX(el, kAXPositionAttribute as String), AXValueGetValue(pv as! AXValue, .cgPoint, &p) else { return nil }
+        guard let pv = wAX(el, kAXPositionAttribute as String), CFGetTypeID(pv) == AXValueGetTypeID(), AXValueGetValue(pv as! AXValue, .cgPoint, &p) else { return nil }
         return p.y - rect.minY
+    }
+    func frame(_ el: AXUIElement) -> CGRect? {
+        var p = CGPoint.zero, s = CGSize.zero
+        guard let pv = wAX(el, kAXPositionAttribute as String), let sv = wAX(el, kAXSizeAttribute as String),
+              CFGetTypeID(pv) == AXValueGetTypeID(), CFGetTypeID(sv) == AXValueGetTypeID(),
+              AXValueGetValue(pv as! AXValue, .cgPoint, &p), AXValueGetValue(sv as! AXValue, .cgSize, &s) else { return nil }
+        return CGRect(origin: p, size: s)
     }
     // a toolbar that shares the title bar (unified, starts at the window's top) keeps it
     let unified = kids.contains { wAXString($0, kAXRoleAttribute as String) == (kAXToolbarRole as String) && (top($0) ?? 99) < 8 }
@@ -195,30 +205,34 @@ func titleBarInset(pid: pid_t, rect: CGRect) -> CGFloat {
         log("title bar kept (unified toolbar) pid=\(pid)")
         return 0
     }
-    guard let cb = wAX(w, kAXCloseButtonAttribute as String) else {
-        log("title bar kept (no close button) pid=\(pid) kids=\(kids.map { (wAXString($0, kAXRoleAttribute as String) ?? "?") + "@" + String(Int(top($0) ?? -1)) })")
+    guard let cbv = wAX(w, kAXCloseButtonAttribute as String), CFGetTypeID(cbv) == AXUIElementGetTypeID(), let cb = frame(cbv as! AXUIElement) else {
+        log("title bar not measured yet (no close button) pid=\(pid)")
+        return nil
+    }
+    // the row of the buttons: their bottom and the same margin again
+    let bar = ((cb.minY - rect.minY) * 2 + cb.height).rounded()
+    guard (20...60).contains(bar) && bar < rect.height / 2 else {
+        log("title bar kept (row of \(Int(bar)) points) pid=\(pid)")
         return 0
     }
-    var p = CGPoint.zero, s = CGSize.zero
-    guard let pv = wAX(cb as! AXUIElement, kAXPositionAttribute as String), let sv = wAX(cb as! AXUIElement, kAXSizeAttribute as String),
-          AXValueGetValue(pv as! AXValue, .cgPoint, &p), AXValueGetValue(sv as! AXValue, .cgSize, &s) else { return 0 }
-    let bar = ((p.y - rect.minY) * 2 + s.height).rounded()
-    guard (20...40).contains(bar) && bar < rect.height / 2 else { return 0 }
+    // the window's title (and what goes with it: its chevron, the document's menu, its icon) is
+    // part of the row, not a toolbar control
+    let titleArea = wAX(w, "AXTitleUIElement").flatMap { t -> CGRect? in
+        CFGetTypeID(t) == AXUIElementGetTypeID() ? frame(t as! AXUIElement) : nil
+    }.map { CGRect(x: $0.minX - 24, y: $0.minY - 4, width: $0.width + 56, height: $0.height + 8) }
     // a control in that band (Notes, Catalyst and SwiftUI apps put their toolbar there without
     // an AXToolbar): the band is not a plain title bar, cutting it cut the toolbar
     let lights: Set<String> = [kAXCloseButtonSubrole as String, kAXMinimizeButtonSubrole as String, kAXZoomButtonSubrole as String, kAXFullScreenButtonSubrole as String]
+    let passive: Set<String> = [kAXStaticTextRole as String, kAXGroupRole as String, kAXScrollAreaRole as String, kAXSplitGroupRole as String, kAXImageRole as String]
     var stack = kids.map { ($0, 0) }, visited = 0
     while let (el, depth) = stack.popLast(), visited < 80 {
         visited += 1
         let role = wAXString(el, kAXRoleAttribute as String) ?? ""
-        if role != (kAXStaticTextRole as String), role != (kAXGroupRole as String), role != (kAXScrollAreaRole as String), role != (kAXSplitGroupRole as String),
-           !lights.contains(wAXString(el, kAXSubroleAttribute as String) ?? ""),
-           let y = top(el), let sz = wAX(el, kAXSizeAttribute as String) {
-            var size = CGSize.zero
-            if AXValueGetValue(sz as! AXValue, .cgSize, &size), size.height > 0, size.height < bar * 2, y < bar - 2, y + size.height > 2 {
-                log("title bar kept (\(role) in it) pid=\(pid)")
-                return 0
-            }
+        if !passive.contains(role), !lights.contains(wAXString(el, kAXSubroleAttribute as String) ?? ""), let f = frame(el),
+           f.height > 0, f.height < bar * 2, f.minY - rect.minY < bar - 2, f.maxY - rect.minY > 2,
+           !(titleArea.map { $0.contains(f) } ?? false) {
+            log("title bar kept (\(role) in it) pid=\(pid)")
+            return 0
         }
         // only what reaches into the band can be in it: no walking into the window's content
         if depth < 3, let y = top(el), y < bar, let more = wAX(el, kAXChildrenAttribute as String) as? [AXUIElement] { for k in more { stack.append((k, depth + 1)) } }
@@ -234,6 +248,9 @@ final class WindowTracker {
     /// held only for that, never behind a tick of the tracker's queue (a tick that waits on a
     /// busy app's Accessibility would hold every click and key back with it)
     private var seen: [CGWindowID: WinInfo] = [:]
+    /// windows whose title row is to be measured again, since when
+    private var remeasure: [CGWindowID: CFAbsoluteTime] = [:]
+    private var remeasureTick = 0
     private let seenLock = NSLock()
     /// Windows seen but not yet reported: dialogs need a moment before their AX tree is complete.
     private var pending: [CGWindowID: Int] = [:]
@@ -395,7 +412,7 @@ final class WindowTracker {
                     let full = old.role == .window && isWholeDisplay(rect)
                     if full != old.fullScreen {
                         old.fullScreen = full
-                        old.inset = full ? 0 : titleBarInset(pid: pid, rect: rect)
+                        old.inset = full ? 0 : titleBarInset(pid: pid, rect: rect) ?? 0
                     }
                     known[id] = old; onMoved?(old)
                 }
@@ -451,11 +468,30 @@ final class WindowTracker {
                 guard let p = mains.first(where: { $0.rect.intersects(rect.insetBy(dx: -40, dy: -40)) }) else { ignored.insert(id); continue }
                 w.parent = p.id
             } else if role != .window { w.parent = parentFor(appID: appID, rect: rect) }
-            if role == .window { w.inset = titleBarInset(pid: pid, rect: rect) }
+            if role == .window {
+                let cut = titleBarInset(pid: pid, rect: rect)
+                w.inset = cut ?? 0
+                if cut == nil { remeasure[id] = CFAbsoluteTimeGetCurrent() }
+            }
             known[id] = w
             onCreated?(w)
         }
         for id in Array(pending.keys) where !seen.contains(id) { pending.removeValue(forKey: id) }
+        // windows whose title row Accessibility could not measure yet: asked again for 3 s;
+        // once it can, the window's stream starts again without the Mac's title row
+        remeasureTick += 1
+        if !remeasure.isEmpty && remeasureTick % 3 == 0 {
+            let now = CFAbsoluteTimeGetCurrent()
+            for (id, since) in remeasure {
+                guard var w = known[id], now - since < 3 else { remeasure.removeValue(forKey: id); continue }
+                guard let cut = titleBarInset(pid: w.pid, rect: w.rect) else { continue }
+                remeasure.removeValue(forKey: id)
+                if cut != w.inset {
+                    log("window \(id) title bar measured: \(Int(cut)) points")
+                    w.inset = cut; known[id] = w; onMoved?(w)
+                }
+            }
+        }
         // a window that left the on-screen list but still exists (another display, another Space)
         // is not gone; it is only reported destroyed once the window server forgets it
         // (a popup that left the screen is closed: menus keep their window for the next time)

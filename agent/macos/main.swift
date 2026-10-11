@@ -49,6 +49,8 @@ while let a = argv.next() {
     }
 }
 let env = ProcessInfo.processInfo.environment
+// a write to a viewer or relay that is gone returns an error; by default it would kill us
+signal(SIGPIPE, SIG_IGN)
 // started in the background (below): our own session, so closing the terminal does not end us;
 // this copy watches over the worker (started again if it dies), which does the rest
 if env["RM_DAEMON"] != nil && env["RM_WORKER"] == nil { becomeDaemon(); superviseWorker() }
@@ -295,7 +297,7 @@ do {
     guard cmin <= 1 && cmax >= 1 else {
         try conn.send(["type": "error", "code": "version_mismatch", "message": "agent speaks protocol 1, client \(cmin)...\(cmax)"]); exit(1)
     }
-    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "fusion", "mask", "exact", "menubar"],
+    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "fusion", "mask", "exact", "menubar", "bye"],
                    "max_surface": [3840, 2160], "agent": "macbridge \(appVersion) \(ProcessInfo.processInfo.operatingSystemVersionString)"])
     try conn.send(probeCapabilities())
 } catch { fail("handshake: \(error)") }
@@ -314,6 +316,11 @@ injector.menuBarRect = { menuBarMirror.rect }
 let streamsLock = NSLock()
 var streams: [CGWindowID: WindowStream] = [:]
 var lastSize: [CGWindowID: CGSize] = [:]
+/// the title row cut from each window's picture (touched on the tracker's queue, as lastSize)
+var lastInset: [CGWindowID: CGFloat] = [:]
+/// the latest restart asked for each window (a newer one replaces it)
+let restartLock = NSLock()
+var restartGen: [CGWindowID: Int] = [:]
 
 func axAttr(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
     var v: CFTypeRef?
@@ -389,10 +396,20 @@ var moveSeq = 0
 /// the last move queued and not posted yet, with nothing queued after it
 var waitingMove: Int?
 var supersededMoves = Set<Int>()
-/// What the viewer sent, handled on the input queue in arrival order (over the connection or
-/// straight over UDP).
+/// Everything slow (launching an app, Accessibility, displays, files, the wallpaper) runs here,
+/// never on the input queue: a click or a key never waits behind it.
+let workQueue = DispatchQueue(label: "rm.work", qos: .userInitiated)
+/// What the viewer sent, in arrival order (over the connection or straight over UDP): input on
+/// the input queue, keyframe requests and the GameStream tunnel at once, the rest on the work
+/// queue once the input before it is done (typing, then closing the window).
 func enqueue(_ m: [String: Any]) {
-    let move = m["type"] as? String == "mouse_move"
+    let type = m["type"] as? String ?? ""
+    if type == "request_keyframe" || type == "gs_tunnel" { handle(m); return }
+    if !inputTypes.contains(type) {
+        workQueue.async { inputQueue.sync {}; handle(m) }
+        return
+    }
+    let move = type == "mouse_move"
     var seq = 0
     inputLock.lock()
     if move {
@@ -476,12 +493,14 @@ func frontWindowID() -> CGWindowID? {
 
 func stopStream(_ id: CGWindowID) {
     streamsLock.lock(); let ws = streams.removeValue(forKey: id); streamsLock.unlock()
+    ws?.cancel() // at once: no more of its frames, and a start still under way drops its stream
     if let ws = ws { Task { await ws.stop(); log("stream stopped window=\(id) packets=\(ws.sent)") } }
 }
 
 tracker.onCreated = { w in
     log("window created id=\(w.id) app=\(w.appID) role=\(w.role.rawValue) parent=\(w.parent.map { String($0) } ?? "-") \(Int(w.rect.width))x\(Int(w.rect.height)) titleBarCut=\(Int(w.inset))")
     lastSize[w.id] = w.rect.size
+    lastInset[w.id] = w.inset
     send(["type": "window_created", "window_id": Int(w.id), "application_id": w.appID, "title": w.title, "bounds": rectJSON(w.content),
           "parent_id": w.parent.map { Int($0) as Any } ?? NSNull(), "role": w.role.rawValue])
     startStream(w.id, inset: w.inset, popup: w.role == .popup)
@@ -500,17 +519,27 @@ tracker.onDestroyed = { id in
     log("window destroyed id=\(id)")
     displays.windowGone(id)
     lastSize.removeValue(forKey: id)
+    lastInset.removeValue(forKey: id)
+    restartLock.lock(); restartGen.removeValue(forKey: id); restartLock.unlock()
     stopStream(id)
     sender.udp?.forgetWindow(UInt64(id))
     send(["type": "window_destroyed", "window_id": Int(id)])
 }
 tracker.onMoved = { w in
     send(["type": "window_moved", "window_id": Int(w.id), "bounds": rectJSON(w.content)])
-    if lastSize[w.id] != w.rect.size {            // size changed: the encoder is bound to a size, so restart the stream
-        lastSize[w.id] = w.rect.size
-        stopStream(w.id); startStream(w.id, inset: w.inset, popup: w.role == .popup)
+    // size (or the title row cut) changed: the encoder is bound to a size, so the stream starts
+    // again, once the size has settled (a live resize brings a new size every tick: restarting
+    // each time captured and encoded nothing but keyframes)
+    guard lastSize[w.id] != w.rect.size || lastInset[w.id] != w.inset else { return }
+    lastSize[w.id] = w.rect.size
+    lastInset[w.id] = w.inset
+    restartLock.lock(); let gen = (restartGen[w.id] ?? 0) + 1; restartGen[w.id] = gen; restartLock.unlock()
+    DispatchQueue.global().asyncAfter(deadline: .now() + 0.15) {
+        restartLock.lock(); let latest = restartGen[w.id] == gen; restartLock.unlock()
+        guard latest, let now = tracker.current(w.id) else { return }
+        stopStream(w.id); startStream(w.id, inset: now.inset, popup: now.role == .popup)
         // the toolbar's items move with the width
-        if exactWindows && w.role != .popup { DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { sendChrome(w.id) } }
+        if exactWindows && now.role != .popup { DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { sendChrome(w.id) } }
     }
 }
 tracker.onTitle = { w in send(["type": "window_title_changed", "window_id": Int(w.id), "title": w.title]) }
@@ -579,7 +608,7 @@ func applyAppScreen(_ screen: String?) {
     guard !desktop.isActive else { return }
     DispatchQueue.global().async {
         if displays.ensureMirrored(width: v[0], height: v[1], scale: v[2]) != nil {
-            log("desktop for apps: \(v[0] / v[2])x\(v[1] / v[2]) points at \(v[2])x")
+            log("desktop for apps: \(v[0] / max(1, v[2]))x\(v[1] / max(1, v[2])) points at \(v[2])x")
         } else {
             keepMirror = false
             log("HiDPI desktop unavailable (mirroring refused); windows stay 1x")
@@ -739,7 +768,7 @@ func handle(_ m: [String: Any]) {
         Task { do { try await ws.start(); log("desktop stream started") } catch { log("desktop stream failed: \(error)")
             send(["type": "capability_unavailable", "capability": "capture", "reason": "\(error)"]) } }
     case "app_terminate" where (m["application_id"] as? String) == desktopAppID,
-         "window_close" where CGWindowID(int(m["window_id"])) == desktopWindowID:
+         "window_close" where CGWindowID(clamping: int(m["window_id"])) == desktopWindowID:
         guard desktop.isActive else { break }
         desktop.stop()
         audioCap.update(everything: false, pids: Set(apps.pids))
@@ -757,9 +786,9 @@ func handle(_ m: [String: Any]) {
         stopStream(desktopWindowID)
         send(["type": "window_destroyed", "window_id": Int(desktopWindowID)])
         send(["type": "app_exited", "application_id": desktopAppID, "code": NSNull()])
-    case "window_focus" where CGWindowID(int(m["window_id"])) == desktopWindowID,
-         "window_fullscreen" where CGWindowID(int(m["window_id"])) == desktopWindowID,
-         "window_resize_request" where CGWindowID(int(m["window_id"])) == desktopWindowID:
+    case "window_focus" where CGWindowID(clamping: int(m["window_id"])) == desktopWindowID,
+         "window_fullscreen" where CGWindowID(clamping: int(m["window_id"])) == desktopWindowID,
+         "window_resize_request" where CGWindowID(clamping: int(m["window_id"])) == desktopWindowID:
         break // the desktop is the display itself: nothing to raise or resize
     case "get_menu_bar" where (m["application_id"] as? String) == desktopAppID:
         send(["type": "menu_bar", "application_id": desktopAppID, "menus": [Any]()]) // the Mac's own menu bar is in the picture
@@ -805,7 +834,7 @@ func handle(_ m: [String: Any]) {
             }
         }
     case "window_close", "window_resize_request":
-        let wid = CGWindowID(int(m["window_id"]))
+        let wid = CGWindowID(clamping: int(m["window_id"]))
         guard let w = tracker.current(wid), let aw = axWindowFor(pid: w.pid, id: wid, rect: w.rect) else {
             send(["type": "error", "code": "no_such_window", "message": "\(wid)"]); break
         }
@@ -816,7 +845,7 @@ func handle(_ m: [String: Any]) {
             if let v = AXValueCreate(.cgSize, &size) { AXUIElementSetAttributeValue(aw, kAXSizeAttribute as CFString, v) }
         }
     case "window_focus":
-        let wid = CGWindowID(int(m["window_id"]))
+        let wid = CGWindowID(clamping: int(m["window_id"]))
         if let w = tracker.current(wid) {
             sendMenuBar(w.appID)
             NSRunningApplication(processIdentifier: w.pid)?.activate(options: [.activateIgnoringOtherApps])
@@ -837,14 +866,14 @@ func handle(_ m: [String: Any]) {
     case "file_upload_begin", "file_upload_chunk", "file_upload_end":
         uploads.handle(m)
     case "panel_choose_file":
-        let wid = CGWindowID(int(m["window_id"]))
+        let wid = CGWindowID(clamping: int(m["window_id"]))
         guard let w = tracker.current(wid), w.role == .open_panel, let path = m["remote_path"] as? String,
               path.hasPrefix(uploads.dir.path + "/"), FileManager.default.fileExists(atPath: path) else {
             send(["type": "error", "code": "panel_choose_failed", "message": "\(wid)"]); break
         }
         DispatchQueue.global().async { chooseInPanel(pid: w.pid, rect: w.rect, path: path) }
     case "panel_cancel":
-        if let w = tracker.current(CGWindowID(int(m["window_id"]))), w.role == .open_panel || w.role == .save_panel { keyTo(w.pid, 53) }
+        if let w = tracker.current(CGWindowID(clamping: int(m["window_id"]))), w.role == .open_panel || w.role == .save_panel { keyTo(w.pid, 53) }
     case "display_configure":
         let (w, h, sc) = (int(m["width"]), int(m["height"]), max(1, int(m["scale"])))
         DispatchQueue.global().async {
@@ -853,7 +882,7 @@ func handle(_ m: [String: Any]) {
             if keepMirror, let st = displays.status() { send(st) } else { send(displays.configure(width: w, height: h, scale: sc)) }
         }
     case "window_fullscreen":
-        let wid = CGWindowID(int(m["window_id"]))
+        let wid = CGWindowID(clamping: int(m["window_id"]))
         guard let w = tracker.current(wid) else { send(["type": "error", "code": "no_such_window", "message": "\(wid)"]); break }
         let on = m["on"] as? Bool ?? true
         DispatchQueue.global().async {
@@ -875,12 +904,12 @@ func handle(_ m: [String: Any]) {
         clipboard.apply(t)
     case "clipboard_image":
         if let d = Data(base64Encoded: m["bmp_base64"] as? String ?? "") { clipboard.applyImage(d) }
-    case "request_keyframe" where CGWindowID(int(m["window_id"])) == dockWindowID:
+    case "request_keyframe" where CGWindowID(clamping: int(m["window_id"])) == dockWindowID:
         dockMirror.requestKeyframe()
-    case "request_keyframe" where CGWindowID(int(m["window_id"])) == menuBarWindowID:
+    case "request_keyframe" where CGWindowID(clamping: int(m["window_id"])) == menuBarWindowID:
         menuBarMirror.requestKeyframe()
     case "request_keyframe":
-        let wid = CGWindowID(int(m["window_id"]))
+        let wid = CGWindowID(clamping: int(m["window_id"]))
         streamsLock.lock(); let ws = streams[wid]; streamsLock.unlock()
         ws?.requestKeyframe()
     case "video_decoder":
@@ -962,7 +991,7 @@ func handle(_ m: [String: Any]) {
         send(["type": "pong", "nonce": m["nonce"] ?? 0])
     case "gs_tunnel":
         guard let t = gsTunnel else { break }
-        let id = UInt32(int(m["id"]))
+        let id = UInt32(clamping: int(m["id"]))
         switch m["op"] as? String ?? "" {
         case "ready":
             // the viewer shows GameStream's pictures now: the usual stream of the desktop stops
@@ -992,7 +1021,7 @@ func handle(_ m: [String: Any]) {
         }
     case _ where inputTypes.contains(type):
         // a click or key in an app window: an app it opens is shown on Windows too
-        if CGWindowID(int(m["window_id"])) != desktopWindowID && (type == "key" || type == "text_input" || (type == "mouse_button" && m["down"] as? Bool == true)) {
+        if CGWindowID(clamping: int(m["window_id"])) != desktopWindowID && (type == "key" || type == "text_input" || (type == "mouse_button" && m["down"] as? Bool == true)) {
             tracker.noteInput()
         }
         if let err = injector.handle(m) { send(["type": "error", "code": "input_failed", "message": err]) }
@@ -1011,6 +1040,8 @@ var viewerSendsHeartbeats = false
 var heardOverTCP = CFAbsoluteTimeGetCurrent()
 /// The session ended because the viewer went silent, not because it closed.
 var connectionLost = false
+/// The viewer said it is closing ("bye").
+var viewerSaidBye = false
 Thread {
     var ticks = 0
     while true {
@@ -1059,6 +1090,8 @@ let reader = Thread {
         while let (ch, payload) = try conn.readFrame() {
             heardOverTCP = CFAbsoluteTimeGetCurrent()
             guard ch != .video, let m = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] else { continue }
+            // the viewer is closing on purpose (its user closed it): its apps close with it
+            if m["type"] as? String == "bye" { viewerSaidBye = true; continue }
             // answered at once: the viewer knows the Mac is there by it
             if m["type"] as? String == "ping" {
                 viewerSendsHeartbeats = true
@@ -1073,12 +1106,17 @@ let reader = Thread {
         log("client disconnected")
     } catch { log("read loop ended: \(error)") }
     startOverSoon("ending the session")
+    // a viewer that says goodbye and did not: the connection was cut (the network, the relay),
+    // not closed by its user, and the apps stay open for it to come back to
+    if !viewerSaidBye && viewerFeatures.contains("bye") { connectionLost = true }
     // the viewer closed: its apps close with it; the connection was lost: they stay open, and the
     // viewer finds them again when it connects back
-    if connectionLost { log("the apps stay open for the viewer to come back to") } else { apps.terminateAll() }
-    displays.setChromeHidden(false) // the menu bar and Dock as the user had them
-    Wallpaper.restore()              // and the wallpaper
+    // the Mac as the user had it first (the menu bar and Dock, the wallpaper, the displays): the
+    // apps may take a few seconds to quit
+    displays.setChromeHidden(false)
+    Wallpaper.restore()
     displays.unmirrorDesktop()
+    if connectionLost { log("the apps stay open for the viewer to come back to") } else { apps.terminateAll() }
     uploads.cleanup()   // the session's uploaded files go with it
     // ready for the next connection (same ID and password)
     if sessionArg == nil { restartForNextClient() }

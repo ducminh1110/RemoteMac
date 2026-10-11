@@ -116,6 +116,8 @@ func restartForNextClient(after seconds: UInt32 = 1) -> Never {
     let path = Bundle.main.executablePath ?? CommandLine.arguments[0]
     var args = CommandLine.arguments.map { strdup($0) }
     args.append(nil)
+    // nothing of this session is carried into the next one (its sockets would pile up there)
+    for fd in 3..<getdtablesize() { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
     execv(path, &args)
     fail("restart failed: errno \(errno)")
 }

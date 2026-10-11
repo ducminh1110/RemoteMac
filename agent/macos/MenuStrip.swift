@@ -63,7 +63,7 @@ final class MenuBarMirror {
     func stop() {
         lock.lock(); wanted = false; let s = stream; stream = nil; region = nil; lock.unlock()
         onShown?(nil)
-        if let s = s { Task { await s.stop() } }
+        if let s = s { s.cancel(); Task { await s.stop() } }
     }
 
     /// Follow the menu bar (the main display changed, the bar's height with it): every few seconds.
@@ -74,7 +74,7 @@ final class MenuBarMirror {
         case .failure(let e):
             let had = old != nil || force
             lock.lock(); let s = stream; stream = nil; region = nil; lock.unlock()
-            if let s = s { Task { await s.stop() } }
+            if let s = s { s.cancel(); Task { await s.stop() } }
             onShown?(nil)
             if had {
                 log("Mac menu bar not shown: \(e.description)")
@@ -83,7 +83,7 @@ final class MenuBarMirror {
         case .success(let r):
             guard force || r != old else { return }
             lock.lock(); region = r; let s = stream; lock.unlock()
-            if let s = s { Task { await s.stop() } }
+            if let s = s { s.cancel(); Task { await s.stop() } }
             let ws = WindowStream(windowID: menuBarWindowID) { [weak self] pkt in self?.onPacket?(pkt) }
             // the whole strip as the display shows it (nothing but the menu bar is ever there)
             ws.region = (CGMainDisplayID(), r, [])
