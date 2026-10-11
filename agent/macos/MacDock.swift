@@ -107,13 +107,28 @@ private func openMenu(of item: DockItem) -> AXUIElement? {
     return nil
 }
 
-private func closeMenu(_ menu: AXUIElement) {
+private func closeMenu(_ menu: AXUIElement, of item: DockItem) {
     if AXUIElementPerformAction(menu, kAXCancelAction as CFString) != .success {
         // Escape, as a person would
         let src = CGEventSource(stateID: .hidSystemState)
         CGEvent(keyboardEventSource: src, virtualKey: 53, keyDown: true)?.post(tap: .cghidEventTap)
         CGEvent(keyboardEventSource: src, virtualKey: 53, keyDown: false)?.post(tap: .cghidEventTap)
     }
+    // gone before anything else of the Dock is asked (a menu of another item would not open
+    // while this one still closes)
+    for _ in 0..<12 where dKids(item.element).contains(where: { (dAX($0, kAXRoleAttribute as String) as? String) == (kAXMenuRole as String) }) {
+        usleep(40_000)
+    }
+}
+
+/// Open the item's menu (once more, a moment later, if it did not come: the Dock may still be
+/// closing another).
+private func showMenu(of item: DockItem) -> AXUIElement? {
+    for attempt in 0..<2 {
+        if attempt > 0 { usleep(350_000) }
+        if AXUIElementPerformAction(item.element, kAXShowMenuAction as CFString) == .success, let m = openMenu(of: item) { return m }
+    }
+    return nil
 }
 
 private func menuNodes(_ menu: AXUIElement, depth: Int = 0) -> [[String: Any]] {
@@ -130,30 +145,30 @@ private func menuNodes(_ menu: AXUIElement, depth: Int = 0) -> [[String: Any]] {
 
 /// The item's menu as the Mac shows it (opened for a moment, read, closed).
 func readDockMenu(_ item: DockItem) -> [[String: Any]] {
-    guard AXUIElementPerformAction(item.element, kAXShowMenuAction as CFString) == .success, let menu = openMenu(of: item) else { return [] }
+    guard let menu = showMenu(of: item) else { return [] }
     let nodes = menuNodes(menu)
-    closeMenu(menu)
+    closeMenu(menu, of: item)
     return nodes
 }
 
 /// Choose the entry at `path` of the item's menu (opened again, the entry pressed).
 func invokeDockMenu(_ item: DockItem, path: [Int]) -> Bool {
-    guard !path.isEmpty, AXUIElementPerformAction(item.element, kAXShowMenuAction as CFString) == .success, let menu = openMenu(of: item) else { return false }
+    guard !path.isEmpty, let menu = showMenu(of: item) else { return false }
     var level = menu
     var target: AXUIElement?
     for (i, k) in path.enumerated() {
         let entries = dKids(level)
-        guard k >= 0, k < entries.count else { closeMenu(menu); return false }
+        guard k >= 0, k < entries.count else { closeMenu(menu, of: item); return false }
         if i == path.count - 1 {
             target = entries[k]
         } else {
             // a submenu: open it (its entries are there once it is)
             _ = AXUIElementPerformAction(entries[k], kAXPressAction as CFString)
             usleep(80_000)
-            guard let sub = dKids(entries[k]).first(where: { (dAX($0, kAXRoleAttribute as String) as? String) == (kAXMenuRole as String) }) else { closeMenu(menu); return false }
+            guard let sub = dKids(entries[k]).first(where: { (dAX($0, kAXRoleAttribute as String) as? String) == (kAXMenuRole as String) }) else { closeMenu(menu, of: item); return false }
             level = sub
         }
     }
-    guard let t = target, AXUIElementPerformAction(t, kAXPressAction as CFString) == .success else { closeMenu(menu); return false }
+    guard let t = target, AXUIElementPerformAction(t, kAXPressAction as CFString) == .success else { closeMenu(menu, of: item); return false }
     return true
 }

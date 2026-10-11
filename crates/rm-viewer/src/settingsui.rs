@@ -652,7 +652,7 @@ impl SettingsView {
                     b
                 }
             };
-            c.shadow(mx, my, mw, mh, mr, self.p(14.0), self.p(5.0), Rgba::BLACK.alpha(if self.dark { 0.45 } else { 0.18 }));
+            c.shadow(mx, my, mw, mh, mr, self.p(14.0), self.p(5.0), Rgba::BLACK.alpha(if self.dark { 0.45 } else { 0.18 } * open));
             c.composite(&body, mx.round() as isize, (my - (1.0 - open) * self.p(6.0)).round() as isize, open);
             let (items, hover, chosen) = {
                 let m = self.menu.as_ref().unwrap();
@@ -784,7 +784,9 @@ mod preview {
                 v.mouse_down(x + w - 30.0, y + h / 2.0);
                 v.mouse_up(x + w - 30.0, y + h / 2.0);
                 v.key_up_down(true);
-                save(&v.render(later), "settings-menu.ppm");
+                // (its opening animation done: timed from now, the earlier pictures may have
+                // taken a while)
+                save(&v.render(Instant::now() + Duration::from_secs(3)), "settings-menu.ppm");
                 v.key_escape();
                 v.section = 1;
                 save(&v.render(later), "settings-sound.ppm");

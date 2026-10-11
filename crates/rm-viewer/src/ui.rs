@@ -4158,7 +4158,8 @@ fn gallery_tick(dir: &std::path::Path) -> bool {
                 crate::dock::reveal_now(POINT { x: wa.left, y: (wa.top + wa.bottom) / 2 });
             } else if t > Duration::from_millis(1600) && GALLERY_KEYS.with(|g| g.get()) == 1 {
                 GALLERY_KEYS.with(|g| g.set(2));
-                if let Some((id, at)) = crate::dock::first_item() {
+                // (a Mac without its Dock to read: Taro's own items, no menu)
+                if let Some((id, at)) = crate::dock::first_item().filter(|_| net::mac_has("dock")) {
                     crate::dock::hold(true);
                     dock_menu_asked(id, at);
                 }

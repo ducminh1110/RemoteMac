@@ -639,6 +639,9 @@ fn relaunch<S: Read + Write>(c: &mut Ctx<S>) {
 /// Trash last), a right-click menu read as the Mac shows it, the Trash opened as a Finder window
 /// shown on Windows.
 fn mac_dock<S: Read + Write>(c: &mut Ctx<S>) {
+    // offered by the Mac and asked for by Taro (else a viewer never reads the Mac's Dock)
+    let features = c.sess.negotiated.features.clone();
+    c.r.check("Mac Dock: agreed on both sides (feature \"dock\")", features.iter().any(|f| f == "dock"), format!("{features:?}"));
     c.mac_dock = None;
     c.send(Message::DockList);
     c.pump(10, |c| c.mac_dock.is_some());

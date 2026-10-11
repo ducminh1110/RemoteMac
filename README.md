@@ -43,8 +43,9 @@ Desktop, streamed the way Moonlight streams a game.
 
 Taro's own windows are drawn after Apple's Screen Sharing on macOS 26: no Windows title
 bar (the window's toolbar is its title bar, with the red, yellow and green buttons), Liquid Glass
-controls, text set as macOS sets it, light and dark. These pictures are rendered by the app's
-own drawing code (`RM_PREVIEW=dir cargo test -p rm-viewer preview`); the app icons in them are stand-ins.
+controls, text set as macOS sets it, light and dark, in Taro's violet. These pictures are
+rendered by the app's own drawing code (`RM_PREVIEW=dir cargo test -p rm-viewer preview`); the
+app icons in them are stand-ins.
 
 | The launcher, dark | Scrolled: the grid softens under the glass toolbar |
 |---|---|
@@ -56,7 +57,13 @@ own drawing code (`RM_PREVIEW=dir cargo test -p rm-viewer preview`); the app ico
 
 | Settings | A menu open in Settings |
 |---|---|
-| ![Settings after System Settings: a glass sidebar, rounded groups, menus and switches](docs/images/settings-light.png) | ![A menu of Settings, the choice ticked](docs/images/settings-menu.png) |
+| ![Settings after System Settings: a glass sidebar with Video, Sound, Keyboard & Pointer, Appearance and Dock, rounded groups, menus and switches](docs/images/settings-light.png) | ![A menu of Settings in violet, the choice ticked](docs/images/settings-menu.png) |
+
+A Mac app's window on Windows: its title bar carries the traffic lights, the app's own menus and
+the document's title (light and dark).
+
+![The title bar of TextEdit on Windows: traffic lights, the app's menus, its title](docs/images/titlebar-light.png)
+![The same title bar in dark mode](docs/images/titlebar-dark.png)
 
 ## Features
 
@@ -89,8 +96,10 @@ own drawing code (`RM_PREVIEW=dir cargo test -p rm-viewer preview`); the app ico
 - **Liquid Glass UI** for Taro's own menus, search and banners, with reduced-motion and
   reduced-transparency fallbacks, and three **keyboard modes** (Windows, Mac, Fusion).
   *(new in 1.2)*
-- **The Dock** at the left or right edge of the screen: the Mac Desktop, the Mac apps open here
-  and Open an App, out only when you push the pointer against that edge. *(new in 1.2)*
+- **The Mac's own Dock** at the left or right edge of the screen, out only when you push the
+  pointer against that edge: its apps, folders and Trash in the Mac's order, the dots of the
+  running apps, the same right-click menus (Options, Show All Windows, Quit, Empty Trash…),
+  icons sized to fit the screen. *(new in 1.2)*
 - **Full screen like on the Mac**: a Mac app takes the whole monitor at its exact size, over
   the taskbar; push the pointer against the bottom edge and the taskbar comes up.
 - **End-to-end encrypted.** A password-authenticated key exchange, then ChaCha20-Poly1305 on
