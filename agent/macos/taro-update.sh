@@ -80,7 +80,7 @@ if (( ! newer && ! force )); then
   exit 0
 fi
 
-say "Downloading Taro $latest…"
+say "Downloading Taro ${latest}…"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/taro-update.XXXXXX")" || die "no temporary folder"
 trap 'rm -rf "$tmp"' EXIT
 curl -fL --retry 2 --progress-bar -o "$tmp/$asset" "$url" || die "the download failed"
