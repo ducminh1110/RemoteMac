@@ -375,7 +375,7 @@ if env["RM_NO_UDP"] == nil, let u = UdpLink(hostPort: cameLocally ? "127.0.0.1:9
     }
     var reports = 0
     u.onReport = { r in
-        sender.udpReport(r, wait: u.takeMaxWait())
+        sender.udpReport(r, wait: u.takeMaxWait(), sent: u.takeSentBytes())
         reports += 1
         if reports % 25 == 0 {
             log(String(format: "UDP report: loss %.1f%% recovered %d lost %d fec %d%% frames sent %d", r.loss * 100, r.recovered, r.lost, u.fecPct, u.sentFrames))

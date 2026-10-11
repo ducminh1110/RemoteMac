@@ -104,11 +104,13 @@ final class UdpLink {
         raw(d)
     }
 
-    /// A GameStream datagram to the client's tunnel (`"RM" 25 flow`).
+    /// A GameStream datagram to the client's tunnel (`"RM" 25 flow`): the Mac Desktop's video
+    /// counts as sent (the bitrate grows on what the link carried).
     func sendTunnel(_ flow: UInt8, _ data: Data) {
         var d = Data([0x52, 0x4D, 25, flow])
         d.append(data)
         raw(d)
+        cond.lock(); sentBytes += d.count; cond.unlock()
     }
     private let cond = NSCondition()
     private var queue: [(window: UInt64, key: Bool, packets: [Data], queued: CFAbsoluteTime)] = []
@@ -342,9 +344,12 @@ final class UdpLink {
         if ask { requestKeyframe?(p.windowID) }
     }
 
-    /// Longest time a frame waited in the pacer since the last call (seconds).
+    /// Longest time a frame waited to leave since the last call (seconds).
     private var maxWait: Double = 0
     func takeMaxWait() -> Double { cond.lock(); defer { cond.unlock() }; let w = maxWait; maxWait = 0; return w }
+    /// Video bytes sent since the last call.
+    private var sentBytes = 0
+    func takeSentBytes() -> Int { cond.lock(); defer { cond.unlock() }; let b = sentBytes; sentBytes = 0; return b }
 
     /// Each frame leaves at once, a little at a time, as Sunshine sends it and as the Mac
     /// Desktop's GameStream frames go (crates/rm-gamestream: 64 packets, then half a
@@ -365,6 +370,7 @@ final class UdpLink {
                 sendTo(d, to)
                 if i % 64 == 63 { usleep(500) }
             }
+            cond.lock(); sentBytes += item.packets.reduce(0) { $0 + $1.count }; cond.unlock()
             sentFrames += 1
         }
     }

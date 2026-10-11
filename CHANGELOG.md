@@ -18,7 +18,8 @@ the connection when it opens. Update both sides.
   again from another keyframe, and the wait read as congestion and cut the bitrate, which
   slowed the pacer further. Frames now leave at once, as Sunshine (and the Mac Desktop's
   GameStream) sends them; only a frame that waited 0.15 s is a backlog, and the bitrate drops
-  only when two reports in a row show congestion, and climbs back sooner.
+  only when two reports in a row show congestion. It grows only once the link has carried at
+  least half of it (a still window says nothing of the link).
 - **Some apps lost the connection each time they were opened** (closing them brought it back).
   A window with translucent parts (a sidebar, a glass toolbar) had a shape of megabytes, and a
   menu bar with long entries (History, recent documents) could pass 1 MiB: Windows took nothing

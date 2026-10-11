@@ -346,15 +346,24 @@ final class Sender {
     /// The UDP path changed (direct <-> relay): its round trip is a new floor.
     func pathChanged() { cond.lock(); rttFloor = 0; cond.unlock() }
 
-    /// UDP reports in a row that showed congestion
+    /// UDP reports in a row that showed congestion, and when the last came
     private var strikes = 0
+    private var lastReportAt: CFAbsoluteTime = 0
 
-    /// UDP: the client's report (every 200 ms) and how long frames waited to leave drive the
-    /// bitrate: loss after FEC or a growing queue cut it, a clean link lets it grow.
-    func udpReport(_ r: UdpReport, wait: Double) {
+    /// UDP: the client's report (every 200 ms), how long frames waited to leave and how much
+    /// left (`sent` bytes since the last report) drive the bitrate: loss after FEC or a growing
+    /// queue cut it, a clean link that carried it lets it grow.
+    func udpReport(_ r: UdpReport, wait: Double, sent: Int) {
         var change: Int?
         cond.lock()
         let now = CFAbsoluteTimeGetCurrent()
+        let interval = lastReportAt > 0 ? min(1, now - lastReportAt) : 0.2
+        lastReportAt = now
+        // the link carried at least half the bitrate: it is shown to take more. Windows that
+        // send little (nothing moves) say nothing of the link, and the bitrate stays where it
+        // is (it grew to the ceiling over a slow link, and a scroll then lost frames for seconds
+        // while it came down)
+        let carried = interval > 0 && Double(sent) * 8 / interval >= Double(bitrate) * 0.5
         // delay-based (as Google's congestion control): the round trip's floor is the path
         // itself; anything above it is queues filling (router, relay, Wi-Fi). React to that
         // before packets are lost, so video never runs seconds behind the hand
@@ -374,7 +383,7 @@ final class Sender {
         strikes = congested ? strikes + 1 : 0
         if strikes >= 2 {
             if now - lastDecrease > 0.4 { bitrate = max(minBitrate, Int(Double(bitrate) * 0.8)); lastDecrease = now; strikes = 0; change = bitrate }
-        } else if !congested && r.loss < 0.05 && wait < 0.03 && now - lastDecrease > 1.5 && now - lastAdjust > 0.4 && bitrate < ceiling {
+        } else if !congested && carried && r.loss < 0.05 && wait < 0.03 && now - lastDecrease > 1.5 && now - lastAdjust > 0.4 && bitrate < ceiling {
             bitrate = min(ceiling, Int(Double(bitrate) * 1.08)); lastAdjust = now; change = bitrate
         }
         cond.unlock()

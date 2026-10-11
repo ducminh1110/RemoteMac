@@ -163,7 +163,8 @@ menus and streams each window as its own H.264 stream.
 - **Feedback.** The viewer reports what arrived every 200 ms. The Mac sends video over UDP
   only while these reports come in, so a blocked UDP path falls back to TCP by itself. The
   bitrate follows queueing delay and loss: two reports in a row showing either cut it by a
-  fifth, a clean link raises it again.
+  fifth; a clean link that carried at least half of it raises it (windows that send little say
+  nothing of the link, and leave it as it is).
 - **Direct path.** Both sides exchange their addresses (LAN, and the public one from STUN)
   over the encrypted stream and punch through to each other. The first address that answers
   becomes the path for video and input. LAN addresses win over public ones.
