@@ -36,7 +36,8 @@ func readMenuBar(pid: pid_t) -> [[String: Any]] {
     var budget = 3000
     func node(_ el: AXUIElement, depth: Int) -> [String: Any] {
         budget -= 1
-        let title = mAX(el, kAXTitleAttribute as String) as? String ?? ""
+        // (a title of a page or a document can be very long: a menu is never larger than a viewer takes)
+        let title = String((mAX(el, kAXTitleAttribute as String) as? String ?? "").prefix(200))
         var n: [String: Any] = ["title": title, "enabled": (mAX(el, kAXEnabledAttribute as String) as? Bool) ?? true, "separator": title.isEmpty]
         if let s = shortcut(el) { n["shortcut"] = s }
         if depth < 4 {

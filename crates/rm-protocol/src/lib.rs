@@ -799,33 +799,43 @@ fn read_full<R: Read>(r: &mut R, mut buf: &mut [u8]) -> std::io::Result<()> {
 
 /// Blocking read of one frame of either kind. `Ok(None)` on clean EOF. A read timeout can only
 /// surface before the first byte of a frame, never in the middle of one.
+///
+/// One message never ends the session: a frame read whole but not understood (a message this
+/// version does not know, or does not take as it is) is passed over, and the stream stays in
+/// step. Any channel's frame is taken up to [`MAX_BULK_FRAME`], the bound on what is read
+/// (an app whose window shape or menu bar came past a control frame's 1 MiB lost the connection
+/// each time it opened). Only a stream out of step (a length past that, an unknown channel)
+/// is an error.
 pub fn read_frame<R: Read>(r: &mut R) -> Result<Option<Frame>, ProtocolError> {
-    let mut head = [0u8; 4];
-    match r.read(&mut head[..1])? {
-        0 => return Ok(None),
-        _ => read_full(r, &mut head[1..])?,
-    }
-    let len = u32::from_be_bytes(head) as usize;
-    if len == 0 {
-        return Err(ProtocolError::EmptyFrame);
-    }
-    if len > MAX_BULK_FRAME {
-        return Err(ProtocolError::FrameTooLarge(len, MAX_BULK_FRAME));
-    }
-    let mut ch = [0u8; 1];
-    read_full(r, &mut ch)?;
-    let channel = Channel::from_u8(ch[0])?;
-    if len > channel.max_frame() {
-        return Err(ProtocolError::FrameTooLarge(len, channel.max_frame()));
-    }
-    let mut payload = vec![0u8; len - 1];
-    read_full(r, &mut payload)?;
-    if channel == Channel::Video {
-        VideoFrame::decode_payload(&payload).map(|v| Some(Frame::Video(v)))
-    } else if channel == Channel::Audio {
-        audio::AudioPacket::decode_payload(&payload).map(|a| Some(Frame::Audio(a)))
-    } else {
-        serde_json::from_slice(&payload).map(|m| Some(Frame::Msg(m))).map_err(|e| ProtocolError::Malformed(e.to_string()))
+    loop {
+        let mut head = [0u8; 4];
+        match r.read(&mut head[..1])? {
+            0 => return Ok(None),
+            _ => read_full(r, &mut head[1..])?,
+        }
+        let len = u32::from_be_bytes(head) as usize;
+        if len == 0 {
+            return Err(ProtocolError::EmptyFrame);
+        }
+        if len > MAX_BULK_FRAME {
+            return Err(ProtocolError::FrameTooLarge(len, MAX_BULK_FRAME));
+        }
+        let mut ch = [0u8; 1];
+        read_full(r, &mut ch)?;
+        let channel = Channel::from_u8(ch[0])?;
+        let mut payload = vec![0u8; len - 1];
+        read_full(r, &mut payload)?;
+        let frame = if channel == Channel::Video {
+            VideoFrame::decode_payload(&payload).map(Frame::Video)
+        } else if channel == Channel::Audio {
+            audio::AudioPacket::decode_payload(&payload).map(Frame::Audio)
+        } else {
+            serde_json::from_slice(&payload).map(Frame::Msg).map_err(|e| ProtocolError::Malformed(e.to_string()))
+        };
+        match frame {
+            Ok(f) => return Ok(Some(f)),
+            Err(e) => eprintln!("a message from the other side was passed over ({:?}, {len} bytes): {e}", channel),
+        }
     }
 }
 
@@ -913,6 +923,30 @@ mod tests {
         let payload = br#"{"type":"format_c_drive"}"#;
         let b = encode_raw(Channel::Control, payload).unwrap();
         assert!(matches!(decode(&b), Err(ProtocolError::Malformed(_))));
+    }
+
+    /// A message past a control frame's size, or one not understood, never ends the stream: the
+    /// first is taken, the second passed over, and what follows is read in step.
+    #[test]
+    fn a_large_or_unknown_message_does_not_end_the_stream() {
+        let menus = vec![MenuNode { title: "x".repeat(4096), enabled: true, ..Default::default() }; 400];
+        let big = Message::MenuBar { application_id: "safari".into(), menus };
+        // (as a Mac of 1.2.0 sent it: on the control channel, past its size)
+        let json = serde_json::to_vec(&big).unwrap();
+        assert!(json.len() > MAX_CONTROL_FRAME);
+        let mut s = ((json.len() + 1) as u32).to_be_bytes().to_vec();
+        s.push(Channel::Control as u8);
+        s.extend(json);
+        s.extend(encode_raw(Channel::Control, br#"{"type":"something_new","x":1}"#).unwrap());
+        s.extend(encode_raw(Channel::Control, br#"{"type":"window_destroyed","window_id":"not a number"}"#).unwrap());
+        s.extend(encode(&Message::WindowDestroyed { window_id: 7 }).unwrap());
+        let mut r = std::io::Cursor::new(s);
+        assert!(matches!(read_frame(&mut r).unwrap(), Some(Frame::Msg(Message::MenuBar { menus, .. })) if menus.len() == 400));
+        assert!(matches!(read_frame(&mut r).unwrap(), Some(Frame::Msg(Message::WindowDestroyed { window_id: 7 }))));
+        assert!(read_frame(&mut r).unwrap().is_none());
+        // a stream out of step still is an error
+        let mut bad = std::io::Cursor::new(vec![0, 0, 0, 2, 99, b'x']);
+        assert!(matches!(read_frame(&mut bad), Err(ProtocolError::UnknownChannel(99))));
     }
 
     #[test]

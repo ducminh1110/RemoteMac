@@ -4,6 +4,30 @@ Each version of Taro (called MacBridge until 1.2.0), newest first. Both sides sh
 same version; a newer Windows app works with an older Mac app without the features the Mac
 lacks.
 
+## 1.2.1
+
+A Mac app in its own window is as smooth as the same app on the Mac Desktop, and no app loses
+the connection when it opens. Update both sides.
+
+### Fixed
+
+- **An app's window stuttered where the Mac Desktop did not.** Both are captured and encoded
+  alike; only the sending differed. An app's frames left through a pacer at a few times the
+  bitrate: a keyframe (one goes each time a window settles, to redraw it sharp) took tens of
+  milliseconds to leave, the frames behind it were dropped as a backlog, the window started
+  again from another keyframe, and the wait read as congestion and cut the bitrate, which
+  slowed the pacer further. Frames now leave at once, as Sunshine (and the Mac Desktop's
+  GameStream) sends them; only a frame that waited 0.15 s is a backlog, and the bitrate drops
+  only when two reports in a row show congestion, and climbs back sooner.
+- **Some apps lost the connection each time they were opened** (closing them brought it back).
+  A window with translucent parts (a sidebar, a glass toolbar) had a shape of megabytes, and a
+  menu bar with long entries (History, recent documents) could pass 1 MiB: Windows took nothing
+  larger on its control channels and ended the session, and when it came back the app was
+  still open. Windows now takes a message of up to 16 MiB on any channel and passes over one it
+  does not understand instead of ending the session. The Mac sends shapes in 16 steps of
+  transparency (only the outline when even that is too large), menu entries of at most 200
+  characters, and a message past 1 MiB where an older Windows app takes it too.
+
 ## 1.2.0
 
 **MacBridge is now Taro.** The first release of 1.2: everything of the three betas (sound,

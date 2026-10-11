@@ -67,11 +67,31 @@ enum Shape {
         return out
     }
 
+    /// Alpha in 16 steps, the clear and the opaque exact (and on the same side of half as it
+    /// was): a translucent material (a sidebar, a glass toolbar) varies from pixel to pixel, and
+    /// its runs grew to megabytes.
+    static func stepped(_ a: [UInt8]) -> [UInt8] {
+        a.map { v in v >= 248 ? 255 : v <= 7 ? 0 : (v & 0xF0) | 0x08 }
+    }
+
+    /// Only what is outside the window clear, the rest opaque: when even the stepped alpha is
+    /// too large to send.
+    static func outline(_ a: [UInt8]) -> [UInt8] { a.map { $0 <= 7 ? 0 : 255 } }
+
+    /// Largest runs sent (bytes, before base64): a shape goes once per stream, ahead of video,
+    /// and a viewer took at most 1 MiB in a control message (a larger one cut the connection
+    /// each time the app's window opened).
+    static let maxRuns = 256 << 10
+
     /// The "window_mask" message for window `id`: nil when the screenshot shows nothing (all
-    /// clear: the window was not on the screen); an empty `rle` when it is all opaque.
+    /// clear: the window was not on the screen) or the shape is too intricate to send (the
+    /// window is then shown whole); an empty `rle` when it is all opaque.
     static func message(_ id: CGWindowID, width: Int, height: Int, alpha a: [UInt8]) -> [String: Any]? {
         guard a.contains(where: { $0 > 0 }) else { return nil }
-        let rle = a.allSatisfy({ $0 == 255 }) ? "" : runs(a).base64EncodedString()
-        return ["type": "window_mask", "window_id": Int(id), "width": width, "height": height, "rle": rle]
+        if a.allSatisfy({ $0 == 255 }) { return ["type": "window_mask", "window_id": Int(id), "width": width, "height": height, "rle": ""] }
+        var r = runs(stepped(a))
+        if r.count > maxRuns { r = runs(outline(a)) }
+        guard r.count <= maxRuns else { return nil }
+        return ["type": "window_mask", "window_id": Int(id), "width": width, "height": height, "rle": r.base64EncodedString()]
     }
 }

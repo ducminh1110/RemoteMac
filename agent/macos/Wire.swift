@@ -16,6 +16,20 @@ func channel(forType t: String) -> Chan {
     }
 }
 
+/// The largest frame a viewer takes on the control channels (rm-protocol's MAX_CONTROL_FRAME);
+/// one past it cut the connection, so a larger message goes on the files channel, whose frames
+/// may be 16 MiB (an app with a big menu bar opened, and the connection was lost each time).
+let maxControlFrame = 1 << 20
+
+/// The channel of a message of `bytes` bytes of JSON.
+func channel(forType t: String, bytes: Int) -> Chan {
+    let c = channel(forType: t)
+    switch c {
+    case .video, .files, .clipboard, .audio: return c
+    default: return bytes + 1 > maxControlFrame ? .files : c
+    }
+}
+
 struct WireError: Error, CustomStringConvertible { let description: String }
 
 final class Conn {
@@ -153,7 +167,7 @@ final class Conn {
     func send(_ msg: [String: Any]) throws {
         let t = msg["type"] as? String ?? ""
         let json = try JSONSerialization.data(withJSONObject: msg)
-        try writeAll(frame(channel(forType: t), json))
+        try writeAll(frame(channel(forType: t, bytes: json.count), json))
     }
 
     func sendVideo(_ v: VideoPacket) throws { try writeAll(frame(.video, v.payload())) }
@@ -258,14 +272,14 @@ final class Sender {
 
     func send(_ msg: [String: Any]) throws {
         let json = try JSONSerialization.data(withJSONObject: msg)
-        let d = conn.frame(channel(forType: msg["type"] as? String ?? ""), json)
+        let d = conn.frame(channel(forType: msg["type"] as? String ?? "", bytes: json.count), json)
         cond.lock(); control.append(d); cond.signal(); cond.unlock()
     }
 
     /// Low priority: never ahead of input replies, window events or a new window's video.
     func sendBulk(_ msg: [String: Any]) throws {
         let json = try JSONSerialization.data(withJSONObject: msg)
-        let d = conn.frame(channel(forType: msg["type"] as? String ?? ""), json)
+        let d = conn.frame(channel(forType: msg["type"] as? String ?? "", bytes: json.count), json)
         cond.lock(); bulk.append(d); cond.signal(); cond.unlock()
     }
 
@@ -329,11 +343,14 @@ final class Sender {
         }
     }
 
-    /// UDP: the client's report (every 200 ms) and how long frames waited in the pacer drive the
-    /// bitrate: loss after FEC or a growing queue cut it, a clean link lets it grow.
     /// The UDP path changed (direct <-> relay): its round trip is a new floor.
     func pathChanged() { cond.lock(); rttFloor = 0; cond.unlock() }
 
+    /// UDP reports in a row that showed congestion
+    private var strikes = 0
+
+    /// UDP: the client's report (every 200 ms) and how long frames waited to leave drive the
+    /// bitrate: loss after FEC or a growing queue cut it, a clean link lets it grow.
     func udpReport(_ r: UdpReport, wait: Double) {
         var change: Int?
         cond.lock()
@@ -349,17 +366,19 @@ final class Sender {
             queued = rtt > rttFloor + max(40, rttFloor * 0.25)
         }
         // random loss is FEC's job (its share rises with the loss); real congestion - frames
-        // lost despite FEC, a growing queue on the path or here, a very lossy link - costs bitrate
-        if r.lost > 0 || r.loss > 0.15 || wait > 0.05 || queued {
-            if now - lastDecrease > 0.3 { bitrate = max(minBitrate, Int(Double(bitrate) * 0.75)); lastDecrease = now; change = bitrate }
-        } else if r.loss < 0.05 && wait < 0.02 && now - lastDecrease > 2 && now - lastAdjust > 0.4 && bitrate < ceiling {
-            bitrate = min(ceiling, Int(Double(bitrate) * 1.06)); lastAdjust = now; change = bitrate
+        // lost despite FEC, a growing queue on the path or here (a frame waiting a tenth of a
+        // second to leave), a very lossy link - costs bitrate once two reports in a row show
+        // it: one alone is a blip (a keyframe's burst through Wi-Fi), and cutting on each blip
+        // kept an app's window far below the bitrate its link carries
+        let congested = r.lost > 0 || r.loss > 0.15 || wait > 0.1 || queued
+        strikes = congested ? strikes + 1 : 0
+        if strikes >= 2 {
+            if now - lastDecrease > 0.4 { bitrate = max(minBitrate, Int(Double(bitrate) * 0.8)); lastDecrease = now; strikes = 0; change = bitrate }
+        } else if !congested && r.loss < 0.05 && wait < 0.03 && now - lastDecrease > 1.5 && now - lastAdjust > 0.4 && bitrate < ceiling {
+            bitrate = min(ceiling, Int(Double(bitrate) * 1.08)); lastAdjust = now; change = bitrate
         }
         cond.unlock()
-        if let b = change {
-            udp?.paceBitsPerSecond = max(20_000_000, b * 3)
-            onBitrate?(b)
-        }
+        if let b = change { onBitrate?(b) }
     }
 
     /// Additive-increase / multiplicative-decrease on the measured queueing delay.

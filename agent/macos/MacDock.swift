@@ -133,7 +133,7 @@ private func showMenu(of item: DockItem) -> AXUIElement? {
 
 private func menuNodes(_ menu: AXUIElement, depth: Int = 0) -> [[String: Any]] {
     dKids(menu).map { el in
-        let title = dAX(el, kAXTitleAttribute as String) as? String ?? ""
+        let title = String((dAX(el, kAXTitleAttribute as String) as? String ?? "").prefix(200))
         var n: [String: Any] = ["title": title, "enabled": (dAX(el, kAXEnabledAttribute as String) as? Bool) ?? true, "separator": title.isEmpty]
         if depth < 3, let sub = dKids(el).first(where: { (dAX($0, kAXRoleAttribute as String) as? String) == (kAXMenuRole as String) }) {
             let children = menuNodes(sub, depth: depth + 1)

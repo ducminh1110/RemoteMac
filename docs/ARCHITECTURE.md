@@ -140,6 +140,11 @@ the side's **features**; only those both list are used (`negotiate` in `rm-proto
 
 An older Mac simply lacks the newer names, and the viewer hides what needs them.
 
+A frame of any channel may be up to 16 MiB (control messages are kept under 1 MiB, and the Mac
+sends a larger one on the files channel, which older viewers take). A message the reader does
+not understand (a newer type, a field it does not take as it is) is passed over: one message
+never ends a session.
+
 **Connection phases** (`crates/rm-viewer/src/lifecycle.rs`): Idle → Connecting →
 Authenticating → Negotiating → EstablishingMedia → Connected, then Reconnecting (back through
 the same steps) or Disconnecting → Disconnected; Error from any step. Only the transitions in
@@ -151,9 +156,14 @@ menus and streams each window as its own H.264 stream.
 
 - **FEC.** Video frames are cut into 1200-byte shards with Reed-Solomon parity (10–50 %,
   adapted to the measured loss), so lost packets are rebuilt instead of resent.
+- **Sending.** A frame leaves at once, 64 packets at a time half a millisecond apart, as
+  Sunshine sends it (the Mac Desktop's GameStream frames go the same way). Only a frame of a
+  window that waited 0.15 s to leave is a backlog: what waits of that window is dropped and
+  it starts again from a keyframe.
 - **Feedback.** The viewer reports what arrived every 200 ms. The Mac sends video over UDP
   only while these reports come in, so a blocked UDP path falls back to TCP by itself. The
-  bitrate follows queueing delay and loss.
+  bitrate follows queueing delay and loss: two reports in a row showing either cut it by a
+  fifth, a clean link raises it again.
 - **Direct path.** Both sides exchange their addresses (LAN, and the public one from STUN)
   over the encrypted stream and punch through to each other. The first address that answers
   becomes the path for video and input. LAN addresses win over public ones.

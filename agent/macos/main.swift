@@ -542,7 +542,7 @@ tracker.onCreated = { w in
     log("window created id=\(w.id) app=\(w.appID) role=\(w.role.rawValue) parent=\(w.parent.map { String($0) } ?? "-") \(Int(w.rect.width))x\(Int(w.rect.height)) titleBarCut=\(Int(w.inset))")
     lastSize[w.id] = w.rect.size
     lastInset[w.id] = w.inset
-    send(["type": "window_created", "window_id": Int(w.id), "application_id": w.appID, "title": w.title, "bounds": rectJSON(w.content),
+    send(["type": "window_created", "window_id": Int(w.id), "application_id": w.appID, "title": String(w.title.prefix(1000)), "bounds": rectJSON(w.content),
           "parent_id": w.parent.map { Int($0) as Any } ?? NSNull(), "role": w.role.rawValue])
     startStream(w.id, inset: w.inset, popup: w.role == .popup)
     if w.role == .popup {
@@ -584,7 +584,7 @@ tracker.onMoved = { w in
         if exactWindows && now.role != .popup { DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { sendChrome(w.id) } }
     }
 }
-tracker.onTitle = { w in send(["type": "window_title_changed", "window_id": Int(w.id), "title": w.title]) }
+tracker.onTitle = { w in send(["type": "window_title_changed", "window_id": Int(w.id), "title": String(w.title.prefix(1000))]) }
 tracker.onAdopted = { id, pid in
     send(["type": "app_launched", "application_id": id, "pid": Int(pid)])
 }

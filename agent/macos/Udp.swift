@@ -1,8 +1,8 @@
 // Video over UDP through the relay (same host and port as TCP), as crates/rm-protocol/src/udp.rs
 // defines it: each frame is cut into equal shards, grouped in blocks of <= 64, each block gets
-// Reed-Solomon parity (Fec.swift). Packets leave paced (a keyframe is not one burst that
-// overflows a router queue). Video uses this path only while the client's reports arrive; when
-// they stop, Sender goes back to TCP by itself.
+// Reed-Solomon parity (Fec.swift). Packets leave as Sunshine sends them (64 at a time, half a
+// millisecond apart). Video uses this path only while the client's reports arrive; when they
+// stop, Sender goes back to TCP by itself.
 //
 // Direct path (as Moonlight talks straight to the host): both sides swap their addresses (LAN,
 // public via STUN) and a secret over the authenticated TCP connection ("p2p_offer"), then punch
@@ -116,8 +116,6 @@ final class UdpLink {
     private var lastReport: CFAbsoluteTime = 0
     private var registered = false
     private(set) var fecPct = 20
-    /// bits per second the pacer lets out (a few times the video bitrate)
-    var paceBitsPerSecond = 60_000_000
     var onReport: ((UdpReport) -> Void)?
     /// the video path came up or went away (the encoder should send a keyframe)
     var onAlive: ((Bool) -> Void)?
@@ -319,14 +317,19 @@ final class UdpLink {
         }
     }
 
-    /// Cut, protect and queue one frame. Under backlog the window's waiting frames are dropped
-    /// and it restarts from a keyframe (never queue seconds of video).
+    /// A window's frame waiting this long means the link stopped taking them: what waits of it
+    /// is dropped and it starts again from a keyframe (never seconds of video queued).
+    static let backlog: CFAbsoluteTime = 0.15
+
+    /// Cut, protect and queue one frame. Frames leave as they come (see `pace`); only a real
+    /// backlog drops what waits.
     func sendVideo(_ p: VideoPacket) {
         let packets = packetize(p)
         var ask = false
         cond.lock()
-        let pending = queue.filter { $0.window == p.windowID }.count
-        if pending >= 2 && !p.keyframe {
+        let now = CFAbsoluteTimeGetCurrent()
+        let stale = queue.contains { $0.window == p.windowID && now - $0.queued > Self.backlog }
+        if stale && !p.keyframe {
             let before = queue.count
             queue.removeAll { $0.window == p.windowID }
             dropped += before - queue.count + 1
@@ -343,8 +346,14 @@ final class UdpLink {
     private var maxWait: Double = 0
     func takeMaxWait() -> Double { cond.lock(); defer { cond.unlock() }; let w = maxWait; maxWait = 0; return w }
 
+    /// Each frame leaves at once, a little at a time, as Sunshine sends it and as the Mac
+    /// Desktop's GameStream frames go (crates/rm-gamestream: 64 packets, then half a
+    /// millisecond). A pacer at a few times the bitrate held a keyframe back for tens of
+    /// milliseconds: the frames behind it waited, were dropped as a backlog, and the window
+    /// started again from yet another keyframe, while that wait read as congestion and cut the
+    /// bitrate, which slowed the pacer further (an app's window stuttered where the same app on
+    /// the Mac Desktop did not).
     private func pace() {
-        var tokens = 0.0, last = CFAbsoluteTimeGetCurrent()
         while true {
             cond.lock()
             while queue.isEmpty { cond.wait() }
@@ -352,17 +361,9 @@ final class UdpLink {
             maxWait = max(maxWait, CFAbsoluteTimeGetCurrent() - item.queued)
             cond.unlock()
             let to = dest
-            for d in item.packets {
-                let rate = Double(paceBitsPerSecond) / 8, burst = 64.0 * 1024
-                let now = CFAbsoluteTimeGetCurrent()
-                tokens = min(burst, tokens + (now - last) * rate); last = now
-                if tokens < Double(d.count) {
-                    let wait = (Double(d.count) - tokens) / rate
-                    usleep(UInt32(max(50, wait * 1_000_000)))
-                    let t = CFAbsoluteTimeGetCurrent(); tokens = min(burst, tokens + (t - last) * rate); last = t
-                }
-                tokens -= Double(d.count)
+            for (i, d) in item.packets.enumerated() {
                 sendTo(d, to)
+                if i % 64 == 63 { usleep(500) }
             }
             sentFrames += 1
         }
