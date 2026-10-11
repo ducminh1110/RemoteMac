@@ -121,6 +121,19 @@ final class WindowStream: NSObject, SCStreamOutput {
             let c = (y / 2) * cs + (x / 2) * 2
             return Y[y * ys + x] <= 24 && abs(Int(C[c]) - 128) < 12 && abs(Int(C[c + 1]) - 128) < 12
         }
+        // the top corners sit under the viewer's title bar, square: where the picture's top is
+        // still rounded (the cut row shorter than the window's corner), the window's own rim (a
+        // dark line along the curve) goes too, each row taking the colour just inside it
+        if fillTop {
+            for y in 0..<r {
+                var a = 0
+                while a < r && isBlack(a, y) { a += 1 }
+                if a > 0 && a + 3 < r { for x in a..<(a + 2) { copyPixel(from: a + 3, y, to: x, y) } }
+                var b = 0
+                while b < r && isBlack(w - 1 - b, y) { b += 1 }
+                if b > 0 && b + 3 < r { for x in b..<(b + 2) { copyPixel(from: w - 1 - (b + 3), y, to: w - 1 - x, y) } }
+            }
+        }
         // corners: transparent (black) pixels outside a circle of radius r take the colour of
         // the pixel diagonally inside the rounding (not when the viewer has the window's shape:
         // it shows the corners as clear, and the edge as the Mac draws it)

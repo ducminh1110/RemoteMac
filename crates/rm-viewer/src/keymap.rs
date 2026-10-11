@@ -130,10 +130,16 @@ pub fn fit_rect(area: (i32, i32), source: (u32, u32)) -> (i32, i32, i32, i32) {
     let (sw, sh) = (source.0.max(1) as f64, source.1.max(1) as f64);
     let s = (aw / sw).min(ah / sh);
     let (w, h) = ((sw * s).round() as i32, (sh * s).round() as i32);
-    // within a pixel or two of the area: use it all (rounding, not a different shape)
-    let (w, h) = (if (area.0 - w).abs() <= 2 { area.0 } else { w }, if (area.1 - h).abs() <= 2 { area.1 } else { h });
+    // nearly the area's shape: all of it (rounding, a title row measured a moment later, a Mac
+    // window a few points short of the screen); a thin band of nothing along an edge looked
+    // like a gap in the window. Only a really different shape is letterboxed.
+    let near = |a: i32, v: i32| (a - v).abs() <= SNAP.min((a as f64 * 0.03) as i32).max(2);
+    let (w, h) = (if near(area.0, w) { area.0 } else { w }, if near(area.1, h) { area.1 } else { h });
     ((area.0 - w) / 2, (area.1 - h) / 2, w, h)
 }
+
+/// The most a picture is stretched by to fill its area (pixels; 3 % of the area at most).
+const SNAP: i32 = 24;
 
 /// Combine a UTF-16 high surrogate with the following low surrogate (WM_CHAR delivers them separately).
 pub fn push_utf16(pending_high: &mut Option<u16>, unit: u16) -> Option<String> {
@@ -221,6 +227,12 @@ mod tests {
         assert_eq!(fit_rect((1920, 1080), (1440, 900)), (96, 0, 1728, 1080));
         assert_eq!(scale_point(96, 540, (1920, 1080), (1440, 900)), (0.0, 450.0));
         assert_eq!(scale_point(10, 540, (1920, 1080), (1440, 900)), (0.0, 450.0));
+        // a few pixels off (a title row measured a moment later): filled, no band of nothing
+        assert_eq!(fit_rect((1006, 493), (1006, 500)), (0, 0, 1006, 493));
+        let p = scale_point(503, 492, (1006, 493), (1006, 500));
+        assert!(p.0 == 503.0 && (p.1 - 492.0 * 500.0 / 493.0).abs() < 1e-9, "{p:?}");
+        // a Mac window narrower than the screen by more: letterboxed (the bands are drawn)
+        assert_eq!(fit_rect((1920, 1140), (1824, 1140)), (48, 0, 1824, 1140));
     }
 
     #[test]

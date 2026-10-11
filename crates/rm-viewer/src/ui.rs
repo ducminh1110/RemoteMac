@@ -672,6 +672,7 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             stats_tick();
             shortcuts_tick();
             menu_bar_tick();
+            taskbar_tick();
             with_app(|a| a.launcher.as_mut().map(|l| l.poll()));
             smoke_tick();
             showcase_tick();
@@ -1858,6 +1859,131 @@ fn monitor_rect(hwnd: HWND) -> RECT {
     }
 }
 
+// ------------------------------------------------------------------ the taskbar in full screen
+//
+// Full screen covers the taskbar, as on the Mac. The pointer pressed against the bottom edge for
+// a moment brings it up (as the Mac's Dock comes up when it hides itself); away from it for a
+// moment, it goes again and the window is in front. A click on it (an app, Start) leaves it to
+// the user.
+
+#[derive(Default)]
+struct TaskbarPeek {
+    /// the pointer at the bottom edge of a full-screen window since
+    edge_since: Option<Instant>,
+    /// the taskbar brought up over a window: (window, taskbar)
+    shown: Option<(isize, isize)>,
+    /// the pointer away from the taskbar since
+    away_since: Option<Instant>,
+}
+
+thread_local! { static PEEK: RefCell<TaskbarPeek> = RefCell::new(TaskbarPeek::default()); }
+
+/// How long the pointer rests at the edge before the taskbar comes, and is away before it goes.
+const PEEK_IN: Duration = Duration::from_millis(150);
+const PEEK_OUT: Duration = Duration::from_millis(450);
+
+/// The taskbar of the monitor `mon` (the main one's, or another screen's), when it is at the
+/// bottom of that monitor.
+fn taskbar_of(mon: HMONITOR) -> Option<HWND> {
+    unsafe {
+        let mut found = FindWindowW(w!("Shell_TrayWnd"), None).ok().filter(|t| MonitorFromWindow(*t, MONITOR_DEFAULTTONEAREST) == mon);
+        let mut after: Option<HWND> = None;
+        while found.is_none() {
+            let Ok(t) = FindWindowExW(None, after, w!("Shell_SecondaryTrayWnd"), None) else { break };
+            if MonitorFromWindow(t, MONITOR_DEFAULTTONEAREST) == mon {
+                found = Some(t);
+            }
+            after = Some(t);
+        }
+        let t = found?;
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let _ = GetMonitorInfoW(mon, &mut info);
+        let mut r = RECT::default();
+        let _ = GetWindowRect(t, &mut r);
+        // along the bottom (Windows 11's only place; a taskbar moved to a side is left alone)
+        (r.bottom >= info.rcMonitor.bottom - 2 && r.right - r.left > (info.rcMonitor.right - info.rcMonitor.left) / 2).then_some(t)
+    }
+}
+
+/// Every 100 ms (the controller's timer): the pointer at the bottom of a full-screen Mac window
+/// brings the taskbar up; away from it, the window is in front again.
+fn taskbar_tick() {
+    let fg = unsafe { GetForegroundWindow() };
+    let mut p = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut p);
+    }
+    let now = Instant::now();
+    if let Some((frame, bar)) = PEEK.with(|k| k.borrow().shown) {
+        if fg.0 as isize != bar {
+            // a click on it (an app, Start, the window itself): the user's now
+            PEEK.with(|k| *k.borrow_mut() = TaskbarPeek::default());
+            return;
+        }
+        let mut r = RECT::default();
+        unsafe {
+            let _ = GetWindowRect(hwnd_of(bar), &mut r);
+        }
+        let away = p.y < r.top - 6 || p.x < r.left || p.x >= r.right;
+        let gone = PEEK.with(|k| {
+            let mut k = k.borrow_mut();
+            if !away {
+                k.away_since = None;
+                return false;
+            }
+            now.duration_since(*k.away_since.get_or_insert(now)) >= PEEK_OUT
+        });
+        if gone {
+            PEEK.with(|k| *k.borrow_mut() = TaskbarPeek::default());
+            unsafe {
+                let _ = SetForegroundWindow(hwnd_of(frame));
+            }
+        }
+        return;
+    }
+    // a full-screen Mac app in front (not the Mac Desktop: the Mac's own Dock is at its bottom)
+    let full = with_app(|a| a.remotes.get(&(fg.0 as isize)).is_some_and(|r| r.fullscreen && r.app != DESKTOP_APP)).unwrap_or(false);
+    let mon = monitor_rect(fg);
+    let at_edge = full && p.y >= mon.bottom - 2 && p.x >= mon.left && p.x < mon.right;
+    if !at_edge {
+        PEEK.with(|k| k.borrow_mut().edge_since = None);
+        return;
+    }
+    let due = PEEK.with(|k| now.duration_since(*k.borrow_mut().edge_since.get_or_insert(now)) >= PEEK_IN);
+    if !due {
+        return;
+    }
+    let Some(bar) = taskbar_of(unsafe { MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST) }) else { return };
+    unsafe {
+        let _ = SetForegroundWindow(bar);
+    }
+    PEEK.with(|k| *k.borrow_mut() = TaskbarPeek { edge_since: None, shown: Some((fg.0 as isize, bar.0 as isize)), away_since: None });
+}
+
+/// (smoke test) The pointer at the bottom edge of full-screen window `main` brings the taskbar
+/// up, and away from it the window is in front again: what happened, as a note.
+fn taskbar_peek_check(main: HWND) -> String {
+    unsafe {
+        let mon = monitor_rect(main);
+        let Some(bar) = taskbar_of(MonitorFromWindow(main, MONITOR_DEFAULTTONEAREST)) else { return "taskbar: none on this screen".into() };
+        let _ = SetForegroundWindow(main);
+        let mid = (mon.left + mon.right) / 2;
+        let _ = SetCursorPos(mid, mon.bottom - 1);
+        for _ in 0..4 {
+            taskbar_tick();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let up = GetForegroundWindow() == bar;
+        let _ = SetCursorPos(mid, (mon.top + mon.bottom) / 2);
+        for _ in 0..8 {
+            taskbar_tick();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let back = GetForegroundWindow() == main;
+        format!("taskbar: up at the bottom edge={up}, gone again={back}")
+    }
+}
+
 /// Slide/zoom the window from `a` to `b` (screen rects) like the Mac's fullscreen transition.
 fn animate(frame: HWND, a: RECT, b: RECT) {
     const STEPS: u32 = 14;
@@ -2007,9 +2133,18 @@ fn layout(frame: HWND) {
     let bar = bar_px(frame);
     unsafe { let _ = MoveWindow(content, 0, bar, cw, (ch - bar).max(1), true); }
     let square = unsafe { IsZoomed(frame).as_bool() } || is_fullscreen(frame);
+    // beside a picture of another shape (a Mac window that cannot be the screen's size): the
+    // title bar's colour, black in full screen; never the desktop seen through
+    let backdrop = if is_fullscreen(frame) {
+        [0, 0, 0]
+    } else {
+        let c = crate::titlebar::colors(crate::surface::dark_mode(), true).0;
+        [(c.r * 255.0).round() as u8, (c.g * 255.0).round() as u8, (c.b * 255.0).round() as u8]
+    };
     with_app(|a| a.remotes.get_mut(&(frame.0 as isize)).map(|r| {
         let (plain, shaped) = corner_radii(r, cw, bar, square);
         if let Some(c) = r.comp.as_mut() {
+            c.set_backdrop(backdrop);
             c.layout(cw, ch, bar, plain, shaped);
         }
     }));
@@ -3504,8 +3639,9 @@ fn smoke_tick() {
                 sendmsg(c, WM_MOUSEMOVE, 0, (200 << 16) | 200);
                 let gone = bar_px(main) == 0;
                 let display = with_app(|a| a.display).flatten();
+                let peek = taskbar_peek_check(main);
                 finish("green light: fullscreen on the monitor, Mac app sized to it on a virtual display", covers && hidden && picture && revealed && gone,
-                    format!("window={:?} monitor={:?} remote={rw}x{rh}pt display={display:?} barHidden={hidden} reveal={revealed}/{gone}", (wr.left, wr.top, wr.right, wr.bottom), (mon.left, mon.top, mon.right, mon.bottom)), 46);
+                    format!("window={:?} monitor={:?} remote={rw}x{rh}pt display={display:?} barHidden={hidden} reveal={revealed}/{gone} {peek}", (wr.left, wr.top, wr.right, wr.bottom), (mon.left, mon.top, mon.right, mon.bottom)), 46);
                 let c = content_of(main).unwrap_or(main);
                 sendmsg(c, WM_KEYDOWN, VK_F11.0 as usize, 0); // F11 leaves fullscreen
                 sendmsg(c, WM_KEYUP, VK_F11.0 as usize, 0);

@@ -11,8 +11,10 @@
 //! clip are truly transparent. Child windows (input / focus) stay, they just do not draw.
 //!
 //! With the window's shape from the Mac (`window_mask`) the picture itself is drawn through it,
-//! premultiplied: its corners, a menu's outline or the Dock's are exactly the Mac's, with no black
-//! where the video has none of the window (the clip then only rounds what the Mac does not draw).
+//! premultiplied: its corners or a menu's outline are exactly the Mac's, with no black where the
+//! video has none of the window (the clip then only rounds what the Mac does not draw). A picture
+//! of another shape than its window (letterboxed) has the background behind it: the bands beside
+//! it are never see-through.
 
 use rm_decode::Picture;
 use windows::core::Interface;
@@ -41,6 +43,11 @@ pub struct Comp {
     bg_surface: IDCompositionSurface,
     bg_shown: bool,
     bg_scale: IDCompositionScaleTransform,
+    /// the background's colour (BGRA), and whether the picture shown now is letterboxed / was
+    /// drawn through its shape
+    backdrop: [u8; 4],
+    letterboxed: bool,
+    through_shape: bool,
     mask: Option<Mask>,
     /// the clip's corner radii for a picture without its shape, and with it (the shape makes
     /// the picture's own corners), and which is set
@@ -128,7 +135,7 @@ impl Comp {
             root.AddVisual(&overlay, true, &chrome).ok()?;
             target.SetRoot(&root).ok()?;
             device.Commit().ok()?;
-            Some(Self { device, _target: target, root, clip, bg, bg_surface, bg_shown: true, bg_scale, mask: None, radii: ([0.0; 4], [0.0; 4]), radii_shaped: None, video, video_scale, chrome, chrome_surface: None, overlay, overlay_surface: None, d3d, ctx, swap: None, swap_size: (0, 0), area: (0, 0, 1, 1), kind, last_error: "" })
+            Some(Self { device, _target: target, root, clip, bg, bg_surface, bg_shown: true, bg_scale, backdrop: [250, 250, 250, 255], letterboxed: false, through_shape: false, mask: None, radii: ([0.0; 4], [0.0; 4]), radii_shaped: None, video, video_scale, chrome, chrome_surface: None, overlay, overlay_surface: None, d3d, ctx, swap: None, swap_size: (0, 0), area: (0, 0, 1, 1), kind, last_error: "" })
         }
     }
 
@@ -137,7 +144,7 @@ impl Comp {
     pub fn set_mask(&mut self, mask: Option<(u32, u32, std::sync::Arc<Vec<u8>>)>) {
         self.mask = mask.filter(|(w, h, a)| a.len() == (*w * *h) as usize).map(|(w, h, alpha)| Mask { w, h, alpha, view: None });
         if self.mask.is_none() {
-            self.show_bg(true);
+            self.picture_shown(false);
         }
     }
 
@@ -146,7 +153,34 @@ impl Comp {
         self.mask.as_ref().is_some_and(|m| (m.w, m.h) == (w, h))
     }
 
-    /// The picture shown now is drawn through its shape (`on`) or not: background and clip to match.
+    /// The colour behind the picture (before the first one, beside a letterboxed one): the title
+    /// bar's, or black in full screen.
+    pub fn set_backdrop(&mut self, rgb: [u8; 3]) {
+        let px = [rgb[2], rgb[1], rgb[0], 255];
+        if px == self.backdrop {
+            return;
+        }
+        self.backdrop = px;
+        unsafe {
+            let mut off = POINT::default();
+            if let Ok(tex) = self.bg_surface.BeginDraw::<ID3D11Texture2D>(None, &mut off) {
+                upload(&self.ctx, &tex, off, 1, 1, &px);
+                let _ = self.bg_surface.EndDraw();
+                let _ = self.device.Commit();
+            }
+        }
+    }
+
+    /// The picture shown now is drawn through its shape or not, letterboxed or not: background
+    /// and clip to match (the background under a shaped picture would show in its clear corners;
+    /// beside a letterboxed one it fills the bands).
+    fn picture_shown(&mut self, through_shape: bool) {
+        self.through_shape = through_shape;
+        self.show_bg(!through_shape || self.letterboxed);
+    }
+
+    /// The background shown (`on`) or not: the clip rounds the window's corners itself when it is,
+    /// else only what the shape does not.
     fn show_bg(&mut self, on: bool) {
         self.set_radii(!on);
         if self.bg_shown == on {
@@ -224,14 +258,19 @@ impl Comp {
         }
     }
 
-    fn scale_video(&self) {
+    fn scale_video(&mut self) {
         let (sw, sh) = self.swap_size;
         if sw == 0 || sh == 0 {
             return;
         }
         // the picture keeps its shape (letterboxed when the window's shape differs, e.g. a 16:10
-        // Mac screen on a 16:9 monitor), as Moonlight draws it; never stretched one way only
+        // Mac screen on a 16:9 monitor), as Moonlight draws it; only a few pixels off, it fills
         let (ox, oy, w, h) = crate::keymap::fit_rect((self.area.2, self.area.3), (sw, sh));
+        let letterboxed = (w, h) != (self.area.2, self.area.3);
+        if letterboxed != self.letterboxed {
+            self.letterboxed = letterboxed;
+            self.picture_shown(self.through_shape);
+        }
         // the same size as the window (within rounding): 1:1 with no filtering (any resampling,
         // even by 0.1 %, softens every glyph)
         let exact = (w - sw as i32).abs() <= 2 && (h - sh as i32).abs() <= 2;
@@ -344,7 +383,7 @@ impl Comp {
         let shaped = self.mask.as_ref().filter(|m| (m.w, m.h) == (w, h)).map(|m| m.alpha.clone());
         let mut px = p.bgra.clone();
         apply_alpha(&mut px, shaped.as_deref().map(|v| v.as_slice()));
-        self.show_bg(shaped.is_none());
+        self.picture_shown(shaped.is_some());
         unsafe {
             let Some(sc) = self.swap.as_ref() else { return false };
             let Ok(back) = sc.GetBuffer::<ID3D11Texture2D>(0) else { return false };
@@ -370,7 +409,7 @@ impl Comp {
         let (w, h) = (p.width, p.height);
         let r = crate::nv12::shared().ok_or("no GPU colour conversion")?;
         let mask = self.mask_view(w, h);
-        self.show_bg(mask.is_none());
+        self.picture_shown(mask.is_some());
         // the picture at the size it is shown, resampled here with a sharp cubic filter (the
         // compositor's bilinear scaling softens every glyph); 1:1 when it already fits
         let (_, _, fw, fh) = crate::keymap::fit_rect((self.area.2, self.area.3), (w, h));
