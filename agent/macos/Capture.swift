@@ -355,6 +355,10 @@ final class WindowStream: NSObject, SCStreamOutput {
     }
 
     func start() async throws {
+        // stopped before it began: nothing to start; else stop() waits for this to finish
+        lock.lock(); let dead = stopped; if !dead { starting = true }; lock.unlock()
+        guard !dead else { return }
+        defer { startEnded() }
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         if let rg = region {
             let (did, r, pids) = rg
@@ -454,7 +458,34 @@ final class WindowStream: NSObject, SCStreamOutput {
     /// still coming are not sent.
     private var stopped = false
     func cancel() { lock.lock(); stopped = true; lock.unlock() }
-    private var isStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
+    var isStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
+    /// Whether a picture has come yet (a stream that started but gets none is captured again).
+    var hasPicture: Bool { lock.lock(); defer { lock.unlock() }; return lastPB != nil }
+
+    /// A start under way, and the stops waiting for it to end: a stream for the same window
+    /// started while the one it replaces was still starting (then stopped) got no frames at all
+    /// on macOS 15, so the old one is gone entirely before the new one starts (main.swift).
+    private var starting = false
+    private var startWaiters: [Int: CheckedContinuation<Void, Never>] = [:], nextWaiter = 0
+    private func startEnded() {
+        lock.lock(); starting = false; let w = startWaiters; startWaiters = [:]; lock.unlock()
+        w.values.forEach { $0.resume() }
+    }
+    /// (not past `timeout`: a start that hangs in ScreenCaptureKit never holds up the next one)
+    private func startSettled(timeout: Double = 3) async {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            guard starting else { lock.unlock(); c.resume(); return }
+            let n = nextWaiter; nextWaiter += 1
+            startWaiters[n] = c
+            lock.unlock()
+            q.asyncAfter(deadline: .now() + timeout) { [weak self] in
+                guard let self = self else { return }
+                self.lock.lock(); let c = self.startWaiters.removeValue(forKey: n); self.lock.unlock()
+                c?.resume()
+            }
+        }
+    }
 
     /// The stream just started is kept, unless this one was stopped meanwhile (the stop ran
     /// before it had started and found nothing to stop): then it is stopped now, never left
@@ -465,8 +496,11 @@ final class WindowStream: NSObject, SCStreamOutput {
         return !dead
     }
 
+    /// Returns once nothing of this stream captures any more (a start under way has ended and
+    /// dropped what it started).
     func stop() async {
         cancel()
+        await startSettled()
         lock.lock(); let st = scStream; scStream = nil; lock.unlock()
         if let s = st { try? await s.stopCapture() }
         lock.lock(); let sess = session; session = nil; lastPB = nil; lock.unlock()

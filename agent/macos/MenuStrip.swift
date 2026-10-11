@@ -83,7 +83,8 @@ final class MenuBarMirror {
         case .success(let r):
             guard force || r != old else { return }
             lock.lock(); region = r; let s = stream; lock.unlock()
-            if let s = s { s.cancel(); Task { await s.stop() } }
+            // the new stream starts once the old one is gone (Capture.swift: startSettled)
+            let gone = s.map { (old: WindowStream) -> Task<Void, Never> in old.cancel(); return Task { await old.stop() } }
             let ws = WindowStream(windowID: menuBarWindowID) { [weak self] pkt in self?.onPacket?(pkt) }
             // the whole strip as the display shows it (nothing but the menu bar is ever there)
             ws.region = (CGMainDisplayID(), r, [])
@@ -91,7 +92,7 @@ final class MenuBarMirror {
             onShown?(r)
             onStatus?(["type": "menu_bar_status", "available": true, "window_id": Int(menuBarWindowID), "bounds": rectJSON(r)])
             log("Mac menu bar on Windows: \(Int(r.width))x\(Int(r.height)) points")
-            Task { do { try await ws.start() } catch { log("Mac menu bar stream failed: \(error)") } }
+            Task { await gone?.value; do { try await ws.start() } catch { log("Mac menu bar stream failed: \(error)") } }
         }
     }
 

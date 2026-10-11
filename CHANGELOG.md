@@ -38,6 +38,10 @@ animation and glass, and many fixes for what can go wrong while using it. Update
 - **The Mac's capture streams no longer pile up.** A stream stopped while it was still starting
   (resizing a window, a menu opening and closing quickly) went on capturing and encoding for
   ever; restarts while a window is resized now wait for the size to settle.
+- **A window no longer stays blank after resizing as it opened** (Xcode's welcome window on
+  macOS 15): its new capture started while the old one was still starting, and ScreenCaptureKit
+  gave it no picture at all. A new capture now starts once the old one is gone, and a window
+  with no picture 2.5 s after its capture started is captured again (twice at most).
 - **Clicks and keys never wait behind slow work on the Mac.** Opening an app (up to 20 s),
   Accessibility, displays, files and the wallpaper run on their own queue.
 - **The Mac is never killed by a closed connection** (SIGPIPE), nor runs out of file handles

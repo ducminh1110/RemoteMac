@@ -115,7 +115,8 @@ final class DockMirror {
         case .success(let (r, edge, dockPid)):
             guard force || r != old || dockPid != oldPid else { return }
             lock.lock(); region = r; self.edge = edge; pid = dockPid; let s = stream; lock.unlock()
-            if let s = s { s.cancel(); Task { await s.stop() } }
+            // the new stream starts once the old one is gone (Capture.swift: startSettled)
+            let gone = s.map { (old: WindowStream) -> Task<Void, Never> in old.cancel(); return Task { await old.stop() } }
             // only the Dock and the desktop picture: no app window behind the Dock shows
             let level = Int(CGWindowLevelForKey(.desktopWindow))
             let all = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
@@ -135,7 +136,7 @@ final class DockMirror {
             onShown?((dockPid, r))
             onStatus?(["type": "dock_status", "available": true, "window_id": Int(dockWindowID), "bounds": rectJSON(r), "edge": edge])
             log("Mac Dock on Windows: \(Int(r.width))x\(Int(r.height)) at \(Int(r.minX)),\(Int(r.minY)) (\(edge))")
-            Task { do { try await ws.start() } catch { log("Mac Dock stream failed: \(error)") } }
+            Task { await gone?.value; do { try await ws.start() } catch { log("Mac Dock stream failed: \(error)") } }
         }
     }
 

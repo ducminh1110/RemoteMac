@@ -438,9 +438,13 @@ func sendMenuBar(_ id: String) {
     }
 }
 
+/// Windows captured again because their stream brought no picture (at most twice each).
+var pictureRetries: [CGWindowID: Int] = [:]
+
 /// `popup`: a pop-up menu or popover (cut out of its display). Callers pass what they know of
 /// the window: the tracker's callbacks run on its queue, where asking it again would deadlock.
-func startStream(_ id: CGWindowID, inset: CGFloat, popup: Bool = false) {
+/// `after`: the stop of the stream this one replaces (it starts once that one is gone).
+func startStream(_ id: CGWindowID, inset: CGFloat, popup: Bool = false, after: Task<Void, Never>? = nil) {
     let ws = WindowStream(windowID: id, inset: inset) { pkt in sender.sendVideo(pkt) }
     ws.popup = popup
     ws.keepButtons = exactWindows
@@ -450,8 +454,27 @@ func startStream(_ id: CGWindowID, inset: CGFloat, popup: Bool = false) {
     if viewerFeatures.contains("mask") { ws.onShape = { w, h, a in sendShape(id, w, h, framed ? Shape.fillingTop(a, width: w, height: h) : a) } }
     ws.setBitrate(sender.bitrate)
     streamsLock.lock(); streams[id] = ws; streamsLock.unlock()
-    Task { do { try await ws.start(); log("stream started window=\(id)") } catch { log("stream start failed window=\(id): \(error)")
-        send(["type": "capability_unavailable", "capability": "capture", "reason": "\(error)"]) } }
+    Task {
+        await after?.value
+        do { try await ws.start() } catch { log("stream start failed window=\(id): \(error)")
+            send(["type": "capability_unavailable", "capability": "capture", "reason": "\(error)"]); return }
+        guard !ws.isStopped else { return }
+        log("stream started window=\(id)")
+        // a window always gets a first picture at once, even one that never changes: none in a
+        // while means ScreenCaptureKit gave a stream that captures nothing (seen on macOS 15
+        // with a window that resized as it opened) and it stays blank: capture it again
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2.5) {
+            streamsLock.lock()
+            let current = streams[id] === ws
+            let tries = pictureRetries[id] ?? 0
+            let again = current && !ws.isStopped && !ws.hasPicture && tries < 2
+            if again { pictureRetries[id] = tries + 1 }
+            streamsLock.unlock()
+            guard again else { return }
+            log("window \(id): no picture yet, capturing it again")
+            startStream(id, inset: inset, popup: popup, after: stopStream(id))
+        }
+    }
 }
 /// The shape of window `id`'s picture, for the viewer ("window_mask"), while its stream is the
 /// one measured (a newer stream of another size sends its own).
@@ -491,10 +514,13 @@ func frontWindowID() -> CGWindowID? {
     return nil
 }
 
-func stopStream(_ id: CGWindowID) {
+/// Returns the stop under way, for a stream replacing this one to wait for.
+@discardableResult
+func stopStream(_ id: CGWindowID) -> Task<Void, Never>? {
     streamsLock.lock(); let ws = streams.removeValue(forKey: id); streamsLock.unlock()
-    ws?.cancel() // at once: no more of its frames, and a start still under way drops its stream
-    if let ws = ws { Task { await ws.stop(); log("stream stopped window=\(id) packets=\(ws.sent)") } }
+    guard let ws = ws else { return nil }
+    ws.cancel() // at once: no more of its frames, and a start still under way drops its stream
+    return Task { await ws.stop(); log("stream stopped window=\(id) packets=\(ws.sent)") }
 }
 
 tracker.onCreated = { w in
@@ -509,7 +535,7 @@ tracker.onCreated = { w in
         // capture only sends a new picture when something changes: capture it afresh once it is up
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.35) {
             streamsLock.lock(); let open = streams[w.id] != nil; streamsLock.unlock()
-            if open { stopStream(w.id); startStream(w.id, inset: 0, popup: true) }
+            if open { startStream(w.id, inset: 0, popup: true, after: stopStream(w.id)) }
         }
     }
     if w.role == .window { DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { sendMenuBar(w.appID) } }
@@ -522,6 +548,7 @@ tracker.onDestroyed = { id in
     lastInset.removeValue(forKey: id)
     restartLock.lock(); restartGen.removeValue(forKey: id); restartLock.unlock()
     stopStream(id)
+    streamsLock.lock(); pictureRetries.removeValue(forKey: id); streamsLock.unlock()
     sender.udp?.forgetWindow(UInt64(id))
     send(["type": "window_destroyed", "window_id": Int(id)])
 }
@@ -537,7 +564,7 @@ tracker.onMoved = { w in
     DispatchQueue.global().asyncAfter(deadline: .now() + 0.15) {
         restartLock.lock(); let latest = restartGen[w.id] == gen; restartLock.unlock()
         guard latest, let now = tracker.current(w.id) else { return }
-        stopStream(w.id); startStream(w.id, inset: now.inset, popup: now.role == .popup)
+        startStream(w.id, inset: now.inset, popup: now.role == .popup, after: stopStream(w.id))
         // the toolbar's items move with the width
         if exactWindows && now.role != .popup { DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { sendChrome(w.id) } }
     }
@@ -949,7 +976,7 @@ func handle(_ m: [String: Any]) {
                 streamsLock.lock(); let ids = streams.keys.filter { $0 != desktopWindowID }; streamsLock.unlock()
                 for id in ids {
                     guard let w = tracker.current(id) else { continue }
-                    stopStream(id); startStream(id, inset: w.inset, popup: w.role == .popup)
+                    startStream(id, inset: w.inset, popup: w.role == .popup, after: stopStream(id))
                 }
             }
         }
