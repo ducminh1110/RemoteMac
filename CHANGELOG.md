@@ -1,7 +1,52 @@
 # Changelog
 
-Each version of MacBridge, newest first. Both sides should run the same version; a newer
-Windows app works with an older Mac app without the features the Mac lacks.
+Each version of Taro (called MacBridge until 1.2.0), newest first. Both sides should run the
+same version; a newer Windows app works with an older Mac app without the features the Mac
+lacks.
+
+## 1.2.0
+
+**MacBridge is now Taro.** The first release of 1.2: everything of the three betas (sound,
+typed addresses, drag and drop, Liquid Glass, the new launcher, connect window and Settings,
+the title bar and glass menus of each Mac window), with a new name and icon, the Dock at the
+side of the screen, full screen as on the Mac, and fixes from using beta 3. Update both sides:
+the files are now `Taro-windows.zip` (`Taro.exe`), `Taro-macos.tar.gz` (`./taro.sh` or
+`./taro`) and `taro-relay.tar.gz`. The Mac keeps its ID and the PC its settings.
+
+### Changed
+
+- **Taro**: the name everywhere, a taro (khoai môn) on violet for its icon, and Taro's violet
+  as the accent of every surface (selected menu rows, switches, buttons), whatever Windows'
+  accent colour is. On the Mac: `./taro`, `./taro.sh`, the log in `~/Library/Logs/Taro`,
+  uploads in `~/Downloads/Taro Uploads`.
+- **The Dock is back, at the left or right edge of the screen** (Settings → Dock; left by
+  default). Drawn by Taro in Liquid Glass with the Mac Desktop, the Mac apps open here and Open
+  an App. It comes out only when the pointer is **pushed against that edge** (the mouse keeps
+  moving outward once the pointer is there): passing by the edge or resting there leaves it
+  hidden. Icons grow under the pointer with their name beside them.
+- **The Mac's own Dock is no longer streamed** (Desktop Fusion and its wallpaper sync are
+  gone): its picture had a black background behind its glass. A wallpaper an older version
+  changed on the Mac is still put back.
+- **Full screen covers the taskbar; push the pointer against the bottom edge and the taskbar
+  comes up**, as the Mac's Dock does; move away and the Mac app is in front again.
+
+### Fixed
+
+- **Closing an app with its red button and opening it again at once loaded for ever, then the
+  Mac was lost.** The Mac took a quit app for alive (macOS keeps that state up to date only
+  for apps with a run loop): the new launch was refused as "already running", and the old
+  quit's clean-up then forgot the new copy (its window never came). Now it opens at once, also
+  an app that is still quitting or still open without a window; a refused launch says why on
+  the loading window.
+- **A thin band of the desktop between the title bar and the app, and gaps beside a full-screen
+  app.** A picture a few pixels off its window (its title row measured a moment late, a Mac
+  window a few points short of the screen) now fills it; a picture of a really different shape
+  has the title bar's colour (black in full screen) beside it, never the desktop seen through.
+  The dark curve of the Mac window's corner under the title bar is gone too.
+- **A window that stayed blank after resizing as it opened** (Xcode on macOS 15), and a
+  capture that macOS stopped by itself, are captured again.
+- **The Mac's menu bar and Dock left hidden** after Taro on the Mac stopped without a word
+  while an app was full screen there: put back at its next start.
 
 ## 1.2.0-beta.3
 

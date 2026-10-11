@@ -79,7 +79,7 @@ var useHighProfile = false
 /// Moonlight does. RM_NO_CURSOR=1: leave it out (the viewer then shows its own).
 var showRemoteCursor = ProcessInfo.processInfo.environment["RM_NO_CURSOR"] == nil
 
-final class WindowStream: NSObject, SCStreamOutput {
+final class WindowStream: NSObject, SCStreamOutput, SCStreamDelegate {
     let windowID: CGWindowID
     /// Points cut off the top (the Mac title bar).
     let inset: CGFloat
@@ -386,7 +386,7 @@ final class WindowStream: NSObject, SCStreamOutput {
             // apps given: the menu bar's strip, which no window covers)
             let apps = content.applications.filter { pids.contains($0.processID) }
             let filter = pids.isEmpty ? SCContentFilter(display: d, excludingWindows: []) : SCContentFilter(display: d, including: apps, exceptingWindows: [])
-            let s = SCStream(filter: filter, configuration: cfg, delegate: nil)
+            let s = SCStream(filter: filter, configuration: cfg, delegate: self)
             try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
             t0 = CFAbsoluteTimeGetCurrent()
             config = cfg
@@ -416,7 +416,7 @@ final class WindowStream: NSObject, SCStreamOutput {
             var drawn = "?"
             if #available(macOS 14.0, *) { drawn = "\(filter.pointPixelScale)x" }
             log("display \(did) draws at \(drawn) (ScreenCaptureKit)")
-            let s = SCStream(filter: filter, configuration: cfg, delegate: nil)
+            let s = SCStream(filter: filter, configuration: cfg, delegate: self)
             try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
             t0 = CFAbsoluteTimeGetCurrent()
             config = cfg
@@ -438,7 +438,7 @@ final class WindowStream: NSObject, SCStreamOutput {
             cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2
             cfg.queueDepth = 4; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true
-            let s = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: cfg, delegate: nil)
+            let s = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: cfg, delegate: self)
             try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
             t0 = CFAbsoluteTimeGetCurrent()
             config = cfg
@@ -458,13 +458,22 @@ final class WindowStream: NSObject, SCStreamOutput {
         cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
         cfg.queueDepth = 4; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true // fill the output at any capture density (never a corner of it, never cropped)
         let filter = SCContentFilter(desktopIndependentWindow: w)
-        let s = SCStream(filter: filter, configuration: cfg, delegate: nil)
+        let s = SCStream(filter: filter, configuration: cfg, delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
         t0 = CFAbsoluteTimeGetCurrent()
         config = cfg
         try await s.startCapture()
         guard await keep(s) else { return }
         measureShape(filter, cfg, source: cut > 0 ? cfg.sourceRect : nil)
+    }
+
+    /// The capture stopped by itself (its window's display went away, the system ended it): the
+    /// owner starts it again (main.swift).
+    var onStopped: ((Error) -> Void)?
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        guard !isStopped else { return }
+        log("capture of window \(windowID) stopped by itself: \(error.localizedDescription)")
+        onStopped?(error)
     }
 
     /// Stopped (or about to be): a start still under way drops what it started, and frames

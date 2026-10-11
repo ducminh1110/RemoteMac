@@ -10,7 +10,7 @@ server, see [deploy/RELAY-SETUP.md](../deploy/RELAY-SETUP.md).
 - [4. How the connection is made](#4-how-the-connection-is-made)
 - [5. Working with Mac apps](#5-working-with-mac-apps)
 - [6. Sound](#6-sound)
-- [7. Desktop Fusion (experimental)](#7-desktop-fusion-experimental)
+- [7. The Dock and full screen](#7-the-dock-and-full-screen)
 - [8. Settings and shortcuts](#8-settings-and-shortcuts)
 - [9. Logs](#9-logs)
 - [10. Troubleshooting](#10-troubleshooting)
@@ -181,7 +181,7 @@ the apps you had open and the banner says "Connected again". Clicking the banner
 (connecting goes on).
 
 **Features** are agreed when connecting: each side lists what it can do (sound, opening
-files, Desktop Fusion, …) and only what both have is used. A Mac with an older Taro
+files, …) and only what both have is used. A Mac with an older Taro
 still works, without the newer features.
 
 ## 5. Working with Mac apps
@@ -239,34 +239,35 @@ The Mac's sound plays on this PC (on by default; **Sound** and **Volume** in Set
   packet fades out instead of clicking. When the Mac is silent nothing is sent.
 - macOS gives sound to the same **Screen Recording** permission as the picture.
 
-## 7. Desktop Fusion (experimental)
+## 7. The Dock and full screen
 
-**Desktop Fusion** (Settings, off by default) puts the Mac's own Dock on this PC's desktop:
+**The Dock** is a column of glass at the **left edge** of the screen (Settings → **Dock**: at
+the left edge, at the right edge, or off) with the **Mac Desktop**, the Mac apps open here (a
+dot beside each) and **Open an App…** after a line.
 
-- While it is on, the Mac's desktop picture is set to the same picture as the PC's, and the
-  Mac's real Dock is streamed as a window of its own along the bottom of the PC's screen. It
-  slides in when the pointer comes down to the taskbar (or to the bottom edge, with the taskbar
-  hidden) under it and away when the pointer leaves, so it looks like a Dock over the PC's own
-  wallpaper.
-- Clicking an icon in it works as on the Mac: apps it opens become Windows windows, and its
-  menus show over it.
-- Only the Dock and the desktop picture are captured for it; app windows behind it never
-  show.
-- The Mac's own desktop picture is saved first and put back when Desktop Fusion is turned
-  off, when you disconnect, on `./taro --stop`, and at the next start of Taro if it
-  ever stopped without doing so.
-- If the Mac's Dock hides itself (automatic hiding), Taro leaves that setting alone and
-  shows a Dock of the apps opened from Windows instead.
-- The Windows taskbar and Explorer are never changed or replaced.
+- It stays out of the way until you **push the pointer against that edge**: move the mouse
+  on towards the edge for a moment after the pointer has reached it. Passing by the edge, or
+  leaving the pointer there, does nothing. (With a pen or in a remote session, where there is
+  no such push, leaving the pointer at the edge for about a second brings it out.)
+- The icon under the pointer grows, with its name beside it. A click opens the app, or brings
+  its window to the front (back from the taskbar if it was minimised).
+- It slides away once the pointer has left it.
+- It is drawn by Taro on this PC: it changes nothing on the Mac, and nothing of Windows.
 
-It is experimental: Dock folders (stacks) and some right-click menus may not show yet, and
-a dynamic or video desktop picture may come back as a still picture.
+**Full screen** (the green button, or F11) gives a Mac app the whole monitor, over the
+taskbar, at the monitor's size on the Mac (Taro makes the Mac a display of this size):
+
+- Move the pointer to the top edge: the window's title bar and menus slide in.
+- **Push the pointer against the bottom edge**: the Windows taskbar comes up, as the Mac's
+  Dock does; move away from it and the Mac app is in front again.
+- When a Mac app cannot be quite the monitor's size, the bands beside it are black; a window
+  a few pixels off fills its window instead.
 
 ## 8. Settings and shortcuts
 
 Open **Settings** from the launcher (the gear in its toolbar), the navigation ball, or
 **Ctrl+Alt+Shift+P**. It is laid out as the Mac's System Settings: the sections on the left
-(**Video**, **Sound**, **Keyboard & Pointer**, **Appearance**, **Desktop Fusion**; Up and Down
+(**Video**, **Sound**, **Keyboard & Pointer**, **Appearance**, **Dock**; Up and Down
 move between them), their settings on the right. A change applies at once; there is no Save.
 **Video** holds the frame rate, bitrate, sharpness, the Mac screen size (pixel for pixel is its
 last step), the Mac Desktop scale, the decoder and frame pacing; and:
@@ -279,7 +280,7 @@ last step), the Mac Desktop scale, the decoder and frame pacing; and:
 | **Glass** | how Taro's own menus and panels are drawn: Liquid Glass, frosted (blur only), or solid (least GPU). Windows' "transparency effects" setting off also turns the glass solid. |
 | **Animations** | as Windows is set (Settings → Accessibility → Visual effects → Animation effects), reduced, or full. Reduced keeps fades but drops movement and springs. |
 | **Mac windows** | with the app's menus in the title bar, or as the Mac draws them (experimental: its menu bar at the top); from the next connection |
-| **Desktop Fusion** | see [Desktop Fusion](#7-desktop-fusion-experimental) |
+| **Dock** | at the left edge (the default), at the right edge, or off; see [The Dock](#7-the-dock-and-full-screen) |
 
 Keys still held down when a window loses the focus are let go on the Mac, so none stays
 stuck.

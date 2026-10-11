@@ -321,6 +321,21 @@ final class DisplayManager {
     /// fullscreen app window wants
     private var desktopOpen = false
 
+    /// The user's own menu bar and Dock settings while they are hidden for a fullscreen window,
+    /// kept on disk: a session that ends without a word (a crash, power lost) puts them back at
+    /// the next start.
+    static var chromeFile: URL { supportDirectory.appendingPathComponent("chrome-restore.json") }
+
+    /// At start (no other Taro running): the menu bar and Dock as the user had them, when a
+    /// session left them hidden.
+    func restoreChromeAfterCrash() {
+        guard let d = try? Data(contentsOf: Self.chromeFile),
+              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Bool], let menu = j["menu"], let dock = j["dock"] else { return }
+        log("the menu bar and Dock were left hidden: put back as they were")
+        applyChrome(menu: menu, dock: dock)
+        try? FileManager.default.removeItem(at: Self.chromeFile)
+    }
+
     /// The Mac Desktop opened: the menu bar and Dock as the user has them, at once.
     func desktopOpened() {
         desktopOpen = true
@@ -340,9 +355,14 @@ final class DisplayManager {
             guard chromeSaved == nil else { return }
             chromeSaved = ((CFPreferencesCopyAppValue(menuKey, kCFPreferencesAnyApplication) as? Bool) ?? false,
                            (CFPreferencesCopyAppValue(dockKey, dock) as? Bool) ?? false)
+            if let s = chromeSaved, let d = try? JSONSerialization.data(withJSONObject: ["menu": s.menu, "dock": s.dock]) {
+                try? FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
+                try? d.write(to: Self.chromeFile, options: .atomic)
+            }
             if !desktopOpen { applyChrome(menu: true, dock: true) }
         } else if let s = chromeSaved {
             chromeSaved = nil
+            try? FileManager.default.removeItem(at: Self.chromeFile)
             if !desktopOpen { applyChrome(menu: s.menu, dock: s.dock) }
         }
     }

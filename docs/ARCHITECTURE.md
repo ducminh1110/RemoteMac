@@ -12,7 +12,7 @@ works. User-facing instructions are in the [user guide](USER-GUIDE.md).
 - [Window shapes, exact windows and the menu bar](#window-shapes-exact-windows-and-the-menu-bar)
 - [Sound](#sound)
 - [Opening files and adopting windows](#opening-files-and-adopting-windows)
-- [Desktop Fusion](#desktop-fusion)
+- [The Dock and full screen](#the-dock-and-full-screen)
 - [Mac Desktop over GameStream](#mac-desktop-over-gamestream)
 - [The Windows app's own surfaces](#the-windows-apps-own-surfaces)
 - [Testing](#testing)
@@ -133,7 +133,6 @@ the side's **features**; only those both list are used (`negotiate` in `rm-proto
 | `video` | per-window H.264 |
 | `audio` | the Mac's sound (`audio_control`, the audio channel and datagram) |
 | `open_file` | `open_file` for uploaded documents |
-| `fusion` | `dock_stream`, `set_wallpaper`, `restore_wallpaper` |
 | `mask` | `window_mask` (pictures' shapes) |
 | `exact` | `window_style`, `window_chrome` (windows as the Mac draws them) |
 | `menubar` | `menu_bar_stream`, `menu_bar_status` (the Mac's menu bar) |
@@ -210,23 +209,29 @@ menus and streams each window as its own H.264 stream.
   taken into the session (`app_launched`, then `window_created`), so a document opened in
   Finder or an app started from the Dock becomes a Windows window.
 
-## Desktop Fusion
+## The Dock and full screen
 
-- **The Dock** is a window of its own (`dockWindowID` 0x7FFF0002, app `dock`). The Mac finds the
-  Dock's rectangle through Accessibility (its `AXList`, plus room for magnification) and captures
-  that region of the screen with a content filter that includes only the Dock's process and the
-  owners of desktop-level windows, so app windows behind it never show. `dock_status` reports
-  the rectangle, the screen edge, or why it is unavailable (an auto-hiding Dock is left alone).
-  The Dock's menus are reported as popups whose parent is the Dock window.
-- **Wallpaper**: the viewer uploads the PC's desktop picture (or sends its plain colour) and asks
-  `set_wallpaper`. The Mac saves its own desktop pictures once to
-  `~/Library/Application Support/RemoteMac/wallpaper-restore.json`, then sets the new one;
-  `restore_wallpaper`, the session's end, `--stop` and the next start (when no other Taro
-  runs) put the saved ones back and remove the file.
-- **On Windows** (`ui.rs`, `fusion_*`): the Dock window is borderless, top-most, placed at the
-  bottom of the monitor and slid in and out by the pointer; the wallpaper is checked every 4 s
-  and sent again when it changes. If the Mac cannot stream its Dock, a Dock drawn by the viewer
-  (`dock.rs`) with the session's apps stands in.
+- **The Dock** (`dock.rs`) is drawn by the viewer: a layered, top-most window of Liquid Glass
+  at the left or right edge of the monitor (`dock_edge` in Settings), with the Mac Desktop, the
+  session's open apps (from its remote windows) and Open an App. It registers for the mouse's
+  raw input (`RIDEV_INPUTSINK`, so also while another window is in front); while the pointer
+  is at that edge of the screen (with no other monitor past it), the relative movement outward
+  is added up, and reset by a pause of 300 ms or a move back. At 160 counts it slides out
+  (`Push`). An absolute pointer (a pen, a remote session) has no such movement: resting at the
+  edge for 0.9 s does instead. It slides away 450 ms after the pointer has left it. Nothing is
+  asked of the Mac (the Mac's own Dock is not streamed any more; older versions' Desktop
+  Fusion changed the Mac's wallpaper: the Mac still puts it back if that was left behind).
+- **Full screen**: the window takes the monitor (over the taskbar), the Mac gets a display of
+  that size and the app window is sized to it. The title bar slides in at the top edge; the
+  pointer resting at the bottom edge for 150 ms makes the taskbar of that monitor the
+  foreground window, and once the pointer has been away from it for 450 ms the Mac window is
+  in front again (`taskbar_tick`). The Mac's menu bar and Dock hide while an app is full screen
+  there; the user's settings are kept in `~/Library/Application Support/RemoteMac/
+  chrome-restore.json` until put back, also at the next start after a crash.
+- **A picture of another shape than its window** (`keymap::fit_rect`): within 3 % (24 px at
+  most) it fills the window (a title row measured a moment late, a window a few points short);
+  beyond, it is letterboxed on the composition's background (the title bar's colour, black in
+  full screen), never on the desktop seen through. Input maps through the same rectangle.
 
 ## Mac Desktop over GameStream
 

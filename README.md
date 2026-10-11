@@ -89,8 +89,10 @@ own drawing code (`RM_PREVIEW=dir cargo test -p rm-viewer preview`); the app ico
 - **Liquid Glass UI** for Taro's own menus, search and banners, with reduced-motion and
   reduced-transparency fallbacks, and three **keyboard modes** (Windows, Mac, Fusion).
   *(new in 1.2)*
-- **Desktop Fusion** *(experimental)*: the Mac's real Dock streamed onto the PC's desktop, with
-  the Mac's wallpaper set to the PC's while it is on (and always put back).
+- **The Dock** at the left or right edge of the screen: the Mac Desktop, the Mac apps open here
+  and Open an App, out only when you push the pointer against that edge. *(new in 1.2)*
+- **Full screen like on the Mac**: a Mac app takes the whole monitor at its exact size, over
+  the taskbar; push the pointer against the bottom edge and the taskbar comes up.
 - **End-to-end encrypted.** A password-authenticated key exchange, then ChaCha20-Poly1305 on
   everything. A relay only carries ciphertext and never learns anything about the password.
 - **Quiet by default.** The Mac app shows its ID and password, then runs in the background.
@@ -289,7 +291,7 @@ publishes a GitHub release with all three packages.
 | Mac Desktop controls | the **navigation ball**: drag it anywhere, click for the menu (exit fullscreen, minimize, open an app, pointer, sound, settings, disconnect) |
 | Open or switch to a Mac app by name (Taro Search) | **Ctrl+Alt+Space** |
 | Open a file on the Mac | drop it from Explorer onto a Mac app's window |
-| Settings (frame rate, bitrate, sharpness, screen size, pixel-for-pixel, sound, keyboard, glass, animations, Desktop Fusion) | **Ctrl+Alt+Shift+P** |
+| Settings (frame rate, bitrate, sharpness, screen size, pixel-for-pixel, sound, keyboard, glass, animations, the Dock) | **Ctrl+Alt+Shift+P** |
 | The Mac's sound off / on | **Ctrl+Alt+Shift+M** |
 | Show this PC's pointer over the picture | **Ctrl+Alt+Shift+C** |
 | Stream statistics overlay | **Ctrl+Alt+Shift+S** |
@@ -319,8 +321,8 @@ relay or straight over the local network:
   ChaCha20-Poly1305.
 - **Scoped file opening.** The viewer can only ask the Mac to open documents in the uploads
   folder or the user's home, through LaunchServices; programs, scripts and packages are
-  refused and no shell is ever run. The Mac's wallpaper is changed only during Desktop Fusion
-  and always restored.
+  refused and no shell is ever run. Taro changes no setting of the Mac's, but for its menu bar
+  and Dock hiding while an app is full screen, always put back (also after a crash).
   Tampered data is rejected.
 - **What a relay sees:** the session ID, IP addresses, and the size and timing of the traffic.
   Nothing else. A relay with `RM_RELAY_KEY` set also refuses clients without the key.
@@ -338,7 +340,7 @@ Found a vulnerability? Please report it privately as described in SECURITY.md.
 |---|---|
 | [User guide](docs/USER-GUIDE.md) | installing, connecting, options, shortcuts, logs, troubleshooting |
 | [Relay setup](deploy/RELAY-SETUP.md) | running your own relay server |
-| [Architecture](docs/ARCHITECTURE.md) | how it works: connection paths, protocol, encryption, sound, Desktop Fusion |
+| [Architecture](docs/ARCHITECTURE.md) | how it works: connection paths, protocol, encryption, sound, the Dock |
 | [Changelog](CHANGELOG.md) | what changed in each version |
 | [QA checklist](docs/QA-CHECKLIST.md) | what to check by hand before a release |
 | [Security policy](SECURITY.md) | the security model and reporting vulnerabilities |

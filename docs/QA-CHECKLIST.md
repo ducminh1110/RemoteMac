@@ -106,22 +106,25 @@ or headphones; both on the same network unless the item says otherwise. Note bot
 - [ ] Windows' Animation effects off (or **Animations** = Reduced): no sliding, only short fades.
 - [ ] Opening and closing a menu quickly several times never leaves it half-drawn.
 
-## 8. Desktop Fusion (experimental)
+## 8. The Dock and full screen
 
-- [ ] Turn on **Desktop Fusion**: the Mac's desktop picture becomes the PC's within a few
-      seconds; the Dock slides in at the bottom of the PC's screen when the pointer comes down
-      to the taskbar under it (no need to press against the bottom of the screen), and away
-      when it leaves.
-- [ ] Clicking an app in the Dock opens it as a Windows window; a right-click menu of a Dock
-      icon shows over the Dock.
-- [ ] Change the PC's wallpaper while connected: the Mac follows within 4–5 s.
-- [ ] Turn Desktop Fusion off, disconnect, and `./taro --stop`: each time the Mac's own
-      desktop picture is back.
-- [ ] Kill Taro on the Mac (`kill -9`) while Fusion is on, then start it again: the Mac's
-      own desktop picture is back.
-- [ ] With automatic hiding of the Dock on the Mac: the setting is left as it is and the
-      viewer's own Dock stands in.
-- [ ] The Windows taskbar and Explorer are unchanged throughout.
+- [ ] Move the pointer quickly to the left edge and away, or leave it resting there: the Dock
+      stays hidden. Push the mouse on against the edge: the Dock slides out, centred on that
+      edge, with the Mac Desktop, the open apps (a dot beside each) and Open an App.
+- [ ] Hover an icon: it grows, its name beside it; click it: the app's window comes to the
+      front (back from the taskbar when minimised); Open an App opens Taro Search.
+- [ ] Move away: the Dock slides away within half a second. Settings → Dock → At the right
+      edge: it comes out at the right edge instead; Off: never.
+- [ ] Two monitors side by side: the edge between them never brings the Dock out.
+- [ ] Green button on a Mac app: it fills the monitor over the taskbar, no band beside it on
+      a Mac that makes a display of this size. Push against the bottom edge: the taskbar comes
+      up; move up: the Mac app is in front again, the taskbar hidden.
+- [ ] Kill Taro on the Mac (`kill -9`) while an app is full screen there, start it again:
+      the Mac's menu bar and Dock are as before.
+- [ ] Open TextEdit, Notes, Finder: no thin band of the desktop between the title bar and the
+      app, no dark curve at the top corners.
+- [ ] Close an app with its red button and open it again at once from the launcher or the
+      Dock: it opens (no endless loading), the connection stays.
 
 ## 9. Stopping and uninstalling
 

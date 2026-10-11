@@ -436,8 +436,10 @@ func sendMenuBar(_ id: String) {
     }
 }
 
-/// Windows captured again because their stream brought no picture (at most twice each).
+/// Windows captured again because their stream brought no picture (at most twice each), or
+/// stopped by itself (at most five times each).
 var pictureRetries: [CGWindowID: Int] = [:]
+var captureRestarts: [CGWindowID: Int] = [:]
 
 /// `popup`: a pop-up menu or popover (cut out of its display). Callers pass what they know of
 /// the window: the tracker's callbacks run on its queue, where asking it again would deadlock.
@@ -451,6 +453,21 @@ func startStream(_ id: CGWindowID, inset: CGFloat, popup: Bool = false, after: T
     let framed = !exactWindows && !popup
     if viewerFeatures.contains("mask") { ws.onShape = { w, h, a in sendShape(id, w, h, framed ? Shape.fillingTop(a, width: w, height: h) : a) } }
     ws.setBitrate(sender.bitrate)
+    // stopped by itself (the system ended it, its display went away): started again, as the window
+    // is now, instead of staying on its last picture
+    ws.onStopped = { [weak ws] _ in
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+            guard let ws = ws else { return }
+            streamsLock.lock()
+            let current = streams[id] === ws
+            let tries = captureRestarts[id] ?? 0
+            if current { captureRestarts[id] = tries + 1 }
+            streamsLock.unlock()
+            guard current, tries < 5, let now = tracker.current(id) else { return }
+            log("window \(id): capture started again")
+            startStream(id, inset: now.inset, popup: now.role == .popup, after: stopStream(id))
+        }
+    }
     streamsLock.lock(); streams[id] = ws; streamsLock.unlock()
     Task {
         await after?.value
@@ -546,7 +563,7 @@ tracker.onDestroyed = { id in
     lastInset.removeValue(forKey: id)
     restartLock.lock(); restartGen.removeValue(forKey: id); restartLock.unlock()
     stopStream(id)
-    streamsLock.lock(); pictureRetries.removeValue(forKey: id); streamsLock.unlock()
+    streamsLock.lock(); pictureRetries.removeValue(forKey: id); captureRestarts.removeValue(forKey: id); streamsLock.unlock()
     sender.udp?.forgetWindow(UInt64(id))
     send(["type": "window_destroyed", "window_id": Int(id)])
 }
@@ -600,6 +617,9 @@ menuBarMirror.onShown = { r in tracker.setMenuBar(r) }
 let uploads = UploadStore(send: send)
 uploads.cleanup() // leftovers of a session that ended without cleaning (crash, power loss)
 let displays = DisplayManager()
+// a session that ended without a word may have left the menu bar and Dock hidden (a fullscreen
+// window); not while another Taro runs: it may be the one hiding them
+if runningInBackground() == nil { displays.restoreChromeAfterCrash() }
 /// the Mac's screens mirror our HiDPI display for the whole session (not only the Mac Desktop)
 var keepMirror = false
 /// the layout the app windows get ("W,H,S" from the client): the Mac Desktop may lay out its
