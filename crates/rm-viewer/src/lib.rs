@@ -5,6 +5,7 @@ pub mod audio;
 pub mod banner;
 pub mod chrome;
 pub mod connectui;
+pub mod dock;
 pub mod field;
 pub mod ico;
 pub mod keymap;

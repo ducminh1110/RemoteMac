@@ -823,7 +823,7 @@ impl View {
 
 /// An icon to show until the Mac's comes: a rounded square in a colour of the name, its first
 /// letter in white (the Mac Desktop: a display).
-fn placeholder(id: &str, name: &str, size: usize, s: f32) -> Canvas {
+pub fn placeholder(id: &str, name: &str, size: usize, s: f32) -> Canvas {
     let mut c = Canvas::new(size, size);
     let f = size as f32;
     let hue = name.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32)) % 360;

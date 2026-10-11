@@ -10,7 +10,7 @@ use crate::glass::{self, Kind, Level, Material};
 use crate::look::{self, theme, Light, Symbol};
 use crate::motion::{Anim, Curve};
 use crate::paint::{Canvas, Rgba};
-use crate::settings::{Settings, BITRATES, DECODERS, DESKTOP_SCALES, FPS, GLASS_LEVELS, KEYBOARD_MODES, MOTION_LEVELS, QUALITY, WINDOW_FRAMES};
+use crate::settings::{Settings, BITRATES, DECODERS, DESKTOP_SCALES, DOCK_EDGES, FPS, GLASS_LEVELS, KEYBOARD_MODES, MOTION_LEVELS, QUALITY, WINDOW_FRAMES};
 use crate::text::{self, Style};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -40,6 +40,7 @@ pub enum Field {
     Glass,
     Motion,
     Frame,
+    Dock,
 }
 
 enum Control {
@@ -65,6 +66,7 @@ impl Field {
             Field::Glass => "Glass",
             Field::Motion => "Animations",
             Field::Frame => "Mac windows",
+            Field::Dock => "Dock",
         }
     }
 
@@ -85,7 +87,7 @@ struct Section {
     groups: &'static [(&'static [Field], &'static str)],
 }
 
-const SECTIONS: [Section; 4] = [
+const SECTIONS: [Section; 5] = [
     Section {
         name: "Video",
         icon: Symbol::Display,
@@ -109,6 +111,7 @@ const SECTIONS: [Section; 4] = [
         colour: Rgba::rgb(0x5e, 0x5c, 0xe6),
         groups: &[(&[Field::Frame], "The app's menus sit in each window's title bar, beside its buttons. As the Mac draws them (experimental): the Mac's own title bars, and its menu bar at the top of the screen. Applies from the next connection."), (&[Field::Glass, Field::Motion], "")],
     },
+    Section { name: "Dock", icon: Symbol::Dock, colour: Rgba::rgb(0x8e, 0x5c, 0xd9), groups: &[(&[Field::Dock], "Push the pointer against that edge of the screen to bring the Dock out: the Mac Desktop, the Mac apps open here, and Open an App. Passing by the edge leaves it hidden.")] },
 ];
 
 /// What the pointer is over.
@@ -221,6 +224,7 @@ impl SettingsView {
             Field::Glass => own(&GLASS_LEVELS),
             Field::Motion => own(&MOTION_LEVELS),
             Field::Frame => own(&WINDOW_FRAMES),
+            Field::Dock => own(&DOCK_EDGES),
             _ => vec![],
         }
     }
@@ -238,6 +242,7 @@ impl SettingsView {
             Field::Glass => s.glass as usize,
             Field::Motion => s.motion as usize,
             Field::Frame => s.frame as usize,
+            Field::Dock => s.dock as usize,
             _ => 0,
         }
     }
@@ -255,6 +260,7 @@ impl SettingsView {
             Field::Glass => s.glass = i.min(GLASS_LEVELS.len() - 1) as u8,
             Field::Motion => s.motion = i.min(MOTION_LEVELS.len() - 1) as u8,
             Field::Frame => s.frame = i.min(WINDOW_FRAMES.len() - 1) as u8,
+            Field::Dock => s.dock = i.min(DOCK_EDGES.len() - 1) as u8,
             _ => {}
         }
     }

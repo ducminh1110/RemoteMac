@@ -35,6 +35,9 @@ pub struct Settings {
     pub glass: u8,
     /// animations: 0 as Windows says, 1 reduced, 2 full
     pub motion: u8,
+    /// the Dock ([`DOCK_EDGES`]): 0 off, 1 at the left edge of the screen, 2 at the right; it
+    /// comes out when the pointer is pushed against that edge
+    pub dock: u8,
     /// how Mac windows look ([`WINDOW_FRAMES`]): 0 with MacBridge's own title bar, the app's
     /// menus in it; 1 as the Mac draws them (title bar, buttons; the Mac's menu bar at the top of
     /// the screen; experimental)
@@ -43,7 +46,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { fps: 60, bitrate_mbps: 0, quality: 0, decoder: 0, pacing: false, local_cursor: false, desktop_2x: true, workspace: 1, audio: true, volume: 100, keyboard: 0, glass: 0, motion: 0, frame: 0 }
+        Self { fps: 60, bitrate_mbps: 0, quality: 0, decoder: 0, pacing: false, local_cursor: false, desktop_2x: true, workspace: 1, audio: true, volume: 100, keyboard: 0, glass: 0, motion: 0, dock: 1, frame: 0 }
     }
 }
 
@@ -61,6 +64,7 @@ pub const KEYBOARD_MODES: [&str; 3] = ["Windows — Ctrl acts as ⌘ Command", "
 pub const GLASS_LEVELS: [&str; 3] = ["Liquid Glass (refraction and light)", "Frosted (blur only)", "Off (solid, least GPU)"];
 pub const MOTION_LEVELS: [&str; 3] = ["As Windows is set", "Reduced", "Full"];
 pub const WINDOW_FRAMES: [&str; 2] = ["With the app's menus in the title bar", "As the Mac draws them (experimental)"];
+pub const DOCK_EDGES: [&str; 3] = ["Off", "At the left edge", "At the right edge"];
 
 fn path() -> std::path::PathBuf {
     crate::log_path().with_file_name("settings.json")
@@ -89,6 +93,9 @@ impl Settings {
             // "window_frame" since the menus went back into the windows (1.2.0-beta.1's "frame"
             // had them at the top of the screen first, and is not carried over)
             s.frame = n("window_frame").map_or(s.frame, |x| x.min(1) as u8);
+            // "dock_edge": the Dock at a side of the screen (1.2.0; the older "dock" was the
+            // Mac's own Dock at the bottom, off unless chosen)
+            s.dock = n("dock_edge").map_or(s.dock, |x| x.min(2) as u8);
         }
         s
     }
@@ -112,7 +119,7 @@ impl Settings {
         let v = serde_json::json!({
             "fps": self.fps, "bitrate_mbps": self.bitrate_mbps, "sharpness": self.quality,
             "decoder": self.decoder, "pacing": self.pacing, "local_cursor": self.local_cursor, "desktop_2x": self.desktop_2x, "workspace": self.workspace,
-            "audio": self.audio, "volume": self.volume, "keyboard": self.keyboard, "glass": self.glass, "motion": self.motion, "window_frame": self.frame,
+            "audio": self.audio, "volume": self.volume, "keyboard": self.keyboard, "glass": self.glass, "motion": self.motion, "dock_edge": self.dock, "window_frame": self.frame,
         });
         if let Some(d) = path().parent() {
             std::fs::create_dir_all(d)?;

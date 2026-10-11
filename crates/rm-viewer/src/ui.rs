@@ -302,6 +302,7 @@ pub fn run(opts: Options) -> i32 {
         crate::glassmenu::register(hinst);
         crate::palette::register(hinst);
         crate::banner::register(hinst);
+        crate::dock::register(hinst);
         crate::settings_ui::register(hinst);
         crate::navball::register(hinst, ball_menu);
         let controller = match CreateWindowExW(WINDOW_EX_STYLE(0), w!("RmController"), w!("rm-controller"), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(hinst), None) {
@@ -673,6 +674,7 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             shortcuts_tick();
             menu_bar_tick();
             taskbar_tick();
+            dock_tick();
             with_app(|a| a.launcher.as_mut().map(|l| l.poll()));
             smoke_tick();
             showcase_tick();
@@ -974,6 +976,52 @@ fn menu_bar_tick() {
             let _ = ShowWindow(strip, SW_HIDE);
         }
     }
+}
+
+// ------------------------------------------------------------------ the Dock (dock.rs)
+
+/// Every 100 ms: the Dock at the edge the setting says, with the Mac Desktop, the Mac apps open
+/// here and Open an App; gone while the Mac is (and in tests, but for the gallery's picture).
+fn dock_tick() {
+    let edge = crate::dock::Edge::from_setting(crate::settings::Settings::load_cached().dock);
+    let connected = !MAC_GONE.load(std::sync::atomic::Ordering::Acquire);
+    let gallery = GALLERY.with(|g| g.borrow().is_some());
+    let headless = with_app(|a| a.smoke.is_some() || a.showcase.is_some()).unwrap_or(true) && !gallery;
+    let Some(edge) = edge.filter(|_| connected && !headless) else {
+        crate::dock::close();
+        return;
+    };
+    let Some((hinst, items, icons)) = with_app(|a| {
+        let mut items = vec![crate::dock::DockItem { id: DESKTOP_APP.into(), name: "Mac Desktop".into(), running: a.remotes.values().any(|r| r.app == DESKTOP_APP) }];
+        let mut seen = std::collections::HashSet::new();
+        for r in a.remotes.values().filter(|r| r.role == WindowRole::Window && r.parent.is_none() && r.app != DESKTOP_APP && r.app != MENUBAR_APP) {
+            if seen.insert(r.app.clone()) {
+                let name = a.app_names.iter().find(|(id, _)| *id == r.app).map_or(r.app.clone(), |(_, n)| n.clone());
+                items.push(crate::dock::DockItem { id: r.app.clone(), name, running: true });
+            }
+        }
+        // the open apps in a steady order (by name), the Mac Desktop first, Open an App last
+        items[1..].sort_by_key(|a| a.name.to_lowercase());
+        items.push(crate::dock::DockItem { id: "\u{1}search".into(), name: "Open an App…".into(), running: false });
+        (a.hinst, items, a.icon_rgba.clone())
+    }) else { return };
+    crate::dock::sync(HINSTANCE(hinst as *mut c_void), edge, items, &icons, |id| {
+        if id == "\u{1}search" {
+            open_palette();
+            return;
+        }
+        let window = with_app(|a| a.remotes.iter().find(|(_, r)| r.app == id && r.role == WindowRole::Window && r.parent.is_none()).map(|(k, _)| *k)).flatten();
+        match window {
+            Some(h) => unsafe {
+                let h = hwnd_of(h);
+                if IsIconic(h).as_bool() {
+                    let _ = ShowWindow(h, SW_RESTORE);
+                }
+                let _ = SetForegroundWindow(h);
+            },
+            None => launch_app(&id),
+        }
+    });
 }
 
 /// The id of the Ctrl+Alt+Space hot key.
@@ -3877,6 +3925,7 @@ fn gallery_tick(dir: &std::path::Path) -> bool {
             1 => crate::glassmenu::cancel(),
             2 => crate::palette::close(),
             3 => crate::banner::hide(),
+            4 => crate::dock::close(),
             7 => crate::glassmenu::cancel(),
             6 => {
                 // the launcher back to its size
@@ -3951,21 +4000,24 @@ fn gallery_tick(dir: &std::path::Path) -> bool {
             }
         }
         4 => {
-            // (was the Dock: removed) the Mac Desktop closed, as the user would, before the
-            // app windows' pictures
+            // the Dock out at the left edge (as a push against it brings it), with the open apps
+            // (the Mac Desktop closed first, as the user would)
             if fresh {
+                GALLERY_KEYS.with(|g| g.set(0));
                 let desktop = with_app(|a| a.remotes.iter().find(|(_, r)| r.app == DESKTOP_APP).map(|(k, _)| *k)).flatten();
                 if let Some(k) = desktop {
                     unsafe {
                         let _ = PostMessageW(Some(hwnd_of(k)), WM_CLOSE, WPARAM(0), LPARAM(0));
                     }
                 }
-            } else if since.elapsed() > Duration::from_millis(1000) {
-                GALLERY.with(|g| {
-                    if let Some(g) = g.borrow_mut().as_mut() {
-                        (g.step, g.since) = (g.step + 1, Instant::now());
-                    }
-                });
+            } else if since.elapsed() > Duration::from_millis(900) && GALLERY_KEYS.with(|g| g.get()) == 0 {
+                GALLERY_KEYS.with(|g| g.set(1));
+                let wa = crate::surface::work_area_at(0, 0);
+                crate::dock::reveal_now(POINT { x: wa.left, y: (wa.top + wa.bottom) / 2 });
+            } else if since.elapsed() > Duration::from_millis(1900) {
+                let wa = crate::surface::work_area_at(0, 0);
+                let s = crate::surface::scale_at(0, 0);
+                ask("14-dock", Some(RECT { left: wa.left, top: wa.top, right: wa.left + (380.0 * s) as i32, bottom: wa.bottom }));
             }
         }
         5 => {
