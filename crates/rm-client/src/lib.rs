@@ -14,6 +14,8 @@ pub struct Session<S: Read + Write> {
     pub state: SessionState,
     pub negotiated: Negotiated,
     pub capabilities: CapabilityReport,
+    /// what the agent calls itself in its hello ("taro 1.2.3 Version 15.1 …")
+    pub agent: String,
     /// UDP video (frames rebuilt from FEC shards) when attached
     udp: Option<(std::sync::Arc<udp::UdpVideo>, std::sync::mpsc::Receiver<rm_protocol::udp::Out>)>,
     /// our direct-path offer, once the UDP thread knows our addresses (sent by `recv`)
@@ -48,7 +50,7 @@ impl<S: Read + Write> Session<S> {
             m => return Err(unexpected(m)),
         };
         let state = SessionState::Connecting.next(Event::HandshakeComplete).expect("valid transition");
-        Ok(Self { stream, state, negotiated, capabilities, udp: None, offer: None })
+        Ok(Self { stream, state, negotiated, capabilities, agent: theirs.agent, udp: None, offer: None })
     }
 
     pub fn list_apps(&mut self) -> Result<Vec<AppInfo>, ClientError> {

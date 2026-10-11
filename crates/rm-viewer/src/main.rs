@@ -9,6 +9,11 @@ fn main() {
         eprintln!("usage: Taro.exe                      (asks for the Mac's ID and password)\n       Taro.exe --id 123456789 --password PASS\n       RM_SESSION_TOKEN=.. Taro.exe --session NAME   (legacy)\n  [--relay HOST:PORT | --direct HOST[:PORT]] [--app testapp] [--logs-enabled] [--raw-ctrl] [--no-clipboard] [--renderer d3d11|gdi] [--mac-file-panel] [--no-shortcuts] [--smoke] [--showcase DIR --apps xcode,textedit --settle SECS --type TEXT]");
         std::process::exit(0)
     }
+    // Taro's icon as an .ico file (the installer and its shortcuts take it)
+    if let Some(path) = get("--write-icon") {
+        let ico = rm_viewer::ico::rgba_to_ico(256, &rm_viewer::logo::rgba(256)).expect("icon");
+        std::process::exit(if std::fs::write(&path, ico).is_ok() { 0 } else { 1 })
+    }
     // a Mac on this network is found by its ID; for one elsewhere: --relay, $RM_RELAY, the relay
     // built into this build (none in the source), or what the connect window is given
     let relay = get("--relay").or_else(|| std::env::var("RM_RELAY").ok().filter(|r| !r.is_empty())).or_else(|| rm_protocol::session::default_relay().map(String::from));

@@ -240,6 +240,8 @@ pub enum Symbol {
     UpDown,
     /// "checkmark"
     Check,
+    /// "info.circle"
+    Info,
 }
 
 pub fn symbol(c: &mut Canvas, sym: Symbol, x: f32, y: f32, d: f32, col: Rgba) {
@@ -354,6 +356,11 @@ pub fn symbol(c: &mut Canvas, sym: Symbol, x: f32, y: f32, d: f32, col: Rgba) {
         Symbol::Check => {
             c.fill_capsule(x - 5.0 * k, y + 0.2 * k, x - 1.6 * k, y + 3.8 * k, w * 0.55, col);
             c.fill_capsule(x - 1.6 * k, y + 3.8 * k, x + 5.4 * k, y - 4.6 * k, w * 0.55, col);
+        }
+        Symbol::Info => {
+            c.stroke_round_rect_with(x - 7.0 * k, y - 7.0 * k, 14.0 * k, 14.0 * k, 7.0 * k, w, |_, _| col);
+            c.fill_circle(x, y - 3.4 * k, 1.05 * k, col);
+            c.fill_capsule(x, y - 0.6 * k, x, y + 3.8 * k, 0.8 * k, col);
         }
         Symbol::Warning => {
             c.fill_circle(x, y, 7.0 * k, col);

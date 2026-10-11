@@ -416,6 +416,7 @@ fn connect_steps(relay: Option<&str>, session: &str, token: &str, app: Option<&s
     let settings = crate::settings::Settings::load();
     link.send(&settings.message(display_scale(), screen_px()));
     *MAC_FEATURES.lock().unwrap() = sess.negotiated.features.clone();
+    *MAC_VERSION.lock().unwrap() = crate::update::version_in(&sess.agent);
     // the Mac's sound, unless muted (a Mac without the feature is never asked)
     let audio = crate::audio::audio();
     audio.reset();
@@ -475,6 +476,13 @@ static MAC_FEATURES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 pub fn mac_has(feature: &str) -> bool {
     MAC_FEATURES.lock().unwrap().iter().any(|f| f == feature)
+}
+
+/// The connected (or last) Mac's Taro version, from its hello.
+static MAC_VERSION: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn mac_version() -> Option<String> {
+    MAC_VERSION.lock().unwrap().clone()
 }
 
 /// Start the Mac Desktop in full GameStream mode for window `id` (see gsdesktop.rs): the tunnel

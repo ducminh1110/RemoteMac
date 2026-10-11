@@ -41,12 +41,16 @@ pub enum Field {
     Motion,
     Frame,
     Dock,
+    /// About this Taro: where updating is at, and its button
+    Updates,
+    AutoUpdate,
 }
 
 enum Control {
     Menu,
     Switch,
     Slider,
+    Button,
 }
 
 impl Field {
@@ -67,17 +71,52 @@ impl Field {
             Field::Motion => "Animations",
             Field::Frame => "Mac windows",
             Field::Dock => "Dock",
+            Field::Updates => "Software Update",
+            Field::AutoUpdate => "Check for updates automatically",
         }
     }
 
     fn control(self) -> Control {
         match self {
-            Field::Pacing | Field::Audio | Field::Cursor => Control::Switch,
+            Field::Pacing | Field::Audio | Field::Cursor | Field::AutoUpdate => Control::Switch,
             Field::Volume => Control::Slider,
+            Field::Updates => Control::Button,
             _ => Control::Menu,
         }
     }
+
+    /// The row's height (DIPs): Software Update has its state on a second line.
+    fn height(self) -> f32 {
+        if self == Field::Updates {
+            62.0
+        } else {
+            ROW
+        }
+    }
 }
+
+/// What the Software Update button does now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateButton {
+    Check,
+    Install,
+}
+
+/// What About this Taro shows (set by the window from update.rs and the connection).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct About {
+    /// this Taro's version
+    pub version: String,
+    /// the connected (or last) Mac's Taro version
+    pub mac: Option<String>,
+    /// where updating is at, in words
+    pub status: String,
+    /// None while checking, downloading or installing
+    pub button: Option<UpdateButton>,
+}
+
+/// The About this Taro section (the last).
+pub const ABOUT: usize = 5;
 
 /// A section of the sidebar: its name, icon and colour, and its groups (fields, a word under).
 struct Section {
@@ -87,7 +126,7 @@ struct Section {
     groups: &'static [(&'static [Field], &'static str)],
 }
 
-const SECTIONS: [Section; 5] = [
+const SECTIONS: [Section; 6] = [
     Section {
         name: "Video",
         icon: Symbol::Display,
@@ -111,7 +150,13 @@ const SECTIONS: [Section; 5] = [
         colour: Rgba::rgb(0x5e, 0x5c, 0xe6),
         groups: &[(&[Field::Frame], "The app's menus sit in each window's title bar, beside its buttons. As the Mac draws them (experimental): the Mac's own title bars, and its menu bar at the top of the screen. Applies from the next connection."), (&[Field::Glass, Field::Motion], "")],
     },
-    Section { name: "Dock", icon: Symbol::Dock, colour: Rgba::rgb(0x8e, 0x5c, 0xd9), groups: &[(&[Field::Dock], "Push the pointer against that edge of the screen to bring the Dock out: the Mac Desktop, the Mac apps open here, and Open an App. Passing by the edge leaves it hidden.")] },
+    Section { name: "Dock", icon: Symbol::Dock, colour: Rgba::rgb(0x8e, 0x5c, 0xd9), groups: &[(&[Field::Dock], "A short push of the pointer against that edge of the screen brings the Mac's Dock out. Passing by the edge leaves it hidden.")] },
+    Section {
+        name: "About this Taro",
+        icon: Symbol::Info,
+        colour: Rgba::rgb(0x8e, 0x8e, 0x93),
+        groups: &[(&[Field::Updates, Field::AutoUpdate], "Updates come from Taro's releases on GitHub: the installer is checked, then Taro closes, updates and opens again (the Mac's apps stay open). On the Mac, run ./taro-update.sh in Taro's folder.")],
+    },
 ];
 
 /// What the pointer is over.
@@ -130,6 +175,8 @@ pub enum Act {
     /// the settings changed: apply them
     Changed(Settings),
     Window(Light),
+    /// Check for Updates, or Update Now
+    Update(UpdateButton),
 }
 
 /// A menu open on a field: its items and the one under the pointer.
@@ -167,6 +214,9 @@ pub struct SettingsView {
     glass: Option<(u64, Canvas)>,
     /// the open menu's glass, by where it is and its size
     menu_glass: Option<(u64, Canvas)>,
+    about: About,
+    /// Taro's icon in About this Taro, at its size
+    icon: Option<(usize, Canvas)>,
 }
 
 /// The part of an option shown on its menu button: before " — " or " (".
@@ -179,10 +229,21 @@ impl SettingsView {
     /// `workspaces`: the Mac screen sizes offered (worked out from this PC's screen).
     pub fn new(settings: Settings, workspaces: Vec<String>) -> SettingsView {
         let mut knobs = HashMap::new();
-        for f in [Field::Pacing, Field::Audio, Field::Cursor] {
+        for f in [Field::Pacing, Field::Audio, Field::Cursor, Field::AutoUpdate] {
             knobs.insert(f, Anim::at(if Self::switch_of(&settings, f) { 1.0 } else { 0.0 }));
         }
-        SettingsView { settings, workspaces, section: 0, hot: Hot::None, down: Hot::None, menu: None, knobs, dragging: false, w: W as usize, h: H as usize, s: 1.0, dark: false, active: true, level: Level::Full, texts: HashMap::new(), glass: None, menu_glass: None }
+        SettingsView { settings, workspaces, section: 0, hot: Hot::None, down: Hot::None, menu: None, knobs, dragging: false, w: W as usize, h: H as usize, s: 1.0, dark: false, active: true, level: Level::Full, texts: HashMap::new(), glass: None, menu_glass: None, about: About::default(), icon: None }
+    }
+
+    /// What About this Taro shows now.
+    pub fn set_about(&mut self, a: About) {
+        self.about = a;
+    }
+
+    /// Show this section (About this Taro: [`ABOUT`]).
+    pub fn set_section(&mut self, i: usize) {
+        self.section = i.min(SECTIONS.len() - 1);
+        self.menu = None;
     }
 
     pub fn set_window(&mut self, w: usize, h: usize, s: f32, dark: bool, level: Level) {
@@ -207,6 +268,7 @@ impl SettingsView {
             Field::Pacing => s.pacing,
             Field::Audio => s.audio,
             Field::Cursor => s.local_cursor,
+            Field::AutoUpdate => s.auto_update,
             _ => false,
         }
     }
@@ -280,6 +342,10 @@ impl SettingsView {
                 s.local_cursor = !s.local_cursor;
                 s.local_cursor
             }
+            Field::AutoUpdate => {
+                s.auto_update = !s.auto_update;
+                s.auto_update
+            }
             _ => return,
         };
         self.knobs.entry(f).or_insert_with(|| Anim::at(0.0)).retarget(if v { 1.0 } else { 0.0 }, Duration::from_millis(400), SPRING);
@@ -315,14 +381,15 @@ impl SettingsView {
     /// Each field of the section shown: its row (x, y, w, h); and each group's box and note.
     fn layout(&mut self) -> Layout {
         let (x, w) = (self.content_x(), self.content_w());
-        let mut y = self.p(70.0);
+        // (About this Taro: Taro's icon and versions first)
+        let mut y = self.p(if self.section == ABOUT { 196.0 } else { 70.0 });
         let mut rows = vec![];
         let mut groups = vec![];
         for (fields, note) in SECTIONS[self.section].groups {
             let top = y;
             for f in fields.iter() {
-                rows.push((*f, (x, y, w, self.p(ROW))));
-                y += self.p(ROW);
+                rows.push((*f, (x, y, w, self.p(f.height()))));
+                y += self.p(f.height());
             }
             let lines = if note.is_empty() { vec![] } else { text::wrap(note, Style::dip(11.5, 400, self.s), w - self.p(16.0), 4) };
             groups.push(((x, top, w, y - top), lines.clone()));
@@ -345,6 +412,45 @@ impl SettingsView {
         let below = ry + rh - self.p(4.0);
         let my = if below + mh < self.h as f32 - self.p(10.0) { below } else { (ry - mh + self.p(4.0)).max(self.p(10.0)) };
         Some(((mx, my, mw, mh), ih))
+    }
+
+    /// The Software Update button in its row, and what it says.
+    fn button_rect(&mut self, row: Rect) -> (Rect, &'static str) {
+        let label = if self.about.button == Some(UpdateButton::Install) { "Update Now" } else { "Check for Updates" };
+        let (x, y, w, h) = row;
+        let bw = self.text(label, 13.0, 500, self.p(240.0)).1 as f32 + self.p(28.0);
+        let bh = self.p(28.0);
+        ((x + w - self.p(16.0) - bw, y + (h - bh) / 2.0, bw, bh), label)
+    }
+
+    /// About this Taro: Taro's icon, its version, the Mac's.
+    fn draw_about_header(&mut self, c: &mut Canvas) {
+        let t = theme(self.dark);
+        let (x, y) = (self.content_x(), self.p(72.0));
+        let n = self.p(96.0).round() as usize;
+        if self.icon.as_ref().is_none_or(|(k, _)| *k != n) {
+            self.icon = Some((n, crate::logo::icon(n)));
+        }
+        if let Some((_, icon)) = &self.icon {
+            c.composite(icon, x.round() as isize, y.round() as isize, 1.0);
+        }
+        let tx = x + n as f32 + self.p(18.0);
+        let tw = self.content_w() - n as f32 - self.p(18.0);
+        let name = self.text("Taro", 24.0, 700, tw);
+        Self::put(c, &name, tx, y + self.p(8.0), t.text);
+        let version = self.text(&format!("Version {}", self.about.version), 13.0, 400, tw);
+        Self::put(c, &version, tx, y + self.p(44.0), t.text2);
+        let mac_line = match &self.about.mac {
+            Some(v) => format!("The Mac runs Taro {v}"),
+            None => "No Mac connected yet".to_string(),
+        };
+        let mac = self.text(&mac_line, 12.0, 400, tw);
+        Self::put(c, &mac, tx, y + self.p(64.0), t.text2);
+        // a Mac behind this PC: how to bring it up to date
+        if self.about.mac.as_deref().is_some_and(|m| crate::update::newer(&self.about.version, m)) {
+            let hint = self.text("Update it: run ./taro-update.sh in Taro's folder on the Mac.", 12.0, 600, tw);
+            Self::put(c, &hint, tx, y + self.p(82.0), t.accent);
+        }
     }
 
     fn slider_track(&self, row: (f32, f32, f32, f32)) -> (f32, f32, f32) {
@@ -473,6 +579,7 @@ impl SettingsView {
                     None
                 }
                 Control::Slider => None,
+                Control::Button => self.about.button.map(Act::Update),
             },
             _ => None,
         }
@@ -576,6 +683,9 @@ impl SettingsView {
         // the section: its name, then its groups
         let title = self.text(SECTIONS[self.section].name, 20.0, 700, self.content_w());
         Self::put(&mut c, &title, self.content_x(), self.p(26.0), if self.active { t.text } else { t.text2 });
+        if self.section == ABOUT {
+            self.draw_about_header(&mut c);
+        }
         let (rows, groups) = self.layout();
         let (fill, line) = if self.dark { (Rgba::WHITE.alpha(0.06), Rgba::WHITE.alpha(0.08)) } else { (Rgba::WHITE.alpha(0.82), Rgba::rgba(20, 40, 80, 22)) };
         for ((gx, gy, gw, gh), note) in &groups {
@@ -594,7 +704,15 @@ impl SettingsView {
                 c.fill_round_rect(x + self.p(16.0), y, w - self.p(32.0), (0.75 * s).max(1.0), 0.0, t.divider);
             }
             let m = self.text(f.label(), 13.0, 400, w * 0.45);
-            Self::put(&mut c, &m, x + self.p(16.0), y + (h - m.2 as f32) / 2.0, t.text);
+            if *f == Field::Updates {
+                // the state on a second line, beside the button
+                Self::put(&mut c, &m, x + self.p(16.0), y + h / 2.0 - m.2 as f32 - self.p(1.0), t.text);
+                let status = self.about.status.clone();
+                let sm = self.text(&status, 11.5, 400, w - self.p(190.0));
+                Self::put(&mut c, &sm, x + self.p(16.0), y + h / 2.0 + self.p(2.0), t.text2);
+            } else {
+                Self::put(&mut c, &m, x + self.p(16.0), y + (h - m.2 as f32) / 2.0, t.text);
+            }
             match f.control() {
                 Control::Menu => {
                     let opts = self.options(*f);
@@ -631,6 +749,24 @@ impl SettingsView {
                     c.fill_circle(kx, ty, self.p(10.0), Rgba::WHITE);
                     let vm = self.text(&format!("{} %", self.settings.volume), 12.0, 400, self.p(60.0));
                     Self::put(&mut c, &vm, tx - self.p(28.0) - vm.1 as f32, ty - vm.2 as f32 / 2.0, t.text2);
+                }
+                Control::Button => {
+                    let ((bx, by, bw, bh), label) = self.button_rect(*row);
+                    let install = self.about.button == Some(UpdateButton::Install);
+                    let enabled = self.about.button.is_some();
+                    let hot = enabled && self.hot == Hot::Field(*f);
+                    let pressed = hot && self.down == Hot::Field(*f);
+                    let fill = if install {
+                        t.accent.shade(if pressed { -0.12 } else if hot { -0.06 } else { 0.0 })
+                    } else if self.dark {
+                        Rgba::WHITE.alpha(if pressed { 0.22 } else if hot { 0.17 } else if enabled { 0.12 } else { 0.06 })
+                    } else {
+                        Rgba::BLACK.alpha(if pressed { 0.13 } else if hot { 0.09 } else if enabled { 0.06 } else { 0.03 })
+                    };
+                    c.fill_round_rect(bx, by, bw, bh, bh / 2.0, fill);
+                    let lm = self.text(label, 13.0, 500, bw);
+                    let fg = if install { Rgba::WHITE } else if enabled { t.text } else { t.text3 };
+                    Self::put(&mut c, &lm, bx + (bw - lm.1 as f32) / 2.0, by + (bh - lm.2 as f32) / 2.0, fg);
                 }
             }
         }
@@ -742,6 +878,30 @@ mod tests {
     }
 
     #[test]
+    fn about_this_taro_checks_and_updates() {
+        let mut v = view();
+        let (sx, sy, sw, sh) = v.section_rect(ABOUT);
+        click(&mut v, sx + sw / 2.0, sy + sh / 2.0);
+        assert_eq!(v.section(), ABOUT);
+        v.set_about(About { version: "1.2.3".into(), mac: Some("1.2.2".into()), status: "Taro is up to date.".into(), button: Some(UpdateButton::Check) });
+        let r = row(&mut v, Field::Updates);
+        let ((bx, by, bw, bh), label) = v.button_rect(r);
+        assert_eq!(label, "Check for Updates");
+        assert_eq!(click(&mut v, bx + bw / 2.0, by + bh / 2.0), Some(Act::Update(UpdateButton::Check)));
+        // a newer one found: the button installs it
+        v.set_about(About { version: "1.2.3".into(), mac: None, status: "Taro 1.2.4 is available.".into(), button: Some(UpdateButton::Install) });
+        let ((bx, by, bw, bh), label) = v.button_rect(r);
+        assert_eq!(label, "Update Now");
+        assert_eq!(click(&mut v, bx + bw / 2.0, by + bh / 2.0), Some(Act::Update(UpdateButton::Install)));
+        // while it checks or downloads, it does nothing
+        v.set_about(About { version: "1.2.3".into(), mac: None, status: "Checking for updates…".into(), button: None });
+        assert_eq!(click(&mut v, bx + bw / 2.0, by + bh / 2.0), None);
+        // the automatic check can be turned off
+        let (x, y, w, h) = row(&mut v, Field::AutoUpdate);
+        assert!(matches!(click(&mut v, x + w - 30.0, y + h / 2.0), Some(Act::Changed(s)) if !s.auto_update));
+    }
+
+    #[test]
     fn every_section_draws() {
         for (s, dark) in [(1.0, false), (1.5, true)] {
             let mut v = view();
@@ -790,6 +950,9 @@ mod preview {
                 v.key_escape();
                 v.section = 1;
                 save(&v.render(later), "settings-sound.ppm");
+                v.set_section(ABOUT);
+                v.set_about(About { version: crate::update::VERSION.into(), mac: Some(crate::update::VERSION.into()), status: "Taro is up to date. (Checked just now.)".into(), button: Some(UpdateButton::Check) });
+                save(&v.render(later), "settings-about.ppm");
             }
         }
     }

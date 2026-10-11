@@ -3,7 +3,7 @@
 //! puts it in a window with no Windows title bar, frame.rs). A change applies at once.
 
 use crate::settings::{Settings, WORKSPACES};
-use crate::settingsui::{Act, SettingsView};
+use crate::settingsui::{About, Act, SettingsView, UpdateButton};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::rc::Rc;
@@ -52,6 +52,36 @@ fn workspaces() -> Vec<String> {
             format!("{w} × {h} ({what})")
         })
         .collect()
+}
+
+/// What About this Taro shows now (update.rs, the connection).
+fn about() -> About {
+    let state = crate::update::state();
+    let button = match &state {
+        crate::update::State::Available(_) => Some(UpdateButton::Install),
+        s if s.busy() => None,
+        _ => Some(UpdateButton::Check),
+    };
+    About { version: crate::update::VERSION.into(), mac: crate::net::mac_version(), status: state.words(), button }
+}
+
+/// Whether the window is on the screen.
+pub fn is_open() -> bool {
+    with(|u| u.hwnd).is_some_and(|h| unsafe { IsWindowVisible(h).as_bool() })
+}
+
+/// Drawn again (where updating is at changed).
+pub fn refresh() {
+    if let Some(h) = with(|u| u.hwnd) {
+        redraw(h);
+    }
+}
+
+/// Open the window at About this Taro.
+pub fn show_about(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: impl Fn(Settings) + 'static) {
+    show(hinst, owner, current, on_save);
+    with(|u| u.view.set_section(crate::settingsui::ABOUT));
+    refresh();
 }
 
 /// Open the window (or bring it forward). `on_save` gets the settings each time one changes.
@@ -130,6 +160,8 @@ fn act(hwnd: HWND, a: Option<Act>) {
             }
         }
         Some(Act::Window(l)) => crate::frame::press(hwnd, l),
+        Some(Act::Update(UpdateButton::Check)) => crate::update::check(false),
+        Some(Act::Update(UpdateButton::Install)) => crate::update::install(),
         None => {}
     }
     animate(hwnd);
@@ -158,7 +190,10 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
-            if let Some(c) = with(|u| u.view.render(Instant::now())) {
+            if let Some(c) = with(|u| {
+                u.view.set_about(about());
+                u.view.render(Instant::now())
+            }) {
                 let bi = BITMAPINFO {
                     bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: c.w as i32, biHeight: -(c.h as i32), biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
                     ..Default::default()

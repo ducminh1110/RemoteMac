@@ -146,8 +146,9 @@ Download the [latest release](../../releases/latest):
 
 | File | Runs on | What it is |
 |---|---|---|
-| `Taro-windows.zip` | Windows 10/11 x64 | `Taro.exe`, the viewer |
-| `Taro-macos.tar.gz` | macOS 14+, Apple silicon and Intel | `taro`, the Mac host |
+| `Taro-Setup.exe` | Windows 10/11 x64 | the viewer's installer (for you only, no administrator); Taro updates itself from then on |
+| `Taro-windows.zip` | Windows 10/11 x64 | the same `Taro.exe`, without installing |
+| `Taro-macos.tar.gz` | macOS 14+, Apple silicon and Intel | `taro`, the Mac host, with `taro.sh` and `taro-update.sh` |
 | `taro-relay.tar.gz` | Linux x86_64 / ARM64 | relay server and its one-command installer |
 
 The official release builds come with a public relay preset, so they work out of the box over
@@ -183,9 +184,17 @@ The first time, macOS asks to allow your terminal app under **System Settings �
 Security → Screen Recording** and **Accessibility**. Allow both, then run the command again.
 The ID stays the same on that Mac.
 
-**2. On Windows:** run `Taro.exe`, type the ID and the password, and press **Connect**
+**2. On Windows:** run `Taro-Setup.exe` (Windows SmartScreen may ask once: **More info → Run
+anyway**), open **Taro** from the Start menu, type the ID and the password, and press **Connect**
 (or choose **By Address** and type only the Mac's address and the password). Pick an app from the launcher, or
 choose **Mac Desktop**.
+
+**Updating.** On Windows, Taro looks for a newer release by itself (at start and every few
+hours) and offers it; **Settings → About this Taro** shows the version, **Check for Updates**
+and **Update Now** (Taro closes, updates and opens again; the Mac's apps stay open). On the Mac,
+run `./taro-update.sh` in Taro's folder: it fetches the newest release, checks it and puts it in
+place, and a Taro running in the background goes on with the new version, same ID and password
+(`./taro-update.sh --check` only says whether there is one).
 
 The [user guide](docs/USER-GUIDE.md) covers everything else: options, settings, shortcuts,
 logs, troubleshooting and uninstalling.

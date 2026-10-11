@@ -279,6 +279,25 @@ live video.
   modifiers to Mac keys, unit-tested; keys still down when a window loses the focus are
   released on the Mac.
 
+## Updates
+
+`crates/rm-viewer/src/update.rs`. The Windows app asks GitHub's REST API for the repository's
+latest release (`/releases/latest`: never a draft or a pre-release) over WinHTTP (the system's
+proxy and certificates), compares its tag with its own version, and offers it: a notice at the
+top of the screen when the automatic check finds it (at start, then every six hours; Settings),
+and Settings → About this Taro. Updating downloads `Taro-Setup.exe` (only from the repository's
+release downloads), checks its size and the SHA-256 GitHub lists for it, runs it with
+`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /RELAUNCH=1`, and ends without saying
+goodbye to the Mac (a cut connection: the Mac keeps the session's apps open). The installer
+(`installer/taro.iss`, Inno Setup, per user, no administrator) replaces `Taro.exe` and starts it
+again.
+
+On the Mac, `taro-update.sh` reads the same release (with macOS's JavaScript), downloads
+`Taro-macos.tar.gz`, checks its SHA-256 and that the new `taro` runs, and moves the files into
+place. A Taro in the background is a watcher and the worker it starts; the script ends the
+worker, and the watcher starts the program at its path again, now the new one, with the same
+arguments (ID and password).
+
 ## Testing
 
 | What | Where | Runs on |

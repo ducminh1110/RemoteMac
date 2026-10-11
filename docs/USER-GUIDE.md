@@ -121,7 +121,12 @@ password in plain text, so keep the file private (`chmod 600`).
 
 ## 3. The Windows app
 
-Unzip `Taro-windows.zip` anywhere and run `Taro.exe`. No installation is needed.
+Run `Taro-Setup.exe`. It installs Taro for you only (no administrator, nothing to choose)
+into `%LOCALAPPDATA%\Programs\Taro`, with **Taro** in the Start menu and an uninstaller in
+Windows' **Installed apps**. The installer is not signed: Windows SmartScreen may ask once
+(**More info → Run anyway**). Taro updates itself from then on (see
+[Updating](#11-updating-and-uninstalling)). `Taro-windows.zip` has the same `Taro.exe` to run
+without installing.
 
 The connect window has two ways in, chosen at the top:
 
@@ -280,8 +285,8 @@ taskbar, at the monitor's size on the Mac (Taro makes the Mac a display of this 
 
 Open **Settings** from the launcher (the gear in its toolbar), the navigation ball, or
 **Ctrl+Alt+Shift+P**. It is laid out as the Mac's System Settings: the sections on the left
-(**Video**, **Sound**, **Keyboard & Pointer**, **Appearance**, **Dock**; Up and Down
-move between them), their settings on the right. A change applies at once; there is no Save.
+(**Video**, **Sound**, **Keyboard & Pointer**, **Appearance**, **Dock**, **About this Taro**;
+Up and Down move between them), their settings on the right. A change applies at once; there is no Save.
 **Video** holds the frame rate, bitrate, sharpness, the Mac screen size (pixel for pixel is its
 last step), the Mac Desktop scale, the decoder and frame pacing; and:
 
@@ -294,6 +299,7 @@ last step), the Mac Desktop scale, the decoder and frame pacing; and:
 | **Animations** | as Windows is set (Settings → Accessibility → Visual effects → Animation effects), reduced, or full. Reduced keeps fades but drops movement and springs. |
 | **Mac windows** | with the app's menus in the title bar, or as the Mac draws them (experimental: its menu bar at the top); from the next connection |
 | **Dock** | at the left edge (the default), at the right edge, or off; see [The Dock](#7-the-dock-and-full-screen) |
+| **About this Taro** | Taro's version and the Mac's; **Software Update** (Check for Updates, Update Now) and **Check for updates automatically**; see [Updating](#11-updating-and-uninstalling) |
 
 Keys still held down when a window loses the focus are let go on the Mac, so none stays
 stuck.
@@ -343,8 +349,29 @@ and any relay key.
 
 ## 11. Updating and uninstalling
 
-**Update:** stop the Mac app (`./taro --stop`), replace `taro`, `taro.sh` and
-`Taro.exe` with the new versions, and start again. The ID is kept.
+**Update on Windows:** Taro looks for a newer release on its own, a few seconds after it
+starts and then every six hours (Settings → About this Taro → **Check for updates
+automatically**). When there is one, a notice comes at the top of the screen: a click updates.
+**Settings → About this Taro** shows this Taro's version and the Mac's, **Check for Updates**,
+and then **Update Now**. The installer is downloaded from Taro's releases on GitHub and checked
+(its size and the SHA-256 GitHub lists for it); Taro then closes, the installer updates it
+silently and opens it again. The Mac's apps stay open, and Taro connects back to them. A copy
+run from `Taro-windows.zip` is updated into the installed place.
+
+**Update on the Mac:** in Taro's folder,
+
+```bash
+./taro-update.sh            # the newest release, when there is a newer one
+./taro-update.sh --check    # only say whether there is one
+```
+
+It fetches `Taro-macos.tar.gz` from Taro's releases on GitHub, checks it (the SHA-256 GitHub
+lists for it, and that the program runs on this Mac), and puts `taro`, `taro.sh`,
+`taro-update.sh` and `README.txt` in place of the ones in the folder (`./taro.sh --update`
+does the same). A Taro running in the background goes on with the new version by itself,
+with the same ID and password; a connected PC reconnects on its own. The ID, the password and
+the permissions are kept. Update both sides: Settings → About this Taro on Windows says when
+the Mac runs an older Taro.
 
 **Uninstall on the Mac:**
 
@@ -357,5 +384,7 @@ rm -f ~/Library/LaunchAgents/com.taro.agent.plist   # if you set up start at log
 Then remove the terminal app from **Screen Recording** and **Accessibility** in System
 Settings if you no longer need it there.
 
-**Uninstall on Windows:** delete the folder with `Taro.exe` and `%APPDATA%\RemoteMac`.
-The Start-menu entries for Mac apps are removed when Taro disconnects.
+**Uninstall on Windows:** Windows Settings → Apps → **Installed apps** → Taro → Uninstall
+(a copy from the zip: delete its folder). Settings and the remembered ID are in
+`%APPDATA%\RemoteMac`; delete it too to remove everything. The Start-menu entries for Mac apps
+are removed when Taro disconnects.

@@ -7,6 +7,7 @@
 # It never changes privacy settings itself: macOS decides, and asks the user. Every option
 # is passed on to taro as it is:  ./taro.sh --password SECRET
 #   ./taro.sh --check      only check, and say what is missing (exit 0 when all is well)
+#   ./taro.sh --update     the newest Taro in place of this one (taro-update.sh)
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -24,9 +25,10 @@ if [[ ! -x "$bin" ]]; then
   exit 2
 fi
 
-# options that need no checks
+# options that need no checks (--update: taro-update.sh, next to this script)
 case "${1:-}" in
   --stop|--version|-h|--help) exec "$bin" "$@" ;;
+  --update) shift; exec "$here/taro-update.sh" "$@" ;;
 esac
 
 ver="$(sw_vers -productVersion 2>/dev/null || echo 0)"

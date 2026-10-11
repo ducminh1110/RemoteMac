@@ -67,6 +67,10 @@ const WM_UI_EVENT: u32 = WM_APP + 1;
 const WM_PICK_FILE: u32 = WM_APP + 2;
 /// The monitor's vertical blank: show the pictures that arrived since the last one.
 const WM_VSYNC: u32 = WM_APP + 3;
+/// Where updating is at changed (update.rs, from its thread).
+const WM_UPDATE: u32 = WM_APP + 4;
+/// The installer runs: Taro ends for it.
+const WM_UPDATE_QUIT: u32 = WM_APP + 5;
 const TIMER_ID: usize = 1;
 const WM_MOUSE_LEAVE: u32 = 0x02A3;
 
@@ -423,6 +427,14 @@ pub fn run(opts: Options) -> i32 {
         eprintln!("frame pacing: {}", if pacer.is_some() { "vsync" } else { "off" });
         with_app(|a| a.vsync = pacer);
         SetTimer(Some(controller), TIMER_ID, 100, None);
+        // updates: Settings shows where they are at, the automatic check brings a notice, and
+        // Taro ends for the installer
+        crate::update::on_change(move || {
+            let _ = PostMessageW(Some(hwnd_of(ctl)), WM_UPDATE, WPARAM(0), LPARAM(0));
+        });
+        crate::update::on_exit(move || {
+            let _ = PostMessageW(Some(hwnd_of(ctl)), WM_UPDATE_QUIT, WPARAM(0), LPARAM(0));
+        });
         if opts.clipboard && !native::listen_clipboard(controller) {
             eprintln!("warning: clipboard listener unavailable; clipboard sync off");
         }
@@ -651,6 +663,63 @@ fn shortcuts_tick() {
     });
 }
 
+/// Taro ends for its installer: the connection is dropped, not closed, and the Mac keeps the
+/// session's apps open for the updated Taro to come back to.
+fn quit_for_update() {
+    crate::lifecycle::set(crate::lifecycle::Phase::Disconnecting);
+    on_mac_gone();
+    crate::lifecycle::set(crate::lifecycle::Phase::Disconnected);
+    with_app(|a| a.exit = Some(0));
+    unsafe { PostQuitMessage(0) };
+}
+
+thread_local! {
+    /// when the automatic check runs next, and the newest version a notice was shown for
+    static UPDATE_NEXT: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    static UPDATE_NOTICED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The automatic check (Settings > About this Taro): a few seconds after Taro starts, then
+/// every six hours.
+fn update_tick() {
+    if with_app(|a| a.smoke.is_some() || a.showcase.is_some()).unwrap_or(true) || std::env::var_os("RM_NO_UPDATE").is_some() {
+        return;
+    }
+    let now = Instant::now();
+    let next = UPDATE_NEXT.with(|n| {
+        let t = n.get().unwrap_or(now + Duration::from_secs(8));
+        n.set(Some(t));
+        t
+    });
+    if now < next {
+        return;
+    }
+    UPDATE_NEXT.with(|n| n.set(Some(now + Duration::from_secs(6 * 3600))));
+    if crate::settings::Settings::load_cached().auto_update {
+        crate::update::check(true);
+    }
+}
+
+/// Where updating is at changed: Settings shows it, and a newer Taro (found by the automatic
+/// check, Settings not open) brings a notice once; a click on it updates.
+fn on_update() {
+    crate::settings_ui::refresh();
+    let crate::update::State::Available(r) = crate::update::state() else { return };
+    let first = UPDATE_NOTICED.with(|n| n.borrow_mut().replace(r.version.clone()).as_deref() != Some(r.version.as_str()));
+    if !first || crate::settings_ui::is_open() {
+        return;
+    }
+    let Some(hinst) = with_app(|a| a.hinst) else { return };
+    let mut p = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut p);
+    }
+    crate::banner::notice(HINSTANCE(hinst as *mut c_void), p.x, p.y, &format!("Taro {} is available", r.version), "Click to update now", || {
+        open_about();
+        crate::update::install();
+    });
+}
+
 fn quit(code: i32) {
     crate::lifecycle::set(crate::lifecycle::Phase::Disconnecting);
     // closed on purpose: the Mac closes the session's apps (a cut connection keeps them open)
@@ -675,12 +744,21 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             on_vsync();
             LRESULT(0)
         }
+        WM_UPDATE => {
+            on_update();
+            LRESULT(0)
+        }
+        WM_UPDATE_QUIT => {
+            quit_for_update();
+            LRESULT(0)
+        }
         WM_TIMER => {
             stats_tick();
             shortcuts_tick();
             menu_bar_tick();
             taskbar_tick();
             dock_tick();
+            update_tick();
             with_app(|a| a.launcher.as_mut().map(|l| l.poll()));
             smoke_tick();
             showcase_tick();
@@ -858,28 +936,37 @@ fn pic_scale(dpi_scale: f64) -> f64 {
 /// sharpness on the Mac; the pointer here) and keeps the rest for windows opened later.
 fn open_settings(owner: Option<HWND>) {
     let Some(hinst) = with_app(|a| a.hinst) else { return };
-    crate::settings_ui::show(HINSTANCE(hinst as *mut c_void), owner, crate::settings::Settings::load(), |s| {
-        if let Err(e) = s.save() {
-            eprintln!("settings not saved: {e}");
+    crate::settings_ui::show(HINSTANCE(hinst as *mut c_void), owner, crate::settings::Settings::load(), settings_changed);
+}
+
+/// Settings at About this Taro (where updating is at).
+fn open_about() {
+    let Some(hinst) = with_app(|a| a.hinst) else { return };
+    crate::settings_ui::show_about(HINSTANCE(hinst as *mut c_void), None, crate::settings::Settings::load(), settings_changed);
+}
+
+/// A setting changed in Settings: saved, and applied at once.
+fn settings_changed(s: crate::settings::Settings) {
+    if let Err(e) = s.save() {
+        eprintln!("settings not saved: {e}");
+    }
+    local_cursor().store(s.local_cursor, std::sync::atomic::Ordering::Relaxed);
+    PIXEL_FOR_PIXEL.store(s.pixel_for_pixel(), std::sync::atomic::Ordering::Relaxed);
+    with_app(|a| a.link.send(&s.message(net::display_scale(), net::screen_px())));
+    // keys: the mode at once (the menus' shortcut labels follow when they are rebuilt)
+    with_app(|a| {
+        if a.ctrl_as_command {
+            a.key_mode = KeyMode::from_setting(s.keyboard);
         }
-        local_cursor().store(s.local_cursor, std::sync::atomic::Ordering::Relaxed);
-        PIXEL_FOR_PIXEL.store(s.pixel_for_pixel(), std::sync::atomic::Ordering::Relaxed);
-        with_app(|a| a.link.send(&s.message(net::display_scale(), net::screen_px())));
-        // keys: the mode at once (the menus' shortcut labels follow when they are rebuilt)
-        with_app(|a| {
-            if a.ctrl_as_command {
-                a.key_mode = KeyMode::from_setting(s.keyboard);
-            }
-        });
-        crate::motion::set_preference(s.motion);
-        // sound: volume at once; muting also stops the Mac sending it
-        let sound = crate::audio::audio();
-        sound.set_volume(s.volume as f32 / 100.0);
-        if sound.muted() == s.audio {
-            with_app(|a| crate::audio::set_muted(Some(&a.link), !s.audio));
-        }
-        eprintln!("settings: {s:?}");
     });
+    crate::motion::set_preference(s.motion);
+    // sound: volume at once; muting also stops the Mac sending it
+    let sound = crate::audio::audio();
+    sound.set_volume(s.volume as f32 / 100.0);
+    if sound.muted() == s.audio {
+        with_app(|a| crate::audio::set_muted(Some(&a.link), !s.audio));
+    }
+    eprintln!("settings: {s:?}");
 }
 
 // ------------------------------------------------------------------ the Mac's menu bar (exact windows)

@@ -4,6 +4,29 @@ Each version of Taro (called MacBridge until 1.2.0), newest first. Both sides sh
 same version; a newer Windows app works with an older Mac app without the features the Mac
 lacks.
 
+## 1.2.3
+
+Taro updates itself, and Windows gets an installer. Update both sides (this once by hand: the
+next updates come on their own).
+
+### Added
+
+- **Windows installer, `Taro-Setup.exe`**: Taro for you only (no administrator) in
+  `%LOCALAPPDATA%\Programs\Taro`, with Taro in the Start menu, an optional desktop icon and an
+  uninstaller. `Taro-windows.zip` stays, for running without installing.
+- **Updates on Windows**: Taro looks for a newer release on GitHub a few seconds after it starts
+  and every six hours, and a notice says so at the top of the screen (a click updates). The
+  installer is downloaded, checked (its size and the SHA-256 GitHub lists for it), and run
+  silently: Taro closes, updates and opens again, and the Mac's apps stay open for it.
+- **Settings → About this Taro**: Taro's icon, its version and the Mac's (with a word when the
+  Mac's is older), **Software Update** with **Check for Updates** / **Update Now** and where it is
+  at, and **Check for updates automatically**.
+- **`taro-update.sh` on the Mac** (also `./taro.sh --update`): fetches the newest
+  `Taro-macos.tar.gz`, checks it (SHA-256, and that the program runs), and puts `taro`,
+  `taro.sh`, `taro-update.sh` and `README.txt` in place. A Taro running in the background goes
+  on with the new version by itself, same ID and password. `--check` only says whether there is
+  one.
+
 ## 1.2.2
 
 Closing a window works as on the Mac, and the Dock comes out with a shorter push. Update both

@@ -26,6 +26,7 @@ pub mod settings;
 pub mod settingsui;
 pub mod text;
 pub mod titlebar;
+pub mod update;
 pub mod net;
 #[cfg(windows)]
 pub mod d3d;
