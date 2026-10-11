@@ -54,6 +54,15 @@ or headphones; both on the same network unless the item says otherwise. Note bot
 - [ ] The launcher's green button fills the screen and the launcher is drawn at that size
       (nothing black, no second copy of it); again restores it.
 - [ ] Leave the Mac unused for an hour, and asleep for a while: the PC connects again at once.
+- [ ] On a German or French keyboard layout, AltGr+Q / AltGr+7 type @ and { in TextEdit (no
+      macOS Zoom, no Dock hiding).
+- [ ] Drag-select text, Alt+Tab away while holding the button, come back: moving the pointer no
+      longer selects. Ctrl+Z with Ctrl released first does not leave Z held.
+- [ ] Cut the network for 15 s, then restore it: the viewer reconnects, the apps are still open
+      on the Mac, video comes over UDP again (not TCP). Close the viewer: the apps quit.
+- [ ] Drop a 50 MB file on a Mac window on a slow link: the session stays up while it uploads.
+- [ ] TextEdit, Finder and Safari windows show only MacBridge's title bar (no "Untitled ⌄" row
+      or grey capsule under it).
 - [ ] With **Mac windows** = as the Mac draws them: Safari, TextEdit, Finder windows show their own
       title bar and buttons; dragging the empty title bar moves the window here (snap to the
       screen edges works); toolbar buttons and the address field work; red closes, yellow

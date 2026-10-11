@@ -3,7 +3,10 @@
 Each version of MacBridge, newest first. Both sides should run the same version; a newer
 Windows app works with an older Mac app without the features the Mac lacks.
 
-## Unreleased
+## 1.2.0-beta.3
+
+The third beta: the title bar and menus drawn as the rest of MacBridge, smoother and lighter
+animation and glass, and many fixes for what can go wrong while using it. Update both sides.
 
 ### Changed
 
@@ -16,6 +19,50 @@ Windows app works with an older Mac app without the features the Mac lacks.
   Font), and the Mac's way of moving through them: press on a title and let go on an item, or
   click and click; the pointer moving along the titles, or Left and Right, goes from one menu to
   the next; Escape closes. The window stays the active one while a menu is open.
+- **Smoother, lighter animation and Liquid Glass.** Animations run at 60 frames a second (16 ms
+  timers fired every 31 ms at Windows' default timer resolution); the blur is about three times
+  faster with the same pixels; a glass pane costs about a third less; shadows, the Settings
+  window's glass and its open menu are made once instead of every frame; the launcher no longer
+  softens the top of the grid when nothing is under the toolbar; nothing is drawn 60 times a
+  second while only a caret or a spinner moves.
+- **Pointer moves at most every 4 ms** (the latest one goes before any click): a 1000 Hz mouse
+  sent the Mac 1000 messages a second.
+
+### Fixed
+
+- **Two title bars on a Mac window.** The Mac's own title row ("Untitled ⌄", the grey "being
+  shared" capsule) showed under MacBridge's title bar in TextEdit, Finder, Safari: the window's
+  title and its chevron counted as toolbar controls, rows taller than 40 points were kept, and a
+  window measured before Accessibility was ready kept it for good. The row is measured from the
+  close button and the title, up to 60 points, and again for 3 seconds when it could not be.
+- **The Mac's capture streams no longer pile up.** A stream stopped while it was still starting
+  (resizing a window, a menu opening and closing quickly) went on capturing and encoding for
+  ever; restarts while a window is resized now wait for the size to settle.
+- **Clicks and keys never wait behind slow work on the Mac.** Opening an app (up to 20 s),
+  Accessibility, displays, files and the wallpaper run on their own queue.
+- **The Mac is never killed by a closed connection** (SIGPIPE), nor runs out of file handles
+  after many sessions (sockets were inherited by each restart for the next viewer).
+- **Closing the viewer quits the session's apps; a cut connection keeps them** (the viewer now
+  says goodbye; before, a connection cut by the network or the relay quit them too).
+- **Reconnecting no longer leaves the old UDP path running**: it held the old session's video
+  and decoders and took the new session's place at the relay (video stuttered and fell back to
+  TCP, worse with each reconnect).
+- **A file upload no longer cuts the connection**: its chunks went ahead of the pings, so a slow
+  upload (a dropped file, Desktop Fusion's wallpaper) made the viewer think the Mac was gone;
+  the whole file was also held in memory.
+- **Keyframes are asked for and sent at a sane rate**: one request per window until it comes,
+  one keyframe per 0.3 s at most on the Mac (every lost frame asked for one).
+- **AltGr typing** (@ { } [ ] \ | ~ € on German, French, Spanish… keyboards) types the character
+  instead of sending Cmd+Option shortcuts to the Mac (Cmd+Option+8 toggled macOS Zoom).
+- **Keys and mouse buttons are never left down on the Mac**: a key goes up there whatever the
+  modifiers are by then, and buttons held when the pointer is taken away (Alt+Tab) go up.
+- Pasted text types 20 characters per event (a page took many seconds); the pasteboard is never
+  waited on; values from the viewer can no longer crash the Mac with a bad number.
+- Settings opens again after the window it belonged to closed; clicking a running app in the
+  launcher keeps it maximised; closing the launcher while an app is opening no longer quits;
+  popups and dialogs are placed from where their window is now; F11 and the Ctrl+Alt+Shift
+  toggles act once per press; Alt+letter no longer beeps; window menus are freed with their
+  windows.
 
 ## 1.2.0-beta.2
 
