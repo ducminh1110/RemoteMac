@@ -193,10 +193,15 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_MOUSEMOVE => {
             let (x, y) = xy(lp);
+            let before = with(|u| u.view.hover_key());
             let a = with(|u| u.view.mouse_move(x, y)).flatten();
+            let after = with(|u| u.view.hover_key());
             let mut tme = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
             let _ = TrackMouseEvent(&mut tme);
-            act(hwnd, a);
+            // drawn again only when what is lit changed (every move redrew the whole window)
+            if a.is_some() || before != after {
+                act(hwnd, a);
+            }
             LRESULT(0)
         }
         WM_MOUSE_LEAVE => {

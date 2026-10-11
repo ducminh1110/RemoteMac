@@ -205,7 +205,22 @@ pub fn text(c: &mut Canvas, s: &str, x: f32, y: f32, w: f32, px: i32, weight: i3
 }
 
 /// A value of Windows' personalization settings (None when it is not set).
+/// A value of Windows' personalisation settings, read again at most once a second (every
+/// title bar paint and every glass surface asks for the appearance).
 fn personalize(name: &str) -> Option<u32> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+    thread_local! { static READ: RefCell<HashMap<String, (Instant, Option<u32>)>> = RefCell::new(HashMap::new()); }
+    if let Some(v) = READ.with(|r| r.borrow().get(name).filter(|(t, _)| t.elapsed() < Duration::from_secs(1)).map(|(_, v)| *v)) {
+        return v;
+    }
+    let v = personalize_now(name);
+    READ.with(|r| r.borrow_mut().insert(name.to_string(), (Instant::now(), v)));
+    v
+}
+
+fn personalize_now(name: &str) -> Option<u32> {
     use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
     let mut v: u32 = 0;
     let mut n = 4u32;
@@ -259,7 +274,7 @@ pub fn work_area_at(x: i32, y: i32) -> RECT {
 
 /// The look of glass surfaces now: (dark, accent, level).
 pub fn glass_look() -> (bool, Rgba, crate::glass::Level) {
-    let level = if transparency_off() { crate::glass::Level::Off } else { crate::glass::Level::from_setting(crate::settings::Settings::load().glass) };
+    let level = if transparency_off() { crate::glass::Level::Off } else { crate::glass::Level::from_setting(crate::settings::Settings::load_cached().glass) };
     (dark_mode(), accent(), level)
 }
 

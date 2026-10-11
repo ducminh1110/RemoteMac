@@ -165,6 +165,8 @@ pub struct SettingsView {
     level: Level,
     texts: HashMap<(String, u32, i32, u32), Mask>,
     glass: Option<(u64, Canvas)>,
+    /// the open menu's glass, by where it is and its size
+    menu_glass: Option<(u64, Canvas)>,
 }
 
 /// The part of an option shown on its menu button: before " — " or " (".
@@ -180,7 +182,7 @@ impl SettingsView {
         for f in [Field::Pacing, Field::Audio, Field::Cursor, Field::Fusion] {
             knobs.insert(f, Anim::at(if Self::switch_of(&settings, f) { 1.0 } else { 0.0 }));
         }
-        SettingsView { settings, workspaces, section: 0, hot: Hot::None, down: Hot::None, menu: None, knobs, dragging: false, w: W as usize, h: H as usize, s: 1.0, dark: false, active: true, level: Level::Full, texts: HashMap::new(), glass: None }
+        SettingsView { settings, workspaces, section: 0, hot: Hot::None, down: Hot::None, menu: None, knobs, dragging: false, w: W as usize, h: H as usize, s: 1.0, dark: false, active: true, level: Level::Full, texts: HashMap::new(), glass: None, menu_glass: None }
     }
 
     pub fn set_window(&mut self, w: usize, h: usize, s: f32, dark: bool, level: Level) {
@@ -410,6 +412,12 @@ impl SettingsView {
         None
     }
 
+    /// What the pointer lights (a row, a control, a menu item): the window is drawn again only
+    /// when this changes, not on every move.
+    pub fn hover_key(&self) -> (Hot, Option<usize>) {
+        (self.hot, self.menu.as_ref().and_then(|m| m.hover))
+    }
+
     pub fn mouse_leave(&mut self) {
         if !self.dragging {
             self.hot = Hot::None;
@@ -522,26 +530,28 @@ impl SettingsView {
     pub fn render(&mut self, now: Instant) -> Canvas {
         let t = theme(self.dark);
         let s = self.s;
-        let mut c = Canvas::new(self.w, self.h);
-        look::tint(&mut c, &t);
         // the sidebar: a pane of glass over the window's tint
         let (sx, sy, sw, sh) = self.sidebar();
         let r = self.p(18.0);
-        let m = Material::for_kind(Kind::Sheet, self.dark, t.accent);
         let (wi, hi) = (sw.round() as usize, sh.round() as usize);
-        let reach = glass::margin(&m, s, self.level, wi, hi, r);
         let key = (wi as u64) << 32 | (hi as u64) << 8 | (self.dark as u64) << 1 | (self.level as u64) << 4 | ((s * 100.0) as u64) << 48;
-        let pane = match &self.glass {
-            Some((k, p)) if *k == key => p.clone(),
+        // the window's tint, the glass and its shadow do not change from one frame to the next:
+        // drawn once per size and appearance (it was most of every frame)
+        let mut c = match &self.glass {
+            Some((k, base)) if *k == key && base.w == self.w && base.h == self.h => base.clone(),
             _ => {
+                let mut c = Canvas::new(self.w, self.h);
+                look::tint(&mut c, &t);
+                let m = Material::for_kind(Kind::Sheet, self.dark, t.accent);
+                let reach = glass::margin(&m, s, self.level, wi, hi, r);
                 let back = c.crop(sx as isize - reach as isize, sy as isize - reach as isize, wi + 2 * reach, hi + 2 * reach);
-                let p = glass::render(Some(&back), reach, wi, hi, r, &m, self.level, s);
-                self.glass = Some((key, p.clone()));
-                p
+                let pane = glass::render(Some(&back), reach, wi, hi, r, &m, self.level, s);
+                c.shadow(sx, sy, sw, sh, r, self.p(16.0), self.p(4.0), Rgba::BLACK.alpha(if self.dark { 0.35 } else { 0.08 }));
+                c.composite(&pane, sx.round() as isize, sy.round() as isize, 1.0);
+                self.glass = Some((key, c.clone()));
+                c
             }
         };
-        c.shadow(sx, sy, sw, sh, r, self.p(16.0), self.p(4.0), Rgba::BLACK.alpha(if self.dark { 0.35 } else { 0.08 }));
-        c.composite(&pane, sx.round() as isize, sy.round() as isize, 1.0);
         let (lx, ly) = self.lights();
         let down = match self.down {
             Hot::Lights(Some(l)) if self.hot == self.down => Some(l),
@@ -633,8 +643,17 @@ impl SettingsView {
             let mat = Material::for_kind(Kind::Sheet, self.dark, t.accent);
             let (wi, hi) = (mw.round() as usize, mh.round() as usize);
             let reach = glass::margin(&mat, s, self.level, wi, hi, mr);
-            let back = c.crop(mx as isize - reach as isize, my as isize - reach as isize, wi + 2 * reach, hi + 2 * reach);
-            let body = glass::render(Some(&back), reach, wi, hi, mr, &mat, self.level, s);
+            // made once while it is open (what is behind it does not change)
+            let key = (wi as u64) << 40 ^ (hi as u64) << 24 ^ (mx.round() as u64) << 12 ^ (my.round() as u64) ^ (self.dark as u64) << 63 ^ (self.level as u64) << 60;
+            let body = match &self.menu_glass {
+                Some((k, b)) if *k == key => b.clone(),
+                _ => {
+                    let back = c.crop(mx as isize - reach as isize, my as isize - reach as isize, wi + 2 * reach, hi + 2 * reach);
+                    let b = glass::render(Some(&back), reach, wi, hi, mr, &mat, self.level, s);
+                    self.menu_glass = Some((key, b.clone()));
+                    b
+                }
+            };
             c.shadow(mx, my, mw, mh, mr, self.p(14.0), self.p(5.0), Rgba::BLACK.alpha(if self.dark { 0.45 } else { 0.18 }));
             c.composite(&body, mx.round() as isize, (my - (1.0 - open) * self.p(6.0)).round() as isize, open);
             let (items, hover, chosen) = {

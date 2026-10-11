@@ -235,10 +235,17 @@ impl Launcher {
     /// The timer fired: draw, and keep it while something moves.
     pub fn on_timer(&mut self) {
         self.redraw();
-        if !self.view.busy(Instant::now()) {
+        let now = Instant::now();
+        if !self.view.busy(now) {
             self.timer = false;
             unsafe {
                 let _ = KillTimer(Some(self.hwnd), TIMER);
+            }
+        } else if self.view.only_waiting(now) {
+            // only the spinner: a dozen frames a second (anything that moves sets 16 ms again)
+            self.timer = false;
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER, 83, None);
             }
         }
     }

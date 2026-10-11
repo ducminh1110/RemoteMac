@@ -278,6 +278,10 @@ fn hwnd_of(v: isize) -> HWND {
 pub fn run(opts: Options) -> i32 {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        // Windows' timers tick every 15.6 ms by default, so a 16 ms animation timer fired every
+        // 31 ms: animations ran at 30 frames a second. 1 ms while MacBridge runs (as a video
+        // player or Moonlight does) gives them their 60.
+        let _ = windows::Win32::Media::timeBeginPeriod(1);
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         // One viewer per user session: a second launch (Start menu, Search, taskbar) hands its app over.
         if !opts.smoke && opts.showcase.is_none() && launcher::forward_to_running_instance(opts.app.as_deref()) {

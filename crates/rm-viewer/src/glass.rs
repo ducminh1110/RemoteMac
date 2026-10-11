@@ -427,8 +427,14 @@ pub fn render(backdrop: Option<&Canvas>, origin: usize, w: usize, h: usize, radi
             out = sample_through(&soft, sharp.as_ref(), origin, &t, level == Level::Full, p.edge_sharp);
             let boost = if level == Level::Blur { m.blur_tint_boost } else { 1.0 };
             let (top, bottom) = (m.tint_top.fade(boost), m.tint_bottom.fade(boost));
+            // the tint changes from row to row only: one colour per row, laid over it whole
             let hh = h as f32;
-            out.fill_round_rect_with(0.0, 0.0, w as f32, hh, 0.0, |_, y| top.lerp(bottom, y / hh));
+            for y in 0..h {
+                let c = top.lerp(bottom, (y as f32 + 0.5) / hh);
+                for x in 0..w {
+                    out.blend(x, y, c, 1.0);
+                }
+            }
         }
     }
     let rad = t.radius;
@@ -499,8 +505,12 @@ fn sample_through(soft: &Canvas, sharp: Option<&Canvas>, origin: usize, t: &Shap
             let gain = 1.0 + 0.06 * (tx.depth as f32 / 255.0);
             let o = &mut out.px[y * t.w + x];
             if !displace || (tx.rx == 0 && tx.ry == 0 && tx.cx == 0 && tx.cy == 0) {
-                let c = soft.sample(bx, by);
-                *o = [cl(c[0] * gain), cl(c[1] * gain), cl(c[2] * gain), 255];
+                // not bent (most of the pane): the pixel behind it, read straight (a bilinear
+                // sample at a whole pixel is that pixel; three of them cost most of the glass)
+                let (sx, sy) = ((origin + x).min(soft.w - 1), (origin + y).min(soft.h - 1));
+                let c = soft.px[sy * soft.w + sx];
+                let f = |v: u8| (v as f32 * gain + 0.5).min(255.0) as u8;
+                *o = [f(c[0]), f(c[1]), f(c[2]), 255];
                 continue;
             }
             let (fx, fy) = (bx + tx.rx as f32 / 16.0, by + tx.ry as f32 / 16.0);
@@ -510,9 +520,9 @@ fn sample_through(soft: &Canvas, sharp: Option<&Canvas>, origin: usize, t: &Shap
             let mut rgb = [0f32; 3];
             for (i, sgn) in [(0usize, -1.0f32), (1, 0.0), (2, 1.0)] {
                 let (sx, sy) = (fx + cx * sgn, fy + cy * sgn);
-                let mut v = soft.sample(sx, sy)[i];
+                let mut v = soft.sample1(sx, sy, i);
                 if let Some(s) = sharp.filter(|_| edge_mix < 0.999) {
-                    v = s.sample(sx, sy)[i] * (1.0 - edge_mix) + v * edge_mix;
+                    v = s.sample1(sx, sy, i) * (1.0 - edge_mix) + v * edge_mix;
                 }
                 rgb[i] = v;
             }
@@ -643,5 +653,64 @@ mod tests {
         assert_eq!(Level::from_setting(0), Level::Full);
         assert_eq!(Level::from_setting(1), Level::Blur);
         assert_eq!(Level::from_setting(2), Level::Off);
+    }
+}
+
+/// How long the glass and the launcher take (cargo test --release -p rm-viewer --lib timing -- --ignored --nocapture).
+#[cfg(test)]
+mod timing {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore]
+    fn timing() {
+        let s = 1.5f32;
+        let (w, h) = ((300.0 * s) as usize, (400.0 * s) as usize);
+        let m = Material::for_kind(Kind::Sheet, false, Rgba::rgb(10, 132, 255));
+        let reach = margin(&m, s, Level::Full, w, h, 12.0 * s);
+        let mut back = Canvas::new(w + 2 * reach, h + 2 * reach);
+        for (i, p) in back.px.iter_mut().enumerate() {
+            *p = [(i % 251) as u8, (i % 197) as u8, (i % 173) as u8, 255];
+        }
+        let _ = render(Some(&back), reach, w, h, 12.0 * s, &m, Level::Full, s);
+        let t = Instant::now();
+        for _ in 0..10 {
+            let _ = render(Some(&back), reach, w, h, 12.0 * s, &m, Level::Full, s);
+        }
+        eprintln!("glass 300x400 dip at 1.5x: {:.1} ms", t.elapsed().as_secs_f64() * 100.0);
+        // its parts
+        let p = m.device_params(s);
+        let tb = ShapeTable::cached(w, h, 12.0 * s, &p);
+        let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
+        let t = Instant::now();
+        let mut soft = back.clone();
+        soft.blur(p.blur as usize, 2);
+        soft.saturate(p.saturate);
+        eprintln!("  blur+saturate {:.1} ms", ms(t));
+        let t = Instant::now();
+        let mut sharp = back.clone();
+        sharp.saturate(p.saturate);
+        eprintln!("  sharp saturate {:.1} ms", ms(t));
+        let t = Instant::now();
+        let mut out = sample_through(&soft, Some(&sharp), reach, &tb, true, p.edge_sharp);
+        eprintln!("  sample_through {:.1} ms", ms(t));
+        let t = Instant::now();
+        out.fill_round_rect_with(0.0, 0.0, w as f32, h as f32, 0.0, |_, y| m.tint_top.lerp(m.tint_bottom, y / h as f32));
+        eprintln!("  tint {:.1} ms", ms(t));
+        let t = Instant::now();
+        out.stroke_round_rect_with(0.0, 0.0, w as f32, h as f32, 18.0, 1.5, |_, _| m.rim_dark);
+        eprintln!("  one rim {:.1} ms", ms(t));
+        let mut c = Canvas::new(1920, 1080);
+        let t = Instant::now();
+        for _ in 0..10 {
+            c.blur(10, 2);
+        }
+        eprintln!("blur 1920x1080 r10 x2: {:.1} ms", t.elapsed().as_secs_f64() * 100.0);
+        let t = Instant::now();
+        for _ in 0..20 {
+            c.shadow(100.0, 100.0, 400.0, 300.0, 18.0, 24.0, 6.0, Rgba::BLACK.alpha(0.1));
+        }
+        eprintln!("shadow 400x300 (cached): {:.2} ms", t.elapsed().as_secs_f64() * 50.0);
     }
 }

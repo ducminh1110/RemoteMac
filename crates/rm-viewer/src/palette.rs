@@ -406,6 +406,12 @@ mod win {
                     }
                 } else {
                     draw(); // the caret blinks, the opening springs
+                    // once it has opened only the caret blinks: a few frames a second are enough
+                    // (it drew the whole panel 60 times a second while open)
+                    let settled = OPEN.with(|o| o.borrow().as_ref().is_some_and(|m| !m.closing && m.pop.done() && m.alpha.done()));
+                    if settled {
+                        SetTimer(Some(hwnd), TIMER, 265, None);
+                    }
                 }
                 LRESULT(0)
             }

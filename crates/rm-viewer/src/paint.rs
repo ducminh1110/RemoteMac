@@ -299,6 +299,21 @@ impl Canvas {
         o
     }
 
+    /// One channel of [`sample`](Self::sample) (0 blue, 1 green, 2 red, 3 alpha): what the glass's
+    /// bent edge reads, a channel at a time.
+    #[inline]
+    pub fn sample1(&self, fx: f32, fy: f32, i: usize) -> f32 {
+        let (x0, y0) = (fx.floor(), fy.floor());
+        let (tx, ty) = (fx - x0, fy - y0);
+        let (mx, my) = (self.w as isize - 1, self.h as isize - 1);
+        let (xa, ya) = ((x0 as isize).clamp(0, mx) as usize, (y0 as isize).clamp(0, my) as usize);
+        let (xb, yb) = ((x0 as isize + 1).clamp(0, mx) as usize, (y0 as isize + 1).clamp(0, my) as usize);
+        let at = |x: usize, y: usize| self.px[y * self.w + x][i] as f32;
+        let top = at(xa, ya) * (1.0 - tx) + at(xb, ya) * tx;
+        let bot = at(xa, yb) * (1.0 - tx) + at(xb, yb) * tx;
+        (top * (1.0 - ty) + bot * ty) / 255.0
+    }
+
     /// The part (x, y, w, h) of this canvas; outside it, its nearest edge pixel.
     pub fn crop(&self, x: isize, y: isize, w: usize, h: usize) -> Canvas {
         let mut out = Canvas::new(w, h);
@@ -413,11 +428,27 @@ impl Canvas {
     #[allow(clippy::too_many_arguments)]
     pub fn shadow(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, spread: f32, dy: f32, color: Rgba) {
         let pad = (spread * 2.0).ceil() as usize + 2;
-        let (sw, sh) = (w.ceil() as usize + pad * 2, h.ceil() as usize + pad * 2);
-        let mut s = Canvas::new(sw, sh);
-        s.fill_round_rect(pad as f32, pad as f32, w, h, r, Rgba::BLACK);
-        s.blur((spread / 2.0).round().max(1.0) as usize, 3);
-        let mask: Vec<u8> = s.px.iter().map(|p| p[3]).collect();
+        let sw = w.ceil() as usize + pad * 2;
+        // the same shape blurred the same way is the same shadow: made once (a blur of the whole
+        // shape was a large part of every frame that has shadows), whatever its colour and place
+        let key = ((w * 4.0) as u32, (h * 4.0) as u32, (r * 4.0) as u32, (spread * 4.0) as u32);
+        let mask = SHADOWS.with(|c| {
+            let mut c = c.borrow_mut();
+            if let Some(m) = c.get(&key) {
+                return m.clone();
+            }
+            let sh = h.ceil() as usize + pad * 2;
+            let mut s = Canvas::new(sw, sh);
+            s.fill_round_rect(pad as f32, pad as f32, w, h, r, Rgba::BLACK);
+            s.blur((spread / 2.0).round().max(1.0) as usize, 3);
+            let m: std::rc::Rc<Vec<u8>> = std::rc::Rc::new(s.px.iter().map(|p| p[3]).collect());
+            // a few dozen shapes at most are on screen; a window resized makes new ones
+            if c.len() >= 48 {
+                c.clear();
+            }
+            c.insert(key, m.clone());
+            m
+        });
         self.fill_mask(&mask, sw, (x - pad as f32).round() as isize, (y + dy - pad as f32).round() as isize, color);
     }
 
@@ -453,32 +484,65 @@ impl Canvas {
     }
 }
 
+type ShadowKey = (u32, u32, u32, u32);
+thread_local! {
+    /// Blurred shadow shapes (coverage), by size, corner and spread.
+    static SHADOWS: std::cell::RefCell<std::collections::HashMap<ShadowKey, std::rc::Rc<Vec<u8>>>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 #[inline]
 fn q(v: f32) -> u8 {
     (v * 255.0 + 0.5).clamp(0.0, 255.0) as u8
 }
 
+/// One box blur pass of radius `r` (a running sum over 2r + 1 pixels, edges clamped). The sum is
+/// divided by a multiply with its reciprocal (exact for these sums: the same pixels as a
+/// division, three times faster), and the vertical pass walks rows, not columns, so it reads the
+/// canvas in order.
 fn box_pass(src: &[[u8; 4]], dst: &mut [[u8; 4]], w: usize, h: usize, r: usize, horizontal: bool) {
-    let (len, lines) = if horizontal { (w, h) } else { (h, w) };
-    let idx = |line: usize, i: usize| if horizontal { line * w + i } else { i * w + line };
-    let win = (2 * r + 1) as u32;
-    for line in 0..lines {
-        let mut acc = [0u32; 4];
-        let at = |i: isize| src[idx(line, i.clamp(0, len as isize - 1) as usize)];
-        for i in -(r as isize)..=(r as isize) {
-            let p = at(i);
-            for c in 0..4 {
-                acc[c] += p[c] as u32;
+    if w == 0 || h == 0 {
+        return;
+    }
+    let win = (2 * r + 1) as u64;
+    let inv = (1u64 << 32).div_ceil(win);
+    let div = |a: u32| ((a as u64 * inv) >> 32) as u8;
+    if horizontal {
+        for (srow, drow) in src.chunks_exact(w).zip(dst.chunks_exact_mut(w)) {
+            let at = |i: isize| srow[i.clamp(0, w as isize - 1) as usize];
+            let mut acc = [0u32; 4];
+            for i in -(r as isize)..=(r as isize) {
+                let p = at(i);
+                for c in 0..4 {
+                    acc[c] += p[c] as u32;
+                }
+            }
+            for (i, o) in drow.iter_mut().enumerate() {
+                *o = [div(acc[0]), div(acc[1]), div(acc[2]), div(acc[3])];
+                let (out, inn) = (at(i as isize - r as isize), at(i as isize + r as isize + 1));
+                for c in 0..4 {
+                    acc[c] = acc[c] + inn[c] as u32 - out[c] as u32;
+                }
             }
         }
-        for i in 0..len {
-            let o = &mut dst[idx(line, i)];
-            for c in 0..4 {
-                o[c] = (acc[c] / win) as u8;
+    } else {
+        let row = |y: isize| &src[y.clamp(0, h as isize - 1) as usize * w..][..w];
+        let mut acc = vec![[0u32; 4]; w];
+        for y in -(r as isize)..=(r as isize) {
+            for (a, p) in acc.iter_mut().zip(row(y)) {
+                for c in 0..4 {
+                    a[c] += p[c] as u32;
+                }
             }
-            let (out, inn) = (at(i as isize - r as isize), at(i as isize + r as isize + 1));
-            for c in 0..4 {
-                acc[c] = acc[c] + inn[c] as u32 - out[c] as u32;
+        }
+        for (y, drow) in dst.chunks_exact_mut(w).enumerate() {
+            for (o, a) in drow.iter_mut().zip(&acc) {
+                *o = [div(a[0]), div(a[1]), div(a[2]), div(a[3])];
+            }
+            let (out, inn) = (row(y as isize - r as isize), row(y as isize + r as isize + 1));
+            for ((a, o), i) in acc.iter_mut().zip(out).zip(inn) {
+                for c in 0..4 {
+                    a[c] = a[c] + i[c] as u32 - o[c] as u32;
+                }
             }
         }
     }
@@ -522,6 +586,59 @@ pub fn dominant(icon: &Canvas) -> Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The blur's pass as it was (a division per channel, the vertical pass by columns).
+    fn box_pass_reference(src: &[[u8; 4]], dst: &mut [[u8; 4]], w: usize, h: usize, r: usize, horizontal: bool) {
+        let (len, lines) = if horizontal { (w, h) } else { (h, w) };
+        let idx = |line: usize, i: usize| if horizontal { line * w + i } else { i * w + line };
+        let win = (2 * r + 1) as u32;
+        for line in 0..lines {
+            let mut acc = [0u32; 4];
+            let at = |i: isize| src[idx(line, i.clamp(0, len as isize - 1) as usize)];
+            for i in -(r as isize)..=(r as isize) {
+                let p = at(i);
+                for c in 0..4 {
+                    acc[c] += p[c] as u32;
+                }
+            }
+            for i in 0..len {
+                let o = &mut dst[idx(line, i)];
+                for c in 0..4 {
+                    o[c] = (acc[c] / win) as u8;
+                }
+                let (out, inn) = (at(i as isize - r as isize), at(i as isize + r as isize + 1));
+                for c in 0..4 {
+                    acc[c] = acc[c] + inn[c] as u32 - out[c] as u32;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_faster_blur_gives_the_same_pixels() {
+        let (w, h) = (97, 61);
+        let mut seed = 12345u32;
+        let src: Vec<[u8; 4]> = (0..w * h)
+            .map(|_| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                seed.to_le_bytes()
+            })
+            .collect();
+        for r in [1usize, 2, 3, 7, 16, 40, 64] {
+            for horizontal in [true, false] {
+                let (mut a, mut b) = (vec![[0u8; 4]; w * h], vec![[0u8; 4]; w * h]);
+                box_pass(&src, &mut a, w, h, r, horizontal);
+                box_pass_reference(&src, &mut b, w, h, r, horizontal);
+                assert!(a == b, "radius {r}, horizontal {horizontal}");
+            }
+        }
+        // the largest sums: all white
+        let white = vec![[255u8; 4]; w * h];
+        let mut a = vec![[0u8; 4]; w * h];
+        box_pass(&white, &mut a, w, h, 64, false);
+        assert!(a.iter().all(|p| *p == [255; 4]));
+    }
+
 
     #[test]
     fn rounded_rect_is_filled_with_soft_edges_and_round_corners() {
