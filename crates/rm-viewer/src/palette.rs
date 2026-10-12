@@ -1,4 +1,4 @@
-//! MacBridge Search: a glass search field over the screen (Ctrl+Alt+Space anywhere, the
+//! Taro Search: a glass search field over the screen (Ctrl+Alt+Space anywhere, the
 //! navigation ball, or the launcher) to open a Mac app or switch to one already open, by typing
 //! part of its name. Enter opens the first match, the arrow keys move, Escape closes; a click
 //! elsewhere closes it too. The matching is ours and plain (no system search is involved).
@@ -199,7 +199,7 @@ mod win {
         let m = crate::glass::Material::for_kind(crate::glass::Kind::Sheet, dark, accent);
         let reach = crate::glass::margin(&m, scale, level, w as usize, tallest, 16.0 * scale);
         let backdrop = if level == crate::glass::Level::Off { None } else { surface::capture(x - reach as i32, y - reach as i32, w as usize + 2 * reach, tallest + 2 * reach) };
-        let Some(surf) = Surface::new(hinst, CLASS, "MacBridge Search", None, true, true) else { return };
+        let Some(surf) = Surface::new(hinst, CLASS, "Taro Search", None, true, true) else { return };
         let hwnd = surf.hwnd;
         let icons = icons.into_iter().filter(|(_, (s, px))| px.len() == (*s * *s * 4) as usize).map(|(k, (s, px))| (k, Canvas::from_rgba(s as usize, s as usize, &px))).collect();
         let results = search(&entries, "", ROWS);
@@ -406,6 +406,12 @@ mod win {
                     }
                 } else {
                     draw(); // the caret blinks, the opening springs
+                    // once it has opened only the caret blinks: a few frames a second are enough
+                    // (it drew the whole panel 60 times a second while open)
+                    let settled = OPEN.with(|o| o.borrow().as_ref().is_some_and(|m| !m.closing && m.pop.done() && m.alpha.done()));
+                    if settled {
+                        SetTimer(Some(hwnd), TIMER, 265, None);
+                    }
                 }
                 LRESULT(0)
             }

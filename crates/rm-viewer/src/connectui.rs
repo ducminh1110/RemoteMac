@@ -4,7 +4,7 @@
 //! the step under way (a spinner) or what went wrong (in red), and Cancel / Connect. By its ID:
 //! the ID, the password and (for a Mac elsewhere) a relay. By its address: only the address and
 //! the password, straight to the Mac as Moonlight goes to Sunshine (the Mac says which it is).
-//! The fields are MacBridge's own (field.rs): typing, selecting, words, paste, a secure password
+//! The fields are Taro's own (field.rs): typing, selecting, words, paste, a secure password
 //! field.
 //!
 //! Portable: it draws into a Canvas and takes plain input; connect.rs puts it in a window.
@@ -562,7 +562,7 @@ impl ConnectView {
         look::mac_icon(&mut c, self.w as f32 / 2.0, self.p(92.0), self.p(104.0), self.dark);
         let title = self.text("Connect to Your Mac", 20.0, 700, self.p(380.0));
         Self::put(&mut c, &title, (self.w as f32 - title.1 as f32) / 2.0, self.p(150.0), t.text);
-        let what = if self.by_address { "Type the Mac's IP address or name and the password MacBridge shows on it." } else { "Open MacBridge on the Mac, then type the ID and password it shows." };
+        let what = if self.by_address { "Type the Mac's IP address or name and the password Taro shows on it." } else { "Open Taro on the Mac, then type the ID and password it shows." };
         for (n, l) in text::wrap(what, Style::dip(13.0, 400, s), self.p(330.0), 2).iter().enumerate() {
             let m = self.text(l, 13.0, 400, self.p(340.0));
             Self::put(&mut c, &m, (self.w as f32 - m.1 as f32) / 2.0, self.p(180.0 + n as f32 * 17.0), t.text2);

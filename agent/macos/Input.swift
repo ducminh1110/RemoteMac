@@ -44,8 +44,6 @@ final class InputInjector {
     /// Mac Desktop: presses and releases received per path and button, and acted on per button
     private var received: [String: Int] = [:], injected: [String: Int] = [:]
 
-    /// The region the Mac's Dock is streamed from, while it is (set by main).
-    var dockRect: () -> CGRect? = { nil }
     /// The region the Mac's menu bar is streamed from, while it is (set by main).
     var menuBarRect: () -> CGRect? = { nil }
 
@@ -56,14 +54,11 @@ final class InputInjector {
 
     /// Returns an error string if the message could not be delivered.
     func handle(_ msg: [String: Any]) -> String? {
-        let wid = CGWindowID(int(msg["window_id"]))
+        let wid = CGWindowID(clamping: int(msg["window_id"]))
         // Mac Desktop: coordinates are on the display, keys go to whatever app is in front (pid 0)
         let w: WinInfo
         if wid == desktopWindowID && desktop.isActive {
             w = WinInfo(id: wid, pid: 0, title: "Mac Desktop", rect: desktop.bounds)
-        } else if wid == dockWindowID, let r = dockRect() {
-            // the Mac's Dock (Fusion.swift): coordinates are within the region streamed
-            w = WinInfo(id: wid, pid: 0, title: "Dock", rect: r)
         } else if wid == menuBarWindowID, let r = menuBarRect() {
             // the Mac's menu bar (MenuStrip.swift): coordinates are within its strip
             w = WinInfo(id: wid, pid: 0, title: "Menu Bar", rect: r)
@@ -110,7 +105,7 @@ final class InputInjector {
             post(type, p, button: button, pid: w.pid)
         case "scroll":
             // Unverified on runners (docs/SPEC.md): pixel units, y positive = content moves down.
-            if let e = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: Int32(num(msg["dy"])), wheel2: Int32(num(msg["dx"])), wheel3: 0) {
+            if let e = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: pixels(num(msg["dy"])), wheel2: pixels(num(msg["dx"])), wheel3: 0) {
                 e.location = lastPoint; e.post(tap: .cghidEventTap)
             }
         default: return "not an input message"
@@ -157,15 +152,24 @@ final class InputInjector {
     private var lastDown = CGPoint(x: -100, y: -100), lastDownAt: CFAbsoluteTime = 0
     private var lastButton: CGMouseButton = .left
 
+    private static let typing = CGEventSource(stateID: .hidSystemState)
+    /// Text as key events carrying it, up to 20 UTF-16 units each (the most one event takes):
+    /// pasting a page was one event per character, two waits each.
     private func typeUnicode(_ s: String, pid: pid_t) {
+        var chunks: [[UInt16]] = [], cur: [UInt16] = []
         for ch in s {
             let units = Array(String(ch).utf16)
+            if cur.count + units.count > 20 { chunks.append(cur); cur = [] }
+            cur += units
+        }
+        if !cur.isEmpty { chunks.append(cur) }
+        for units in chunks {
             for down in [true, false] {
-                guard let e = CGEvent(keyboardEventSource: CGEventSource(stateID: .hidSystemState), virtualKey: 0, keyDown: down) else { continue }
+                guard let e = CGEvent(keyboardEventSource: Self.typing, virtualKey: 0, keyDown: down) else { continue }
                 e.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
                 if pid == 0 { e.post(tap: .cghidEventTap) } else { e.postToPid(pid) }
-                usleep(2_000)
             }
+            usleep(2_000)
         }
     }
 }

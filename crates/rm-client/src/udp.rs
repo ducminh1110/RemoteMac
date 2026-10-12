@@ -113,9 +113,17 @@ impl UdpVideo {
     }
 }
 
+impl UdpVideo {
+    /// End the UDP path now (its thread stops sending, registering and calling back): the
+    /// session it belonged to is over, whoever still holds it.
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
 impl Drop for UdpVideo {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
+        self.stop();
     }
 }
 

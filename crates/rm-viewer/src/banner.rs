@@ -1,7 +1,10 @@
 //! The reconnect banner: when the connection to the Mac is lost, a small glass capsule at the
 //! top of the screen says so, with the Mac's spinner and the step the new attempt is at, while
-//! MacBridge connects again by itself. Once connected it shows a check mark for a moment and
+//! Taro connects again by itself. Once connected it shows a check mark for a moment and
 //! fades. It never takes the focus; a click hides it (connecting goes on).
+//!
+//! The same capsule brings a notice (a newer Taro): Taro's icon, a line and a word under it;
+//! a click acts on it, and it goes by itself after a while.
 
 use crate::motion::{tokens, Anim, Curve};
 use crate::paint::{Canvas, Rgba};
@@ -35,6 +38,14 @@ struct Banner {
     done_at: Option<Instant>,
     closing: bool,
     dark: bool,
+    /// a notice instead: Taro's icon, what a click does, when it goes by itself
+    notice: Option<Notice>,
+}
+
+struct Notice {
+    icon: Canvas,
+    on_click: Box<dyn Fn()>,
+    until: Instant,
 }
 
 thread_local! {
@@ -47,15 +58,17 @@ pub fn register(hinst: HINSTANCE) {
 
 /// Show "connection lost, connecting again" at the top of the monitor at (x, y).
 pub fn show(hinst: HINSTANCE, x: i32, y: i32) {
-    if BANNER.with(|b| b.borrow().is_some()) {
+    // (it takes the place of a notice)
+    if BANNER.with(|b| b.borrow().as_ref().is_some_and(|m| m.notice.is_none())) {
         return;
     }
+    hide();
     let scale = surface::scale_at(x, y);
     let wa = surface::work_area_at(x, y);
     let (w, h) = (460.0 * scale, 52.0 * scale);
     let pos = (wa.left + ((wa.right - wa.left) as f32 - w) as i32 / 2, wa.top + (14.0 * scale) as i32);
     let (base, margin) = surface::glass_panel(pos.0, pos.1, w as usize, h as usize, h / 2.0, crate::glass::Kind::Sheet, scale);
-    let Some(surf) = Surface::new(hinst, CLASS, "MacBridge — connecting again", None, true, false) else { return };
+    let Some(surf) = Surface::new(hinst, CLASS, "Taro — connecting again", None, true, false) else { return };
     let (dark, _, _) = surface::glass_look();
     let title = surface::text_mask("Connection lost — connecting again…", (14.0 * scale).round() as i32, 600, (w * 0.75) as usize);
     let hwnd = surf.hwnd;
@@ -76,6 +89,51 @@ pub fn show(hinst: HINSTANCE, x: i32, y: i32) {
             done_at: None,
             closing: false,
             dark,
+            notice: None,
+        })
+    });
+    draw();
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        SetTimer(Some(hwnd), TIMER, 16, None);
+    }
+}
+
+/// A notice at the top of the monitor at (x, y): `title`, `sub` under it; a click runs
+/// `on_click`. Not while the capsule says something else (the connection was lost).
+pub fn notice(hinst: HINSTANCE, x: i32, y: i32, title: &str, sub: &str, on_click: impl Fn() + 'static) {
+    if BANNER.with(|b| b.borrow().is_some()) {
+        return;
+    }
+    let scale = surface::scale_at(x, y);
+    let wa = surface::work_area_at(x, y);
+    let (w, h) = (400.0 * scale, 56.0 * scale);
+    let pos = (wa.left + ((wa.right - wa.left) as f32 - w) as i32 / 2, wa.top + (14.0 * scale) as i32);
+    let (base, margin) = surface::glass_panel(pos.0, pos.1, w as usize, h as usize, h / 2.0, crate::glass::Kind::Sheet, scale);
+    let Some(surf) = Surface::new(hinst, CLASS, "Taro", None, true, false) else { return };
+    let (dark, _, _) = surface::glass_look();
+    let title = surface::text_mask(title, (14.0 * scale).round() as i32, 600, (w * 0.75) as usize);
+    let sub = surface::text_mask(sub, (12.0 * scale).round() as i32, 400, (w * 0.75) as usize);
+    let icon = crate::logo::icon((34.0 * scale).round() as usize);
+    let hwnd = surf.hwnd;
+    BANNER.with(|b| {
+        *b.borrow_mut() = Some(Banner {
+            surf,
+            scale,
+            pos,
+            base,
+            margin,
+            w,
+            h,
+            title,
+            step: Some((String::new(), sub)),
+            alpha: Anim::new(0.0, 1.0, tokens::pick(tokens::POPOVER, 0.6), Curve::Decelerate),
+            drop: Anim::new(-12.0 * scale, 0.0, tokens::pick(tokens::WINDOW, 0.3), Curve::ARRIVE),
+            since: Instant::now(),
+            done_at: None,
+            closing: false,
+            dark,
+            notice: Some(Notice { icon, on_click: Box::new(on_click), until: Instant::now() + Duration::from_secs(12) }),
         })
     });
     draw();
@@ -88,7 +146,7 @@ pub fn show(hinst: HINSTANCE, x: i32, y: i32) {
 /// Connected again: a check mark, then gone.
 pub fn connected() {
     BANNER.with(|b| {
-        if let Some(m) = b.borrow_mut().as_mut() {
+        if let Some(m) = b.borrow_mut().as_mut().filter(|m| m.notice.is_none()) {
             m.done_at = Some(Instant::now());
             m.title = surface::text_mask("Connected again", (14.0 * m.scale).round() as i32, 600, (m.w * 0.75) as usize);
             m.step = None;
@@ -122,7 +180,7 @@ fn draw() {
         let now = Instant::now();
         // the step the attempt is at, under the title
         let phase = crate::lifecycle::current();
-        if m.done_at.is_none() && phase.busy() && phase != crate::lifecycle::Phase::Reconnecting {
+        if m.notice.is_none() && m.done_at.is_none() && phase.busy() && phase != crate::lifecycle::Phase::Reconnecting {
             let label = phase.label();
             if m.step.as_ref().is_none_or(|(l, _)| *l != label) {
                 let mask = surface::text_mask(&label, (12.0 * s).round() as i32, 400, (m.w * 0.75) as usize);
@@ -133,7 +191,9 @@ fn draw() {
         let (mx, my) = (m.margin as f32, m.margin as f32);
         let (fg, fg2) = surface::glass_text(m.dark);
         let (cx, cy) = (mx + 30.0 * s, my + m.h / 2.0);
-        if m.done_at.is_some() {
+        if let Some(n) = &m.notice {
+            c.composite(&n.icon, (cx - n.icon.w as f32 / 2.0).round() as isize, (cy - n.icon.h as f32 / 2.0).round() as isize, 1.0);
+        } else if m.done_at.is_some() {
             c.fill_circle(cx, cy, 11.0 * s, Rgba::rgb(48, 209, 88));
             c.fill_capsule(cx - 5.0 * s, cy, cx - 1.5 * s, cy + 4.0 * s, 1.3 * s, Rgba::WHITE);
             c.fill_capsule(cx - 1.5 * s, cy + 4.0 * s, cx + 5.5 * s, cy - 4.5 * s, 1.3 * s, Rgba::WHITE);
@@ -165,7 +225,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let gone = BANNER.with(|b| {
                 let mut b = b.borrow_mut();
                 let m = b.as_mut()?;
-                if m.done_at.is_some_and(|t| t.elapsed() > Duration::from_millis(1400)) {
+                if m.done_at.is_some_and(|t| t.elapsed() > Duration::from_millis(1400)) || m.notice.as_ref().is_some_and(|n| Instant::now() > n.until) {
                     start_closing(m);
                 }
                 Some(m.closing && m.alpha.done())
@@ -179,7 +239,17 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_LBUTTONUP => {
-            BANNER.with(|b| b.borrow_mut().as_mut().map(start_closing));
+            // a notice acts (once), then goes; the reconnect banner only goes
+            let act = BANNER.with(|b| {
+                let mut b = b.borrow_mut();
+                let m = b.as_mut()?;
+                let first = !m.closing;
+                start_closing(m);
+                first.then(|| m.notice.as_mut().map(|n| std::mem::replace(&mut n.on_click, Box::new(|| {})))).flatten()
+            });
+            if let Some(f) = act {
+                f();
+            }
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),

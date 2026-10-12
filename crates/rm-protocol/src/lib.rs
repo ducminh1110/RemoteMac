@@ -234,6 +234,24 @@ pub struct MenuNode {
 
 pub const MAX_MENU_ITEMS: usize = 3000;
 
+/// One item of the Mac's Dock, as the Mac shows it (feature "dock").
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DockEntry {
+    /// what the client names it by ("app:com.apple.Safari", "path:/Users/me/Downloads",
+    /// "trash", "separator:1")
+    pub id: String,
+    /// "app", "launcher" (Launchpad, Apps), "folder", "file", "trash" or "separator"
+    pub kind: String,
+    #[serde(default)]
+    pub title: String,
+    /// for an app the client can open itself (one of `Apps`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+    /// the app runs on the Mac (its dot under it there)
+    #[serde(default)]
+    pub running: bool,
+}
+
 impl MenuNode {
     /// Total number of nodes (bounded so a hostile agent cannot make the client build huge menus).
     pub fn count(nodes: &[MenuNode]) -> usize {
@@ -485,6 +503,25 @@ pub enum Message {
     Error { code: String, message: String },
     Ping { nonce: u64 },
     Pong { nonce: u64 },
+    /// Client -> agent (feature "bye"): the viewer is closing because its user closed it (the
+    /// session's apps quit); a connection that ends without it was cut and they stay open.
+    Bye,
+
+    /// Client -> agent (feature "dock"): the Mac's Dock as it is now.
+    DockList,
+    /// Agent -> client: the Mac's Dock, in its order (the apps kept in it and the open ones,
+    /// the lines between, folders, the Trash).
+    DockItems { items: Vec<DockEntry> },
+    /// Client -> agent: open Dock item `id` as a click on it does (an app the client cannot
+    /// open itself, a folder, a document, the Trash).
+    DockOpen { id: String },
+    /// Client -> agent: the menu of Dock item `id` (a right-click on it), as the Mac shows it.
+    DockMenuGet { id: String },
+    /// Agent -> client: that menu.
+    DockMenu { id: String, menus: Vec<MenuNode> },
+    /// Client -> agent: choose the item at `path` (indices into `DockMenu.menus`) of Dock item
+    /// `id`'s menu.
+    DockMenuInvoke { id: String, path: Vec<u32> },
 }
 
 impl Message {
@@ -495,7 +532,7 @@ impl Message {
             WindowCreated { .. } | WindowDestroyed { .. } | WindowMoved { .. } | WindowTitleChanged { .. } | WindowMask { .. } | WindowChrome { .. } => {
                 Channel::WindowMetadata
             }
-            Ping { .. } | Pong { .. } => Channel::Telemetry,
+            Ping { .. } | Pong { .. } | Bye => Channel::Telemetry,
             ClipboardSet { .. } | ClipboardImage { .. } => Channel::Clipboard,
             FileUploadBegin { .. } | FileUploadChunk { .. } | FileUploadEnd { .. } => Channel::Files,
             _ => Channel::Control,
@@ -762,33 +799,43 @@ fn read_full<R: Read>(r: &mut R, mut buf: &mut [u8]) -> std::io::Result<()> {
 
 /// Blocking read of one frame of either kind. `Ok(None)` on clean EOF. A read timeout can only
 /// surface before the first byte of a frame, never in the middle of one.
+///
+/// One message never ends the session: a frame read whole but not understood (a message this
+/// version does not know, or does not take as it is) is passed over, and the stream stays in
+/// step. Any channel's frame is taken up to [`MAX_BULK_FRAME`], the bound on what is read
+/// (an app whose window shape or menu bar came past a control frame's 1 MiB lost the connection
+/// each time it opened). Only a stream out of step (a length past that, an unknown channel)
+/// is an error.
 pub fn read_frame<R: Read>(r: &mut R) -> Result<Option<Frame>, ProtocolError> {
-    let mut head = [0u8; 4];
-    match r.read(&mut head[..1])? {
-        0 => return Ok(None),
-        _ => read_full(r, &mut head[1..])?,
-    }
-    let len = u32::from_be_bytes(head) as usize;
-    if len == 0 {
-        return Err(ProtocolError::EmptyFrame);
-    }
-    if len > MAX_BULK_FRAME {
-        return Err(ProtocolError::FrameTooLarge(len, MAX_BULK_FRAME));
-    }
-    let mut ch = [0u8; 1];
-    read_full(r, &mut ch)?;
-    let channel = Channel::from_u8(ch[0])?;
-    if len > channel.max_frame() {
-        return Err(ProtocolError::FrameTooLarge(len, channel.max_frame()));
-    }
-    let mut payload = vec![0u8; len - 1];
-    read_full(r, &mut payload)?;
-    if channel == Channel::Video {
-        VideoFrame::decode_payload(&payload).map(|v| Some(Frame::Video(v)))
-    } else if channel == Channel::Audio {
-        audio::AudioPacket::decode_payload(&payload).map(|a| Some(Frame::Audio(a)))
-    } else {
-        serde_json::from_slice(&payload).map(|m| Some(Frame::Msg(m))).map_err(|e| ProtocolError::Malformed(e.to_string()))
+    loop {
+        let mut head = [0u8; 4];
+        match r.read(&mut head[..1])? {
+            0 => return Ok(None),
+            _ => read_full(r, &mut head[1..])?,
+        }
+        let len = u32::from_be_bytes(head) as usize;
+        if len == 0 {
+            return Err(ProtocolError::EmptyFrame);
+        }
+        if len > MAX_BULK_FRAME {
+            return Err(ProtocolError::FrameTooLarge(len, MAX_BULK_FRAME));
+        }
+        let mut ch = [0u8; 1];
+        read_full(r, &mut ch)?;
+        let channel = Channel::from_u8(ch[0])?;
+        let mut payload = vec![0u8; len - 1];
+        read_full(r, &mut payload)?;
+        let frame = if channel == Channel::Video {
+            VideoFrame::decode_payload(&payload).map(Frame::Video)
+        } else if channel == Channel::Audio {
+            audio::AudioPacket::decode_payload(&payload).map(Frame::Audio)
+        } else {
+            serde_json::from_slice(&payload).map(Frame::Msg).map_err(|e| ProtocolError::Malformed(e.to_string()))
+        };
+        match frame {
+            Ok(f) => return Ok(Some(f)),
+            Err(e) => eprintln!("a message from the other side was passed over ({:?}, {len} bytes): {e}", channel),
+        }
     }
 }
 
@@ -878,6 +925,30 @@ mod tests {
         assert!(matches!(decode(&b), Err(ProtocolError::Malformed(_))));
     }
 
+    /// A message past a control frame's size, or one not understood, never ends the stream: the
+    /// first is taken, the second passed over, and what follows is read in step.
+    #[test]
+    fn a_large_or_unknown_message_does_not_end_the_stream() {
+        let menus = vec![MenuNode { title: "x".repeat(4096), enabled: true, ..Default::default() }; 400];
+        let big = Message::MenuBar { application_id: "safari".into(), menus };
+        // (as a Mac of 1.2.0 sent it: on the control channel, past its size)
+        let json = serde_json::to_vec(&big).unwrap();
+        assert!(json.len() > MAX_CONTROL_FRAME);
+        let mut s = ((json.len() + 1) as u32).to_be_bytes().to_vec();
+        s.push(Channel::Control as u8);
+        s.extend(json);
+        s.extend(encode_raw(Channel::Control, br#"{"type":"something_new","x":1}"#).unwrap());
+        s.extend(encode_raw(Channel::Control, br#"{"type":"window_destroyed","window_id":"not a number"}"#).unwrap());
+        s.extend(encode(&Message::WindowDestroyed { window_id: 7 }).unwrap());
+        let mut r = std::io::Cursor::new(s);
+        assert!(matches!(read_frame(&mut r).unwrap(), Some(Frame::Msg(Message::MenuBar { menus, .. })) if menus.len() == 400));
+        assert!(matches!(read_frame(&mut r).unwrap(), Some(Frame::Msg(Message::WindowDestroyed { window_id: 7 }))));
+        assert!(read_frame(&mut r).unwrap().is_none());
+        // a stream out of step still is an error
+        let mut bad = std::io::Cursor::new(vec![0, 0, 0, 2, 99, b'x']);
+        assert!(matches!(read_frame(&mut bad), Err(ProtocolError::UnknownChannel(99))));
+    }
+
     #[test]
     fn eof_semantics() {
         let mut empty = std::io::Cursor::new(Vec::<u8>::new());
@@ -940,7 +1011,7 @@ mod tests {
         for m in [
             Message::DockStream { enabled: true },
             Message::DockStatus { available: true, window_id: 9, bounds: Rect { x: 300, y: 1000, w: 900, h: 80 }, edge: "bottom".into(), reason: None },
-            Message::SetWallpaper { path: Some("/Users/me/Downloads/RemoteMac Uploads/w.jpg".into()), style: "fill".into(), color: "#1E1E1E".into() },
+            Message::SetWallpaper { path: Some("/Users/me/Downloads/Taro Uploads/w.jpg".into()), style: "fill".into(), color: "#1E1E1E".into() },
             Message::SetWallpaper { path: None, style: "fill".into(), color: "#003366".into() },
             Message::RestoreWallpaper,
             Message::WallpaperStatus { applied: false, reason: Some("x".into()) },
@@ -954,6 +1025,13 @@ mod tests {
             Message::WindowStyle { exact: true },
             Message::WindowChrome { window_id: 7, title_height: 52, close: Some(Rect { x: 20, y: 20, w: 14, h: 14 }), minimize: None, zoom: None, controls: vec![Rect { x: 300, y: 12, w: 28, h: 28 }] },
             Message::MenuBarStream { enabled: true },
+            Message::Bye,
+            Message::DockList,
+            Message::DockItems { items: vec![DockEntry { id: "app:com.apple.finder".into(), kind: "app".into(), title: "Finder".into(), app_id: Some("finder".into()), running: true }, DockEntry { id: "separator:1".into(), kind: "separator".into(), ..Default::default() }] },
+            Message::DockOpen { id: "trash".into() },
+            Message::DockMenuGet { id: "app:com.apple.finder".into() },
+            Message::DockMenu { id: "trash".into(), menus: vec![MenuNode { title: "Empty Trash".into(), enabled: true, ..Default::default() }] },
+            Message::DockMenuInvoke { id: "trash".into(), path: vec![0] },
             Message::MenuBarStatus { available: true, window_id: 0x7FFF_0003, bounds: Rect { x: 0, y: 0, w: 1512, h: 33 }, reason: None },
         ] {
             let b = encode(&m).unwrap();

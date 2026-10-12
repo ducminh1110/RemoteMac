@@ -2,7 +2,7 @@
 // (every app while the Mac Desktop is open), at 48 kHz stereo; it leaves as 16-bit PCM in 5 ms
 // packets (crates/rm-protocol/src/audio.rs): over UDP while that path is alive, otherwise on the
 // Audio channel (7) of the encrypted stream. Nothing is captured until the viewer asks
-// ("audio_control"), and MacBridge's own sound is never captured.
+// ("audio_control"), and Taro's own sound is never captured.
 import Foundation
 import ScreenCaptureKit
 import CoreMedia
@@ -84,7 +84,7 @@ final class AudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         lock.lock(); let (all, set, on) = (everything, pids, wanted); lock.unlock()
         guard on else { return }
         if !CGPreflightScreenCaptureAccess() {
-            onStatus?("unavailable", "Screen Recording is not allowed for MacBridge (System Settings > Privacy & Security > Screen Recording)")
+            onStatus?("unavailable", "Screen Recording is not allowed for Taro (System Settings > Privacy & Security > Screen Recording)")
             return
         }
         do {

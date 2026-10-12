@@ -1,4 +1,4 @@
-# Contributing to MacBridge
+# Contributing to Taro
 
 Thanks for helping! Bug reports, fixes and features are all welcome.
 
@@ -7,8 +7,8 @@ Thanks for helping! Bug reports, fixes and features are all welcome.
 Open an issue with:
 
 - what you did, what you expected, what happened (a screenshot helps a lot);
-- logs from both sides: start `MacBridge.exe --logs-enabled` (log in
-  `%APPDATA%\RemoteMac\viewer.log`) and `./macbridge --foreground --logs-enabled ...` on the Mac
+- logs from both sides: start `Taro.exe --logs-enabled` (log in
+  `%APPDATA%\RemoteMac\viewer.log`) and `./taro --foreground --logs-enabled ...` on the Mac
   (log in the terminal);
 - Windows version and GPU, macOS version and Mac model, and whether the connection was on the
   same network or through a relay.

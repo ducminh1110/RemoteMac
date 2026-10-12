@@ -1,7 +1,7 @@
 // Opening a document from the viewer ("open_file"): a file the user dropped on a Mac app's
 // window, or onto the launcher, after it was uploaded. Scoped: only documents in the session's
 // upload folder or the user's own folders, never anything that runs (apps, installers,
-// scripts, executables), and only with an app MacBridge lists. No shell is involved.
+// scripts, executables), and only with an app Taro lists. No shell is involved.
 import Foundation
 import AppKit
 import UniformTypeIdentifiers
@@ -38,7 +38,7 @@ func openRejection(_ path: String, uploads: URL) -> String? {
     return nil
 }
 
-/// Open `path` with the app `appBundle` (an app MacBridge lists), or with its default app.
+/// Open `path` with the app `appBundle` (an app Taro lists), or with its default app.
 func openDocument(_ path: String, appBundle: String?, done: @escaping (String?) -> Void) {
     let file = URL(fileURLWithPath: path)
     let cfg = NSWorkspace.OpenConfiguration()

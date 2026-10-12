@@ -1,10 +1,8 @@
-//! MacBridge's icon, drawn as an icon of macOS 26 is made: a squircle (Apple's continuous
-//! corners) in a deep blue gradient lit from above, and on it one window of Liquid Glass (the
-//! material of glass.rs: what is behind it bends at its rim, light runs along its edge) with the
-//! three window buttons, a bridge of light across it: Mac windows carried over to another screen.
-//! The same drawing at every size (the README's picture, the app's icon).
+//! Taro's icon, drawn as an icon of macOS 26 is made: a squircle (Apple's continuous corners)
+//! in a violet gradient lit from above, and on it a taro (khoai môn): its lilac corm with soft
+//! rings and a shine, two green leaves above it. The same drawing at every size (the README's
+//! picture, the app's icon).
 
-use crate::glass::{self, Kind, Level, Material};
 use crate::paint::{Canvas, Rgba};
 
 /// Inside Apple's squircle (a superellipse of exponent 5) of half-size `a` around (cx, cy):
@@ -30,7 +28,55 @@ fn squircle(x: usize, y: usize, cx: f32, cy: f32, a: f32) -> f32 {
     n as f32 / 16.0
 }
 
-/// The icon, `n` pixels square (transparent around the squircle, as macOS icons are).
+/// Coverage of pixel (x, y) by the shape `inside` (a test on a point), 4x4 samples where
+/// `near_edge` says the edge may pass.
+fn coverage(x: usize, y: usize, inside: impl Fn(f32, f32) -> bool) -> f32 {
+    let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+    let corners = [(px - 0.5, py - 0.5), (px + 0.5, py - 0.5), (px - 0.5, py + 0.5), (px + 0.5, py + 0.5)];
+    let n_in = corners.iter().filter(|(a, b)| inside(*a, *b)).count();
+    if n_in == 4 {
+        return 1.0;
+    }
+    if n_in == 0 && !inside(px, py) {
+        return 0.0;
+    }
+    let mut n = 0;
+    for sy in 0..4 {
+        for sx in 0..4 {
+            if inside(x as f32 + (sx as f32 + 0.5) / 4.0, y as f32 + (sy as f32 + 0.5) / 4.0) {
+                n += 1;
+            }
+        }
+    }
+    n as f32 / 16.0
+}
+
+/// The taro's corm: an egg fuller at the bottom, half-width `a` and half-height `b` around (cx, cy).
+fn in_corm(x: f32, y: f32, cx: f32, cy: f32, a: f32, b: f32) -> bool {
+    let v = (y - cy) / b;
+    let half = a * (1.0 + 0.17 * v);
+    let u = (x - cx) / half;
+    u * u + v * v <= 1.0
+}
+
+/// A leaf from its base (bx, by) to its tip (tx, ty), `wide` across at its widest.
+fn in_leaf(x: f32, y: f32, (bx, by): (f32, f32), (tx, ty): (f32, f32), wide: f32) -> bool {
+    let (dx, dy) = (tx - bx, ty - by);
+    let len = (dx * dx + dy * dy).sqrt();
+    let (ux, uy) = (dx / len, dy / len);
+    let along = (x - bx) * ux + (y - by) * uy;
+    let across = -(x - bx) * uy + (y - by) * ux;
+    if !(0.0..=len).contains(&along) {
+        return false;
+    }
+    let t = along / len;
+    // round at the base, drawn to a point at the tip (a taro leaf, simply)
+    let half = wide / 2.0 * (std::f32::consts::PI * t).sin().powf(0.75) * (1.0 - 0.25 * t);
+    across.abs() <= half
+}
+
+/// The icon, `n` pixels square (transparent around the squircle, as macOS icons are): a taro
+/// (khoai môn, Taro's namesake) on a squircle of violet, lit from above.
 pub fn icon(n: usize) -> Canvas {
     let s = n as f32 / 1024.0;
     let (cx, cy, a) = (512.0 * s, 506.0 * s, 412.0 * s);
@@ -48,9 +94,9 @@ pub fn icon(n: usize) -> Canvas {
     sh.blur((22.0 * s).round().max(1.0) as usize, 3);
     let m: Vec<u8> = sh.px.iter().map(|p| (p[3] as f32 * 0.32) as u8).collect();
     c.fill_mask(&m, n, 0, 0, Rgba::BLACK);
-    // the body: sky blue at the top left into a deep blue, a violet glow low on the right
+    // the body: lavender at the top left into a deep violet, a pink glow low on the right
     let mut body = Canvas::new(n, n);
-    let (top, mid, deep, glow) = (Rgba::rgb(0x7a, 0xd8, 0xff), Rgba::rgb(0x2a, 0x7c, 0xff), Rgba::rgb(0x12, 0x3c, 0xd8), Rgba::rgb(0x9b, 0x5c, 0xff));
+    let (top, mid, deep, glow) = (Rgba::rgb(0xc4, 0xa6, 0xff), Rgba::rgb(0x84, 0x4a, 0xf0), Rgba::rgb(0x4a, 0x1d, 0x96), Rgba::rgb(0xf0, 0x7a, 0xc8));
     for y in 0..n {
         for x in 0..n {
             let k = squircle(x, y, cx, cy, a);
@@ -60,12 +106,12 @@ pub fn icon(n: usize) -> Canvas {
             let (u, v) = ((x as f32 - (cx - a)) / (2.0 * a), (y as f32 - (cy - a)) / (2.0 * a));
             let t = (u * 0.35 + v * 0.65).clamp(0.0, 1.0);
             let base = if t < 0.5 { top.lerp(mid, t / 0.5) } else { mid.lerp(deep, (t - 0.5) / 0.5) };
-            let g = (-(((u - 0.85).powi(2) + (v - 0.95).powi(2)) / 0.12)).exp();
-            body.blend(x, y, base.lerp(glow, g * 0.55), k);
+            let g = (-(((u - 0.88).powi(2) + (v - 0.95).powi(2)) / 0.10)).exp();
+            body.blend(x, y, base.lerp(glow, g * 0.45), k);
         }
     }
-    // light from above: a soft sheen at the top, the rim a hair brighter there
-    let sheen = Rgba::WHITE.alpha(0.22);
+    // light from above: a soft sheen at the top
+    let sheen = Rgba::WHITE.alpha(0.20);
     let mut lit = Canvas::new(n, n);
     for y in 0..n {
         let v = (y as f32 - (cy - a)) / (2.0 * a);
@@ -80,52 +126,91 @@ pub fn icon(n: usize) -> Canvas {
         }
     }
     body.composite(&lit, 0, 0, 1.0);
-    // the window of glass, refracting the body behind it
-    let (gw, gh) = ((560.0 * s).round() as usize, (420.0 * s).round() as usize);
-    let (gx, gy) = ((cx - gw as f32 / 2.0).round() as isize, (cy - gh as f32 / 2.0 - 6.0 * s).round() as isize);
-    let r = 86.0 * s;
-    let mut m = Material::for_kind(Kind::Control, false, Rgba::rgb(0x0a, 0x7a, 0xff));
-    m.tint_top = Rgba::WHITE.alpha(0.30);
-    m.tint_bottom = Rgba::WHITE.alpha(0.12);
-    m.rim_light = Rgba::WHITE.alpha(0.95);
-    m.rim_lo = Rgba::WHITE.alpha(0.30);
-    m.rim_dark = Rgba::CLEAR;
-    m.params.refraction = 0.65;
-    m.params.z_radius = 34.0;
-    m.params.blur = 10.0;
-    m.params.specular = 0.45;
-    m.sheen = 1.0;
-    let gs = s * 4.0; // the material's lengths are in DIPs: this icon's are larger
-    let reach = glass::margin(&m, gs, Level::Full, gw, gh, r);
-    let back = body.crop(gx - reach as isize, gy - reach as isize, gw + 2 * reach, gh + 2 * reach);
-    let pane = glass::render(Some(&back), reach, gw, gh, r, &m, Level::Full, gs);
-    body.shadow(gx as f32, gy as f32, gw as f32, gh as f32, r, 40.0 * s, 16.0 * s, Rgba::rgb(0x08, 0x1c, 0x70).alpha(0.45));
-    body.composite(&pane, gx, gy, 1.0);
-    // the window's three buttons
-    let (bx, by, br) = (gx as f32 + 62.0 * s, gy as f32 + 58.0 * s, 17.0 * s);
-    for (i, col) in [Rgba::rgb(0xff, 0x5f, 0x57), Rgba::rgb(0xfe, 0xbc, 0x2e), Rgba::rgb(0x28, 0xc8, 0x40)].iter().enumerate() {
-        let x = bx + i as f32 * 52.0 * s;
-        body.fill_circle(x, by + 2.0 * s, br, Rgba::BLACK.alpha(0.12));
-        body.fill_circle(x, by, br, *col);
-        body.fill_circle(x - br * 0.3, by - br * 0.35, br * 0.45, Rgba::WHITE.alpha(0.35));
+    // the taro: its corm, lilac with rings, under two leaves
+    let (tx, ty, ta, tb) = (512.0 * s, 618.0 * s, 236.0 * s, 236.0 * s);
+    let deep_violet = Rgba::rgb(0x2e, 0x10, 0x65);
+    // its shadow on the body
+    let mut ts = Canvas::new(n, n);
+    for y in 0..n {
+        for x in 0..n {
+            let k = coverage(x, y, |px, py| in_corm(px, py - 26.0 * s, tx, ty, ta, tb));
+            if k > 0.0 {
+                ts.blend(x, y, deep_violet, k);
+            }
+        }
     }
-    // a bridge of light across the window: an arch and its deck
-    let (ax, ay) = (cx, gy as f32 + gh as f32 * 0.80);
-    let span = 190.0 * s;
-    let thick = 30.0 * s;
-    let white = Rgba::WHITE;
-    // (the arch's round ends rest on the deck)
-    let deck = ay - 3.0 * s;
-    let (ay, top_y) = (deck - thick * 0.5, deck - thick * 0.5);
-    body.arc(ax, ay + 6.0 * s, span, thick, 1.5 * std::f32::consts::PI, 2.5 * std::f32::consts::PI, |_| Rgba::rgb(0x08, 0x1c, 0x70).alpha(0.16));
-    body.arc(ax, ay, span, thick, 1.5 * std::f32::consts::PI, 2.5 * std::f32::consts::PI, |_| white);
-    for k in [-0.62f32, -0.25, 0.25, 0.62] {
-        let x = ax + k * span;
-        let top = top_y - (span * span - (k * span).powi(2)).sqrt();
-        body.fill_capsule(x, top + thick * 0.5, x, deck, 5.0 * s, white.alpha(0.85));
+    ts.blur((28.0 * s).round().max(1.0) as usize, 3);
+    let tm: Vec<u8> = ts.px.iter().map(|p| (p[3] as f32 * 0.42) as u8).collect();
+    body.fill_mask(&tm, n, 0, 0, deep_violet);
+    // the leaves behind the corm's top: one up and to the right, a smaller one to the left
+    let leaf = |body: &mut Canvas, base: (f32, f32), tip: (f32, f32), wide: f32| {
+        let (x0, x1) = (base.0.min(tip.0) - wide, base.0.max(tip.0) + wide);
+        let (y0, y1) = (base.1.min(tip.1) - wide, base.1.max(tip.1) + wide);
+        let (light, dark) = (Rgba::rgb(0x9b, 0xf0, 0x8c), Rgba::rgb(0x1f, 0x9d, 0x4f));
+        for y in (y0.max(0.0) as usize)..(y1.min(n as f32) as usize) {
+            for x in (x0.max(0.0) as usize)..(x1.min(n as f32) as usize) {
+                let k = coverage(x, y, |px, py| in_leaf(px, py, base, tip, wide));
+                if k > 0.0 {
+                    let (dx, dy) = (tip.0 - base.0, tip.1 - base.1);
+                    let t = (((x as f32 - base.0) * dx + (y as f32 - base.1) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+                    body.blend(x, y, dark.lerp(light, t * 0.8), k);
+                }
+            }
+        }
+        // its vein
+        let (vx, vy) = (base.0 + (tip.0 - base.0) * 0.82, base.1 + (tip.1 - base.1) * 0.82);
+        body.fill_capsule(base.0, base.1, vx, vy, 5.0 * s, Rgba::WHITE.alpha(0.38));
+    };
+    body.fill_capsule(tx + 2.0 * s, ty - tb + 40.0 * s, tx + 24.0 * s, ty - tb - 60.0 * s, 13.0 * s, Rgba::rgb(0x2a, 0xa8, 0x5a));
+    leaf(&mut body, (tx + 24.0 * s, ty - tb - 52.0 * s), (tx + 222.0 * s, ty - tb - 232.0 * s), 158.0 * s);
+    leaf(&mut body, (tx + 4.0 * s, ty - tb - 36.0 * s), (tx - 158.0 * s, ty - tb - 172.0 * s), 112.0 * s);
+    // the corm: lilac lit from the top left
+    let (hi, lo) = (Rgba::rgb(0xf6, 0xee, 0xff), Rgba::rgb(0xc9, 0xa9, 0xf7));
+    let mut corm = Canvas::new(n, n);
+    let mut cov = vec![0f32; n * n];
+    for y in ((ty - tb - 2.0) as usize).min(n)..((ty + tb + 2.0) as usize).min(n) {
+        for x in ((tx - ta * 1.3) as usize).min(n)..((tx + ta * 1.3) as usize).min(n) {
+            let k = coverage(x, y, |px, py| in_corm(px, py, tx, ty, ta, tb));
+            if k > 0.0 {
+                cov[y * n + x] = k;
+                let (u, v) = ((x as f32 - tx) / ta, (y as f32 - ty) / tb);
+                let t = ((u * 0.45 + v * 0.75) * 0.5 + 0.5).clamp(0.0, 1.0);
+                corm.blend(x, y, hi.lerp(lo, t), k);
+            }
+        }
     }
-    body.fill_capsule(ax - span - 46.0 * s, deck + 5.0 * s, ax + span + 46.0 * s, deck + 5.0 * s, thick * 0.42, Rgba::rgb(0x08, 0x1c, 0x70).alpha(0.14));
-    body.fill_capsule(ax - span - 46.0 * s, deck, ax + span + 46.0 * s, deck, thick * 0.42, white);
+    // its rings: soft violet bands around it, curving with its roundness (seen from a little
+    // above)
+    let ring = Rgba::rgb(0x8f, 0x5c, 0xe0);
+    let mut rings = Canvas::new(n, n);
+    for (i, f) in [-0.5f32, -0.12, 0.26, 0.62].iter().enumerate() {
+        let r = 560.0 * s;
+        let yc = ty + f * tb - r;
+        rings.arc(tx, yc, r, (15.0 - i as f32 * 1.5) * s, std::f32::consts::PI - 0.5, std::f32::consts::PI + 0.5, |_| ring.alpha(0.5));
+    }
+    // a few specks, as on its skin
+    for (u, v, r) in [(-0.45f32, 0.15f32, 9.0f32), (0.35, -0.2, 7.0), (0.15, 0.55, 8.0), (-0.2, 0.75, 6.0), (0.55, 0.45, 6.0), (-0.6, -0.35, 5.0)] {
+        rings.fill_circle(tx + u * ta, ty + v * tb, r * s, ring.alpha(0.45));
+    }
+    let rm: Vec<u8> = rings.px.iter().zip(&cov).map(|(p, k)| (p[3] as f32 * k) as u8).collect();
+    corm.fill_mask(&rm, n, 0, 0, ring);
+    // the shine on its top left
+    let mut shine = Canvas::new(n, n);
+    for y in 0..n {
+        for x in 0..n {
+            let k = cov[y * n + x];
+            if k <= 0.0 {
+                continue;
+            }
+            let (du, dv) = ((x as f32 - (tx - ta * 0.42)) / (ta * 0.34), (y as f32 - (ty - tb * 0.52)) / (tb * 0.24));
+            let g = (-(du * du + dv * dv) * 1.6).exp();
+            if g > 0.01 {
+                shine.blend(x, y, Rgba::WHITE, g * 0.75 * k);
+            }
+        }
+    }
+    corm.composite(&shine, 0, 0, 1.0);
+    body.composite(&corm, 0, 0, 1.0);
     c.composite(&body, 0, 0, 1.0);
     c
 }
@@ -147,7 +232,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_icon_is_a_squircle_with_its_window() {
+    fn the_icon_is_a_squircle_with_its_taro() {
         let c = icon(128);
         assert_eq!(c.get(2, 2)[3], 0, "clear outside");
         assert_eq!(c.get(64, 64)[3], 255, "opaque inside");

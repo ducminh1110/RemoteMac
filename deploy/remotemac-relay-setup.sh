@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MacBridge (RemoteMac) relay server: one-shot setup from A to Z (Ubuntu / Debian).
+# Taro (RemoteMac) relay server: one-shot setup from A to Z (Ubuntu / Debian).
 #
 #   sudo ./remotemac-relay-setup.sh                # install or update, keep the existing key
 #   sudo ./remotemac-relay-setup.sh --port 7470 --key KEY --name relay.example.com
@@ -153,15 +153,15 @@ fi
 ADDR="${DNS_NAME:-${PUBLIC_IP:-THIS-SERVER}}"
 
 echo
-bold "MacBridge relay is installed: $ADDR:$PORT"
+bold "Taro relay is installed: $ADDR:$PORT"
 echo
 bold "Open these ports in your provider's firewall / security group (inbound):"
-echo "    TCP $PORT   MacBridge relay: connection, control, input (Mac and Windows connect here)"
-echo "    UDP $PORT   MacBridge relay: video with FEC (the smooth path; without it video uses TCP)"
+echo "    TCP $PORT   Taro relay: connection, control, input (Mac and Windows connect here)"
+echo "    UDP $PORT   Taro relay: video with FEC (the smooth path; without it video uses TCP)"
 echo "    TCP 22     SSH (to administer the server)"
 echo "    (nothing else; the Mac and the PC open no ports at all, both only connect out)"
 echo
-echo "Use it:   on the Mac  ./macbridge --relay $ADDR:$PORT --password ...;  on Windows type $ADDR:$PORT under Relay server"
+echo "Use it:   on the Mac  ./taro --relay $ADDR:$PORT --password ...;  on Windows type $ADDR:$PORT under Relay server"
 echo "Check from Windows (PowerShell):  Test-NetConnection $ADDR -Port $PORT"
 echo "Logs:     journalctl -u rm-relay -f"
 echo "Restart:  sudo systemctl restart rm-relay"

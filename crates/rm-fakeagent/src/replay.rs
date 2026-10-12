@@ -2,8 +2,6 @@
 //! gets the recorded capabilities and app list, and launching an app plays back what that app's
 //! windows showed (real H.264 video, titles, menu bar, icon) with the recorded timing. Windows
 //! stay open after the playback with their last picture, until closed or the app is terminated.
-//! A recorded `dock` segment (the Mac's Dock, as Desktop Fusion streams it) is played when the
-//! client asks for the Dock.
 
 use rm_protocol::recording::{self, Record};
 use rm_protocol::*;
@@ -15,8 +13,7 @@ use std::time::{Duration, Instant};
 
 /// Gaps longer than this in the recording are shortened (an idle app sends nothing).
 const MAX_GAP: Duration = Duration::from_secs(2);
-/// The recorded Mac Dock and menu bar (see rm-client's recorder).
-const DOCK: &str = "dock";
+/// The recorded Mac menu bar (see rm-client's recorder).
 const MENUBAR: &str = "menubar";
 
 type Writer<W> = Arc<Mutex<W>>;
@@ -70,10 +67,10 @@ pub fn serve_replay<S: Read + Write + Send + 'static>(mut reader: S, writer: S, 
         Some(Message::ClientHello(_)) => {}
         _ => return Ok(()),
     }
-    // what the recording has: the Dock (Fusion), windows as the Mac drew them (exact)
+    // what the recording has: windows as the Mac drew them (exact), the Mac's Dock
     let mut features = vec!["control", "video", "mask"];
-    if rec.apps.contains_key(DOCK) {
-        features.push("fusion");
+    if rec.session.iter().any(|m| matches!(m, Message::DockItems { .. })) {
+        features.push("dock");
     }
     if rec.session.contains(&Message::WindowStyle { exact: true }) {
         features.push("exact");
@@ -115,9 +112,21 @@ pub fn serve_replay<S: Read + Write + Send + 'static>(mut reader: S, writer: S, 
                 }
             }
             Message::GetAppIcon { application_id } => {
-                if let Some(m) = rec.last(&application_id, |m| matches!(m, Message::AppIcon { .. })) {
+                // an app's (recorded with it), or a Dock item's (with the session)
+                let dock = || rec.session.iter().find(|m| matches!(m, Message::AppIcon { application_id: a, .. } if *a == application_id)).cloned();
+                if let Some(m) = rec.last(&application_id, |m| matches!(m, Message::AppIcon { .. })).or_else(dock) {
                     send(&w, &m)?;
                 }
+            }
+            Message::DockList => {
+                if let Some(m) = rec.session.iter().find(|m| matches!(m, Message::DockItems { .. })) {
+                    send(&w, m)?;
+                }
+            }
+            Message::DockMenuGet { id } => {
+                // as recorded (the first item's); none for the others
+                let m = rec.session.iter().find(|m| matches!(m, Message::DockMenu { id: i, .. } if *i == id)).cloned();
+                send(&w, &m.unwrap_or(Message::DockMenu { id, menus: vec![] }))?;
             }
             Message::WindowClose { window_id } => {
                 if open.lock().unwrap().remove(&window_id).is_some() {
@@ -151,22 +160,6 @@ pub fn serve_replay<S: Read + Write + Send + 'static>(mut reader: S, writer: S, 
                     playing.lock().unwrap().insert(MENUBAR.to_string(), stop.clone());
                     let (w, open, closed) = (w.clone(), open.clone(), closed.clone());
                     std::thread::spawn(move || play(&w, MENUBAR, &records, &stop, &open, &closed));
-                }
-            }
-            Message::DockStream { enabled } => {
-                let Some(records) = rec.apps.get(DOCK).cloned() else {
-                    send(&w, &Message::DockStatus { available: false, window_id: 0, bounds: Rect { x: 0, y: 0, w: 0, h: 0 }, edge: String::new(), reason: Some("the Dock was not recorded".into()) })?;
-                    continue;
-                };
-                let running = playing.lock().unwrap().remove(DOCK);
-                if let Some(stop) = running {
-                    stop.store(true, Ordering::SeqCst);
-                }
-                if enabled {
-                    let stop = Arc::new(AtomicBool::new(false));
-                    playing.lock().unwrap().insert(DOCK.to_string(), stop.clone());
-                    let (w, open, closed) = (w.clone(), open.clone(), closed.clone());
-                    std::thread::spawn(move || play(&w, DOCK, &records, &stop, &open, &closed));
                 }
             }
             Message::Ping { nonce } => send(&w, &Message::Pong { nonce })?,
@@ -270,27 +263,5 @@ mod tests {
         write_message(&mut c, &Message::AppTerminate { application_id: "xcode".into() }).unwrap();
         assert!(matches!(read_message(&mut c).unwrap(), Some(Message::WindowDestroyed { window_id: 9 })));
         assert!(matches!(read_message(&mut c).unwrap(), Some(Message::AppExited { .. })));
-    }
-
-    #[test]
-    fn replays_the_recorded_dock_when_asked_for() {
-        let id = 0x7FFF_0002u64;
-        let status = Message::DockStatus { available: true, window_id: id, bounds: Rect { x: 25, y: 700, w: 974, h: 64 }, edge: "bottom".into(), reason: None };
-        let video = VideoFrame { window_id: id, pts_us: 0, keyframe: true, codec: CODEC_H264, width: 974, height: 64, data: vec![0, 0, 0, 1, 0x65] };
-        let records = vec![rec(recording::SESSION, 0, &Message::Apps { apps: vec![] }), rec(DOCK, 5, &status), Record { app: DOCK.into(), t_ms: 9, frame: encode_video(&video).unwrap() }];
-        let rec = Arc::new(Recording::from_records(records));
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        let b = TcpStream::connect(l.local_addr().unwrap()).unwrap();
-        let a = l.accept().unwrap().0;
-        let a2 = a.try_clone().unwrap();
-        std::thread::spawn(move || serve_replay(a, a2, rec));
-        let mut c = b;
-        write_message(&mut c, &Message::ClientHello(Hello::ours("t", &["h264"], &["control", "fusion"]))).unwrap();
-        let Some(Message::ServerHello(h)) = read_message(&mut c).unwrap() else { panic!() };
-        assert!(h.features.iter().any(|f| f == "fusion"), "a recording with the Dock offers Fusion: {:?}", h.features);
-        assert!(matches!(read_message(&mut c).unwrap(), Some(Message::CapabilityReport(_))));
-        write_message(&mut c, &Message::DockStream { enabled: true }).unwrap();
-        assert!(matches!(read_frame(&mut c).unwrap(), Some(Frame::Msg(m)) if m == status));
-        assert!(matches!(read_frame(&mut c).unwrap(), Some(Frame::Video(v)) if v == video));
     }
 }

@@ -1,6 +1,6 @@
-# MacBridge architecture
+# Taro architecture
 
-How the pieces fit together, for contributors and anyone who wants to check how MacBridge
+How the pieces fit together, for contributors and anyone who wants to check how Taro
 works. User-facing instructions are in the [user guide](USER-GUIDE.md).
 
 - [Components](#components)
@@ -12,7 +12,7 @@ works. User-facing instructions are in the [user guide](USER-GUIDE.md).
 - [Window shapes, exact windows and the menu bar](#window-shapes-exact-windows-and-the-menu-bar)
 - [Sound](#sound)
 - [Opening files and adopting windows](#opening-files-and-adopting-windows)
-- [Desktop Fusion](#desktop-fusion)
+- [The Dock and full screen](#the-dock-and-full-screen)
 - [Mac Desktop over GameStream](#mac-desktop-over-gamestream)
 - [The Windows app's own surfaces](#the-windows-apps-own-surfaces)
 - [Testing](#testing)
@@ -21,8 +21,8 @@ works. User-facing instructions are in the [user guide](USER-GUIDE.md).
 
 | Component | Language | Where | Role |
 |---|---|---|---|
-| Mac app (`macbridge`) | Swift + a little Objective-C | `agent/macos/` | captures windows (ScreenCaptureKit), encodes H.264 (VideoToolbox), injects input, reads menus and windows (Accessibility), launches apps (LaunchServices), virtual displays |
-| Windows app (`MacBridge.exe`) | Rust (Win32) | `crates/rm-viewer/` | one native window per Mac window, decoding (Media Foundation / openh264), presentation (D3D11, DirectComposition), input, clipboard, launcher |
+| Mac app (`taro`) | Swift + a little Objective-C | `agent/macos/` | captures windows (ScreenCaptureKit), encodes H.264 (VideoToolbox), injects input, reads menus and windows (Accessibility), launches apps (LaunchServices), virtual displays |
+| Windows app (`Taro.exe`) | Rust (Win32) | `crates/rm-viewer/` | one native window per Mac window, decoding (Media Foundation / openh264), presentation (D3D11, DirectComposition), input, clipboard, launcher |
 | Relay (`rm-relay`) | Rust | `crates/rm-relay/` | pairs the two sides, forwards TCP and UDP, hands out Mac IDs |
 | Protocol | Rust (mirrored in Swift) | `crates/rm-protocol/`, `agent/macos/Wire.swift` | framing, messages, UDP/FEC, sessions, encryption |
 | GameStream | Rust + C | `crates/rm-gamestream/`, `crates/moonlight-sys/` | the Mac Desktop: a host ported from Sunshine, the Moonlight client core |
@@ -133,12 +133,17 @@ the side's **features**; only those both list are used (`negotiate` in `rm-proto
 | `video` | per-window H.264 |
 | `audio` | the Mac's sound (`audio_control`, the audio channel and datagram) |
 | `open_file` | `open_file` for uploaded documents |
-| `fusion` | `dock_stream`, `set_wallpaper`, `restore_wallpaper` |
 | `mask` | `window_mask` (pictures' shapes) |
 | `exact` | `window_style`, `window_chrome` (windows as the Mac draws them) |
 | `menubar` | `menu_bar_stream`, `menu_bar_status` (the Mac's menu bar) |
+| `dock` | `dock_list`, `dock_items`, `dock_open`, `dock_menu_get`, `dock_menu`, `dock_menu_invoke` |
 
 An older Mac simply lacks the newer names, and the viewer hides what needs them.
+
+A frame of any channel may be up to 16 MiB (control messages are kept under 1 MiB, and the Mac
+sends a larger one on the files channel, which older viewers take). A message the reader does
+not understand (a newer type, a field it does not take as it is) is passed over: one message
+never ends a session.
 
 **Connection phases** (`crates/rm-viewer/src/lifecycle.rs`): Idle → Connecting →
 Authenticating → Negotiating → EstablishingMedia → Connected, then Reconnecting (back through
@@ -151,9 +156,15 @@ menus and streams each window as its own H.264 stream.
 
 - **FEC.** Video frames are cut into 1200-byte shards with Reed-Solomon parity (10–50 %,
   adapted to the measured loss), so lost packets are rebuilt instead of resent.
+- **Sending.** A frame leaves at once, 64 packets at a time half a millisecond apart, as
+  Sunshine sends it (the Mac Desktop's GameStream frames go the same way). Only a frame of a
+  window that waited 0.15 s to leave is a backlog: what waits of that window is dropped and
+  it starts again from a keyframe.
 - **Feedback.** The viewer reports what arrived every 200 ms. The Mac sends video over UDP
   only while these reports come in, so a blocked UDP path falls back to TCP by itself. The
-  bitrate follows queueing delay and loss.
+  bitrate follows queueing delay and loss: two reports in a row showing either cut it by a
+  fifth; a clean link that carried at least half of it raises it (windows that send little say
+  nothing of the link, and leave it as it is).
 - **Direct path.** Both sides exchange their addresses (LAN, and the public one from STUN)
   over the encrypted stream and punch through to each other. The first address that answers
   becomes the path for video and input. LAN addresses win over public ones.
@@ -183,7 +194,7 @@ menus and streams each window as its own H.264 stream.
 ## Sound
 
 - **Capture** (`agent/macos/Audio.swift`): ScreenCaptureKit's audio of the session's apps (all
-  apps while the Mac Desktop is open), never MacBridge's own (`excludesCurrentProcessAudio`).
+  apps while the Mac Desktop is open), never Taro's own (`excludesCurrentProcessAudio`).
   It starts on the viewer's `audio_control {enabled: true}` and answers `audio_status`
   (`playing`, `unavailable` with a reason). After one second of digital silence nothing is
   sent.
@@ -210,23 +221,37 @@ menus and streams each window as its own H.264 stream.
   taken into the session (`app_launched`, then `window_created`), so a document opened in
   Finder or an app started from the Dock becomes a Windows window.
 
-## Desktop Fusion
+## The Dock and full screen
 
-- **The Dock** is a window of its own (`dockWindowID` 0x7FFF0002, app `dock`). The Mac finds the
-  Dock's rectangle through Accessibility (its `AXList`, plus room for magnification) and captures
-  that region of the screen with a content filter that includes only the Dock's process and the
-  owners of desktop-level windows, so app windows behind it never show. `dock_status` reports
-  the rectangle, the screen edge, or why it is unavailable (an auto-hiding Dock is left alone).
-  The Dock's menus are reported as popups whose parent is the Dock window.
-- **Wallpaper**: the viewer uploads the PC's desktop picture (or sends its plain colour) and asks
-  `set_wallpaper`. The Mac saves its own desktop pictures once to
-  `~/Library/Application Support/RemoteMac/wallpaper-restore.json`, then sets the new one;
-  `restore_wallpaper`, the session's end, `--stop` and the next start (when no other MacBridge
-  runs) put the saved ones back and remove the file.
-- **On Windows** (`ui.rs`, `fusion_*`): the Dock window is borderless, top-most, placed at the
-  bottom of the monitor and slid in and out by the pointer; the wallpaper is checked every 4 s
-  and sent again when it changes. If the Mac cannot stream its Dock, a Dock drawn by the viewer
-  (`dock.rs`) with the session's apps stands in.
+- **The Dock** (`dock.rs`) is drawn by the viewer: a layered, top-most window of Liquid Glass
+  at the left or right edge of the monitor (`dock_edge` in Settings). With feature `dock` it
+  mirrors the Mac's Dock (`MacDock.swift`): `dock_list` → `dock_items` (the children of the
+  Dock's AXList: app, folder, document, Trash and separator items, `AXIsApplicationRunning`),
+  asked every 4 s; pictures of items that are not listed apps come through `get_app_icon`
+  with `dock:<id>`; a click opens a listed app as the launcher does, anything else through
+  `dock_open` (AXPress, or a Finder window of a folder or the Trash); a right-click sends
+  `dock_menu_get`: the Mac performs the item's AXShowMenu, reads the menu, cancels it, and
+  `dock_menu_invoke` opens it again and presses the entry. Icons shrink to fit the monitor
+  (`dock::layout`). Without the feature: the Mac Desktop, the session's open apps and Open an
+  App. It registers for the mouse's
+  raw input (`RIDEV_INPUTSINK`, so also while another window is in front); while the pointer
+  is at that edge of the screen (with no other monitor past it), the relative movement outward
+  is added up, and reset by a pause of 300 ms or a move back. At 160 counts it slides out
+  (`Push`). An absolute pointer (a pen, a remote session) has no such movement: resting at the
+  edge for 0.9 s does instead. It slides away 450 ms after the pointer has left it. Nothing is
+  asked of the Mac (the Mac's own Dock is not streamed any more; older versions' Desktop
+  Fusion changed the Mac's wallpaper: the Mac still puts it back if that was left behind).
+- **Full screen**: the window takes the monitor (over the taskbar), the Mac gets a display of
+  that size and the app window is sized to it. The title bar slides in at the top edge; the
+  pointer resting at the bottom edge for 150 ms makes the taskbar of that monitor the
+  foreground window, and once the pointer has been away from it for 450 ms the Mac window is
+  in front again (`taskbar_tick`). The Mac's menu bar and Dock hide while an app is full screen
+  there; the user's settings are kept in `~/Library/Application Support/RemoteMac/
+  chrome-restore.json` until put back, also at the next start after a crash.
+- **A picture of another shape than its window** (`keymap::fit_rect`): within 3 % (24 px at
+  most) it fills the window (a title row measured a moment late, a window a few points short);
+  beyond, it is letterboxed on the composition's background (the title bar's colour, black in
+  full screen), never on the desktop seen through. Input maps through the same rectangle.
 
 ## Mac Desktop over GameStream
 
@@ -237,7 +262,7 @@ encrypted session stream, and the UDP flows ride the session's encrypted datagra
 
 ## The Windows app's own surfaces
 
-MacBridge's own menus, search, loading window and banners are small layered windows drawn on
+Taro's own menus, search, loading window and banners are small layered windows drawn on
 the CPU (`paint.rs`: premultiplied BGRA, SDF rounded shapes, blur, shadows), never over the
 live video.
 
@@ -254,11 +279,30 @@ live video.
   modifiers to Mac keys, unit-tested; keys still down when a window loses the focus are
   released on the Mac.
 
+## Updates
+
+`crates/rm-viewer/src/update.rs`. The Windows app asks GitHub's REST API for the repository's
+latest release (`/releases/latest`: never a draft or a pre-release) over WinHTTP (the system's
+proxy and certificates), compares its tag with its own version, and offers it: a notice at the
+top of the screen when the automatic check finds it (at start, then every six hours; Settings),
+and Settings → About this Taro. Updating downloads `Taro-Setup.exe` (only from the repository's
+release downloads), checks its size and the SHA-256 GitHub lists for it, runs it with
+`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /RELAUNCH=1`, and ends without saying
+goodbye to the Mac (a cut connection: the Mac keeps the session's apps open). The installer
+(`installer/taro.iss`, Inno Setup, per user, no administrator) replaces `Taro.exe` and starts it
+again.
+
+On the Mac, `taro-update.sh` reads the same release (with macOS's JavaScript), downloads
+`Taro-macos.tar.gz`, checks its SHA-256 and that the new `taro` runs, and moves the files into
+place. A Taro in the background is a watcher and the worker it starts; the script ends the
+worker, and the watcher starts the program at its path again, now the new one, with the same
+arguments (ID and password).
+
 ## Testing
 
 | What | Where | Runs on |
 |---|---|---|
 | unit tests of every Rust crate (protocol, encryption, relay, LAN discovery, FEC, decoder…) | `cargo test --workspace` | any OS |
-| the Windows viewer against the scripted stand-in Mac, rendering checked, screenshots of the loading window, glass menu, MacBridge Search and reconnect banner | `.github/workflows/windows-viewer.yml` | Windows runners |
+| the Windows viewer against the scripted stand-in Mac, rendering checked, screenshots of the loading window, glass menu, Taro Search and reconnect banner | `.github/workflows/windows-viewer.yml` | Windows runners |
 | the real Mac app end to end (encryption, LAN, typed address over IPv4 and IPv6, relay, video, input, menus, dialogs, files, opening documents and refusing programs, adoption, sound packets, the streamed Dock, wallpaper set and restored, fullscreen, Mac Desktop, the launcher script) | `scripts/e2e-macos.sh` | macOS runners |
 | a recorded real Mac session replayed into the viewer | `.github/workflows/mac-to-windows.yml` | macOS + Windows runners |

@@ -45,7 +45,7 @@ const TAG: usize = 16;
 pub enum HandshakeError {
     WrongPassword,
     Locked,
-    /// The other side does not speak this handshake (an older MacBridge).
+    /// The other side does not speak this handshake (an older Taro).
     OldPeer,
     Failed(String),
 }
@@ -55,7 +55,7 @@ impl std::fmt::Display for HandshakeError {
         match self {
             Self::WrongPassword => write!(f, "wrong password"),
             Self::Locked => write!(f, "locked: too many wrong passwords, try again in a minute"),
-            Self::OldPeer => write!(f, "the other side runs an older MacBridge without encryption: update both"),
+            Self::OldPeer => write!(f, "the other side runs an older Taro without encryption: update both"),
             Self::Failed(e) => write!(f, "secure handshake: {e}"),
         }
     }

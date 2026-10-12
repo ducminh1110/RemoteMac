@@ -1,4 +1,4 @@
-//! Surfaces: borderless layered windows MacBridge draws itself (paint.rs) — the app loading
+//! Surfaces: borderless layered windows Taro draws itself (paint.rs) — the app loading
 //! window, glass menus, the search palette, the reconnect banner, the Dock. A surface keeps one
 //! DIB the size of the window; a frame is painted into a `Canvas`, copied in (only the part
 //! that changed, when told) and shown with per-pixel alpha by `UpdateLayeredWindowIndirect`.
@@ -205,7 +205,22 @@ pub fn text(c: &mut Canvas, s: &str, x: f32, y: f32, w: f32, px: i32, weight: i3
 }
 
 /// A value of Windows' personalization settings (None when it is not set).
+/// A value of Windows' personalisation settings, read again at most once a second (every
+/// title bar paint and every glass surface asks for the appearance).
 fn personalize(name: &str) -> Option<u32> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+    thread_local! { static READ: RefCell<HashMap<String, (Instant, Option<u32>)>> = RefCell::new(HashMap::new()); }
+    if let Some(v) = READ.with(|r| r.borrow().get(name).filter(|(t, _)| t.elapsed() < Duration::from_secs(1)).map(|(_, v)| *v)) {
+        return v;
+    }
+    let v = personalize_now(name);
+    READ.with(|r| r.borrow_mut().insert(name.to_string(), (Instant::now(), v)));
+    v
+}
+
+fn personalize_now(name: &str) -> Option<u32> {
     use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
     let mut v: u32 = 0;
     let mut n = 4u32;
@@ -226,14 +241,9 @@ pub fn transparency_off() -> bool {
     personalize("EnableTransparency") == Some(0)
 }
 
-/// The user's accent colour (Windows settings), else system blue.
+/// Taro's colour: its violet (brighter in dark mode), whatever Windows' accent is.
 pub fn accent() -> Rgba {
-    let mut c = 0u32;
-    let mut opaque = windows::core::BOOL(0);
-    if unsafe { windows::Win32::Graphics::Dwm::DwmGetColorizationColor(&mut c, &mut opaque) }.is_ok() && c != 0 {
-        return Rgba::rgb((c >> 16) as u8, (c >> 8) as u8, c as u8);
-    }
-    Rgba::rgb(10, 132, 255)
+    crate::look::theme(dark_mode()).accent
 }
 
 /// The display scale of the monitor at a screen point.
@@ -259,7 +269,7 @@ pub fn work_area_at(x: i32, y: i32) -> RECT {
 
 /// The look of glass surfaces now: (dark, accent, level).
 pub fn glass_look() -> (bool, Rgba, crate::glass::Level) {
-    let level = if transparency_off() { crate::glass::Level::Off } else { crate::glass::Level::from_setting(crate::settings::Settings::load().glass) };
+    let level = if transparency_off() { crate::glass::Level::Off } else { crate::glass::Level::from_setting(crate::settings::Settings::load_cached().glass) };
     (dark_mode(), accent(), level)
 }
 

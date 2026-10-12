@@ -1,4 +1,4 @@
-//! MacBridge's own windows drawn as macOS draws a window: no Windows title bar, the window's
+//! Taro's own windows drawn as macOS draws a window: no Windows title bar, the window's
 //! own toolbar at the top with the three window buttons in it. The window stays a normal
 //! resizable Windows window underneath (snapping, Win+arrows, the taskbar, the shadow and
 //! rounded corners of Windows 11): only the title bar is taken away, and its jobs (moving the
@@ -11,7 +11,7 @@ use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// MacBridge's icon (logo.rs) on the window: the taskbar and Alt+Tab show it.
+/// Taro's icon (logo.rs) on the window: the taskbar and Alt+Tab show it.
 fn own_icon(hwnd: HWND) {
     thread_local! { static ICON: std::cell::Cell<Option<isize>> = const { std::cell::Cell::new(None) }; }
     let icon = ICON.with(|c| {
@@ -102,20 +102,18 @@ pub fn hit_test(hwnd: HWND, lp: LPARAM, resizable: bool, caption: impl FnOnce(f3
 }
 
 /// What a window button does here: red closes, yellow minimizes, green zooms (maximizes, or
-/// back).
+/// back). Posted, not done at once: the caller is usually inside its window's state, and the
+/// WM_SIZE that zooming sends straight away would find that state in use (the window would
+/// grow while what it shows kept its old size).
 pub fn press(hwnd: HWND, l: Light) {
+    let cmd = match l {
+        Light::Close => SC_CLOSE,
+        Light::Minimize => SC_MINIMIZE,
+        Light::Zoom if maximized(hwnd) => SC_RESTORE,
+        Light::Zoom => SC_MAXIMIZE,
+    };
     unsafe {
-        match l {
-            Light::Close => {
-                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
-            }
-            Light::Minimize => {
-                let _ = ShowWindow(hwnd, SW_MINIMIZE);
-            }
-            Light::Zoom => {
-                let _ = ShowWindow(hwnd, if IsZoomed(hwnd).as_bool() { SW_RESTORE } else { SW_MAXIMIZE });
-            }
-        }
+        let _ = PostMessageW(Some(hwnd), WM_SYSCOMMAND, WPARAM(cmd as usize), LPARAM(0));
     }
 }
 

@@ -200,7 +200,7 @@ pub fn connect_direct(address: &str, session: &str, token: &str) -> Result<(TcpS
             Err(e) => errors.push(format!("{a}: {e}")),
         }
     }
-    Err(format!("The Mac did not answer at {}. Check the address, that MacBridge runs there, and that TCP port {port} is open. ({})", address.trim(), errors.join("; ")))
+    Err(format!("The Mac did not answer at {}. Check the address, that Taro runs there, and that TCP port {port} is open. ({})", address.trim(), errors.join("; ")))
 }
 
 /// Reach the Mac of `session` (token from ID and password): on this network if it answers there

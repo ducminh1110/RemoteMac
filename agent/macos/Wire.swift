@@ -16,6 +16,20 @@ func channel(forType t: String) -> Chan {
     }
 }
 
+/// The largest frame a viewer takes on the control channels (rm-protocol's MAX_CONTROL_FRAME);
+/// one past it cut the connection, so a larger message goes on the files channel, whose frames
+/// may be 16 MiB (an app with a big menu bar opened, and the connection was lost each time).
+let maxControlFrame = 1 << 20
+
+/// The channel of a message of `bytes` bytes of JSON.
+func channel(forType t: String, bytes: Int) -> Chan {
+    let c = channel(forType: t)
+    switch c {
+    case .video, .files, .clipboard, .audio: return c
+    default: return bytes + 1 > maxControlFrame ? .files : c
+    }
+}
+
 struct WireError: Error, CustomStringConvertible { let description: String }
 
 final class Conn {
@@ -40,6 +54,11 @@ final class Conn {
         while let ai = p {
             let fd = socket(ai.pointee.ai_family, ai.pointee.ai_socktype, ai.pointee.ai_protocol)
             if fd >= 0 {
+                // not inherited by the restart for the next viewer; a write to a peer that is gone
+                // fails instead of killing the process
+                _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
+                var nosig: Int32 = 1
+                setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosig, socklen_t(MemoryLayout<Int32>.size))
                 if Darwin.connect(fd, ai.pointee.ai_addr, ai.pointee.ai_addrlen) == 0 {
                     var one: Int32 = 1
                     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, socklen_t(MemoryLayout<Int32>.size))
@@ -148,7 +167,7 @@ final class Conn {
     func send(_ msg: [String: Any]) throws {
         let t = msg["type"] as? String ?? ""
         let json = try JSONSerialization.data(withJSONObject: msg)
-        try writeAll(frame(channel(forType: t), json))
+        try writeAll(frame(channel(forType: t, bytes: json.count), json))
     }
 
     func sendVideo(_ v: VideoPacket) throws { try writeAll(frame(.video, v.payload())) }
@@ -176,6 +195,8 @@ struct VideoPacket {
 
 func num(_ v: Any?) -> Double { (v as? NSNumber)?.doubleValue ?? 0 }
 func int(_ v: Any?) -> Int { (v as? NSNumber)?.intValue ?? 0 }
+/// A distance from the viewer as whole pixels (nothing it sends can trap the conversion).
+func pixels(_ d: Double) -> Int32 { d.isFinite ? Int32(max(-100_000, min(100_000, d.rounded()))) : 0 }
 
 /// Admission key of a relay on a public address: the environment, else the one built in.
 func relayKey() -> String? {
@@ -251,14 +272,14 @@ final class Sender {
 
     func send(_ msg: [String: Any]) throws {
         let json = try JSONSerialization.data(withJSONObject: msg)
-        let d = conn.frame(channel(forType: msg["type"] as? String ?? ""), json)
+        let d = conn.frame(channel(forType: msg["type"] as? String ?? "", bytes: json.count), json)
         cond.lock(); control.append(d); cond.signal(); cond.unlock()
     }
 
     /// Low priority: never ahead of input replies, window events or a new window's video.
     func sendBulk(_ msg: [String: Any]) throws {
         let json = try JSONSerialization.data(withJSONObject: msg)
-        let d = conn.frame(channel(forType: msg["type"] as? String ?? ""), json)
+        let d = conn.frame(channel(forType: msg["type"] as? String ?? "", bytes: json.count), json)
         cond.lock(); bulk.append(d); cond.signal(); cond.unlock()
     }
 
@@ -312,20 +333,37 @@ final class Sender {
             else if !bulk.isEmpty && (video.isEmpty || bulkTurn) { item = (bulk.removeFirst(), nil); bulkTurn = false }
             else { let v = video.removeFirst(); item = (v.data, v.queued); bulkTurn = true }
             cond.unlock()
-            do { try conn.writeAll(item.0) } catch { log("send failed: \(error)"); return }
+            do { try conn.writeAll(item.0) } catch {
+                // the connection is gone: the reader ends the session (nothing piles up here)
+                log("send failed: \(error)")
+                Darwin.shutdown(conn.fd, SHUT_RDWR)
+                return
+            }
             if let q = item.1 { note(delay: CFAbsoluteTimeGetCurrent() - q) }
         }
     }
 
-    /// UDP: the client's report (every 200 ms) and how long frames waited in the pacer drive the
-    /// bitrate: loss after FEC or a growing queue cut it, a clean link lets it grow.
     /// The UDP path changed (direct <-> relay): its round trip is a new floor.
     func pathChanged() { cond.lock(); rttFloor = 0; cond.unlock() }
 
-    func udpReport(_ r: UdpReport, wait: Double) {
+    /// UDP reports in a row that showed congestion, and when the last came
+    private var strikes = 0
+    private var lastReportAt: CFAbsoluteTime = 0
+
+    /// UDP: the client's report (every 200 ms), how long frames waited to leave and how much
+    /// left (`sent` bytes since the last report) drive the bitrate: loss after FEC or a growing
+    /// queue cut it, a clean link that carried it lets it grow.
+    func udpReport(_ r: UdpReport, wait: Double, sent: Int) {
         var change: Int?
         cond.lock()
         let now = CFAbsoluteTimeGetCurrent()
+        let interval = lastReportAt > 0 ? min(1, now - lastReportAt) : 0.2
+        lastReportAt = now
+        // the link carried at least half the bitrate: it is shown to take more. Windows that
+        // send little (nothing moves) say nothing of the link, and the bitrate stays where it
+        // is (it grew to the ceiling over a slow link, and a scroll then lost frames for seconds
+        // while it came down)
+        let carried = interval > 0 && Double(sent) * 8 / interval >= Double(bitrate) * 0.5
         // delay-based (as Google's congestion control): the round trip's floor is the path
         // itself; anything above it is queues filling (router, relay, Wi-Fi). React to that
         // before packets are lost, so video never runs seconds behind the hand
@@ -337,17 +375,19 @@ final class Sender {
             queued = rtt > rttFloor + max(40, rttFloor * 0.25)
         }
         // random loss is FEC's job (its share rises with the loss); real congestion - frames
-        // lost despite FEC, a growing queue on the path or here, a very lossy link - costs bitrate
-        if r.lost > 0 || r.loss > 0.15 || wait > 0.05 || queued {
-            if now - lastDecrease > 0.3 { bitrate = max(minBitrate, Int(Double(bitrate) * 0.75)); lastDecrease = now; change = bitrate }
-        } else if r.loss < 0.05 && wait < 0.02 && now - lastDecrease > 2 && now - lastAdjust > 0.4 && bitrate < ceiling {
-            bitrate = min(ceiling, Int(Double(bitrate) * 1.06)); lastAdjust = now; change = bitrate
+        // lost despite FEC, a growing queue on the path or here (a frame waiting a tenth of a
+        // second to leave), a very lossy link - costs bitrate once two reports in a row show
+        // it: one alone is a blip (a keyframe's burst through Wi-Fi), and cutting on each blip
+        // kept an app's window far below the bitrate its link carries
+        let congested = r.lost > 0 || r.loss > 0.15 || wait > 0.1 || queued
+        strikes = congested ? strikes + 1 : 0
+        if strikes >= 2 {
+            if now - lastDecrease > 0.4 { bitrate = max(minBitrate, Int(Double(bitrate) * 0.8)); lastDecrease = now; strikes = 0; change = bitrate }
+        } else if !congested && carried && r.loss < 0.05 && wait < 0.03 && now - lastDecrease > 1.5 && now - lastAdjust > 0.4 && bitrate < ceiling {
+            bitrate = min(ceiling, Int(Double(bitrate) * 1.08)); lastAdjust = now; change = bitrate
         }
         cond.unlock()
-        if let b = change {
-            udp?.paceBitsPerSecond = max(20_000_000, b * 3)
-            onBitrate?(b)
-        }
+        if let b = change { onBitrate?(b) }
     }
 
     /// Additive-increase / multiplicative-decrease on the measured queueing delay.

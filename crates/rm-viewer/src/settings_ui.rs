@@ -3,7 +3,7 @@
 //! puts it in a window with no Windows title bar, frame.rs). A change applies at once.
 
 use crate::settings::{Settings, WORKSPACES};
-use crate::settingsui::{Act, SettingsView};
+use crate::settingsui::{About, Act, SettingsView, UpdateButton};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::rc::Rc;
@@ -54,18 +54,53 @@ fn workspaces() -> Vec<String> {
         .collect()
 }
 
+/// What About this Taro shows now (update.rs, the connection).
+fn about() -> About {
+    let state = crate::update::state();
+    let button = match &state {
+        crate::update::State::Available(_) => Some(UpdateButton::Install),
+        s if s.busy() => None,
+        _ => Some(UpdateButton::Check),
+    };
+    About { version: crate::update::VERSION.into(), mac: crate::net::mac_version(), status: state.words(), button }
+}
+
+/// Whether the window is on the screen.
+pub fn is_open() -> bool {
+    with(|u| u.hwnd).is_some_and(|h| unsafe { IsWindowVisible(h).as_bool() })
+}
+
+/// Drawn again (where updating is at changed).
+pub fn refresh() {
+    if let Some(h) = with(|u| u.hwnd) {
+        redraw(h);
+    }
+}
+
+/// Open the window at About this Taro.
+pub fn show_about(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: impl Fn(Settings) + 'static) {
+    show(hinst, owner, current, on_save);
+    with(|u| u.view.set_section(crate::settingsui::ABOUT));
+    refresh();
+}
+
 /// Open the window (or bring it forward). `on_save` gets the settings each time one changes.
 pub fn show(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: impl Fn(Settings) + 'static) {
     if let Some(h) = with(|u| u.hwnd) {
         unsafe {
-            let _ = SetForegroundWindow(h);
+            if IsWindow(Some(h)).as_bool() {
+                let _ = ShowWindow(h, SW_SHOW);
+                let _ = SetForegroundWindow(h);
+                return;
+            }
         }
-        return;
+        // its window went with the window it belonged to: made again
+        UI.with(|u| u.borrow_mut().take());
     }
     unsafe {
         UI.with(|u| *u.borrow_mut() = Some(Ui { hwnd: HWND::default(), view: SettingsView::new(current, workspaces()), on_save: Rc::new(on_save), timer: false }));
         let style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME;
-        let Ok(hwnd) = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("MacBridge Settings"), style, CW_USEDEFAULT, CW_USEDEFAULT, 720, 560, owner, None, Some(hinst), None) else {
+        let Ok(hwnd) = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("Taro Settings"), style, CW_USEDEFAULT, CW_USEDEFAULT, 720, 560, owner, None, Some(hinst), None) else {
             UI.with(|u| u.borrow_mut().take());
             return;
         };
@@ -125,6 +160,8 @@ fn act(hwnd: HWND, a: Option<Act>) {
             }
         }
         Some(Act::Window(l)) => crate::frame::press(hwnd, l),
+        Some(Act::Update(UpdateButton::Check)) => crate::update::check(false),
+        Some(Act::Update(UpdateButton::Install)) => crate::update::install(),
         None => {}
     }
     animate(hwnd);
@@ -153,7 +190,10 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
-            if let Some(c) = with(|u| u.view.render(Instant::now())) {
+            if let Some(c) = with(|u| {
+                u.view.set_about(about());
+                u.view.render(Instant::now())
+            }) {
                 let bi = BITMAPINFO {
                     bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: c.w as i32, biHeight: -(c.h as i32), biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
                     ..Default::default()
@@ -188,10 +228,15 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_MOUSEMOVE => {
             let (x, y) = xy(lp);
+            let before = with(|u| u.view.hover_key());
             let a = with(|u| u.view.mouse_move(x, y)).flatten();
+            let after = with(|u| u.view.hover_key());
             let mut tme = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
             let _ = TrackMouseEvent(&mut tme);
-            act(hwnd, a);
+            // drawn again only when what is lit changed (every move redrew the whole window)
+            if a.is_some() || before != after {
+                act(hwnd, a);
+            }
             LRESULT(0)
         }
         WM_MOUSE_LEAVE => {
@@ -241,6 +286,18 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_CLOSE => {
             close(hwnd);
+            LRESULT(0)
+        }
+        // destroyed with the window it belonged to (a Mac window closed, the connection dropped):
+        // it can be opened again
+        WM_DESTROY => {
+            UI.with(|u| {
+                if let Ok(mut g) = u.try_borrow_mut() {
+                    if g.as_ref().is_some_and(|ui| ui.hwnd == hwnd) {
+                        g.take();
+                    }
+                }
+            });
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),

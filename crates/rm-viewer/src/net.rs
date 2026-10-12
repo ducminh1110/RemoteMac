@@ -174,6 +174,9 @@ pub enum UiEvent {
     WindowCreated { id: u64, app: String, title: String, x: i32, y: i32, w: u32, h: u32, parent: Option<u64>, role: rm_protocol::WindowRole },
     Apps(Vec<rm_protocol::AppInfo>),
     MenuBar { app: String, menus: Vec<rm_protocol::MenuNode> },
+    /// The Mac's own Dock (feature "dock"), and the menu of one of its items.
+    MacDock(Vec<rm_protocol::DockEntry>),
+    DockMenu { id: String, menus: Vec<rm_protocol::MenuNode> },
     /// The Mac's virtual display (Mac points), or why there is none.
     Display { available: bool, width: u32, height: u32, reason: Option<String> },
     Uploaded { transfer_id: u64, remote_path: String },
@@ -190,9 +193,6 @@ pub enum UiEvent {
     AppExited(String),
     /// The Mac started the app (the launch card moves on).
     Launched(String),
-    /// The Mac's own Dock (Desktop Fusion): streamed as window `id` from this region of the
-    /// Mac's screen (points), at `edge`; or why it cannot be shown.
-    Dock { available: bool, id: u64, x: i32, y: i32, w: u32, h: u32, edge: String, reason: Option<String> },
     /// The Mac's own menu bar, streamed as window `id` (its strip in Mac points), or why not.
     MacMenuBar { available: bool, id: u64, w: u32, h: u32, reason: Option<String> },
     /// The title bar of exact window `id` (Mac points from its picture's top-left).
@@ -207,8 +207,11 @@ pub enum UiEvent {
 pub struct Link {
     /// messages for the Mac, written by their own thread: a Mac that is slow to read (busy, or
     /// the link stalling) must never hold up the window that sends (Windows then marks the
-    /// viewer "Not Responding")
-    writer: Sender<Message>,
+    /// viewer "Not Responding"); `None` says a file chunk is waiting in `bulk`
+    writer: Sender<Option<Message>>,
+    /// file chunks, written only when nothing else waits (pings and keys never queue behind a
+    /// file); a few at most, so an upload is read from disk as it goes, not all into memory
+    bulk: std::sync::mpsc::SyncSender<Message>,
     /// messages queued and not written yet (pointer moves are dropped while many are)
     pending: Arc<std::sync::atomic::AtomicUsize>,
     /// UDP video path (FEC); None when it could not be started
@@ -236,53 +239,100 @@ impl Link {
             return; // stale pointer positions behind a stalled link: the next one says where it is
         }
         self.pending.fetch_add(1, Relaxed);
-        if self.writer.send(m.clone()).is_err() {
+        if self.writer.send(Some(m.clone())).is_err() {
             self.pending.fetch_sub(1, Relaxed);
+        }
+    }
+
+    /// A file chunk: written when nothing else waits; blocks while a few are already queued
+    /// (call it from the upload's own thread).
+    pub fn send_bulk(&self, m: Message) {
+        if self.bulk.send(m).is_ok() {
+            let _ = self.writer.send(None);
+        }
+    }
+
+    /// Tell the Mac this viewer is closing on purpose (the session's apps quit with it), and give
+    /// it a moment to go out.
+    pub fn bye(&self) {
+        if !mac_has("bye") {
+            return;
+        }
+        self.send(&Message::Bye);
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while self.pending.load(std::sync::atomic::Ordering::Relaxed) > 0 && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 
     /// The writer thread for `stream`.
     fn start(stream: Secure) -> Link {
-        let (tx, rx) = channel::<Message>();
+        use std::sync::mpsc::TryRecvError;
+        let (tx, rx) = channel::<Option<Message>>();
+        let (btx, brx) = std::sync::mpsc::sync_channel::<Message>(4);
         let pending = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let p = pending.clone();
         let _ = std::thread::Builder::new().name("rm-link-writer".into()).spawn(move || {
             let mut w = stream;
-            for m in rx {
-                p.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            // file chunks announced and not written yet
+            let mut chunks = 0usize;
+            loop {
+                let next = if chunks == 0 { rx.recv().map_err(|_| TryRecvError::Disconnected) } else { rx.try_recv() };
+                let m = match next {
+                    Ok(Some(m)) => {
+                        p.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        m
+                    }
+                    Ok(None) => {
+                        chunks += 1;
+                        continue;
+                    }
+                    // nothing else waits: one chunk of the file
+                    Err(TryRecvError::Empty) => match brx.try_recv() {
+                        Ok(m) => {
+                            chunks -= 1;
+                            m
+                        }
+                        Err(_) => {
+                            chunks = 0;
+                            continue;
+                        }
+                    },
+                    Err(TryRecvError::Disconnected) => break,
+                };
                 if write_message(&mut w, &m).is_err() {
                     break;
                 }
             }
         });
-        Link { writer: tx, pending, udp: None }
+        Link { writer: tx, bulk: btx, pending, udp: None }
     }
 }
 
 /// Why connecting failed, in words for the user (the relay's `ERR ...` replies mapped).
 pub fn friendly_error(e: &str) -> String {
     let m = if e.contains("no such session") {
-        "This Mac is not online. Start remotemac on the Mac and check the ID."
+        "This Mac is not online. Start Taro on the Mac and check the ID."
     } else if e.contains("session mismatch") {
         "Wrong password (or the Mac is already in use)."
     } else if e.contains("locked") {
         "Too many wrong passwords. Wait a minute and try again."
     } else if e.contains("not admitted") {
-        "The server refused this app (key mismatch). Use the current MacBridge build."
+        "The server refused this app (key mismatch). Use the current Taro build."
     } else if e.contains("pair timeout") {
         "The Mac did not answer in time. Try again."
     } else if e.contains("relay busy") {
         "The server is busy. Try again shortly."
     } else if e.contains("handshake") {
-        "Connected, but the Mac did not complete the handshake. Update remotemac on the Mac."
+        "Connected, but the Mac did not complete the handshake. Update Taro on the Mac."
     } else if e.contains("wrong password") {
         "Wrong password."
-    } else if e.contains("older MacBridge") {
-        "The Mac runs an older MacBridge without encryption. Update the Mac and this PC to the same version."
+    } else if e.contains("older Taro") {
+        "The Mac runs an older Taro without encryption. Update the Mac and this PC to the same version."
     } else if e.contains("not found on this network") || e.contains("did not answer at") || e.contains("is not a Mac address") || e.contains("could not be resolved") {
         return e.to_string();
     } else {
-        return format!("Cannot reach the MacBridge server: {e}");
+        return format!("Cannot reach the Taro server: {e}");
     };
     m.to_string()
 }
@@ -340,7 +390,7 @@ fn connect_steps(relay: Option<&str>, session: &str, token: &str, app: Option<&s
     let (tx, rx) = channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     let mut link = Link::start(writer);
-    let video = Arc::new(Video { decoders: Mutex::new(HashMap::new()), link: Mutex::new(link.clone()), tx: tx.clone(), wake: wake.clone(), udp: Mutex::new(None) });
+    let video = Arc::new(Video { decoders: Mutex::new(HashMap::new()), link: Mutex::new(link.clone()), tx: tx.clone(), wake: wake.clone(), udp: Mutex::new(None), asked: Mutex::new(HashMap::new()) });
     // UDP video beside the TCP connection (RM_NO_UDP=1 keeps everything on TCP)
     if std::env::var_os("RM_NO_UDP").is_none() {
         let v = video.clone();
@@ -366,6 +416,7 @@ fn connect_steps(relay: Option<&str>, session: &str, token: &str, app: Option<&s
     let settings = crate::settings::Settings::load();
     link.send(&settings.message(display_scale(), screen_px()));
     *MAC_FEATURES.lock().unwrap() = sess.negotiated.features.clone();
+    *MAC_VERSION.lock().unwrap() = crate::update::version_in(&sess.agent);
     // the Mac's sound, unless muted (a Mac without the feature is never asked)
     let audio = crate::audio::audio();
     audio.reset();
@@ -374,7 +425,7 @@ fn connect_steps(relay: Option<&str>, session: &str, token: &str, app: Option<&s
         link.send(&Message::AudioControl { enabled: true });
     }
     // Mac windows as the Mac draws them (before any window opens), when it can and it is wanted
-    let exact = mac_has("exact") && settings.frame == 0 && !std::env::var_os("RM_FRAMED").is_some_and(|v| v != "0");
+    let exact = mac_has("exact") && settings.frame == 1 && !std::env::var_os("RM_FRAMED").is_some_and(|v| v != "0");
     EXACT.store(exact, std::sync::atomic::Ordering::Relaxed);
     if mac_has("exact") {
         link.send(&Message::WindowStyle { exact });
@@ -414,7 +465,8 @@ pub fn mac_label() -> String {
 }
 
 /// Mac windows are shown as the Mac draws them (their own title bar and buttons, the Mac's menu
-/// bar at the top of the screen) rather than in MacBridge's frame.
+/// bar at the top of the screen) rather than in Taro's frame (the default: the app's menus
+/// in its title bar).
 pub fn exact_windows() -> bool {
     EXACT.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -424,6 +476,13 @@ static MAC_FEATURES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 pub fn mac_has(feature: &str) -> bool {
     MAC_FEATURES.lock().unwrap().iter().any(|f| f == feature)
+}
+
+/// The connected (or last) Mac's Taro version, from its hello.
+static MAC_VERSION: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn mac_version() -> Option<String> {
+    MAC_VERSION.lock().unwrap().clone()
 }
 
 /// Start the Mac Desktop in full GameStream mode for window `id` (see gsdesktop.rs): the tunnel
@@ -465,6 +524,8 @@ struct Video {
     tx: Sender<UiEvent>,
     wake: Arc<dyn Fn() + Send + Sync>,
     udp: Mutex<Option<Arc<rm_client::udp::UdpVideo>>>,
+    /// keyframes asked for and not come yet, per window
+    asked: Mutex<HashMap<u64, std::time::Instant>>,
 }
 
 impl Video {
@@ -477,13 +538,29 @@ impl Video {
             rm_protocol::udp::Out::Frame(v) if !crate::gsdesktop::owns(v.window_id) => self.push(v, true),
             rm_protocol::udp::Out::Frame(_) => {}
             // lost even with FEC: the decoder needs a fresh keyframe
-            rm_protocol::udp::Out::Lost(id) => self.link().send(&Message::RequestKeyframe { window_id: id }),
+            rm_protocol::udp::Out::Lost(id) => self.ask_keyframe(id),
             rm_protocol::udp::Out::Audio(a) => crate::audio::audio().push(&a),
         }
     }
 
+    /// Ask the Mac for a keyframe of window `id`, once until one comes (or 0.5 s went by): on a
+    /// lossy link every lost frame would ask again, and keyframes are what fills the link most.
+    fn ask_keyframe(&self, id: u64) {
+        let now = std::time::Instant::now();
+        let mut asked = self.asked.lock().unwrap();
+        if asked.get(&id).is_some_and(|t| now.duration_since(*t) < std::time::Duration::from_millis(500)) {
+            return;
+        }
+        asked.insert(id, now);
+        drop(asked);
+        self.link().send(&Message::RequestKeyframe { window_id: id });
+    }
+
     fn push(&self, v: rm_protocol::VideoFrame, via_udp: bool) {
         let id = v.window_id;
+        if v.keyframe {
+            self.asked.lock().unwrap().remove(&id);
+        }
         let received_agent_us = self.udp.lock().unwrap().as_ref().and_then(|u| u.agent_now_us());
         let meta = FrameMeta { pts_us: v.pts_us, received_agent_us, decode_us: 0, via_udp, bytes: v.data.len() as u32 };
         let mut decoders = self.decoders.lock().unwrap();
@@ -498,7 +575,8 @@ impl Video {
                 // decoding cannot keep up: skip ahead to a fresh keyframe instead of showing an
                 // ever older picture
                 w.resync = true;
-                self.link().send(&Message::RequestKeyframe { window_id: id });
+                drop(decoders);
+                self.ask_keyframe(id);
             }
             Err(TrySendError::Disconnected(_)) => {
                 decoders.remove(&id);
@@ -617,13 +695,20 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
             wake();
         }
     };
-    struct StopOnExit(Arc<Heartbeat>);
+    // the session is over: its heartbeat, its UDP path (whose thread would otherwise run on,
+    // holding the session's video, and steal the next session's place at the relay) and its
+    // decoders go with it
+    struct StopOnExit(Arc<Heartbeat>, Arc<Video>);
     impl Drop for StopOnExit {
         fn drop(&mut self) {
             self.0.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(u) = self.1.udp.lock().unwrap().take() {
+                u.stop();
+            }
+            self.1.decoders.lock().unwrap().clear();
         }
     }
-    let _stop = StopOnExit(alive.clone());
+    let _stop = StopOnExit(alive.clone(), video.clone());
     loop {
         let r = sess.recv();
         if matches!(r, Ok(Some(_))) {
@@ -643,6 +728,8 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
                 }
                 Message::Apps { apps } => emit(UiEvent::Apps(apps)),
                 Message::DisplayStatus { available, width, height, reason, .. } => emit(UiEvent::Display { available, width, height, reason }),
+                Message::DockItems { items } if items.len() <= 200 => emit(UiEvent::MacDock(items)),
+                Message::DockMenu { id, menus } if rm_protocol::MenuNode::count(&menus) <= rm_protocol::MAX_MENU_ITEMS => emit(UiEvent::DockMenu { id, menus }),
                 Message::MenuBar { application_id, menus } if rm_protocol::MenuNode::count(&menus) <= rm_protocol::MAX_MENU_ITEMS => {
                     emit(UiEvent::MenuBar { app: application_id, menus })
                 }
@@ -670,7 +757,6 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
                 Message::AppExited { application_id, .. } => emit(UiEvent::AppExited(application_id)),
                 Message::AppLaunched { application_id, .. } => emit(UiEvent::Launched(application_id)),
                 Message::AudioStatus { state, reason } => crate::audio::audio().set_mac_status(&state, reason.as_deref()),
-                Message::DockStatus { available, window_id, bounds, edge, reason } => emit(UiEvent::Dock { available, id: window_id, x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, edge, reason }),
                 Message::MenuBarStatus { available, window_id, bounds, reason } => emit(UiEvent::MacMenuBar { available, id: window_id, w: bounds.w, h: bounds.h, reason }),
                 Message::WindowChrome { window_id, title_height, close, minimize, zoom, controls } => {
                     let r = |r: rm_protocol::Rect| (r.x, r.y, r.w, r.h);
@@ -680,7 +766,6 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
                     let alpha = rm_protocol::mask::from_message(width, height, &rle).map(std::sync::Arc::new);
                     emit(UiEvent::Mask { id: window_id, width, height, alpha })
                 }
-                Message::WallpaperStatus { applied, reason } => eprintln!("wallpaper on the Mac: {}", if applied { "this PC's".to_string() } else { reason.unwrap_or_else(|| "the Mac's own".into()) }),
                 Message::Error { code, message } => emit(UiEvent::Notice(format!("{code}: {message}"))),
                 Message::CapabilityUnavailable { capability, reason } => emit(UiEvent::Notice(format!("{capability} unavailable: {reason}"))),
                 Message::P2pOffer { secret, candidates } => {
@@ -716,10 +801,11 @@ pub fn upload_file_as(link: &Link, transfer_id: u64, path: &std::path::Path, nam
         if n == 0 {
             break;
         }
-        link.send(&Message::FileUploadChunk { transfer_id, offset, data_base64: rm_protocol::base64_encode(&buf[..n]) });
+        link.send_bulk(Message::FileUploadChunk { transfer_id, offset, data_base64: rm_protocol::base64_encode(&buf[..n]) });
         offset += n as u64;
     }
-    link.send(&Message::FileUploadEnd { transfer_id });
+    // after the last chunk, in the same queue
+    link.send_bulk(Message::FileUploadEnd { transfer_id });
     Ok(offset)
 }
 

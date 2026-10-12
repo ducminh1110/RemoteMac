@@ -1,6 +1,6 @@
 # Security policy
 
-MacBridge gives remote control of a Mac, so security reports matter a lot to us.
+Taro gives remote control of a Mac, so security reports matter a lot to us.
 
 ## Reporting a vulnerability
 
@@ -32,7 +32,7 @@ and its disclosure with you.
   and timing of the traffic.
 - **Weak passwords.** The lockout slows online guessing but cannot save a password that is
   trivially guessed. Use a long, random password.
-- **The machines themselves.** Anyone who can use the PC with MacBridge connected has the Mac.
+- **The machines themselves.** Anyone who can use the PC with Taro connected has the Mac.
   The Mac app can see and control everything the logged-in user can.
 - **Admission keys inside release binaries.** They keep casual users off a relay, but a
   determined person can extract them. They are not a secret against the public.

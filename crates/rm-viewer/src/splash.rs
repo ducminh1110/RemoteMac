@@ -171,6 +171,11 @@ pub fn showing(app: &str) -> bool {
     CARDS.with(|c| c.borrow().contains_key(app))
 }
 
+/// An app is being opened (its loading window is up).
+pub fn any() -> bool {
+    CARDS.with(|c| !c.borrow().is_empty())
+}
+
 /// The app's icon arrived: the loading window takes its colours.
 pub fn set_icon(app: &str, size: u32, rgba: &[u8]) {
     with_card(app, |card| {

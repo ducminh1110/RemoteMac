@@ -492,6 +492,12 @@ impl View {
     }
 
     /// Something still moves at `now` (keep drawing frames).
+    /// Nothing moves but the spinner shown while the apps are on their way (a dozen frames a
+    /// second draw it; the whole window 60 times a second did).
+    pub fn only_waiting(&self, now: Instant) -> bool {
+        self.tiles.is_empty() && self.press.done_at(now) && self.scroll.done_at(now) && self.lift.values().all(|a| a.done_at(now))
+    }
+
     pub fn busy(&self, now: Instant) -> bool {
         self.tiles.is_empty()
             || !self.press.done_at(now)
@@ -582,7 +588,9 @@ impl View {
             if y > self.h as f32 || y + g.cell_h < 0.0 {
                 continue;
             }
-            under |= y < tb + 12.0 * s;
+            // only once the grid is scrolled is anything really under the toolbar (at the top the
+            // first row starts just below it: the pass, a third of the frame, changed nothing)
+            under |= scroll > 0.5 && y < tb + 12.0 * s;
             let sel = self.sel.and_then(|k| self.shown.get(k)).is_some_and(|&j| j == i);
             self.draw_tile(&mut c, i, x, y + (1.0 - show.min(1.0)) * 10.0 * s, g.cell_w, show, sel, now, &t);
         }
@@ -683,7 +691,8 @@ impl View {
         let tb = self.tb();
         let band = (tb + 16.0 * s).ceil() as usize;
         let band = band.min(c.h);
-        let bg = self.background();
+        // the background as drawn for this frame (not another copy of it)
+        let Some((_, bg)) = &self.bg else { return };
         let mut soft = c.crop(0, 0, c.w, band);
         soft.blur((7.0 * s).round().max(1.0) as usize, 2);
         for y in 0..band {
@@ -814,7 +823,7 @@ impl View {
 
 /// An icon to show until the Mac's comes: a rounded square in a colour of the name, its first
 /// letter in white (the Mac Desktop: a display).
-fn placeholder(id: &str, name: &str, size: usize, s: f32) -> Canvas {
+pub fn placeholder(id: &str, name: &str, size: usize, s: f32) -> Canvas {
     let mut c = Canvas::new(size, size);
     let f = size as f32;
     let hue = name.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32)) % 360;

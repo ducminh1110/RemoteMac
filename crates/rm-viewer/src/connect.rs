@@ -4,7 +4,7 @@
 //! Mac's address (an IP or a host name, any network that reaches it). While it connects, the
 //! steps show as they happen (finding the Mac, checking the password, setting up, video).
 //! It looks like the sign-in of Apple's Screen Sharing (connectui.rs draws it; its fields are
-//! MacBridge's own). It has its own small message loop and returns once the user connects (or
+//! Taro's own). It has its own small message loop and returns once the user connects (or
 //! closes it).
 
 use crate::connectui::{Act, ConnectView, Key};
@@ -122,7 +122,7 @@ pub fn connect_window<T: Send>(id: Option<&str>, error: Option<&str>, try_connec
             view.set_error(e);
         }
         STATE.with(|st| *st.borrow_mut() = Some(Shell { view, done: None }));
-        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("MacBridge"), style, CW_USEDEFAULT, CW_USEDEFAULT, 460, 572, None, None, Some(hinst), None).ok()?;
+        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("Taro"), style, CW_USEDEFAULT, CW_USEDEFAULT, 460, 572, None, None, Some(hinst), None).ok()?;
         crate::frame::adopt(hwnd);
         // its size at this scale, a little above the middle of the screen
         let s = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;

@@ -1,9 +1,11 @@
 name: Release builds
 
-# The three things a user downloads:
-#   MacBridge-macos.tar.gz   the Mac app (universal: Apple silicon + Intel):  ./macbridge --password PASS
-#   MacBridge-windows.zip    MacBridge.exe: type the Mac's ID and password, done
-#   macbridge-relay.tar.gz   the relay server + remotemac-relay-setup.sh (installs it from A to Z)
+# What a user downloads:
+#   Taro-Setup.exe      Taro for Windows, installed for this user (it updates itself from here)
+#   Taro-windows.zip    the same Taro.exe without installing
+#   Taro-macos.tar.gz   the Mac app (universal: Apple silicon + Intel):  ./taro --password PASS,
+#                       updated in place with ./taro-update.sh
+#   taro-relay.tar.gz   the relay server + remotemac-relay-setup.sh (installs it from A to Z)
 # The source has no relay in it. These builds get one built in: the repository variable
 # RM_DEFAULT_RELAY (host:port), and on the official repository remotemac.mooo.com:7470; the
 # relay's admission key comes from the RM_RELAY_KEY secret. A version tag (1.0.0 or v1.0.0)
@@ -19,7 +21,7 @@ on:
   push:
     branches: [claude/inspiring-einstein-er2d37]
     tags: ['v*', '[0-9]*']
-    paths: [agent/**, crates/**, deploy/**, scripts/build-agent-macos.sh, .github/workflows/release.yml, Cargo.*]
+    paths: [agent/**, crates/**, deploy/**, installer/**, scripts/build-agent-macos.sh, .github/workflows/release.yml, Cargo.*]
 
 env:
   DEFAULT_RELAY: ${{ vars.RM_DEFAULT_RELAY || (github.repository == 'ducminh1110/RemoteMac' && 'remotemac.mooo.com:7470' || '') }}
@@ -44,48 +46,69 @@ jobs:
             mv out/remote-agent-mac out/remotemac-$arch
           done
           rm -f out/BuildConfig.swift
-          mkdir -p dist/MacBridge
-          lipo -create out/remotemac-arm64 out/remotemac-x86_64 -output dist/MacBridge/macbridge
-          codesign --force -s - dist/MacBridge/macbridge
-          lipo -info dist/MacBridge/macbridge
-          dist/MacBridge/macbridge --help
-          install -m 0755 agent/macos/macbridge.sh dist/MacBridge/macbridge.sh
-          cat > dist/MacBridge/README.txt <<'TXT'
-          MacBridge for macOS (14 or later, Apple silicon and Intel)
+          mkdir -p dist/Taro
+          lipo -create out/remotemac-arm64 out/remotemac-x86_64 -output dist/Taro/taro
+          codesign --force -s - dist/Taro/taro
+          lipo -info dist/Taro/taro
+          dist/Taro/taro --help
+          install -m 0755 agent/macos/taro.sh dist/Taro/taro.sh
+          install -m 0755 agent/macos/taro-update.sh dist/Taro/taro-update.sh
+          bash -n dist/Taro/taro-update.sh
+          cat > dist/Taro/README.txt <<'TXT'
+          Taro for macOS (14 or later, Apple silicon and Intel)
 
-            xattr -d com.apple.quarantine macbridge 2>/dev/null; chmod +x macbridge
-            ./macbridge.sh --password YOUR-PASSWORD
+            xattr -d com.apple.quarantine taro 2>/dev/null; chmod +x taro
+            ./taro.sh --password YOUR-PASSWORD
 
-          macbridge.sh checks the program, macOS and the permissions first, says what is
-          missing and how to allow it, then starts macbridge (./macbridge works as well;
-          ./macbridge.sh --check only checks).
+          taro.sh checks the program, macOS and the permissions first, says what is
+          missing and how to allow it, then starts taro (./taro works as well;
+          ./taro.sh --check only checks).
 
           It prints the ID and the password, then keeps running in the background
-          (also after the terminal is closed). Type both into MacBridge.exe on Windows.
-          The ID stays the same on this Mac. Stop it with: ./macbridge --stop
+          (also after the terminal is closed). Type both into Taro.exe on Windows.
+          The ID stays the same on this Mac. Stop it with: ./taro --stop
           Connections are end-to-end encrypted. No log is written unless you add
-          --logs-enabled (log: ~/Library/Logs/MacBridge/macbridge.log).
+          --logs-enabled (log: ~/Library/Logs/Taro/taro.log).
           On the same network the PC finds this Mac by its ID and connects straight to it;
           from elsewhere it goes through the relay built into this build
-          (another one: ./macbridge --relay HOST:PORT --password ...).
+          (another one: ./taro --relay HOST:PORT --password ...).
           First run: allow Terminal in System Settings > Privacy & Security >
           Screen Recording and Accessibility, then run the command again.
           Without --password a random password is shown. --foreground keeps it in the
-          terminal (Ctrl+C stops it). All options: ./macbridge --help
+          terminal (Ctrl+C stops it). All options: ./taro --help
+
+          Updating: ./taro-update.sh fetches the newest Taro from its releases on
+          GitHub, checks it and puts it in place of this one (./taro-update.sh --check
+          only says whether there is one). A Taro running in the background goes on
+          with the new version by itself, with the same ID and password.
           TXT
-          sed -i '' 's/^          //' dist/MacBridge/README.txt
-          tar -C dist -czf dist/MacBridge-macos.tar.gz MacBridge
+          sed -i '' 's/^          //' dist/Taro/README.txt
+          tar -C dist -czf dist/Taro-macos.tar.gz Taro
+      - name: taro-update.sh fetches, checks and puts a release in place
+        run: |
+          set -uo pipefail
+          # this build against the newest release: up to date (0) or a newer one there (10)
+          dist/Taro/taro-update.sh --check; rc=$?
+          [[ $rc == 0 || $rc == 10 ]] || { echo "--check failed ($rc)"; exit 1; }
+          # a copy of the folder takes the newest release in place of this build
+          t="$RUNNER_TEMP/taro-copy"; rm -rf "$t"; cp -R dist/Taro "$t"
+          "$t/taro-update.sh" --force || { echo "the update failed"; exit 1; }
+          want="$(curl -fsSI https://github.com/${{ github.repository }}/releases/latest | tr -d '\r' | awk 'tolower($1)=="location:"{print $2}' | sed 's|.*/tag/||; s|^v||')"
+          got="$("$t/taro" --version | awk '{print $2}')"
+          echo "newest release: $want; the copy now runs: $got"
+          [[ -n "$want" && "$got" == "$want" ]] || { echo "the copy was not updated"; exit 1; }
+          [[ -x "$t/taro.sh" ]] || { echo "taro.sh is gone"; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
-          name: MacBridge-macos
-          path: dist/MacBridge-macos.tar.gz
+          name: Taro-macos
+          path: dist/Taro-macos.tar.gz
 
   windows:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Build MacBridge.exe
+      - name: Build Taro.exe
         env:
           RM_RELAY_KEY: ${{ secrets.RM_RELAY_KEY }}
           RM_DEFAULT_RELAY: ${{ env.DEFAULT_RELAY }}
@@ -93,27 +116,55 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist\MacBridge | Out-Null
-          Copy-Item target\release\remote-mac-viewer.exe dist\MacBridge\MacBridge.exe
+          New-Item -ItemType Directory -Force dist\Taro | Out-Null
+          Copy-Item target\release\remote-mac-viewer.exe dist\Taro\Taro.exe
           @"
-          MacBridge for Windows
+          Taro for Windows
 
-          1. On the Mac run:  ./macbridge --password YOUR-PASSWORD
-          2. Open MacBridge.exe, type the ID and the password the Mac shows, press Connect.
+          1. On the Mac run:  ./taro --password YOUR-PASSWORD
+          2. Open Taro.exe, type the ID and the password the Mac shows, press Connect.
 
-          On the same network MacBridge finds the Mac by its ID and connects straight to it.
+          On the same network Taro finds the Mac by its ID and connects straight to it.
           From elsewhere it goes through the relay server shown under "Relay server"
           (this build fills in its own; any other relay can be typed there).
 
           The Mac's apps open as windows here (and in the Start menu while connected);
           "Mac Desktop" shows the whole Mac screen. The last ID is remembered.
-          Connections are end-to-end encrypted. For a log, start MacBridge.exe --logs-enabled.
-          "@ -replace '(?m)^          ', '' | Set-Content dist\MacBridge\README.txt
-          Compress-Archive -Path dist\MacBridge\* -DestinationPath dist\MacBridge-windows.zip
+          Connections are end-to-end encrypted. For a log, start Taro.exe --logs-enabled.
+          "@ -replace '(?m)^          ', '' | Set-Content dist\Taro\README.txt
+          Compress-Archive -Path dist\Taro\* -DestinationPath dist\Taro-windows.zip
+      - name: Installer (Taro-Setup.exe), installed and uninstalled once
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $n = ($v -split '-')[0] + '.0'
+          # Taro's icon for the installer and its shortcuts
+          Start-Process -Wait -FilePath target\release\remote-mac-viewer.exe -ArgumentList '--write-icon', "$PWD\dist\taro.ico"
+          if (-not (Test-Path dist\taro.ico)) { throw 'no icon written' }
+          $find = { @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1 }
+          $iscc = & $find
+          if (-not $iscc) { choco install innosetup -y --no-progress | Out-Null; $iscc = & $find }
+          if (-not $iscc) { throw 'Inno Setup not found' }
+          & $iscc /Qp "/DAppVersion=$v" "/DNumericVersion=$n" "/DSourceDir=$PWD\dist\Taro" "/DIconFile=$PWD\dist\taro.ico" "/O$PWD\dist" installer\taro.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
+          # for this user, silently (as an update runs it), then uninstalled
+          $dir = Join-Path $env:RUNNER_TEMP 'TaroInstall'
+          $p = Start-Process -Wait -PassThru -FilePath dist\Taro-Setup.exe -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$dir"
+          if ($p.ExitCode -ne 0) { throw "the installer exited with $($p.ExitCode)" }
+          $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'Taro.lnk'
+          if (-not (Test-Path "$dir\Taro.exe")) { throw 'Taro.exe was not installed' }
+          if (-not (Test-Path $lnk)) { throw "no Start-menu entry at $lnk" }
+          Start-Process -Wait -FilePath "$dir\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+          for ($i = 0; $i -lt 60 -and ((Test-Path "$dir\Taro.exe") -or (Test-Path $lnk)); $i++) { Start-Sleep -Milliseconds 500 }
+          if ((Test-Path "$dir\Taro.exe") -or (Test-Path $lnk)) { throw 'the uninstaller left Taro behind' }
+          Get-Item dist\Taro-Setup.exe | Format-List Name, Length
       - uses: actions/upload-artifact@v4
         with:
-          name: MacBridge-windows
-          path: dist/MacBridge-windows.zip
+          name: Taro-windows
+          path: |
+            dist/Taro-windows.zip
+            dist/Taro-Setup.exe
 
   relay-bin:
     strategy:
@@ -171,9 +222,9 @@ jobs:
           chmod +x dist/remotemac-relay/remotemac-relay-setup.sh
           bash -n dist/remotemac-relay/remotemac-relay-setup.sh
           cat > dist/remotemac-relay/README.txt <<'TXT'
-          MacBridge relay server, Ubuntu / Debian, x86_64 or ARM
+          Taro relay server, Ubuntu / Debian, x86_64 or ARM
 
-            tar -xzf macbridge-relay.tar.gz && cd remotemac-relay
+            tar -xzf taro-relay.tar.gz && cd remotemac-relay
             sudo ./remotemac-relay-setup.sh --name relay.example.com
 
           (--name: the DNS name pointing at this server, optional; --key KEY: an
@@ -185,7 +236,7 @@ jobs:
           Running it again updates the relay.
           TXT
           sed -i 's/^          //' dist/remotemac-relay/README.txt
-          tar -C dist -czf dist/macbridge-relay.tar.gz remotemac-relay
+          tar -C dist -czf dist/taro-relay.tar.gz remotemac-relay
       - name: Try the setup script's relay locally
         run: |
           set -euo pipefail
@@ -196,8 +247,8 @@ jobs:
           grep -q "ERR not admitted" reply.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: macbridge-relay
-          path: dist/macbridge-relay.tar.gz
+          name: taro-relay
+          path: dist/taro-relay.tar.gz
 
   test:
     if: startsWith(github.ref, 'refs/tags/') || inputs.version != ''
@@ -232,14 +283,16 @@ jobs:
 
           | File | For |
           |---|---|
-          | `MacBridge-windows.zip` | Windows 10/11 x64: `MacBridge.exe` |
-          | `MacBridge-macos.tar.gz` | macOS 14+, Apple silicon and Intel: `macbridge` |
-          | `macbridge-relay.tar.gz` | your own relay server (Linux x86_64 / ARM64), one-command installer |
+          | `Taro-Setup.exe` | Windows 10/11 x64: installs Taro for you (no administrator); it updates itself after that |
+          | `Taro-windows.zip` | the same `Taro.exe`, without installing |
+          | `Taro-macos.tar.gz` | macOS 14+, Apple silicon and Intel: `taro`, `taro.sh`, `taro-update.sh` |
+          | `taro-relay.tar.gz` | your own relay server (Linux x86_64 / ARM64), one-command installer |
 
-          **Mac:** `./macbridge.sh --password YOUR-PASSWORD` shows the ID and the password, then runs in the background
-          (`./macbridge --stop` ends it). **Windows:** open `MacBridge.exe`, then either **By ID** (the ID and the
-          password: found on this network, or through the relay) or **By Address** (the Mac's IP address or name and
-          the password: straight to the Mac, no relay). The Mac takes both at once.
+          **Mac:** `./taro.sh --password YOUR-PASSWORD` shows the ID and the password, then runs in the background
+          (`./taro --stop` ends it); `./taro-update.sh` updates it in place. **Windows:** run `Taro-Setup.exe`, open Taro,
+          then either **By ID** (the ID and the password: found on this network, or through the relay) or **By Address**
+          (the Mac's IP address or name and the password: straight to the Mac, no relay). Settings > About this Taro
+          shows the version and updates it.
 
           ## Highlights
 
@@ -253,7 +306,7 @@ jobs:
           - No logs unless asked for (`--logs-enabled`).
 
           Both sides must run the same version. If you run your own relay, update it with the new
-          `macbridge-relay.tar.gz` as well. See the [user guide](../../blob/HEAD/docs/USER-GUIDE.md).
+          `taro-relay.tar.gz` as well. See the [user guide](../../blob/HEAD/docs/USER-GUIDE.md).
           MD
           sed -i 's/^          //' notes.md
           # this version's part of the changelog
@@ -262,5 +315,5 @@ jobs:
           if [ -s changes.md ]; then { echo; echo "## What's new in $V"; cat changes.md; } >> notes.md; fi
           # a version with a suffix (1.2.0-beta.1) is a pre-release; a plain one the latest release
           if [[ "$V" == *-* ]]; then KIND=--prerelease; else KIND=--latest; fi
-          gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "MacBridge $V" --notes-file notes.md $KIND \
-            dist/MacBridge-macos.tar.gz dist/MacBridge-windows.zip dist/macbridge-relay.tar.gz
+          gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Taro $V" --notes-file notes.md $KIND \
+            dist/Taro-Setup.exe dist/Taro-macos.tar.gz dist/Taro-windows.zip dist/taro-relay.tar.gz

@@ -14,6 +14,8 @@ pub struct Session<S: Read + Write> {
     pub state: SessionState,
     pub negotiated: Negotiated,
     pub capabilities: CapabilityReport,
+    /// what the agent calls itself in its hello ("taro 1.2.3 Version 15.1 …")
+    pub agent: String,
     /// UDP video (frames rebuilt from FEC shards) when attached
     udp: Option<(std::sync::Arc<udp::UdpVideo>, std::sync::mpsc::Receiver<rm_protocol::udp::Out>)>,
     /// our direct-path offer, once the UDP thread knows our addresses (sent by `recv`)
@@ -36,7 +38,7 @@ impl<S: Read + Write> Session<S> {
     /// Runs the handshake. Only returns once the agent has sent ServerHello
     /// AND its capability report; `state` is then `Ready`, never earlier.
     pub fn handshake(mut stream: S) -> Result<Self, ClientError> {
-        let ours = Hello::ours(&format!("remote-mac {}", env!("CARGO_PKG_VERSION")), &["h264"], &["control", "audio", "open_file", "fusion", "mask", "exact", "menubar"]);
+        let ours = Hello::ours(&format!("remote-mac {}", env!("CARGO_PKG_VERSION")), &["h264"], &["control", "audio", "open_file", "mask", "exact", "menubar", "bye", "dock"]);
         write_message(&mut stream, &Message::ClientHello(ours.clone()))?;
         let theirs = match next(&mut stream)? {
             Message::ServerHello(h) => h,
@@ -48,7 +50,7 @@ impl<S: Read + Write> Session<S> {
             m => return Err(unexpected(m)),
         };
         let state = SessionState::Connecting.next(Event::HandshakeComplete).expect("valid transition");
-        Ok(Self { stream, state, negotiated, capabilities, udp: None, offer: None })
+        Ok(Self { stream, state, negotiated, capabilities, agent: theirs.agent, udp: None, offer: None })
     }
 
     pub fn list_apps(&mut self) -> Result<Vec<AppInfo>, ClientError> {
@@ -277,6 +279,8 @@ mod tests {
         let stream = join(&addr, "rep-1", Role::Client, tok).unwrap();
         stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
         let mut sess = Session::handshake(stream).unwrap();
+        // the Mac's Dock was recorded, and is offered again
+        assert!(sess.negotiated.features.iter().any(|f| f == "dock"), "{:?}", sess.negotiated.features);
         let apps = sess.list_apps().unwrap();
         assert!(apps.iter().any(|a| a.id == "notes" && a.available), "{apps:?}");
         sess.send(&Message::AppLaunch { application_id: "notes".into(), arguments: vec![], working_directory: None, environment: Default::default() }).unwrap();

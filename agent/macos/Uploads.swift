@@ -1,4 +1,4 @@
-// Files the user picked on Windows, written into ~/Downloads/RemoteMac Uploads. The client names the
+// Files the user picked on Windows, written into ~/Downloads/Taro Uploads. The client names the
 // file; we never let it choose a directory: names are sanitised exactly like rm_protocol::sanitize_upload_name.
 // They are only there for the session: when it ends (and at start, after a crash) the folder is
 // removed, so nothing piles up on the Mac's disk.
@@ -23,7 +23,7 @@ final class UploadStore {
 
     init(send: @escaping ([String: Any]) -> Void) {
         self.send = send
-        dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads/RemoteMac Uploads", isDirectory: true)
+        dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads/Taro Uploads", isDirectory: true)
     }
 
     /// Remove everything uploaded (the session is over): open transfers are dropped too.
@@ -54,7 +54,7 @@ final class UploadStore {
     }
 
     func handle(_ m: [String: Any]) {
-        let id = UInt64(int(m["transfer_id"]))
+        let id = UInt64(clamping: int(m["transfer_id"]))
         switch m["type"] as? String ?? "" {
         case "file_upload_begin":
             let size = UInt64(max(0, int(m["size"])))

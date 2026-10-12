@@ -1,7 +1,7 @@
 //! Records a real agent session for replay elsewhere: opens each application in turn, asks for
 //! its menu bar and icon once its first window is up, and stores everything the agent sends for
-//! that app (windows, titles, menus, icons, H.264 video) in an `.rmrec` file. The name `dock`
-//! records the Mac's Dock as Desktop Fusion streams it instead (its status and video).
+//! that app (windows, titles, menus, icons, H.264 video) in an `.rmrec` file. The name `menubar`
+//! records the Mac's menu bar instead (exact windows: its status and video).
 
 use crate::Session;
 use rm_protocol::recording::{self, Record};
@@ -10,10 +10,6 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
-/// The pseudo-app that records the Mac's Dock (Desktop Fusion), and the window id the Mac
-/// streams it as.
-pub const DOCK: &str = "dock";
-const DOCK_WINDOW: u64 = 0x7FFF_0002;
 /// The pseudo-app that records the Mac's menu bar (exact windows' menus), and its window id.
 pub const MENUBAR: &str = "menubar";
 const MENUBAR_WINDOW: u64 = 0x7FFF_0003;
@@ -38,6 +34,61 @@ fn is_timeout(e: &ProtocolError) -> bool {
     matches!(e, ProtocolError::Io(io) if matches!(io.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut))
 }
 
+/// The Mac's Dock into the session's records: its items, a picture of each, the first item's
+/// (Finder's) menu.
+fn record_dock<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, t0: Instant) -> Result<(), ProtocolError> {
+    let put = |out: &mut W, m: &Message| -> Result<(), ProtocolError> { Ok(recording::write_record(out, &Record { app: recording::SESSION.into(), t_ms: t0.elapsed().as_millis() as u32, frame: encode(m)? })?) };
+    sess.send(&Message::DockList)?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut items = None;
+    while items.is_none() && Instant::now() < deadline {
+        match sess.recv() {
+            Ok(Some(Frame::Msg(m @ Message::DockItems { .. }))) => {
+                put(out, &m)?;
+                if let Message::DockItems { items: i } = m {
+                    items = Some(i);
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(ProtocolError::Malformed("agent closed the session".into())),
+            Err(e) if is_timeout(&e) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let items = items.unwrap_or_default();
+    let mut want: std::collections::HashSet<String> = items.iter().filter(|e| e.kind != "separator").map(|e| e.app_id.clone().unwrap_or_else(|| format!("dock:{}", e.id))).collect();
+    for key in &want {
+        sess.send(&Message::GetAppIcon { application_id: key.clone() })?;
+    }
+    let menu_of = items.iter().find(|e| e.kind != "separator").map(|e| e.id.clone());
+    if let Some(id) = &menu_of {
+        sess.send(&Message::DockMenuGet { id: id.clone() })?;
+    }
+    let mut menu = menu_of.is_none();
+    let deadline = Instant::now() + Duration::from_secs(12);
+    while (!want.is_empty() || !menu) && Instant::now() < deadline {
+        match sess.recv() {
+            Ok(Some(Frame::Msg(m @ Message::AppIcon { .. }))) => {
+                if let Message::AppIcon { application_id, .. } = &m {
+                    if want.remove(application_id) {
+                        put(out, &m)?;
+                    }
+                }
+            }
+            Ok(Some(Frame::Msg(m @ Message::DockMenu { .. }))) => {
+                put(out, &m)?;
+                menu = true;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(ProtocolError::Malformed("agent closed the session".into())),
+            Err(e) if is_timeout(&e) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    eprintln!("recorded the Mac's Dock: {} items, {} pictures missing, menu {}", items.len(), want.len(), if menu { "read" } else { "missing" });
+    Ok(())
+}
+
 /// The stream needs a short read timeout (the caller sets ~1 s).
 pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut plan: Plan) -> Result<Summary, ProtocolError> {
     recording::write_header(out)?;
@@ -46,8 +97,11 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
     };
     let t0 = Instant::now();
     put(out, recording::SESSION, t0, encode(&Message::CapabilityReport(sess.capabilities.clone()))?)?;
-    // windows as the Mac draws them (their title bar and buttons), when it can: the replay shows them so
-    if sess.negotiated.features.iter().any(|f| f == "exact") {
+    // windows as the Mac draws them (their title bar and buttons) only when asked for
+    // (RM_RECORD_EXACT=1): the viewer shows them in its own frame by default, and the replay
+    // shows them as it would
+    let exact = std::env::var_os("RM_RECORD_EXACT").is_some_and(|v| v != "0");
+    if exact && sess.negotiated.features.iter().any(|f| f == "exact") {
         let m = Message::WindowStyle { exact: true };
         sess.send(&m)?;
         put(out, recording::SESSION, t0, encode(&m)?)?;
@@ -69,13 +123,15 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
             Err(e) => return Err(e),
         }
     }
+    // the Mac's own Dock (feature "dock"): its items, their pictures and Finder's menu, for the
+    // Dock the replay shows
+    if sess.negotiated.features.iter().any(|f| f == "dock") {
+        record_dock(sess, out, t0)?;
+    }
     for app in plan.apps.clone() {
         let start = Instant::now();
-        if app == DOCK {
-            owner.insert(DOCK_WINDOW, app.clone()); // its first frame may come before its status
-            sess.send(&Message::DockStream { enabled: true })?;
-        } else if app == MENUBAR {
-            owner.insert(MENUBAR_WINDOW, app.clone());
+        if app == MENUBAR {
+            owner.insert(MENUBAR_WINDOW, app.clone()); // its first frame may come before its status
             sess.send(&Message::MenuBarStream { enabled: true })?;
         } else {
             sess.send(&Message::AppLaunch { application_id: app.clone(), arguments: vec![], working_directory: None, environment: Default::default() })?;
@@ -121,14 +177,6 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
                     }
                     Some(app.clone())
                 }
-                Frame::Msg(Message::DockStatus { available, window_id, .. }) if app == DOCK => {
-                    owner.insert(*window_id, app.clone());
-                    if *available && first.is_none() {
-                        windows += 1;
-                        first = Some(Instant::now());
-                    }
-                    Some(app.clone())
-                }
                 Frame::Msg(Message::AppLaunched { application_id, .. } | Message::AppExited { application_id, .. } | Message::AppIcon { application_id, .. } | Message::MenuBar { application_id, .. }) => Some(application_id.clone()),
                 Frame::Msg(_) => None,
             };
@@ -145,7 +193,7 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
                 Frame::Audio(a) => rm_protocol::encode_audio(a)?,
             };
             put(out, &app, start, wire)?;
-            if first.is_some() && !asked && app != DOCK && app != MENUBAR {
+            if first.is_some() && !asked && app != MENUBAR {
                 asked = true;
                 sess.send(&Message::GetMenuBar { application_id: app.clone() })?;
                 sess.send(&Message::GetAppIcon { application_id: app.clone() })?;
@@ -155,10 +203,6 @@ pub fn record<S: Read + Write, W: Write>(sess: &mut Session<S>, out: &mut W, mut
         summary.apps.push((app.clone(), windows, frames, bytes, first.map(|f| (f - start).as_secs_f64())));
         eprintln!("recorded {app}: windows={windows} videoFrames={frames} bytes={bytes} firstWindowAfter={:?}", first.map(|f| f - start));
         // close it before the next app (not recorded: the replay keeps the windows open)
-        if app == DOCK {
-            sess.send(&Message::DockStream { enabled: false })?;
-            continue;
-        }
         if app == MENUBAR {
             sess.send(&Message::MenuBarStream { enabled: false })?;
             continue;

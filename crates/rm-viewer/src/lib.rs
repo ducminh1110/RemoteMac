@@ -25,6 +25,8 @@ pub mod gsdesktop;
 pub mod settings;
 pub mod settingsui;
 pub mod text;
+pub mod titlebar;
+pub mod update;
 pub mod net;
 #[cfg(windows)]
 pub mod d3d;
@@ -55,7 +57,6 @@ pub mod splash;
 #[cfg(windows)]
 pub mod surface;
 #[cfg(windows)]
-pub mod wallpaper;
 #[cfg(windows)]
 pub mod ui;
 
@@ -69,7 +70,7 @@ pub fn log_hint() -> String {
     if logs_enabled() {
         format!("Log: {}", log_path().display())
     } else {
-        "For a log, start MacBridge.exe with --logs-enabled.".into()
+        "For a log, start Taro.exe with --logs-enabled.".into()
     }
 }
 

@@ -6,7 +6,7 @@
 // Apple menu, the status items and the clock). App windows never cover the menu bar, so the
 // strip shows nothing else. Clicks go to the menu bar at that spot; the menus that open from it
 // are shown under it as popups of it (WindowTracker). A menu bar that hides itself is left
-// alone: MacBridge never changes that setting.
+// alone: Taro never changes that setting.
 import Foundation
 import AppKit
 
@@ -63,7 +63,7 @@ final class MenuBarMirror {
     func stop() {
         lock.lock(); wanted = false; let s = stream; stream = nil; region = nil; lock.unlock()
         onShown?(nil)
-        if let s = s { Task { await s.stop() } }
+        if let s = s { s.cancel(); Task { await s.stop() } }
     }
 
     /// Follow the menu bar (the main display changed, the bar's height with it): every few seconds.
@@ -74,7 +74,7 @@ final class MenuBarMirror {
         case .failure(let e):
             let had = old != nil || force
             lock.lock(); let s = stream; stream = nil; region = nil; lock.unlock()
-            if let s = s { Task { await s.stop() } }
+            if let s = s { s.cancel(); Task { await s.stop() } }
             onShown?(nil)
             if had {
                 log("Mac menu bar not shown: \(e.description)")
@@ -83,7 +83,8 @@ final class MenuBarMirror {
         case .success(let r):
             guard force || r != old else { return }
             lock.lock(); region = r; let s = stream; lock.unlock()
-            if let s = s { Task { await s.stop() } }
+            // the new stream starts once the old one is gone (Capture.swift: startSettled)
+            let gone = s.map { (old: WindowStream) -> Task<Void, Never> in old.cancel(); return Task { await old.stop() } }
             let ws = WindowStream(windowID: menuBarWindowID) { [weak self] pkt in self?.onPacket?(pkt) }
             // the whole strip as the display shows it (nothing but the menu bar is ever there)
             ws.region = (CGMainDisplayID(), r, [])
@@ -91,7 +92,7 @@ final class MenuBarMirror {
             onShown?(r)
             onStatus?(["type": "menu_bar_status", "available": true, "window_id": Int(menuBarWindowID), "bounds": rectJSON(r)])
             log("Mac menu bar on Windows: \(Int(r.width))x\(Int(r.height)) points")
-            Task { do { try await ws.start() } catch { log("Mac menu bar stream failed: \(error)") } }
+            Task { await gone?.value; do { try await ws.start() } catch { log("Mac menu bar stream failed: \(error)") } }
         }
     }
 

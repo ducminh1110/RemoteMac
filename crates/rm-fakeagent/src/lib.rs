@@ -21,13 +21,10 @@ pub const HEIGHT: usize = 352;
 const PANEL: (usize, usize) = (320, 240);
 /// the fake Mac's screen
 const DESKTOP: (usize, usize) = (960, 600);
-pub const UPLOAD_DIR: &str = "/Users/runner/Downloads/RemoteMac Uploads";
+pub const UPLOAD_DIR: &str = "/Users/runner/Downloads/Taro Uploads";
 
 /// "desktop" is the whole Mac (one window showing the screen); input on it goes to the window
 /// under the pointer, like on the real agent.
-/// The Dock's window id and size (as the Mac's: Fusion.swift).
-const DOCK_ID: u64 = 0x7FFF_0002;
-const DOCK: (usize, usize) = (480, 64);
 /// the Mac's menu bar, as Desktop Fusion's exact windows stream it (scripted strip)
 const MENUBAR_ID: u64 = 0x7FFF_0003;
 const MENUBAR: (usize, usize) = (1280, 24);
@@ -99,14 +96,10 @@ struct State {
     gs_ready: bool,
     /// sound is being sent (a 440 Hz tone): set to stop it
     audio: Option<Arc<AtomicBool>>,
-    /// the Dock is streamed: set to stop it
-    dock: Option<Arc<AtomicBool>>,
     /// windows are shown as the Mac draws them ("window_style"): their title bars are described
     exact: bool,
     /// the menu bar is streamed: set to stop it
     menubar: Option<Arc<AtomicBool>>,
-    /// the wallpaper set from the PC (path or colour), if any
-    wallpaper: Option<String>,
 }
 
 type Writer<W> = Arc<Mutex<W>>;
@@ -276,7 +269,7 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
     }
     // exact windows only when asked for (RM_FAKE_EXACT=1): the viewer's smoke test checks its own frame
     let exact = std::env::var_os("RM_FAKE_EXACT").is_some_and(|v| v != "0");
-    let features: &[&str] = if exact { &["control", "video", "files", "audio", "open_file", "fusion", "mask", "exact"] } else { &["control", "video", "files", "audio", "open_file", "fusion", "mask"] };
+    let features: &[&str] = if exact { &["control", "video", "files", "audio", "open_file", "mask", "exact", "dock"] } else { &["control", "video", "files", "audio", "open_file", "mask", "dock"] };
     send(&writer, &Message::ServerHello(Hello::ours("rm-fakeagent", &["h264"], features)))?;
     send(&writer, &Message::CapabilityReport(caps()))?;
     // TCP messages and input that came over UDP (the direct path) go through one loop
@@ -564,31 +557,27 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
                 }
             }
             Message::Ping { nonce } => send(&writer, &Message::Pong { nonce })?,
-            // Desktop Fusion: a strip streamed as the Dock, the wallpaper kept (scripted)
-            Message::DockStream { enabled } => {
-                let mut s = st.lock().unwrap();
-                if let Some(stop) = s.dock.take() {
-                    stop.store(true, Ordering::SeqCst);
-                }
-                if enabled {
-                    let stop = Arc::new(AtomicBool::new(false));
-                    s.dock = Some(stop.clone());
-                    drop(s);
-                    send(&writer, &Message::DockStatus { available: true, window_id: DOCK_ID, bounds: Rect { x: 220, y: 1000, w: DOCK.0 as u32, h: DOCK.1 as u32 }, edge: "bottom".into(), reason: None })?;
-                    send_shape(&writer, DOCK_ID, DOCK.0, DOCK.1, 18.0)?;
-                    let (wr, st2) = (writer.clone(), st.clone());
-                    std::thread::spawn(move || video_loop(wr, st2, DOCK_ID, DOCK.0, DOCK.1, 200, stop));
-                }
+            // the Mac's Dock (scripted): Finder, the apps, a line, Downloads, the Trash
+            Message::DockList => {
+                let open: Vec<String> = st.lock().unwrap().windows.values().map(|w| w.app.clone()).collect();
+                let app = |id: &str, title: &str| DockEntry { id: format!("app:{id}"), kind: "app".into(), title: title.into(), app_id: Some(id.into()), running: open.iter().any(|a| a == id) };
+                let mut items = vec![DockEntry { id: "app:com.apple.finder".into(), kind: "app".into(), title: "Finder".into(), app_id: Some("finder".into()), running: true }];
+                items.extend([app("testapp", "RM Test App"), app("notes", "Notes Test"), app("textedit", "TextEdit")]);
+                items.push(DockEntry { id: "separator:1".into(), kind: "separator".into(), ..Default::default() });
+                items.push(DockEntry { id: "path:/Users/runner/Downloads".into(), kind: "folder".into(), title: "Downloads".into(), ..Default::default() });
+                items.push(DockEntry { id: "trash".into(), kind: "trash".into(), title: "Trash".into(), ..Default::default() });
+                send(&writer, &Message::DockItems { items })?;
             }
-            Message::SetWallpaper { path, style: _, color } => {
-                let known = path.as_ref().is_none_or(|p| st.lock().unwrap().files.contains_key(p));
-                if known {
-                    st.lock().unwrap().wallpaper = Some(path.unwrap_or(color));
-                    send(&writer, &Message::WallpaperStatus { applied: true, reason: None })?;
+            Message::DockMenuGet { id } => {
+                let node = |t: &str| MenuNode { title: t.into(), enabled: true, ..Default::default() };
+                let menus = if id == "trash" {
+                    vec![node("Open"), MenuNode { separator: true, ..Default::default() }, node("Empty Trash")]
                 } else {
-                    send(&writer, &Message::WallpaperStatus { applied: false, reason: Some("only an image sent from Windows is used".into()) })?;
-                }
+                    vec![MenuNode { title: "Options".into(), enabled: true, children: vec![node("Keep in Dock"), node("Open at Login"), node("Show in Finder")], ..Default::default() }, MenuNode { separator: true, ..Default::default() }, node("Show All Windows"), node("Hide"), node("Quit")]
+                };
+                send(&writer, &Message::DockMenu { id, menus })?;
             }
+            Message::DockOpen { .. } | Message::DockMenuInvoke { .. } => {}
             Message::WindowStyle { exact } => st.lock().unwrap().exact = exact,
             Message::MenuBarStream { enabled } => {
                 let mut s = st.lock().unwrap();
@@ -603,10 +592,6 @@ pub fn serve_with<S: Read + Write + Send + 'static>(mut reader: S, writer: S, ud
                     let (wr, st2) = (writer.clone(), st.clone());
                     std::thread::spawn(move || video_loop(wr, st2, MENUBAR_ID, MENUBAR.0, MENUBAR.1, 230, stop));
                 }
-            }
-            Message::RestoreWallpaper => {
-                st.lock().unwrap().wallpaper = None;
-                send(&writer, &Message::WallpaperStatus { applied: false, reason: None })?;
             }
             Message::AudioControl { enabled } => {
                 let mut s = st.lock().unwrap();
