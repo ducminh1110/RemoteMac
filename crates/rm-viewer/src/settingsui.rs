@@ -46,6 +46,8 @@ pub enum Field {
     /// About this Taro: the Taro on the Mac, and its button
     MacUpdate,
     AutoUpdate,
+    /// Dock: Stage Manager
+    Stage,
 }
 
 enum Control {
@@ -76,12 +78,13 @@ impl Field {
             Field::Updates => "Software Update",
             Field::MacUpdate => "Taro on the Mac",
             Field::AutoUpdate => "Check for updates automatically",
+            Field::Stage => "Stage Manager",
         }
     }
 
     fn control(self) -> Control {
         match self {
-            Field::Pacing | Field::Audio | Field::Cursor | Field::AutoUpdate => Control::Switch,
+            Field::Pacing | Field::Audio | Field::Cursor | Field::AutoUpdate | Field::Stage => Control::Switch,
             Field::Volume => Control::Slider,
             Field::Updates | Field::MacUpdate => Control::Button,
             _ => Control::Menu,
@@ -160,7 +163,7 @@ const SECTIONS: [Section; 6] = [
         colour: Rgba::rgb(0x5e, 0x5c, 0xe6),
         groups: &[(&[Field::Frame], "The app's menus sit in each window's title bar, beside its buttons. As the Mac draws them (experimental): the Mac's own title bars, and its menu bar at the top of the screen. Applies from the next connection."), (&[Field::Glass, Field::Motion], "")],
     },
-    Section { name: "Dock", icon: Symbol::Dock, colour: Rgba::rgb(0x8e, 0x5c, 0xd9), groups: &[(&[Field::Dock], "A short push of the pointer against that edge of the screen brings the Mac's Dock out. Passing by the edge leaves it hidden.")] },
+    Section { name: "Dock", icon: Symbol::Dock, colour: Rgba::rgb(0x8e, 0x5c, 0xd9), groups: &[(&[Field::Dock], "A short push of the pointer against that edge of the screen brings the Mac's Dock out. Passing by the edge leaves it hidden."), (&[Field::Stage], "Stage Manager, as on the Mac: the app you are using in the middle, the others as small pictures at the left; click one to bring it forward.")] },
     Section {
         name: "About this Taro",
         icon: Symbol::Info,
@@ -241,7 +244,7 @@ impl SettingsView {
     /// `workspaces`: the Mac screen sizes offered (worked out from this PC's screen).
     pub fn new(settings: Settings, workspaces: Vec<String>) -> SettingsView {
         let mut knobs = HashMap::new();
-        for f in [Field::Pacing, Field::Audio, Field::Cursor, Field::AutoUpdate] {
+        for f in [Field::Pacing, Field::Audio, Field::Cursor, Field::AutoUpdate, Field::Stage] {
             knobs.insert(f, Anim::at(if Self::switch_of(&settings, f) { 1.0 } else { 0.0 }));
         }
         SettingsView { settings, workspaces, section: 0, hot: Hot::None, down: Hot::None, menu: None, knobs, dragging: false, w: W as usize, h: H as usize, s: 1.0, dark: false, active: true, level: Level::Full, texts: HashMap::new(), glass: None, menu_glass: None, about: About::default(), icon: None }
@@ -281,6 +284,7 @@ impl SettingsView {
             Field::Audio => s.audio,
             Field::Cursor => s.local_cursor,
             Field::AutoUpdate => s.auto_update,
+            Field::Stage => s.stage_manager,
             _ => false,
         }
     }
@@ -357,6 +361,10 @@ impl SettingsView {
             Field::AutoUpdate => {
                 s.auto_update = !s.auto_update;
                 s.auto_update
+            }
+            Field::Stage => {
+                s.stage_manager = !s.stage_manager;
+                s.stage_manager
             }
             _ => return,
         };

@@ -10,6 +10,10 @@ lacks.
 - Minimising a Mac window slides and shrinks it toward the side of the Dock (the bottom without one),
   fading as it goes, as the Mac does (the light, the taskbar and Win+Down all do it).
 
+- Stage Manager (Settings > Dock): the app in use stands in the middle, the other apps' windows rest
+  as pictures at the left, newest first; a click on one brings it forward (the pictures are taken
+  when a window leaves the stage).
+
 ### Fixed
 - An app opened from Taro comes to the front; it no longer opens behind the PC's own windows.
 - A window the Mac puts in full screen (a video made full screen in Safari, View > Enter Full

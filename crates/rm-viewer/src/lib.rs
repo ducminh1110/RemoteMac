@@ -53,6 +53,8 @@ pub mod navball;
 #[cfg(windows)]
 pub mod shortcuts;
 #[cfg(windows)]
+pub mod stage;
+#[cfg(windows)]
 pub mod settings_ui;
 #[cfg(windows)]
 pub mod splash;

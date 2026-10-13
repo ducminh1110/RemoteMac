@@ -44,11 +44,13 @@ pub struct Settings {
     pub frame: u8,
     /// look for a newer Taro at start and every few hours (update.rs)
     pub auto_update: bool,
+    /// Stage Manager: one app's window in the middle, the others as pictures at the left
+    pub stage_manager: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { fps: 60, bitrate_mbps: 0, quality: 0, decoder: 0, pacing: false, local_cursor: false, desktop_2x: true, workspace: 1, audio: true, volume: 100, keyboard: 0, glass: 0, motion: 0, dock: 1, frame: 0, auto_update: true }
+        Self { fps: 60, bitrate_mbps: 0, quality: 0, decoder: 0, pacing: false, local_cursor: false, desktop_2x: true, workspace: 1, audio: true, volume: 100, keyboard: 0, glass: 0, motion: 0, dock: 1, frame: 0, auto_update: true, stage_manager: false }
     }
 }
 
@@ -99,6 +101,7 @@ impl Settings {
             // Mac's own Dock at the bottom, off unless chosen)
             s.dock = n("dock_edge").map_or(s.dock, |x| x.min(2) as u8);
             s.auto_update = b("auto_update").unwrap_or(s.auto_update);
+            s.stage_manager = b("stage_manager").unwrap_or(s.stage_manager);
         }
         s
     }
@@ -124,6 +127,7 @@ impl Settings {
             "decoder": self.decoder, "pacing": self.pacing, "local_cursor": self.local_cursor, "desktop_2x": self.desktop_2x, "workspace": self.workspace,
             "audio": self.audio, "volume": self.volume, "keyboard": self.keyboard, "glass": self.glass, "motion": self.motion, "dock_edge": self.dock, "window_frame": self.frame,
             "auto_update": self.auto_update,
+            "stage_manager": self.stage_manager,
         });
         if let Some(d) = path().parent() {
             std::fs::create_dir_all(d)?;

@@ -307,6 +307,7 @@ pub fn run(opts: Options) -> i32 {
         crate::palette::register(hinst);
         crate::banner::register(hinst);
         crate::dock::register(hinst);
+        crate::stage::set_picker(stage_pick);
         crate::settings_ui::register(hinst);
         crate::navball::register(hinst, ball_menu);
         let controller = match CreateWindowExW(WINDOW_EX_STYLE(0), w!("RmController"), w!("rm-controller"), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(hinst), None) {
@@ -972,6 +973,7 @@ fn settings_changed(s: crate::settings::Settings) {
         }
     });
     crate::motion::set_preference(s.motion);
+    stage_setting(s.stage_manager);
     // sound: volume at once; muting also stops the Mac sending it
     let sound = crate::audio::audio();
     sound.set_volume(s.volume as f32 / 100.0);
@@ -1363,6 +1365,92 @@ fn bring_to_front(hwnd: HWND) {
     }
 }
 
+// ------------------------------------------------------------------ Stage Manager
+
+fn stage_on() -> bool {
+    crate::settings::Settings::load_cached().stage_manager
+}
+
+/// The windows that take part: apps' main windows (not dialogs, menus, the Mac Desktop).
+fn stage_windows() -> Vec<isize> {
+    with_app(|a| a.remotes.iter().filter(|(_, r)| r.role == WindowRole::Window && r.parent.is_none() && !r.owned && r.app != DESKTOP_APP && !r.fullscreen).map(|(k, _)| *k).collect()).unwrap_or_default()
+}
+
+fn app_of(k: isize) -> String {
+    with_app(|a| a.remotes.get(&k).map(|r| r.app.clone())).flatten().unwrap_or_default()
+}
+
+/// `hwnd`'s app on stage: its windows in the middle, the other apps' windows as pictures at the
+/// left. `center`: also placed in the middle of the stage (a new window, one coming from the strip).
+fn stage_focus(hwnd: HWND, center: bool) {
+    if !stage_on() {
+        return;
+    }
+    let (me, app) = (hwnd.0 as isize, app_of(hwnd.0 as isize));
+    let came_back = crate::stage::is_stashed(hwnd);
+    unsafe {
+        for k in stage_windows() {
+            let h = hwnd_of(k);
+            if k != me && app_of(k) != app {
+                if !crate::stage::is_stashed(h) && IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() {
+                    crate::stage::stash(h);
+                }
+            } else if crate::stage::is_stashed(h) {
+                crate::stage::unstash(h);
+                let _ = ShowWindow(h, SW_SHOW);
+            }
+        }
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        if center || came_back {
+            let area = crate::stage::stage_area();
+            let mut r = RECT::default();
+            let _ = GetWindowRect(hwnd, &mut r);
+            let (w, h) = ((r.right - r.left).min(area.right - area.left), (r.bottom - r.top).min(area.bottom - area.top));
+            let _ = SetWindowPos(hwnd, None, area.left + (area.right - area.left - w) / 2, area.top + (area.bottom - area.top - h) / 2, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        bring_to_front(hwnd);
+    }
+}
+
+/// A picture of the strip was clicked.
+fn stage_pick(k: isize) {
+    stage_focus(hwnd_of(k), true);
+}
+
+/// A window is gone: its picture too; with nothing left on stage the newest picture comes forward.
+fn stage_after_close(k: isize) {
+    crate::stage::unstash(hwnd_of(k));
+    if !stage_on() {
+        return;
+    }
+    let on_stage = stage_windows().iter().any(|w| !crate::stage::is_stashed(hwnd_of(*w)));
+    if !on_stage {
+        if let Some(first) = crate::stage::stashed().first() {
+            stage_focus(hwnd_of(*first), true);
+        }
+    }
+}
+
+/// Stage Manager turned on or off in Settings.
+fn stage_setting(on: bool) {
+    if on {
+        let fg = unsafe { GetForegroundWindow() }.0 as isize;
+        let all = stage_windows();
+        if let Some(k) = all.iter().copied().find(|k| *k == fg).or(all.first().copied()) {
+            stage_focus(hwnd_of(k), false);
+        }
+    } else {
+        for h in crate::stage::clear() {
+            unsafe {
+                let _ = ShowWindow(hwnd_of(h), SW_SHOW);
+            }
+        }
+    }
+}
+
 /// Minimise a Mac window, sliding toward the side of the Dock.
 fn minimize_window(frame: HWND) {
     crate::minimize::minimize(frame, crate::dock::Edge::from_setting(crate::settings::Settings::load_cached().dock));
@@ -1372,6 +1460,7 @@ fn minimize_window(frame: HWND) {
 fn launch_app(app: &str) {
     let existing = with_app(|a| a.remotes.iter().find(|(_, r)| r.app == app && r.parent.is_none()).map(|(k, _)| *k)).flatten();
     match existing {
+        Some(h) if stage_on() => stage_focus(hwnd_of(h), false),
         Some(h) => unsafe {
             // back from the taskbar if minimised; a maximised window stays maximised
             if IsIconic(hwnd_of(h)).as_bool() {
@@ -1936,6 +2025,7 @@ fn handle_event(ev: UiEvent) {
                     }
                     let _ = DestroyWindow(hwnd_of(h));
                 }
+                stage_after_close(h);
             }
             with_app(|a| a.panels.remove(&id));
             smoke_note_destroyed(id);
@@ -2109,6 +2199,9 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         let _ = InvalidateRect(Some(hwnd), None, false);
         eprintln!("window created id={id} app={app} role={role:?} parent={parent:?} renderer={renderer} {w}x{h}pt scale={scale} title={title:?}");
         launcher_sync();
+        if !popup && !owned && parent.is_none() && role == WindowRole::Window && app != DESKTOP_APP {
+            stage_focus(hwnd, true);
+        }
         if app == DESKTOP_APP {
             // the whole Mac: straight to fullscreen, as a remote desktop is used
             toggle_fullscreen(hwnd);
