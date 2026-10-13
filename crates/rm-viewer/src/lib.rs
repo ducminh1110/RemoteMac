@@ -25,6 +25,8 @@ pub mod gsdesktop;
 pub mod settings;
 pub mod settingsui;
 pub mod text;
+#[cfg(windows)]
+pub mod tour;
 pub mod titlebar;
 pub mod update;
 pub mod net;

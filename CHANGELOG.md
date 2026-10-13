@@ -4,6 +4,20 @@ Each version of Taro (called MacBridge until 1.2.0), newest first. Both sides sh
 same version; a newer Windows app works with an older Mac app without the features the Mac
 lacks.
 
+## 1.2.6
+
+### Added
+- A guided tour (Getting Started) the first time Taro runs after an update, before it connects: the
+  screen dims a little and arrows point at the ID, the password and Connect; do what the card says
+  and it answers "Great!", Next goes on, Skip ends it (`RM_NO_TOUR=1` turns it off).
+
+### Changed
+- Stage Manager is live: a window leaving the stage is parked past the edge of the screens (as in
+  StageManagerForWindows, MIT: see NOTICE.md) and its card in the strip is a live DWM thumbnail
+  with rounded frames, not a still picture.
+- The Stage Manager strip slides down out of the way while the Mac's Dock is out, and comes back up
+  when the Dock goes.
+
 ## 1.2.5
 
 ### Added

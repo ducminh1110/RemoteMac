@@ -96,6 +96,17 @@ pub enum Hot {
     Cancel,
 }
 
+/// The places and states the guided tour (tour.rs) looks at.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TourProbe {
+    pub id: (f32, f32, f32, f32),
+    pub password: (f32, f32, f32, f32),
+    pub connect: (f32, f32, f32, f32),
+    pub id_len: usize,
+    pub password_len: usize,
+    pub busy: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
     None,
@@ -247,6 +258,19 @@ impl ConnectView {
     fn field_rect(&self, i: usize) -> (f32, f32, f32, f32) {
         let row = self.rows().iter().position(|&r| r == i).unwrap_or(0);
         (self.p(FX), self.p(FIELD_Y[row]), self.p(FW), self.p(FH))
+    }
+
+    /// What the guided tour points at and watches (client px).
+    pub fn probe(&self) -> TourProbe {
+        let typed = if self.by_address { ADDRESS } else { ID };
+        TourProbe {
+            id: self.field_rect(ID),
+            password: self.field_rect(PASSWORD),
+            connect: self.connect_rect(),
+            id_len: self.fields[typed].len(),
+            password_len: self.fields[PASSWORD].len(),
+            busy: self.busy,
+        }
     }
 
     fn connect_rect(&self) -> (f32, f32, f32, f32) {

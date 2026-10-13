@@ -31,6 +31,21 @@ struct Shell {
 
 thread_local! { static STATE: std::cell::RefCell<Option<Shell>> = const { std::cell::RefCell::new(None) }; }
 
+/// The connect window, for the guided tour: where the controls are on the screen, what is typed.
+pub fn tour_probe() -> Option<(HWND, (i32, i32), crate::connectui::TourProbe)> {
+    let hwnd = HWND(CONNECT_HWND.with(|h| h.get()) as *mut c_void);
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let mut origin = POINT::default();
+    unsafe {
+        let _ = ClientToScreen(hwnd, &mut origin);
+    }
+    with(|sh| sh.view.probe()).map(|p| (hwnd, (origin.x, origin.y), p))
+}
+
+thread_local! { static CONNECT_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) }; }
+
 /// The window's state (None while it is in use further up: a message sent from inside).
 fn with<R>(f: impl FnOnce(&mut Shell) -> R) -> Option<R> {
     STATE.with(|st| st.try_borrow_mut().ok().and_then(|mut g| g.as_mut().map(f)))
@@ -134,6 +149,8 @@ pub fn connect_window<T: Send>(id: Option<&str>, error: Option<&str>, try_connec
         let _ = SetForegroundWindow(hwnd);
         let _ = SetFocus(Some(hwnd));
         schedule(hwnd);
+        CONNECT_HWND.with(|h| h.set(hwnd.0 as isize));
+        crate::tour::start(hinst);
 
         let mut msg = MSG::default();
         let result = std::thread::scope(|scope| {
@@ -202,6 +219,8 @@ pub fn connect_window<T: Send>(id: Option<&str>, error: Option<&str>, try_connec
                 DispatchMessageW(&msg);
             }
         });
+        crate::tour::close();
+        CONNECT_HWND.with(|h| h.set(0));
         let _ = DestroyWindow(hwnd);
         STATE.with(|st| st.borrow_mut().take());
         result
