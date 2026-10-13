@@ -98,6 +98,8 @@ jobs:
           echo "newest release: $want; the copy now runs: $got"
           [[ -n "$want" && "$got" == "$want" ]] || { echo "the copy was not updated"; exit 1; }
           [[ -x "$t/taro.sh" ]] || { echo "taro.sh is gone"; exit 1; }
+          # (a fresh copy: the one above now has the released taro-update.sh, which may be older)
+          t="$RUNNER_TEMP/taro-copy2"; rm -rf "$t"; cp -R dist/Taro "$t"
           # the mode Taro itself uses (the Mac updating from the PC's window): progress, then done
           out="$("$t/taro-update.sh" --porcelain --force)" || { echo "the porcelain update failed"; exit 1; }
           echo "$out" | tail -4
