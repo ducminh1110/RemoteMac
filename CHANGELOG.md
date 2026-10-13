@@ -4,6 +4,18 @@ Each version of Taro (called MacBridge until 1.2.0), newest first. Both sides sh
 same version; a newer Windows app works with an older Mac app without the features the Mac
 lacks.
 
+## 1.2.5
+
+### Added
+- Minimising a Mac window slides and shrinks it toward the side of the Dock (the bottom without one),
+  fading as it goes, as the Mac does (the light, the taskbar and Win+Down all do it).
+
+### Fixed
+- An app opened from Taro comes to the front; it no longer opens behind the PC's own windows.
+- A window the Mac puts in full screen (a video made full screen in Safari, View > Enter Full
+  Screen) fills the PC's monitor, and goes back when the Mac leaves full screen, instead of showing
+  as one more window (message `window_is_fullscreen`).
+
 ## 1.2.4
 
 ### Added

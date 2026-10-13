@@ -523,6 +523,10 @@ pub enum Message {
     /// `id`'s menu.
     DockMenuInvoke { id: String, path: Vec<u32> },
 
+    /// Agent -> client: this window is (`on`) or is no longer in macOS full screen (a whole display:
+    /// a video made full screen in Safari, View > Enter Full Screen). The viewer shows it full
+    /// screen on the PC too, and back, instead of as one more window.
+    WindowIsFullscreen { window_id: u64, on: bool },
     /// Client -> agent (feature "update"): look for a newer Taro for this Mac (`install` false),
     /// or put it in place and start it (`install` true; the connection drops and the viewer
     /// reconnects to the new one).
@@ -1042,6 +1046,7 @@ mod tests {
             Message::DockMenuGet { id: "app:com.apple.finder".into() },
             Message::DockMenu { id: "trash".into(), menus: vec![MenuNode { title: "Empty Trash".into(), enabled: true, ..Default::default() }] },
             Message::DockMenuInvoke { id: "trash".into(), path: vec![0] },
+            Message::WindowIsFullscreen { window_id: 7, on: true },
             Message::MacUpdate { install: true },
             Message::MacUpdateStatus { state: "available".into(), version: "1.2.3".into(), latest: "1.2.4".into(), progress: 40, detail: String::new() },
             Message::MenuBarStatus { available: true, window_id: 0x7FFF_0003, bounds: Rect { x: 0, y: 0, w: 1512, h: 33 }, reason: None },

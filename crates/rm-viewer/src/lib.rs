@@ -47,6 +47,8 @@ pub mod launcher;
 #[cfg(windows)]
 pub mod native;
 #[cfg(windows)]
+pub mod minimize;
+#[cfg(windows)]
 pub mod navball;
 #[cfg(windows)]
 pub mod shortcuts;

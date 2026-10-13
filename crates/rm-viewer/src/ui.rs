@@ -1339,6 +1339,35 @@ fn fit_to_work_area(hwnd: HWND) {
     }
 }
 
+/// When an app was last opened from here: its window comes to the front when it appears.
+static LAUNCHED: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+fn recently_launched() -> bool {
+    LAUNCHED.lock().unwrap().is_some_and(|t| t.elapsed() < Duration::from_secs(20))
+}
+
+/// Windows lets only the program in front take the front (a new window then opens behind the
+/// PC's other windows): this one joins the input of the window that is in front for a moment.
+fn bring_to_front(hwnd: HWND) {
+    unsafe {
+        let fg = GetForegroundWindow();
+        let me = windows::Win32::System::Threading::GetCurrentThreadId();
+        let them = GetWindowThreadProcessId(fg, None);
+        let joined = them != 0 && them != me && windows::Win32::System::Threading::AttachThreadInput(them, me, true).as_bool();
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+        let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+        let _ = SetForegroundWindow(hwnd);
+        if joined {
+            let _ = windows::Win32::System::Threading::AttachThreadInput(them, me, false);
+        }
+    }
+}
+
+/// Minimise a Mac window, sliding toward the side of the Dock.
+fn minimize_window(frame: HWND) {
+    crate::minimize::minimize(frame, crate::dock::Edge::from_setting(crate::settings::Settings::load_cached().dock));
+}
+
 /// Launch an app, or bring its existing main window to the front (like clicking a running app).
 fn launch_app(app: &str) {
     let existing = with_app(|a| a.remotes.iter().find(|(_, r)| r.app == app && r.parent.is_none()).map(|(k, _)| *k)).flatten();
@@ -1351,6 +1380,7 @@ fn launch_app(app: &str) {
             let _ = SetForegroundWindow(hwnd_of(h));
         },
         None => {
+            *LAUNCHED.lock().unwrap() = Some(Instant::now());
             // Mac Desktop: the Mac lays out its screen at this PC's resolution (virtual display,
             // as BetterDummy), so it fills the monitor 1:1
             let mut arguments: Vec<String> = if app == DESKTOP_APP { desktop_fit().into_iter().collect() } else { vec![] };
@@ -1762,6 +1792,14 @@ fn handle_event(ev: UiEvent) {
             });
             sync_shortcuts();
         }
+        UiEvent::MacFullscreen { id, on } => {
+            // the Mac's own full screen (a video in Safari, View > Enter Full Screen): this PC's
+            // monitor too, and back; nothing is sent to the Mac (it is already there)
+            let hwnd = with_app(|a| a.remotes.iter().find(|(_, r)| r.id == id && r.app != DESKTOP_APP && r.fullscreen != on).map(|(k, _)| *k)).flatten();
+            if let Some(k) = hwnd {
+                toggle_fullscreen_with(hwnd_of(k), false);
+            }
+        }
         UiEvent::MacDock(items) => MAC_DOCK.with(|m| m.borrow_mut().items = Some(items)),
         UiEvent::DockMenu { id, menus } => on_dock_menu(id, menus),
         UiEvent::MenuBar { app, menus } => {
@@ -2059,6 +2097,10 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
             keep_on_screen(hwnd);
         }
         let _ = ShowWindow(hwnd, if popup { SW_SHOWNOACTIVATE } else { SW_SHOW });
+        // an app the user just opened (or the dialog it opens): in front of the PC's own windows
+        if !popup && recently_launched() {
+            bring_to_front(hwnd);
+        }
         let compositor = if use_comp { comp::Comp::new(hwnd) } else { None };
         let presenter = if compositor.is_none() && with_app(|a| a.d3d).unwrap_or(false) { d3d::Presenter::new(content, w, h) } else { None };
         let renderer = compositor.as_ref().map(|c| c.kind).or(presenter.as_ref().map(|p| p.kind)).unwrap_or("gdi");
@@ -2296,6 +2338,11 @@ fn animate(frame: HWND, a: RECT, b: RECT) {
 const DESKTOP_APP: &str = "desktop";
 
 fn toggle_fullscreen(frame: HWND) {
+    toggle_fullscreen_with(frame, true);
+}
+
+/// `tell`: the Mac is asked to go the same way (not when it has gone there itself).
+fn toggle_fullscreen_with(frame: HWND, tell: bool) {
     let Some((on, saved, id, scale, desktop)) = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| (r.fullscreen, r.saved, r.id, r.scale, r.app == DESKTOP_APP))).flatten() else { return };
     unsafe {
         if !on {
@@ -2306,7 +2353,7 @@ fn toggle_fullscreen(frame: HWND) {
             let req = chrome::display_request(mon.right - mon.left, mon.bottom - mon.top, scale);
             with_app(|a| {
                 // the Mac Desktop is the Mac's own screen: it is only scaled, nothing to resize there
-                if !desktop && a.display_req != Some(req) {
+                if tell && !desktop && a.display_req != Some(req) {
                     a.display_req = Some(req);
                     a.link.send(&Message::DisplayConfigure { width: req.0, height: req.1, scale: req.2 });
                 }
@@ -2320,10 +2367,10 @@ fn toggle_fullscreen(frame: HWND) {
             let _ = SetWindowPos(frame, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             animate(frame, from, mon);
             layout(frame);
-            if !desktop {
-                with_app(|a| a.link.send(&Message::WindowFullscreen { window_id: id, on: true }));
-            } else {
+            if desktop {
                 crate::navball::show(frame); // the Mac Desktop: a navigation ball, no bar at the top edge
+            } else if tell {
+                with_app(|a| a.link.send(&Message::WindowFullscreen { window_id: id, on: true }));
             }
         } else {
             crate::navball::hide(frame);
@@ -2339,7 +2386,7 @@ fn toggle_fullscreen(frame: HWND) {
                 native::round_corners(frame);
             }
             layout(frame);
-            if !desktop {
+            if tell && !desktop {
                 with_app(|a| a.link.send(&Message::WindowFullscreen { window_id: id, on: false }));
             }
         }
@@ -2377,7 +2424,7 @@ fn ball_menu(frame: HWND, at: POINT) {
         match cmd {
             Some(EXIT) => toggle_fullscreen(frame),
             Some(MINIMIZE) => {
-                let _ = ShowWindow(frame, SW_MINIMIZE);
+                minimize_window(frame);
             }
             Some(SETTINGS) => open_settings(Some(frame)),
             Some(POINTER) => set_local_pointer(!pointer),
@@ -2865,7 +2912,7 @@ fn light_action(frame: HWND, l: chrome::Light) {
         match l {
             chrome::Light::Close => { let _ = PostMessageW(Some(frame), WM_CLOSE, WPARAM(0), LPARAM(0)); }
             _ if dialog => {}
-            chrome::Light::Minimize => { let _ = ShowWindow(frame, SW_MINIMIZE); }
+            chrome::Light::Minimize => minimize_window(frame),
             chrome::Light::Zoom => toggle_fullscreen(frame), // like the Mac: green = fullscreen
         }
     }
@@ -2901,6 +2948,11 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 mi.ptMaxPosition = POINT { x: w.left - m.left, y: w.top - m.top + bar };
                 mi.ptMaxSize = POINT { x: w.right - w.left, y: w.bottom - w.top - bar };
             }
+            LRESULT(0)
+        }
+        // minimising (the light, the taskbar, Win+Down): slides toward the Dock as the Mac's does
+        WM_SYSCOMMAND if (wp.0 & 0xFFF0) == SC_MINIMIZE as usize && !is_popup(hwnd) && !is_fullscreen(hwnd) => {
+            minimize_window(hwnd);
             LRESULT(0)
         }
         WM_NCHITTEST if is_popup(hwnd) => LRESULT(HTCLIENT as isize),

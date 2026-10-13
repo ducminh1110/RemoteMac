@@ -176,6 +176,8 @@ pub enum UiEvent {
     MenuBar { app: String, menus: Vec<rm_protocol::MenuNode> },
     /// The Mac's own Dock (feature "dock"), and the menu of one of its items.
     MacDock(Vec<rm_protocol::DockEntry>),
+    /// A window went into (or out of) macOS full screen on the Mac.
+    MacFullscreen { id: u64, on: bool },
     DockMenu { id: String, menus: Vec<rm_protocol::MenuNode> },
     /// The Mac's virtual display (Mac points), or why there is none.
     Display { available: bool, width: u32, height: u32, reason: Option<String> },
@@ -729,6 +731,7 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
                 }
                 Message::Apps { apps } => emit(UiEvent::Apps(apps)),
                 Message::DisplayStatus { available, width, height, reason, .. } => emit(UiEvent::Display { available, width, height, reason }),
+                Message::WindowIsFullscreen { window_id, on } => emit(UiEvent::MacFullscreen { id: window_id, on }),
                 Message::MacUpdateStatus { state, latest, progress, detail, .. } => crate::update::mac_status(&state, &latest, progress, &detail),
                 Message::DockItems { items } if items.len() <= 200 => emit(UiEvent::MacDock(items)),
                 Message::DockMenu { id, menus } if rm_protocol::MenuNode::count(&menus) <= rm_protocol::MAX_MENU_ITEMS => emit(UiEvent::DockMenu { id, menus }),

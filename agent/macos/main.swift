@@ -543,6 +543,8 @@ func stopStream(_ id: CGWindowID) -> Task<Void, Never>? {
     return Task { await ws.stop(); log("stream stopped window=\(id) packets=\(ws.sent)") }
 }
 
+/// Windows the viewer was told are in full screen (the tracker's thread only).
+var fullScreenSent = Set<CGWindowID>()
 tracker.onCreated = { w in
     log("window created id=\(w.id) app=\(w.appID) role=\(w.role.rawValue) parent=\(w.parent.map { String($0) } ?? "-") \(Int(w.rect.width))x\(Int(w.rect.height)) titleBarCut=\(Int(w.inset))")
     lastSize[w.id] = w.rect.size
@@ -550,6 +552,12 @@ tracker.onCreated = { w in
     send(["type": "window_created", "window_id": Int(w.id), "application_id": w.appID, "title": String(w.title.prefix(1000)), "bounds": rectJSON(w.content),
           "parent_id": w.parent.map { Int($0) as Any } ?? NSNull(), "role": w.role.rawValue])
     startStream(w.id, inset: w.inset, popup: w.role == .popup)
+    // opened already in macOS full screen (a video made full screen in Safari): the viewer shows it
+    // full screen on the PC, not as one more window
+    if w.role == .window && isWholeDisplay(w.rect) {
+        fullScreenSent.insert(w.id)
+        send(["type": "window_is_fullscreen", "window_id": Int(w.id), "on": true])
+    }
     if w.role == .popup {
         // a menu is still being drawn (its items, the highlight) when it is first captured, and the
         // capture only sends a new picture when something changes: capture it afresh once it is up
@@ -566,6 +574,7 @@ tracker.onDestroyed = { id in
     displays.windowGone(id)
     lastSize.removeValue(forKey: id)
     lastInset.removeValue(forKey: id)
+    fullScreenSent.remove(id)
     restartLock.lock(); restartGen.removeValue(forKey: id); restartLock.unlock()
     stopStream(id)
     streamsLock.lock(); pictureRetries.removeValue(forKey: id); captureRestarts.removeValue(forKey: id); streamsLock.unlock()
@@ -574,6 +583,10 @@ tracker.onDestroyed = { id in
 }
 tracker.onMoved = { w in
     send(["type": "window_moved", "window_id": Int(w.id), "bounds": rectJSON(w.content)])
+    if w.role == .window, w.fullScreen != fullScreenSent.contains(w.id) {
+        if w.fullScreen { fullScreenSent.insert(w.id) } else { fullScreenSent.remove(w.id) }
+        send(["type": "window_is_fullscreen", "window_id": Int(w.id), "on": w.fullScreen])
+    }
     // size (or the title row cut) changed: the encoder is bound to a size, so the stream starts
     // again, once the size has settled (a live resize brings a new size every tick: restarting
     // each time captured and encoded nothing but keyframes)
