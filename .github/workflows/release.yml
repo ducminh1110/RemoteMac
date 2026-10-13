@@ -98,6 +98,10 @@ jobs:
           echo "newest release: $want; the copy now runs: $got"
           [[ -n "$want" && "$got" == "$want" ]] || { echo "the copy was not updated"; exit 1; }
           [[ -x "$t/taro.sh" ]] || { echo "taro.sh is gone"; exit 1; }
+          # the mode Taro itself uses (the Mac updating from the PC's window): progress, then done
+          out="$("$t/taro-update.sh" --porcelain --force)" || { echo "the porcelain update failed"; exit 1; }
+          echo "$out" | tail -4
+          echo "$out" | grep -q '^progress 100$' && echo "$out" | grep -q "^done $want$" || { echo "no progress / done lines"; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: Taro-macos

@@ -70,6 +70,46 @@ impl State {
     }
 }
 
+/// The Taro on the Mac (feature "update"): where checking and updating it is at.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MacState {
+    Unknown,
+    Checking,
+    UpToDate,
+    Available(String),
+    /// the Mac fetches and puts the new Taro in place: how far (0-100)
+    Installing(u32),
+    /// in place; the Mac starts it when this connection ends (nothing is cut off)
+    Done(String),
+    Failed(String),
+}
+
+impl MacState {
+    pub fn busy(&self) -> bool {
+        matches!(self, MacState::Checking | MacState::Installing(_))
+    }
+
+    /// 0-100 while it is being installed.
+    pub fn progress(&self) -> Option<u32> {
+        match self {
+            MacState::Installing(p) => Some(*p),
+            _ => None,
+        }
+    }
+
+    pub fn words(&self) -> String {
+        match self {
+            MacState::Unknown => "Asks the Mac to look for a newer Taro.".into(),
+            MacState::Checking => "Asking the Mac…".into(),
+            MacState::UpToDate => "Taro on the Mac is up to date.".into(),
+            MacState::Available(v) => format!("Taro {v} is available for the Mac."),
+            MacState::Installing(p) => format!("The Mac is updating… {p} %"),
+            MacState::Done(v) => format!("Done: the Mac has Taro {v}. It starts when this connection ends."),
+            MacState::Failed(why) => why.clone(),
+        }
+    }
+}
+
 /// A version as numbers and a pre-release part: "1.2.3", "v1.2.0-beta.3".
 fn parse(v: &str) -> Option<([u64; 3], Option<String>)> {
     let v = v.trim().trim_start_matches(['v', 'V']);
@@ -169,6 +209,30 @@ type Hook = Box<dyn Fn() + Send>;
 static ON_CHANGE: Mutex<Option<Hook>> = Mutex::new(None);
 /// Ends Taro for the installer (without closing the Mac's apps).
 static ON_EXIT: Mutex<Option<Hook>> = Mutex::new(None);
+
+static MAC_STATE: Mutex<MacState> = Mutex::new(MacState::Unknown);
+
+pub fn mac_state() -> MacState {
+    MAC_STATE.lock().unwrap().clone()
+}
+
+pub fn set_mac(s: MacState) {
+    *MAC_STATE.lock().unwrap() = s;
+    if let Some(f) = ON_CHANGE.lock().unwrap().as_ref() {
+        f();
+    }
+}
+
+/// What the Mac said about its update (`MacUpdateStatus`).
+pub fn mac_status(state: &str, latest: &str, progress: u32, detail: &str) {
+    set_mac(match state {
+        "up_to_date" => MacState::UpToDate,
+        "available" => MacState::Available(latest.into()),
+        "installing" => MacState::Installing(progress.min(100)),
+        "done" => MacState::Done(latest.into()),
+        _ => MacState::Failed(if detail.is_empty() { "The Mac could not update.".into() } else { detail.chars().take(160).collect() }),
+    });
+}
 
 pub fn state() -> State {
     STATE.lock().unwrap().clone()
@@ -395,6 +459,20 @@ mod tests {
         assert_eq!(parse_release(br#"{"message":"Not Found"}"#), None);
         // a release without an installer still says its version
         assert_eq!(parse_release(br#"{"tag_name":"v1.2.5","assets":[]}"#).map(|r| (r.version, r.installer)), Some(("1.2.5".into(), None)));
+    }
+
+    #[test]
+    fn the_mac_update_in_words() {
+        mac_status("installing", "1.2.4", 40, "");
+        assert_eq!(mac_state(), MacState::Installing(40));
+        assert!(mac_state().busy() && mac_state().words().contains("40 %"));
+        mac_status("done", "1.2.4", 100, "");
+        assert!(mac_state().words().starts_with("Done"));
+        mac_status("failed", "", 0, "");
+        assert_eq!(mac_state().words(), "The Mac could not update.");
+        mac_status("available", "1.2.4", 0, "");
+        assert!(!mac_state().busy());
+        set_mac(MacState::Unknown);
     }
 
     #[test]

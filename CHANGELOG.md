@@ -4,6 +4,20 @@ Each version of Taro (called MacBridge until 1.2.0), newest first. Both sides sh
 same version; a newer Windows app works with an older Mac app without the features the Mac
 lacks.
 
+## 1.2.4
+
+### Added
+- About this Taro: "Taro on the Mac" checks the Mac for a newer Taro and updates it from the PC's
+  window, with a progress bar and a "Done". The Mac replaces its files while connected and starts the
+  new program at the next connection, so the session is not cut (feature "update",
+  `taro-update.sh --porcelain`). The Windows update shows a progress bar too.
+
+### Fixed
+- The Dock: a menu of an item closes, and the Dock goes, once the pointer is away from both.
+- `./taro --password X` from a terminal shows "Starting Taro…" at once, goes to the background
+  whenever any of stdin/stdout/stderr is a terminal, and its ID banner is not hidden by a stale
+  RM_QUIET_BANNER.
+
 ## 1.2.3
 
 Taro updates itself, and Windows gets an installer. Update both sides (this once by hand: the

@@ -55,7 +55,9 @@ signal(SIGPIPE, SIG_IGN)
 // this copy watches over the worker (started again if it dies), which does the rest
 if env["RM_DAEMON"] != nil && env["RM_WORKER"] == nil { becomeDaemon(); superviseWorker() }
 /// From a terminal (not a script) with the ID and password: show them, then go to the background.
-let goBackground = !foreground && env["RM_DAEMON"] == nil && sessionArg == nil && isatty(STDOUT_FILENO) == 1
+/// (a terminal on any of stdin, stdout, stderr: not only stdout, which a wrapper may have piped)
+let onTerminal = isatty(STDIN_FILENO) == 1 || isatty(STDOUT_FILENO) == 1 || isatty(STDERR_FILENO) == 1
+let goBackground = !foreground && env["RM_DAEMON"] == nil && sessionArg == nil && onTerminal
 if goBackground, let pid = runningInBackground() {
     print("Taro is already running in the background (pid \(pid)). Stop it with: \(CommandLine.arguments[0]) --stop")
     exit(1)
@@ -79,6 +81,7 @@ if let s = sessionArg {
     // ID + password mode; a restart for the next client keeps both (RM_PASSWORD, RM_ID)
     // the ID: given, else from the relay (it keeps IDs unique there), else this Mac's own
     // (with no relay it is only reached on this network, where the viewer looks for it by ID)
+    if env["RM_DAEMON"] == nil && env["RM_RESTARTED"] == nil { print("  Starting Taro…"); fflush(stdout) } // (asking the relay for the ID can take a few seconds)
     let id: String
     if let given = idArg ?? env["RM_ID"] {
         id = given
@@ -95,7 +98,9 @@ if let s = sessionArg {
     setenv("RM_ID", id, 1); setenv("RM_PASSWORD", password, 1)
     sessionID = relaySession(id: id); token = sessionToken(id: id, password: password)
     directSecret = directToken(password: password)
-    if env["RM_QUIET_BANNER"] == nil {
+    // (the banner is for the program the user started: not for the copy in the background, nor for
+    // a restart for the next client; a stale RM_QUIET_BANNER in the user's shell does not hide it)
+    if env["RM_QUIET_BANNER"] == nil || (env["RM_DAEMON"] == nil && env["RM_RESTARTED"] == nil) {
         print("")
         print("  Taro is ready — connect from Windows with:")
         print("    ID session to connect: \(displayID(id))")
@@ -297,7 +302,7 @@ do {
     guard cmin <= 1 && cmax >= 1 else {
         try conn.send(["type": "error", "code": "version_mismatch", "message": "agent speaks protocol 1, client \(cmin)...\(cmax)"]); exit(1)
     }
-    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "mask", "exact", "menubar", "bye", "dock"],
+    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "mask", "exact", "menubar", "bye", "dock", "update"],
                    "max_surface": [3840, 2160], "agent": "taro \(appVersion) \(ProcessInfo.processInfo.operatingSystemVersionString)"])
     try conn.send(probeCapabilities())
 } catch { fail("handshake: \(error)") }
@@ -1067,6 +1072,9 @@ func handle(_ m: [String: Any]) {
         }
     case "p2p_offer":
         sender.udp?.peerOffer(secret: m["secret"] as? String ?? "", candidates: m["candidates"] as? [String] ?? [])
+    case "mac_update":
+        // this Taro's own update, asked from the viewer (SelfUpdate.swift)
+        MacUpdater.run(install: m["install"] as? Bool ?? false) { send($0) }
     case "open_file":
         // a document from the viewer (dropped on an app's window, or on the launcher)
         let path = m["path"] as? String ?? ""

@@ -62,7 +62,24 @@ fn about() -> About {
         s if s.busy() => None,
         _ => Some(UpdateButton::Check),
     };
-    About { version: crate::update::VERSION.into(), mac: crate::net::mac_version(), status: state.words(), button }
+    let progress = match &state {
+        crate::update::State::Downloading { done, total, .. } if *total > 0 => Some(((done * 100) / total).min(100) as u32),
+        _ => None,
+    };
+    let mac = crate::update::mac_state();
+    let (mac_status, mac_button) = if crate::net::mac_version().is_none() {
+        ("Connect to a Mac to update it from here.".to_string(), None)
+    } else if !crate::net::mac_has("update") {
+        ("This Mac's Taro is older than 1.2.4: run ./taro-update.sh on it once.".to_string(), None)
+    } else {
+        let b = match &mac {
+            crate::update::MacState::Available(_) => Some(UpdateButton::Install),
+            s if s.busy() => None,
+            _ => Some(UpdateButton::Check),
+        };
+        (mac.words(), b)
+    };
+    About { version: crate::update::VERSION.into(), mac: crate::net::mac_version(), status: state.words(), button, progress, mac_status, mac_button, mac_progress: mac.progress() }
 }
 
 /// Whether the window is on the screen.
@@ -162,6 +179,7 @@ fn act(hwnd: HWND, a: Option<Act>) {
         Some(Act::Window(l)) => crate::frame::press(hwnd, l),
         Some(Act::Update(UpdateButton::Check)) => crate::update::check(false),
         Some(Act::Update(UpdateButton::Install)) => crate::update::install(),
+        Some(Act::UpdateMac(b)) => crate::ui::ask_mac_update(b == UpdateButton::Install),
         None => {}
     }
     animate(hwnd);

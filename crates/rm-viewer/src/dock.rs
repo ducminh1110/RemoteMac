@@ -504,10 +504,17 @@ mod win {
                     Edge::Right => cur.x >= x - reach,
                 };
             let held = k.held.is_some_and(|t| Instant::now() < t);
-            if k.shown.target() > 0.5 && !held {
-                if over {
+            // a menu of an item is open: the pointer may be on it as well as on the Dock; far from
+            // both, the menu closes and the Dock goes (a menu still being asked of the Mac stays)
+            let menu = crate::glassmenu::rect();
+            let over_menu = menu.is_some_and(|r| cur.x >= r.left - reach && cur.x < r.right + reach && cur.y >= r.top - reach && cur.y < r.bottom + reach);
+            if k.shown.target() > 0.5 && !(held && menu.is_none()) {
+                if over || over_menu {
                     k.left_at = None;
-                } else if k.left_at.get_or_insert_with(Instant::now).elapsed() > Duration::from_millis(450) {
+                } else if k.left_at.get_or_insert_with(Instant::now).elapsed() > Duration::from_millis(if held { 250 } else { 450 }) {
+                    if held {
+                        crate::glassmenu::cancel();
+                    }
                     k.go_away();
                 }
             }

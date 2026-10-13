@@ -940,6 +940,18 @@ fn open_settings(owner: Option<HWND>) {
 }
 
 /// Settings at About this Taro (where updating is at).
+/// Ask the Mac to look for a newer Taro, or to update itself (About this Taro).
+pub fn ask_mac_update(install: bool) {
+    use crate::update::{set_mac, MacState};
+    if !net::mac_has("update") {
+        return;
+    }
+    set_mac(if install { MacState::Installing(0) } else { MacState::Checking });
+    if with_app(|a| a.link.send(&Message::MacUpdate { install })).is_none() {
+        set_mac(MacState::Failed("Not connected to a Mac.".into()));
+    }
+}
+
 fn open_about() {
     let Some(hinst) = with_app(|a| a.hinst) else { return };
     crate::settings_ui::show_about(HINSTANCE(hinst as *mut c_void), None, crate::settings::Settings::load(), settings_changed);

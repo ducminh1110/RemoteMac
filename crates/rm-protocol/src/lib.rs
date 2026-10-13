@@ -522,6 +522,16 @@ pub enum Message {
     /// Client -> agent: choose the item at `path` (indices into `DockMenu.menus`) of Dock item
     /// `id`'s menu.
     DockMenuInvoke { id: String, path: Vec<u32> },
+
+    /// Client -> agent (feature "update"): look for a newer Taro for this Mac (`install` false),
+    /// or put it in place and start it (`install` true; the connection drops and the viewer
+    /// reconnects to the new one).
+    MacUpdate { install: bool },
+    /// Agent -> client: how that went. `state` is "up_to_date", "available" (`latest` is the
+    /// newer version), "installing" (`progress` 0-100), "done" (the files are in place; the
+    /// new program starts when this connection ends, so nothing is cut off) or "failed"
+    /// (`detail` says why).
+    MacUpdateStatus { state: String, version: String, latest: String, progress: u32, detail: String },
 }
 
 impl Message {
@@ -1032,6 +1042,8 @@ mod tests {
             Message::DockMenuGet { id: "app:com.apple.finder".into() },
             Message::DockMenu { id: "trash".into(), menus: vec![MenuNode { title: "Empty Trash".into(), enabled: true, ..Default::default() }] },
             Message::DockMenuInvoke { id: "trash".into(), path: vec![0] },
+            Message::MacUpdate { install: true },
+            Message::MacUpdateStatus { state: "available".into(), version: "1.2.3".into(), latest: "1.2.4".into(), progress: 40, detail: String::new() },
             Message::MenuBarStatus { available: true, window_id: 0x7FFF_0003, bounds: Rect { x: 0, y: 0, w: 1512, h: 33 }, reason: None },
         ] {
             let b = encode(&m).unwrap();

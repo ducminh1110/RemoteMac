@@ -417,6 +417,7 @@ fn connect_steps(relay: Option<&str>, session: &str, token: &str, app: Option<&s
     link.send(&settings.message(display_scale(), screen_px()));
     *MAC_FEATURES.lock().unwrap() = sess.negotiated.features.clone();
     *MAC_VERSION.lock().unwrap() = crate::update::version_in(&sess.agent);
+    crate::update::set_mac(crate::update::MacState::Unknown);
     // the Mac's sound, unless muted (a Mac without the feature is never asked)
     let audio = crate::audio::audio();
     audio.reset();
@@ -728,6 +729,7 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
                 }
                 Message::Apps { apps } => emit(UiEvent::Apps(apps)),
                 Message::DisplayStatus { available, width, height, reason, .. } => emit(UiEvent::Display { available, width, height, reason }),
+                Message::MacUpdateStatus { state, latest, progress, detail, .. } => crate::update::mac_status(&state, &latest, progress, &detail),
                 Message::DockItems { items } if items.len() <= 200 => emit(UiEvent::MacDock(items)),
                 Message::DockMenu { id, menus } if rm_protocol::MenuNode::count(&menus) <= rm_protocol::MAX_MENU_ITEMS => emit(UiEvent::DockMenu { id, menus }),
                 Message::MenuBar { application_id, menus } if rm_protocol::MenuNode::count(&menus) <= rm_protocol::MAX_MENU_ITEMS => {
