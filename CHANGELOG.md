@@ -7,6 +7,9 @@ lacks.
 ## 1.2.8
 
 ### Added
+- Taro runs in the background: closing its window no longer ends it. The Dock, the apps' windows
+  and the connection stay, and an icon in the notification area (behind the arrow of the taskbar)
+  opens Taro again; right-click for Open Taro / Quit Taro.
 - Stage Manager: each scene shows its app's icon and name under its cards; the card under the cursor
   pops (1.08x, anchored on its left edge); a window put into the sidebar flies there as a card
   from where it stood, straightening into its tilt on the way.
