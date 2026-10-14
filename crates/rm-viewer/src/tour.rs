@@ -65,7 +65,7 @@ thread_local! {
     static TOUR: RefCell<Option<Tour>> = const { RefCell::new(None) };
 }
 
-/// This version as one number (1.2.6 -> 1_002_006).
+/// This version as one number (1.2.7 -> 1_002_007).
 fn code() -> u32 {
     let mut n = env!("CARGO_PKG_VERSION").split(['.', '-']).filter_map(|p| p.parse::<u32>().ok());
     let (a, b, c) = (n.next().unwrap_or(0), n.next().unwrap_or(0), n.next().unwrap_or(0));

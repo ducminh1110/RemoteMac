@@ -3,6 +3,7 @@
 pub mod audio;
 #[cfg(windows)]
 pub mod banner;
+pub mod cards;
 pub mod chrome;
 pub mod connectui;
 pub mod dock;
@@ -56,6 +57,8 @@ pub mod navball;
 pub mod shortcuts;
 #[cfg(windows)]
 pub mod stage;
+#[cfg(windows)]
+pub mod tiles;
 #[cfg(windows)]
 pub mod settings_ui;
 #[cfg(windows)]

@@ -4,6 +4,17 @@ Each version of Taro (called MacBridge until 1.2.0), newest first. Both sides sh
 same version; a newer Windows app works with an older Mac app without the features the Mac
 lacks.
 
+## 1.2.7
+
+### Changed
+- Stage Manager now follows StageManagerForWindows closely: the cards in the sidebar are live
+  captures (Windows.Graphics.Capture drawn through Composition) leaning in perspective with their
+  size, tilt and cascade from its formulas; the windows of one app are one scene; the sidebar
+  parks past the left edge while a window overlaps it and comes out when the cursor is at the edge.
+  Where capture or composition are missing the DWM thumbnails remain.
+- Switching scenes keeps each window's stacking, ignores the focus changes a switch itself causes
+  and the ones less than 100 ms apart, and parks windows past the bottom-right of the screens.
+
 ## 1.2.6
 
 ### Added

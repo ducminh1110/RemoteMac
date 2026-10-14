@@ -5,6 +5,11 @@
 //! window that leaves the stage is not hidden but parked past the edge of the screens, so that
 //! DWM goes on composing it and its card stays live; the card is a DWM thumbnail. The strip slides
 //! down out of the way while the Mac's Dock is out (`lower`), and comes back after.
+//!
+//! Where the system allows it (`tiles`), the cards are live captures (Windows.Graphics.Capture)
+//! tilted in perspective on a composition window, as StageManagerForWindows draws them; the
+//! sidebar has its three modes (`Mode`): on screen, parked past the left edge when a window
+//! overlaps it, and out again when the cursor is at the edge. Without that, the DWM thumbnails.
 //! ui.rs decides what is on stage; this module keeps the parked windows and the strip.
 use std::cell::RefCell;
 use std::sync::Mutex;
@@ -17,13 +22,17 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// The strip's width at 96 dpi.
-const STRIP: i32 = 176;
+const STRIP: i32 = crate::cards::SIDEBAR_WIDTH_DIP as i32;
 const KEY: COLORREF = COLORREF(0x00FF_00FF);
 const TIMER: usize = 1;
 const SLIDE_MS: f32 = 260.0;
+const POLL: usize = 2;
 
 struct Item {
     hwnd: isize,
+    /// the app (the scene: the windows of one app are one scene)
+    app: String,
+    tile: Option<crate::tiles::Tile>,
     /// where the window stood before it was parked
     home: RECT,
     thumb: isize,
@@ -42,6 +51,12 @@ struct Stage {
     to: f32,
     from: f32,
     since: Option<std::time::Instant>,
+    /// the sidebar's mode slide (OnScreen 0 … OffScreen 1), as `drop`
+    side: f32,
+    side_to: f32,
+    side_from: f32,
+    side_since: Option<std::time::Instant>,
+    host: Option<crate::tiles::Host>,
 }
 
 thread_local! {
@@ -103,9 +118,19 @@ pub fn bottom_to_top(mut windows: Vec<isize>) -> Vec<isize> {
 
 /// What a click on a card does (set once by ui.rs).
 static PICK: Mutex<Option<fn(isize)>> = Mutex::new(None);
+/// The windows on stage, to know whether one overlaps the sidebar (set once by ui.rs).
+static WINDOWS: Mutex<Option<fn() -> Vec<isize>>> = Mutex::new(None);
+
+pub fn set_windows(f: fn() -> Vec<isize>) {
+    *WINDOWS.lock().unwrap() = Some(f);
+}
 
 pub fn set_picker(f: fn(isize)) {
     *PICK.lock().unwrap() = Some(f);
+}
+
+fn h_px(r: &RECT) -> i32 {
+    r.bottom - r.top
 }
 
 fn px(v: i32) -> i32 {
@@ -140,7 +165,7 @@ pub fn stashed() -> Vec<isize> {
 
 /// Park `hwnd` past the edge of the screens (still composed, so its card is live) and put its
 /// card at the top of the strip.
-pub fn stash(hwnd: HWND) {
+pub fn stash(hwnd: HWND, app: &str) {
     if is_stashed(hwnd) {
         return;
     }
@@ -152,12 +177,18 @@ pub fn stash(hwnd: HWND) {
             return;
         }
         let Some(strip) = ensure_strip() else { return };
-        let Ok(thumb) = DwmRegisterThumbnail(strip, hwnd) else { return };
+        // a live tile on the composition host, or a DWM thumbnail on the plain strip
+        let tile = STAGE.with(|s| s.borrow().host.as_ref().and_then(|h| crate::tiles::Tile::new(h, hwnd, (w, h_px(&r)))));
+        let has_host = STAGE.with(|s| s.borrow().host.is_some());
+        if has_host && tile.is_none() {
+            return;
+        }
+        let thumb = if has_host { 0 } else { match DwmRegisterThumbnail(strip, hwnd) { Ok(t) => t, Err(_) => return } };
         // OpacityWindowStrategy.GetOffScreenPoint: past the bottom-right of the virtual screen, +100.
         // IgnoreZOrder: parking must not yank the window to the front of the z-chain.
         let (ax, ay) = (GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + 100, GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN) + 100);
         let _ = SetWindowPos(hwnd, None, ax, ay, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        STAGE.with(|s| s.borrow_mut().items.insert(0, Item { hwnd: hwnd.0 as isize, home: r, thumb, w, h }));
+        STAGE.with(|s| s.borrow_mut().items.insert(0, Item { hwnd: hwnd.0 as isize, app: app.to_string(), tile, home: r, thumb, w, h }));
     }
     layout();
 }
@@ -174,7 +205,9 @@ pub fn unstash(hwnd: HWND) {
     });
     if let Some(it) = gone {
         unsafe {
-            let _ = DwmUnregisterThumbnail(it.thumb);
+            if it.thumb != 0 {
+                let _ = DwmUnregisterThumbnail(it.thumb);
+            }
             let _ = SetWindowPos(hwnd, None, it.home.left, it.home.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
         layout();
@@ -216,6 +249,23 @@ fn ensure_strip() -> Option<HWND> {
     }
     unsafe {
         let hinst = GetModuleHandleW(None).ok()?;
+        // first the composition window of the live cards; if capture or composition are missing,
+        // the layered strip with DWM thumbnails
+        let class = w!("TaroStageHost");
+        let wc = WNDCLASSW { lpfnWndProc: Some(proc), hInstance: hinst.into(), lpszClassName: class, hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), ..Default::default() };
+        RegisterClassW(&wc);
+        if let Ok(hwnd) = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST, class, PCWSTR::null(), WS_POPUP, 0, 0, 1, 1, None, None, Some(hinst.into()), None) {
+            if let Some(host) = crate::tiles::Host::new(hwnd) {
+                STAGE.with(|s| {
+                    let mut s = s.borrow_mut();
+                    s.strip = Some(hwnd);
+                    s.host = Some(host);
+                });
+                SetTimer(Some(hwnd), POLL, 60, None);
+                return Some(hwnd);
+            }
+            let _ = DestroyWindow(hwnd);
+        }
         let class = w!("TaroStageStrip");
         let wc = WNDCLASSW { lpfnWndProc: Some(proc), hInstance: hinst.into(), lpszClassName: class, hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), hbrBackground: CreateSolidBrush(KEY), ..Default::default() };
         RegisterClassW(&wc); // (again: refused, and the class is there)
@@ -226,16 +276,17 @@ fn ensure_strip() -> Option<HWND> {
     }
 }
 
-/// Where the strip is now (it slides by `drop` of its height).
-fn place(strip: HWND, drop: f32) {
+/// Where the strip is now: it slides down by `drop` of its height (the Dock) and out to the left
+/// by `side` of its width (OffScreen).
+fn place(strip: HWND, drop: f32, side: f32) {
     let wk = work();
-    let h = wk.bottom - wk.top;
+    let (h, w) = (wk.bottom - wk.top, px(STRIP));
     unsafe {
-        let _ = SetWindowPos(strip, Some(HWND_TOPMOST), wk.left, wk.top + (h as f32 * drop) as i32, px(STRIP), h, SWP_NOACTIVATE);
+        let _ = SetWindowPos(strip, Some(HWND_TOPMOST), wk.left - (w as f32 * side) as i32, wk.top + (h as f32 * drop) as i32, w, h, SWP_NOACTIVATE);
     }
 }
 
-/// The cards put in their places: each card's thumbnail, the strip shown (hidden with none).
+/// The cards put in their places, the strip shown (hidden with none).
 fn layout() {
     let Some(strip) = STAGE.with(|s| s.borrow().strip) else { return };
     if STAGE.with(|s| s.borrow().items.is_empty()) {
@@ -245,6 +296,88 @@ fn layout() {
         STAGE.with(|s| s.borrow_mut().spots.clear());
         return;
     }
+    if STAGE.with(|s| s.borrow().host.is_some()) {
+        layout_tiles();
+    } else {
+        layout_thumbs();
+    }
+    let (drop, side) = STAGE.with(|s| (s.borrow().drop, s.borrow().side));
+    place(strip, drop, side);
+    unsafe {
+        let _ = ShowWindow(strip, SW_SHOWNOACTIVATE);
+        let _ = InvalidateRect(Some(strip), None, true);
+    }
+}
+
+/// The live cards, as MainWindow.xaml lays them out: the scenes (one per app) one above the other,
+/// centred, each the cascade of its windows (10 dip per window, the first in front), every scene
+/// tilted by where its top and bottom edges are on the screen (`AssignRowTiltsCore`).
+fn layout_tiles() {
+    use crate::cards::*;
+    let wk = work();
+    let sh = wk.bottom - wk.top;
+    let scale = px(100) as f64 / 100.0;
+    let screen_h_dip = unsafe { GetSystemMetrics(SM_CYSCREEN) } as f64 / scale;
+    STAGE.with(|s| {
+        let mut s = s.borrow_mut();
+        // the scenes, in the order of their first window; a card's size from its window's
+        let mut apps: Vec<String> = vec![];
+        for it in s.items.iter() {
+            if !apps.contains(&it.app) {
+                apps.push(it.app.clone());
+            }
+        }
+        let size = |it: &Item| {
+            let (w, h) = card_size_dip(it.w as f64 / scale, it.h as f64 / scale, screen_h_dip);
+            (w * scale, h * scale)
+        };
+        let (step, gap) = (STACK_STEP_DIP * scale, SCENE_GAP_DIP * scale);
+        let heights: Vec<f64> = apps.iter().map(|a| s.items.iter().filter(|i| &i.app == a).enumerate().map(|(n, it)| n as f64 * step + size(it).1).fold(0.0, f64::max)).collect();
+        let total: f64 = heights.iter().sum::<f64>() + gap * (heights.len().saturating_sub(1)) as f64;
+        let mut y = ((sh as f64 - total) / 2.0).max(gap);
+        let mut placed: Vec<(usize, f64, f64, f64, f64, f64, f64)> = vec![]; // item, x, y, w, h, top, bottom
+        let mut spots = vec![];
+        let mut hidden = vec![];
+        for (n, app) in apps.iter().enumerate() {
+            let hh = heights[n];
+            if y + hh > sh as f64 {
+                hidden.extend(s.items.iter().enumerate().filter(|(_, i)| &i.app == app).map(|(k, _)| k));
+                continue;
+            }
+            let top = edge_tilt_at((wk.top as f64 + y) / scale, screen_h_dip);
+            let bottom = edge_tilt_at((wk.top as f64 + y + hh) / scale, screen_h_dip);
+            let idx: Vec<usize> = s.items.iter().enumerate().filter(|(_, i)| &i.app == app).map(|(k, _)| k).collect();
+            for (m, k) in idx.iter().enumerate() {
+                let (cw, ch) = size(&s.items[*k]);
+                let (x, yy) = (SIDEBAR_PAD_DIP * scale + m as f64 * step, y + m as f64 * step);
+                placed.push((*k, x, yy, cw, ch, top, bottom));
+                spots.push((s.items[*k].hwnd, RECT { left: x as i32, top: yy as i32, right: (x + cw) as i32, bottom: (yy + ch) as i32 }));
+            }
+            y += hh + gap;
+        }
+        for k in hidden {
+            if let Some(t) = &s.items[k].tile {
+                t.set_visible(false);
+            }
+        }
+        for (k, x, y, w, h, top, bottom) in placed.iter().copied() {
+            if let Some(t) = s.items[k].tile.as_mut() {
+                t.set_visible(true);
+                t.place(x, y, w, h, top, bottom, CARD_RADIUS_DIP * scale);
+            }
+        }
+        // back to front: later windows of a scene behind the earlier ones
+        let order: Vec<usize> = placed.iter().rev().map(|p| p.0).collect();
+        if let Some(h) = &s.host {
+            let tiles: Vec<&crate::tiles::Tile> = order.iter().filter_map(|k| s.items[*k].tile.as_ref()).collect();
+            h.set_order(&tiles);
+        }
+        s.spots = spots;
+    });
+}
+
+/// The DWM thumbnails of the plain strip.
+fn layout_thumbs() {
     let wk = work();
     let (sw, sh) = (px(STRIP), wk.bottom - wk.top);
     let (maxw, maxh) = (sw - px(40), (sh - px(40)) / 4);
@@ -273,18 +406,16 @@ fn layout() {
         }
     });
     STAGE.with(|s| s.borrow_mut().spots = spots);
-    let drop = STAGE.with(|s| s.borrow().drop);
-    place(strip, drop);
-    unsafe {
-        let _ = ShowWindow(strip, SW_SHOWNOACTIVATE);
-        let _ = InvalidateRect(Some(strip), None, true);
-    }
 }
 
 fn paint(hwnd: HWND) {
     unsafe {
         let mut ps = PAINTSTRUCT::default();
         let dc = BeginPaint(hwnd, &mut ps);
+        if STAGE.with(|s| s.borrow().host.is_some()) {
+            let _ = EndPaint(hwnd, &ps);
+            return;
+        }
         let card = CreateSolidBrush(COLORREF(0x002c_2622));
         let old = SelectObject(dc, card.into());
         let pen = SelectObject(dc, GetStockObject(NULL_PEN));
@@ -301,20 +432,66 @@ fn paint(hwnd: HWND) {
     }
 }
 
+fn ease(since: Option<std::time::Instant>) -> (f32, bool) {
+    let t = since.map_or(1.0, |t| (t.elapsed().as_secs_f32() * 1000.0 / SLIDE_MS).min(1.0));
+    (t * t * (3.0 - 2.0 * t), t >= 1.0)
+}
+
 fn slide(hwnd: HWND) {
-    let (drop, done) = STAGE.with(|s| {
+    let (drop, side, done) = STAGE.with(|s| {
         let mut s = s.borrow_mut();
-        let t = s.since.map_or(1.0, |t| (t.elapsed().as_secs_f32() * 1000.0 / SLIDE_MS).min(1.0));
-        let e = t * t * (3.0 - 2.0 * t);
+        let (e, d1) = ease(s.since);
         s.drop = s.from + (s.to - s.from) * e;
-        (s.drop, t >= 1.0)
+        let (e, d2) = ease(s.side_since);
+        s.side = s.side_from + (s.side_to - s.side_from) * e;
+        (s.drop, s.side, d1 && d2)
     });
-    place(hwnd, drop);
+    place(hwnd, drop, side);
     if done {
         unsafe {
             let _ = KillTimer(Some(hwnd), TIMER);
         }
     }
+}
+
+/// The sidebar's mode (`MainWindow`: OnScreen, OffScreen, Flyover): out when the cursor is at the
+/// left edge (or on the sidebar), parked past the edge while a window overlaps it, else on screen.
+fn poll_mode(hwnd: HWND) {
+    let (cur, wk) = (unsafe { cursor() }, work());
+    let (w, h) = (px(STRIP), wk.bottom - wk.top);
+    let (side, drop) = STAGE.with(|s| (s.borrow().side_to, s.borrow().drop));
+    let strip = RECT { left: wk.left, top: wk.top + (h as f32 * drop) as i32, right: wk.left + w, bottom: wk.bottom };
+    let inside = |r: &RECT, p: POINT| p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom;
+    let edge = cur.x <= wk.left + px(crate::cards::EDGE_TRIGGER_DIP as i32) && cur.y >= wk.top && cur.y < wk.bottom;
+    let over = side < 0.5 && inside(&strip, cur);
+    let overlap = (*WINDOWS.lock().unwrap()).is_some_and(|f| {
+        f().into_iter().any(|k| {
+            let hw = HWND(k as *mut _);
+            if is_stashed(hw) {
+                return false;
+            }
+            let mut r = RECT::default();
+            unsafe { IsWindowVisible(hw).as_bool() && !IsIconic(hw).as_bool() && GetWindowRect(hw, &mut r).is_ok() && r.left < strip.right && r.right > strip.left && r.top < strip.bottom && r.bottom > strip.top }
+        })
+    });
+    let to = if edge || over || !overlap { 0.0 } else { 1.0 };
+    if to != side {
+        STAGE.with(|s| {
+            let mut s = s.borrow_mut();
+            s.side_from = s.side;
+            s.side_to = to;
+            s.side_since = Some(std::time::Instant::now());
+        });
+        unsafe {
+            SetTimer(Some(hwnd), TIMER, 15, None);
+        }
+    }
+}
+
+unsafe fn cursor() -> POINT {
+    let mut p = POINT::default();
+    let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p);
+    p
 }
 
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -326,6 +503,10 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_ERASEBKGND => DefWindowProcW(hwnd, msg, wp, lp),
         WM_TIMER if wp.0 == TIMER => {
             slide(hwnd);
+            LRESULT(0)
+        }
+        WM_TIMER if wp.0 == POLL => {
+            poll_mode(hwnd);
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {

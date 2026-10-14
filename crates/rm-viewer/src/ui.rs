@@ -308,6 +308,7 @@ pub fn run(opts: Options) -> i32 {
         crate::banner::register(hinst);
         crate::dock::register(hinst);
         crate::stage::set_picker(stage_pick);
+        crate::stage::set_windows(stage_windows);
         crate::settings_ui::register(hinst);
         crate::navball::register(hinst, ball_menu);
         let controller = match CreateWindowExW(WINDOW_EX_STYLE(0), w!("RmController"), w!("rm-controller"), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(hinst), None) {
@@ -1402,7 +1403,7 @@ fn stage_focus(hwnd: HWND, center: bool) {
         for k in &outgoing {
             let h = hwnd_of(*k);
             if !crate::stage::is_stashed(h) && IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() {
-                crate::stage::stash(h);
+                crate::stage::stash(h, &app_of(*k));
             }
         }
         let incoming = crate::stage::bottom_to_top(all.iter().copied().filter(|k| *k == me || app_of(*k) == app).collect());
