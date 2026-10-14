@@ -19,6 +19,7 @@ use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, W
 use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// The strip's width at 96 dpi.
@@ -27,12 +28,17 @@ const KEY: COLORREF = COLORREF(0x00FF_00FF);
 const TIMER: usize = 1;
 const SLIDE_MS: f32 = 260.0;
 const POLL: usize = 2;
+const ANIM: usize = 3;
+/// the scale of the scene under the cursor
+const HOVER_SCALE: f64 = 1.08;
 
 struct Item {
     hwnd: isize,
     /// the app (the scene: the windows of one app are one scene)
     app: String,
     tile: Option<crate::tiles::Tile>,
+    /// a card flying in from where its window stood: since when, and the window's rect in the host (x, y, w, h)
+    fly: Option<(std::time::Instant, [f64; 4])>,
     /// where the window stood before it was parked
     home: RECT,
     thumb: isize,
@@ -57,6 +63,21 @@ struct Stage {
     side_from: f32,
     side_since: Option<std::time::Instant>,
     host: Option<crate::tiles::Host>,
+    /// the scene under the cursor
+    hover: Option<String>,
+    /// a card pressed in the sidebar (and where), and whether it is being dragged out
+    press: Option<(isize, POINT)>,
+    dragging: bool,
+    /// the click-through window with each scene's app icon and name, and what it draws
+    icons: Option<HWND>,
+    labels: Vec<(String, i32, i32)>,
+}
+
+type IconFn = fn(&str) -> Option<HICON>;
+static ICON: Mutex<Option<IconFn>> = Mutex::new(None);
+
+pub fn set_icon_fn(f: IconFn) {
+    *ICON.lock().unwrap() = Some(f);
 }
 
 thread_local! {
@@ -189,9 +210,24 @@ pub fn stash(hwnd: HWND, app: &str) {
         // IgnoreZOrder: parking must not yank the window to the front of the z-chain.
         let (ax, ay) = (GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + 100, GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN) + 100);
         let _ = SetWindowPos(hwnd, None, ax, ay, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        STAGE.with(|s| s.borrow_mut().items.insert(0, Item { hwnd: hwnd.0 as isize, app: app.to_string(), tile, home: r, thumb, w, h }));
+        STAGE.with(|s| s.borrow_mut().items.insert(0, Item { hwnd: hwnd.0 as isize, app: app.to_string(), tile, home: r, thumb, w, h, fly: if has_host { let wk = work(); Some((std::time::Instant::now(), [(r.left - wk.left) as f64, (r.top - wk.top) as f64, w as f64, h as f64])) } else { None } }));
     }
     layout();
+    start_anim();
+}
+
+/// The cursor is over the sidebar (a window dropped here goes into it).
+pub fn over_strip() -> bool {
+    let (cur, wk) = (unsafe { cursor() }, work());
+    STAGE.with(|s| s.borrow().side < 0.5) && cur.x >= wk.left && cur.x < wk.left + px(STRIP) && cur.y >= wk.top && cur.y < wk.bottom
+}
+
+fn start_anim() {
+    if let Some(strip) = STAGE.with(|s| s.borrow().strip) {
+        unsafe {
+            SetTimer(Some(strip), ANIM, 15, None);
+        }
+    }
 }
 
 /// `hwnd` is on stage (or gone): its card leaves the strip and the window goes back where it was.
@@ -263,6 +299,13 @@ fn ensure_strip() -> Option<HWND> {
                     s.host = Some(host);
                 });
                 SetTimer(Some(hwnd), POLL, 60, None);
+                let ic = w!("TaroStageIcons");
+                let wc = WNDCLASSW { lpfnWndProc: Some(icons_proc), hInstance: hinst.into(), lpszClassName: ic, hbrBackground: CreateSolidBrush(KEY), ..Default::default() };
+                RegisterClassW(&wc);
+                if let Ok(i) = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST, ic, PCWSTR::null(), WS_POPUP, 0, 0, 1, 1, None, None, Some(hinst.into()), None) {
+                    let _ = SetLayeredWindowAttributes(i, KEY, 255, LWA_COLORKEY);
+                    STAGE.with(|s| s.borrow_mut().icons = Some(i));
+                }
                 return Some(hwnd);
             }
             let _ = DestroyWindow(hwnd);
@@ -283,7 +326,11 @@ fn place(strip: HWND, drop: f32, side: f32) {
     let wk = work();
     let (h, w) = (wk.bottom - wk.top, px(STRIP));
     unsafe {
-        let _ = SetWindowPos(strip, Some(HWND_TOPMOST), wk.left - (w as f32 * side) as i32, wk.top + (h as f32 * drop) as i32, w, h, SWP_NOACTIVATE);
+        let (x, y) = (wk.left - (w as f32 * side) as i32, wk.top + (h as f32 * drop) as i32);
+        let _ = SetWindowPos(strip, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
+        if let Some(ic) = STAGE.with(|s| s.borrow().icons) {
+            let _ = SetWindowPos(ic, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
+        }
     }
 }
 
@@ -293,6 +340,9 @@ fn layout() {
     if STAGE.with(|s| s.borrow().items.is_empty()) {
         unsafe {
             let _ = ShowWindow(strip, SW_HIDE);
+            if let Some(ic) = STAGE.with(|s| s.borrow().icons) {
+                let _ = ShowWindow(ic, SW_HIDE);
+            }
         }
         STAGE.with(|s| s.borrow_mut().spots.clear());
         return;
@@ -307,6 +357,10 @@ fn layout() {
     unsafe {
         let _ = ShowWindow(strip, SW_SHOWNOACTIVATE);
         let _ = InvalidateRect(Some(strip), None, true);
+        if let Some(ic) = STAGE.with(|s| s.borrow().icons) {
+            let _ = ShowWindow(ic, SW_SHOWNOACTIVATE);
+            let _ = InvalidateRect(Some(ic), None, true);
+        }
     }
 }
 
@@ -339,6 +393,7 @@ fn layout_tiles() {
         let mut placed: Vec<(usize, f64, f64, f64, f64, f64, f64)> = vec![]; // item, x, y, w, h, top, bottom
         let mut spots = vec![];
         let mut hidden = vec![];
+        let mut labels = vec![];
         for (n, app) in apps.iter().enumerate() {
             let hh = heights[n];
             if y + hh > sh as f64 {
@@ -354,15 +409,29 @@ fn layout_tiles() {
                 placed.push((*k, x, yy, cw, ch, top, bottom));
                 spots.push((s.items[*k].hwnd, RECT { left: x as i32, top: yy as i32, right: (x + cw) as i32, bottom: (yy + ch) as i32 }));
             }
+            labels.push((app.clone(), (SIDEBAR_PAD_DIP * scale) as i32, (y + hh + 4.0 * scale) as i32));
             y += hh + gap;
         }
+        s.labels = labels;
         for k in hidden {
             if let Some(t) = &s.items[k].tile {
                 t.set_visible(false);
             }
         }
-        for (k, x, y, w, h, top, bottom) in placed.iter().copied() {
-            if let Some(t) = s.items[k].tile.as_mut() {
+        for (k, mut x, mut y, mut w, mut h, mut top, mut bottom) in placed.iter().copied() {
+            let it = &mut s.items[k];
+            if let Some((t0, from)) = it.fly {
+                // the card flies in from its window to its place, straightening out as it goes
+                let (e, done) = ease(Some(t0));
+                if done {
+                    it.fly = None;
+                } else {
+                    let e = e as f64;
+                    (x, y, w, h) = (from[0] + (x - from[0]) * e, from[1] + (y - from[1]) * e, from[2] + (w - from[2]) * e, from[3] + (h - from[3]) * e);
+                    (top, bottom) = (top * e, bottom * e);
+                }
+            }
+            if let Some(t) = it.tile.as_mut() {
                 t.set_visible(true);
                 t.place(x, y, w, h, top, bottom, CARD_RADIUS_DIP * scale);
             }
@@ -459,6 +528,29 @@ fn slide(hwnd: HWND) {
 /// left edge (or on the sidebar), parked past the edge while a window overlaps it, else on screen.
 fn poll_mode(hwnd: HWND) {
     let (cur, wk) = (unsafe { cursor() }, work());
+    // the scene under the cursor is popped (HOVER_SCALE), the others at rest
+    let mut at = cur;
+    unsafe {
+        let _ = ScreenToClient(hwnd, &mut at);
+    }
+    let hovered = STAGE.with(|s| {
+        let s = s.borrow();
+        s.spots.iter().find(|(_, r)| at.x >= r.left && at.x < r.right && at.y >= r.top && at.y < r.bottom).and_then(|(h, _)| s.items.iter().find(|i| i.hwnd == *h)).map(|i| i.app.clone())
+    });
+    if STAGE.with(|s| s.borrow().hover != hovered && !s.borrow().dragging) {
+        STAGE.with(|s| {
+            let mut s = s.borrow_mut();
+            let app = hovered.clone();
+            for it in s.items.iter_mut() {
+                let on = app.as_deref() == Some(it.app.as_str());
+                if let Some(t) = it.tile.as_mut() {
+                    t.scale = if on { HOVER_SCALE } else { 1.0 };
+                }
+            }
+            s.hover = hovered;
+        });
+        layout();
+    }
     let (w, h) = (px(STRIP), wk.bottom - wk.top);
     let (side, drop) = STAGE.with(|s| (s.borrow().side_to, s.borrow().drop));
     let strip = RECT { left: wk.left, top: wk.top + (h as f32 * drop) as i32, right: wk.left + w, bottom: wk.bottom };
@@ -506,18 +598,91 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             slide(hwnd);
             LRESULT(0)
         }
+        WM_TIMER if wp.0 == ANIM => {
+            layout();
+            if !STAGE.with(|s| s.borrow().items.iter().any(|i| i.fly.is_some())) {
+                let _ = KillTimer(Some(hwnd), ANIM);
+            }
+            LRESULT(0)
+        }
         WM_TIMER if wp.0 == POLL => {
             poll_mode(hwnd);
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
+            // a click brings the scene forward; dragging a card out puts its window where it is dropped
             let (x, y) = ((lp.0 & 0xffff) as i16 as i32, ((lp.0 >> 16) & 0xffff) as i16 as i32);
             let hit = STAGE.with(|s| s.borrow().spots.iter().find(|(_, r)| x >= r.left && x < r.right && y >= r.top && y < r.bottom).map(|(h, _)| *h));
-            if let (Some(h), Some(f)) = (hit, *PICK.lock().unwrap()) {
-                f(h);
+            STAGE.with(|s| s.borrow_mut().press = hit.map(|h| (h, POINT { x, y })));
+            if hit.is_some() {
+                SetCapture(hwnd);
             }
             LRESULT(0)
         }
+        WM_MOUSEMOVE => {
+            let (x, y) = ((lp.0 & 0xffff) as i16 as i32, ((lp.0 >> 16) & 0xffff) as i16 as i32);
+            STAGE.with(|s| {
+                let mut s = s.borrow_mut();
+                if let Some((_, p)) = s.press {
+                    if (x - p.x).abs() > px(8) || (y - p.y).abs() > px(8) {
+                        s.dragging = true;
+                    }
+                }
+            });
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            let _ = ReleaseCapture();
+            let (press, dragging) = STAGE.with(|s| {
+                let mut s = s.borrow_mut();
+                (s.press.take(), std::mem::take(&mut s.dragging))
+            });
+            if let (Some((h, _)), Some(f)) = (press, *PICK.lock().unwrap()) {
+                let dropped = dragging && !over_strip();
+                f(h);
+                if dropped {
+                    // the window stands where the card was dropped
+                    let (hw, cur) = (HWND(h as *mut _), cursor());
+                    let mut r = RECT::default();
+                    let _ = GetWindowRect(hw, &mut r);
+                    let _ = SetWindowPos(hw, None, cur.x - (r.right - r.left) / 2, cur.y - (r.bottom - r.top) / 2, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+/// The icons window: each scene's app icon with its name under its cards (`IconOverlayManager`).
+unsafe extern "system" fn icons_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let dc = BeginPaint(hwnd, &mut ps);
+            let icon = *ICON.lock().unwrap();
+            let sz = px(20);
+            let font = CreateFontW(-px(12), 0, 0, 0, 500, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, w!("Segoe UI"));
+            let old = SelectObject(dc, font.into());
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, COLORREF(0x00ff_ffff));
+            STAGE.with(|s| {
+                for (app, x, y) in s.borrow().labels.iter() {
+                    if let Some(ic) = icon.and_then(|f| f(app)) {
+                        let _ = DrawIconEx(dc, *x, *y, ic, sz, sz, 0, None, DI_NORMAL);
+                    }
+                    let mut name: Vec<u16> = app.encode_utf16().collect();
+                    let mut r = RECT { left: x + sz + px(6), top: *y, right: x + px(crate::cards::SIDEBAR_WIDTH_DIP as i32) - px(30), bottom: y + sz };
+                    DrawTextW(dc, &mut name, &mut r, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+                }
+            });
+            SelectObject(dc, old);
+            let _ = DeleteObject(font.into());
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => DefWindowProcW(hwnd, msg, wp, lp),
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }

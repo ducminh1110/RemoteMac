@@ -4,6 +4,15 @@ Each version of Taro (called MacBridge until 1.2.0), newest first. Both sides sh
 same version; a newer Windows app works with an older Mac app without the features the Mac
 lacks.
 
+## 1.2.8
+
+### Added
+- Stage Manager: each scene shows its app's icon and name under its cards; the card under the cursor
+  pops (1.08x, anchored on its left edge); a window put into the sidebar flies there as a card
+  from where it stood, straightening into its tilt on the way.
+- Drag and drop between the sidebar and the stage: drag a card out and the window stands where
+  you let go; drop a window (after moving it by its title bar) on the sidebar and it becomes a card.
+
 ## 1.2.7
 
 ### Changed

@@ -98,6 +98,8 @@ pub struct Tile {
     token: i64,
     /// source size, as the card's size is solved from it
     pub source: (i32, i32),
+    /// the hover scale (1 at rest), anchored on the card's left edge
+    pub scale: f64,
 }
 
 impl Tile {
@@ -167,7 +169,7 @@ impl Tile {
             let _ = session.SetIsCursorCaptureEnabled(false);
             let _ = session.SetIsBorderRequired(false); // needs consent on some builds; ignored then
             session.StartCapture().ok()?;
-            Some(Tile { root, content, sprite, clip: None, compositor: host.compositor.clone(), pool, session, item, token, source })
+            Some(Tile { root, content, sprite, clip: None, compositor: host.compositor.clone(), pool, session, item, token, source, scale: 1.0 })
         }
     }
 
@@ -187,7 +189,7 @@ impl Tile {
         let (shear, rotation) = cards::solve_edge_angles(top, bottom, h);
         let _ = self.sprite.SetRotationAxis(Vector3::new(0.0, 1.0, 0.0));
         let _ = self.sprite.SetRotationAngleInDegrees(rotation as f32);
-        let _ = self.content.SetTransformMatrix(matrix(&cards::compose_transform(shear, 1.0, w, hw, hh)));
+        let _ = self.content.SetTransformMatrix(matrix(&cards::compose_transform(shear, self.scale, w, hw, hh)));
         if self.clip.is_none() {
             if let (Ok(g), Ok(c)) = (self.compositor.CreateRoundedRectangleGeometry(), self.compositor.CreateGeometricClip()) {
                 let _ = c.SetGeometry(&g);

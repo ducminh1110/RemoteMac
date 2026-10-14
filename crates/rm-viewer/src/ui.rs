@@ -71,6 +71,10 @@ const WM_VSYNC: u32 = WM_APP + 3;
 const WM_UPDATE: u32 = WM_APP + 4;
 /// The installer runs: Taro ends for it.
 const WM_UPDATE_QUIT: u32 = WM_APP + 5;
+/// The tray icon was used (its mouse messages).
+const WM_TRAY: u32 = WM_APP + 6;
+/// The window that owns the tray icon (0: none yet).
+static TRAY_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 const TIMER_ID: usize = 1;
 const WM_MOUSE_LEAVE: u32 = 0x02A3;
 
@@ -309,6 +313,7 @@ pub fn run(opts: Options) -> i32 {
         crate::dock::register(hinst);
         crate::stage::set_picker(stage_pick);
         crate::stage::set_windows(stage_windows);
+        crate::stage::set_icon_fn(stage_icon);
         crate::settings_ui::register(hinst);
         crate::navball::register(hinst, ball_menu);
         let controller = match CreateWindowExW(WINDOW_EX_STYLE(0), w!("RmController"), w!("rm-controller"), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(hinst), None) {
@@ -668,6 +673,7 @@ fn shortcuts_tick() {
 /// Taro ends for its installer: the connection is dropped, not closed, and the Mac keeps the
 /// session's apps open for the updated Taro to come back to.
 fn quit_for_update() {
+    tray_remove();
     crate::lifecycle::set(crate::lifecycle::Phase::Disconnecting);
     on_mac_gone();
     crate::lifecycle::set(crate::lifecycle::Phase::Disconnected);
@@ -722,7 +728,68 @@ fn on_update() {
     });
 }
 
+/// Taro keeps running when its window is closed: an icon in the notification area (behind the
+/// arrow of the taskbar) brings it back, or ends it.
+fn tray_add(hwnd: HWND) {
+    use windows::Win32::UI::Shell::*;
+    if TRAY_HWND.swap(hwnd.0 as isize, std::sync::atomic::Ordering::Relaxed) != 0 {
+        return;
+    }
+    let Some(icon) = native::make_icon(32, &crate::logo::rgba(32)) else { return };
+    let mut tip = [0u16; 128];
+    for (d, c) in tip.iter_mut().zip("Taro".encode_utf16()) {
+        *d = c;
+    }
+    let nid = NOTIFYICONDATAW { cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32, hWnd: hwnd, uID: 1, uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP, uCallbackMessage: WM_TRAY, hIcon: icon, szTip: tip, ..Default::default() };
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+    }
+}
+
+fn tray_remove() {
+    use windows::Win32::UI::Shell::*;
+    let h = TRAY_HWND.swap(0, std::sync::atomic::Ordering::Relaxed);
+    if h != 0 {
+        let nid = NOTIFYICONDATAW { cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32, hWnd: HWND(h as *mut _), uID: 1, ..Default::default() };
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+        }
+    }
+}
+
+/// The launcher comes back from the tray.
+fn tray_open(hwnd: HWND) {
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+fn tray_menu(hwnd: HWND) {
+    unsafe {
+        let Ok(m) = CreatePopupMenu() else { return };
+        let _ = AppendMenuW(m, MF_STRING, 1, w!("Open Taro"));
+        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(m, MF_STRING, 2, w!("Quit Taro"));
+        let mut p = POINT::default();
+        let _ = GetCursorPos(&mut p);
+        let _ = SetForegroundWindow(hwnd); // or the menu would not close when clicking elsewhere
+        let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, Some(0), hwnd, None).0;
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(m);
+        match cmd {
+            1 => tray_open(hwnd),
+            2 => quit(0),
+            _ => {}
+        }
+    }
+}
+
 fn quit(code: i32) {
+    tray_remove();
     crate::lifecycle::set(crate::lifecycle::Phase::Disconnecting);
     // closed on purpose: the Mac closes the session's apps (a cut connection keeps them open)
     if let Some(l) = with_app(|a| a.link.clone()) {
@@ -912,13 +979,17 @@ unsafe extern "system" fn launcher_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             LRESULT(1)
         }
         WM_CLOSE => {
-            // Closing the launcher keeps the apps' windows open (and one still opening); with
-            // none, Taro ends. The menu bar strip is not an app's window.
-            let open = with_app(|a| a.remotes.values().any(|r| r.app != MENUBAR_APP)).unwrap_or(false);
-            if !open && !crate::splash::any() {
-                quit(0);
-            } else {
-                let _ = ShowWindow(hwnd, SW_HIDE);
+            // Closing the launcher does not end Taro: it goes on in the background (the Dock, the
+            // apps' windows, one still opening) with an icon in the notification area.
+            tray_add(hwnd);
+            let _ = ShowWindow(hwnd, SW_HIDE);
+            LRESULT(0)
+        }
+        WM_TRAY => {
+            match (lp.0 & 0xffff) as u32 {
+                WM_LBUTTONUP | WM_LBUTTONDBLCLK => tray_open(hwnd),
+                WM_RBUTTONUP | WM_CONTEXTMENU => tray_menu(hwnd),
+                _ => {}
             }
             LRESULT(0)
         }
@@ -1431,6 +1502,25 @@ fn stage_focus(hwnd: HWND, center: bool) {
         bring_to_front(hwnd);
     }
     crate::stage::set_suspended(false);
+}
+
+/// The app's icon for the sidebar.
+fn stage_icon(app: &str) -> Option<HICON> {
+    with_app(|a| a.icons.get(app).copied()).flatten().map(|h| HICON(h as *mut _))
+}
+
+/// A window was let go (after a move): over the sidebar it goes into it, like a card.
+fn stage_dropped(hwnd: HWND) {
+    if !stage_on() || crate::stage::is_stashed(hwnd) || !crate::stage::over_strip() || !stage_windows().contains(&(hwnd.0 as isize)) {
+        return;
+    }
+    let me = hwnd.0 as isize;
+    crate::stage::stash(hwnd, &app_of(me));
+    if !stage_windows().iter().any(|w| !crate::stage::is_stashed(hwnd_of(*w))) {
+        if let Some(next) = crate::stage::stashed().into_iter().find(|h| *h != me) {
+            stage_focus(hwnd_of(next), true);
+        }
+    }
 }
 
 /// A picture of the strip was clicked.
@@ -3237,6 +3327,7 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             LRESULT(0)
         }
         WM_EXITSIZEMOVE => {
+            stage_dropped(hwnd);
             request_remote_resize(hwnd);
             LRESULT(0)
         }
