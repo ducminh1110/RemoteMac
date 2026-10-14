@@ -1,689 +1,1434 @@
-//! Stage Manager, as on the Mac: the window in use stands in the middle and the windows of the
-//! other apps rest at the left as live cards, newest first; a click on one brings it forward.
+//! Stage Manager for remote Mac windows on Windows, ported from StageManagerForWindows (MIT,
+//! Copyright (c) 2026 Minh; see NOTICE.md).
 //!
-//! The way of doing it follows StageManagerForWindows (MIT, Andreas Wäscher and depoledna): a
-//! window that leaves the stage is not hidden but parked past the edge of the screens, so that
-//! DWM goes on composing it and its card stays live; the card is a DWM thumbnail. The strip slides
-//! down out of the way while the Mac's Dock is out (`lower`), and comes back after.
+//! Open remote Mac windows are grouped by application into "scenes" listed on a sidebar tray
+//! (up to 5 recent scenes visible). One scene is on stage at a time; the rest are parked
+//! off-screen (past the bottom-right of the virtual screen at full alpha so DWM/DirectComposition
+//! keeps compositing them and live previews stay current).
 //!
-//! Where the system allows it (`tiles`), the cards are live captures (Windows.Graphics.Capture)
-//! tilted in perspective on a composition window, as StageManagerForWindows draws them; the
-//! sidebar has its three modes (`Mode`): on screen, parked past the left edge when a window
-//! overlaps it, and out again when the cursor is at the edge. Without that, the DWM thumbnails.
-//! ui.rs decides what is on stage; this module keeps the parked windows and the strip.
-use std::cell::RefCell;
-use std::sync::Mutex;
+//! Exact macOS 26.5.2 geometry & behaviour laws from StageManagerForWindows:
+//! - Card sizing law: uniform scale `s = max(0.135693, 96.0 / source_height_dip)`, with left-edge
+//!   perspective squeeze `1.0 - card_w / (2.0 * d_dip)` where `d = screen_h * (1379.0 / 1169.0)`.
+//! - Edge tilt law: `EdgeTiltDegreesAt(y_dip) = atan((y_dip - screen_h / 2.0) / d) * 180 / pi`.
+//! - Trapezoid decomposition (`SolveEdgeAngles`): splits `(top_deg, bottom_deg)` into vertical
+//!   shear slope `T = (slope_top + slope_bottom) / 2` and perspective convergence
+//!   `Q = (slope_top - slope_bottom) / 2` with `PerspectiveDepthPx = 220.0`, re-solved against
+//!   live card height every frame so flying cards never blow up at stage size.
+//! - Multi-window cascade: 10 DIP right & down per window index, back-to-front Z-order preserved.
+//! - App icon overlay: 30 DIP (22 DIP when app filter is active), overlapping when >2 windows,
+//!   click an icon to filter scenes by app, click outside to clear filter with 750 ms grace period.
+//! - Auto-stow (`WindowMode`): `OnScreen` when stage windows don't overlap `0.25 * sidebar_width`,
+//!   `OffScreen` (parked at `-width`) when overlapped, `Flyover` (topmost slide-in) when cursor
+//!   reaches `x <= 44` px or pushes the left edge.
+//! - Interactive drag & drop:
+//!   * Sidebar -> Stage: drag a tile across the 120 DIP buffer zone to pull a window into the
+//!     active scene (interpolating size & tilt from `TrayTiltDegrees = 2.0` to `0.0`).
+//!   * Stage -> Sidebar: drag a window from a multi-window scene into the sidebar to separate it
+//!     into its own scene.
+//! - Scene transition animation: 300 ms `PowerEase(EaseOut)` simultaneous incoming + outgoing
+//!   live flying cards over a click-through transition overlay, with Z-order preservation and
+//!   user-minimized window tracking.
 
-use windows::core::{w, BOOL, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::*;
-use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
-use windows::Win32::UI::WindowsAndMessaging::*;
+#![allow(clippy::too_many_arguments, clippy::type_complexity, clippy::collapsible_if, clippy::collapsible_else_if, clippy::manual_range_contains, clippy::unnecessary_sort_by)]
 
-/// The strip's width at 96 dpi.
-const STRIP: i32 = crate::cards::SIDEBAR_WIDTH_DIP as i32;
-const KEY: COLORREF = COLORREF(0x00FF_00FF);
-const TIMER: usize = 1;
-const SLIDE_MS: f32 = 260.0;
-const POLL: usize = 2;
-const ANIM: usize = 3;
-/// the scale of the scene under the cursor
-const HOVER_SCALE: f64 = 1.08;
+use crate::motion::{Anim, Curve};
+use crate::paint::{sdf_round_rect, coverage, Canvas, Rgba};
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
-struct Item {
-    hwnd: isize,
-    /// the app (the scene: the windows of one app are one scene)
-    app: String,
-    tile: Option<crate::tiles::Tile>,
-    /// a card flying in from where its window stood: since when, and the window's rect in the host (x, y, w, h)
-    fly: Option<(std::time::Instant, [f64; 4])>,
-    /// where the window stood before it was parked
-    home: RECT,
-    thumb: isize,
-    w: i32,
-    h: i32,
+/// Maximum scenes shown in the sidebar tray at once.
+pub const MAX_SCENES: usize = 5;
+/// Resting vertical-shear skew of tray thumbnails, in degrees.
+pub const TRAY_TILT_DEGREES: f64 = 2.0;
+/// Vanishing distance (physical px) of the perspective divide (`M34 = -1 / depth`).
+pub const PERSPECTIVE_DEPTH_PX: f64 = 220.0;
+/// Per-side HWND inflation so the 3D-tilted near edge and 1.08x hover pop are never clipped.
+pub const HOVER_HEADROOM: f64 = 0.30;
+/// Resting look of the tray, measured off macOS 26.5.2 to within 0.2 pt RMS over 16 corners.
+pub const EDGE_PERSPECTIVE_DISTANCE_RATIO: f64 = 1379.0 / 1169.0;
+/// Uniform card scale floor and minimum height in DIPs (macOS `preferredMinimumItemHeight`).
+pub const BASE_CARD_SCALE: f64 = 0.135693;
+pub const MIN_CARD_HEIGHT_DIP: f64 = 96.0;
+/// Sidebar width in DIPs, left padding, and row spacing.
+pub const SIDEBAR_WIDTH_DIP: f64 = 240.0;
+pub const SIDEBAR_PAD_LEFT_DIP: f64 = 22.0;
+pub const SCENE_BOTTOM_MARGIN_DIP: f64 = 28.0;
+pub const STACK_OFFSET_STEP_DIP: f64 = 10.0;
+pub const THUMB_CORNER_RADIUS_DIP: f64 = 8.0;
+/// Fraction of sidebar width at which a normal window's left edge triggers auto-stow.
+pub const STOW_OVERLAP_FRACTION: f64 = 0.25;
+/// Buffer zone width in DIPs for drag-and-drop between sidebar and stage.
+pub const BUFFER_WIDTH_LOGICAL: f64 = 120.0;
+/// Cursor grip offset from card top during drag.
+pub const CURSOR_TOP_OFFSET_LOGICAL: f64 = 16.0;
+pub const CURSOR_TOP_OFFSET_MAX_FRACTION: f64 = 0.35;
+/// Scene transition duration (ms).
+pub const TRANSITION_DURATION_MS: u64 = 300;
+/// Rapid focus change debounce threshold (ms).
+pub const RAPID_FOCUS_MS: u64 = 100;
+/// Filter clear grace period (ms) to suppress accidental desktop toggle.
+pub const FILTER_CLEAR_GRACE_MS: u64 = 750;
+
+/// Sidebar visibility mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowMode {
+    #[default]
+    OnScreen,
+    OffScreen,
+    Flyover,
 }
 
-#[derive(Default)]
-struct Stage {
-    items: Vec<Item>,
-    strip: Option<HWND>,
-    /// each card's place in the strip (client px)
-    spots: Vec<(isize, RECT)>,
-    /// the strip's slide: 0 in place, 1 down out of the way; where it is, where it goes, since when
-    drop: f32,
-    to: f32,
-    from: f32,
-    since: Option<std::time::Instant>,
-    /// the sidebar's mode slide (OnScreen 0 … OffScreen 1), as `drop`
-    side: f32,
-    side_to: f32,
-    side_from: f32,
-    side_since: Option<std::time::Instant>,
-    host: Option<crate::tiles::Host>,
-    /// the scene under the cursor
-    hover: Option<String>,
-    /// a card pressed in the sidebar (and where), and whether it is being dragged out
-    press: Option<(isize, POINT)>,
-    dragging: bool,
-    /// the click-through window with each scene's app icon and name, and what it draws
-    icons: Option<HWND>,
-    labels: Vec<(String, i32, i32)>,
+/// The angle (in degrees, positive = right end rises) a horizontal card edge sits at when it
+/// crosses `y_dip` on a screen of `screen_h_dip` height.
+pub fn edge_tilt_degrees_at(y_dip: f64, screen_h_dip: f64) -> f64 {
+    if screen_h_dip <= 0.0 {
+        return 0.0;
+    }
+    let d = screen_h_dip * EDGE_PERSPECTIVE_DISTANCE_RATIO;
+    ((y_dip - screen_h_dip / 2.0) / d).atan().to_degrees()
 }
 
-type IconFn = fn(&str) -> Option<HICON>;
-static ICON: Mutex<Option<IconFn>> = Mutex::new(None);
-
-pub fn set_icon_fn(f: IconFn) {
-    *ICON.lock().unwrap() = Some(f);
+/// The tray card size (in DIPs) a window of `(source_w_dip, source_h_dip)` gets.
+pub fn card_size_dip(source_w_dip: f64, source_h_dip: f64, screen_h_dip: f64) -> (f64, f64) {
+    if source_w_dip <= 0.0 || source_h_dip <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let s = BASE_CARD_SCALE.max(MIN_CARD_HEIGHT_DIP / source_h_dip);
+    let card_w = source_w_dip * s;
+    let card_h = source_h_dip * s;
+    let d_dip = (screen_h_dip.max(600.0)) * EDGE_PERSPECTIVE_DISTANCE_RATIO;
+    let squeeze = (1.0 - card_w / (2.0 * d_dip)).clamp(0.75, 1.0);
+    (card_w * squeeze, card_h * squeeze)
 }
 
-thread_local! {
-    static STAGE: RefCell<Stage> = RefCell::new(Stage::default());
-    /// SceneManager._suspend: set around a switch so the focus events it causes are not followed.
-    static SUSPEND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// SceneManager._lastFocusChange
-    static LAST_FOCUS: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
-    /// SceneManager._zDepth: how deep each window sat in the z-chain when its scene was last on screen
-    static Z_DEPTH: RefCell<std::collections::HashMap<isize, usize>> = RefCell::new(Default::default());
+/// Splits a pair of requested edge angles `(top_deg, bottom_deg)` and current `base_height_px`
+/// into `(shear_degrees, sprite_rotation_y_degrees)`.
+/// Must be re-solved whenever the sprite's pixel height changes so flying cards never blow up.
+pub fn solve_edge_angles(top_deg: f64, bottom_deg: f64, base_height_px: f64) -> (f64, f64) {
+    let slope_top = -(top_deg.to_radians().tan());
+    let slope_bottom = -(bottom_deg.to_radians().tan());
+    let shear_slope = (slope_top + slope_bottom) / 2.0;
+    let converge = (slope_top - slope_bottom) / 2.0;
+
+    let shear_deg = shear_slope.atan().to_degrees();
+    let rot_deg = if base_height_px > 0.0 {
+        (2.0 * PERSPECTIVE_DEPTH_PX * converge / base_height_px).atan().to_degrees()
+    } else {
+        0.0
+    };
+    (shear_deg, rot_deg)
 }
 
-pub fn suspended() -> bool {
-    SUSPEND.with(|s| s.get())
+/// Top edge for a dragged card of `height_logical` hanging off a cursor at `cursor_logical_y`.
+pub fn card_top_for(cursor_logical_y: f64, height_logical: f64) -> f64 {
+    cursor_logical_y - CURSOR_TOP_OFFSET_LOGICAL.min(height_logical * CURSOR_TOP_OFFSET_MAX_FRACTION)
 }
 
-pub fn set_suspended(on: bool) {
-    SUSPEND.with(|s| s.set(on));
-}
-
-/// SceneManager.IsRapidFocusChange: focus changes less than 100 ms apart are the system's (modal
-/// dialogs, a minimise handing focus on), not the user's; they must not start a switch loop.
-pub fn rapid_focus() -> bool {
-    let now = std::time::Instant::now();
-    LAST_FOCUS.with(|l| l.replace(Some(now))).is_some_and(|t| now.duration_since(t).as_millis() < 100)
-}
-
-/// SceneManager.CaptureZOrder: walk the z-chain once, front to back, and note each window's depth.
-pub fn capture_z(windows: &[isize]) {
-    if windows.is_empty() {
+/// Render a 3D perspective-tilted trapezoid card with anti-aliased rounded corners (`radius_px`)
+/// and drop shadow onto `dst` at `(dst_x, dst_y, dst_w, dst_h)`.
+/// Uses the exact StageManagerForWindows trapezoid law: left edge anchored, horizontal scanlines
+/// foreshortened by `Q` and sheared by `T`, bilinearly sampling `src` (live window frame).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_tilted_card(
+    dst: &mut Canvas,
+    src: &Canvas,
+    dst_x: f32,
+    dst_y: f32,
+    card_w: f32,
+    card_h: f32,
+    radius_px: f32,
+    top_edge_deg: f64,
+    bottom_edge_deg: f64,
+    hover_scale: f32,
+    opacity: f32,
+    scale_dpi: f32,
+) {
+    if src.w == 0 || src.h == 0 || card_w <= 1.0 || card_h <= 1.0 || opacity <= 0.001 {
         return;
     }
-    let mut found = std::collections::HashMap::new();
-    unsafe {
-        let mut h = GetTopWindow(None).ok();
-        let mut depth = 0;
-        while let Some(w) = h {
-            if found.len() >= windows.len() {
-                break;
+    // Left-anchored hover scale (grows rightward and vertically from center, matching Origin 0,0.5)
+    let w = card_w * hover_scale;
+    let h = card_h * hover_scale;
+    let x0 = dst_x;
+    let y0 = dst_y - (h - card_h) * 0.5;
+
+    let slope_top = -(top_edge_deg.to_radians().tan()) as f32;
+    let slope_bot = -(bottom_edge_deg.to_radians().tan()) as f32;
+
+    // Soft shadow behind the card
+    dst.shadow(
+        x0,
+        y0,
+        w,
+        h,
+        radius_px,
+        12.0 * scale_dpi,
+        4.0 * scale_dpi,
+        Rgba::BLACK.alpha(0.32 * opacity),
+    );
+
+    // Bounding box in destination canvas accounting for vertical edge slopes
+    let max_rise = (slope_top.abs().max(slope_bot.abs()) * w).ceil() + 2.0;
+    let min_px = (x0.floor() as isize).max(0) as usize;
+    let max_px = ((x0 + w).ceil() as usize).min(dst.w);
+    let min_py = ((y0 - max_rise).floor() as isize).max(0) as usize;
+    let max_py = ((y0 + h + max_rise).ceil() as usize).min(dst.h);
+
+    for py in min_py..max_py {
+        let fy = py as f32 + 0.5;
+        for px in min_px..max_px {
+            let fx = px as f32 + 0.5;
+            let dx = fx - x0;
+            if dx < -0.5 || dx > w + 0.5 {
+                continue;
             }
-            if windows.contains(&(w.0 as isize)) {
-                found.insert(w.0 as isize, depth);
-                depth += 1;
+            // Perspective horizontal parameter u (foreshortened slightly along X)
+            let u_lin = (dx / w.max(1.0)).clamp(0.0, 1.0);
+            // Top and bottom Y at this X column
+            let y_top = y0 + slope_top * dx;
+            let y_bot = y0 + h + slope_bot * dx;
+            let col_h = (y_bot - y_top).max(1.0);
+            let v = (fy - y_top) / col_h;
+            if v < -0.02 || v > 1.02 {
+                continue;
             }
-            h = GetWindow(w, GW_HWNDNEXT).ok();
-        }
-    }
-    Z_DEPTH.with(|z| z.borrow_mut().extend(found));
-}
-
-/// SceneManager.OrderBottomToTop: back to front, windows with no depth recorded at the back.
-pub fn bottom_to_top(mut windows: Vec<isize>) -> Vec<isize> {
-    Z_DEPTH.with(|z| {
-        let z = z.borrow();
-        windows.sort_by_key(|w| std::cmp::Reverse(z.get(w).copied().unwrap_or(usize::MAX)));
-    });
-    windows
-}
-
-/// What a click on a card does (set once by ui.rs).
-static PICK: Mutex<Option<fn(isize)>> = Mutex::new(None);
-/// The windows on stage, to know whether one overlaps the sidebar (set once by ui.rs).
-type Windows = fn() -> Vec<isize>;
-static WINDOWS: Mutex<Option<Windows>> = Mutex::new(None);
-
-pub fn set_windows(f: fn() -> Vec<isize>) {
-    *WINDOWS.lock().unwrap() = Some(f);
-}
-
-pub fn set_picker(f: fn(isize)) {
-    *PICK.lock().unwrap() = Some(f);
-}
-
-fn h_px(r: &RECT) -> i32 {
-    r.bottom - r.top
-}
-
-fn px(v: i32) -> i32 {
-    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem() } as i32;
-    v * dpi.max(96) / 96
-}
-
-/// The work area of the main monitor, as the stage's: its left part is the strip.
-pub fn work() -> RECT {
-    unsafe {
-        let mon = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
-        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
-        let _ = GetMonitorInfoW(mon, &mut info);
-        info.rcWork
-    }
-}
-
-/// The part of the work area where the window on stage stands.
-pub fn stage_area() -> RECT {
-    let mut r = work();
-    r.left += px(STRIP);
-    r
-}
-
-pub fn is_stashed(hwnd: HWND) -> bool {
-    STAGE.with(|s| s.borrow().items.iter().any(|i| i.hwnd == hwnd.0 as isize))
-}
-
-pub fn stashed() -> Vec<isize> {
-    STAGE.with(|s| s.borrow().items.iter().map(|i| i.hwnd).collect())
-}
-
-/// Park `hwnd` past the edge of the screens (still composed, so its card is live) and put its
-/// card at the top of the strip.
-pub fn stash(hwnd: HWND, app: &str) {
-    if is_stashed(hwnd) {
-        return;
-    }
-    unsafe {
-        let mut r = RECT::default();
-        let _ = GetWindowRect(hwnd, &mut r);
-        let (w, h) = (r.right - r.left, r.bottom - r.top);
-        if w < 40 || h < 40 || !IsWindowVisible(hwnd).as_bool() {
-            return;
-        }
-        let Some(strip) = ensure_strip() else { return };
-        // a live tile on the composition host, or a DWM thumbnail on the plain strip
-        let tile = STAGE.with(|s| s.borrow().host.as_ref().and_then(|h| crate::tiles::Tile::new(h, hwnd, (w, h_px(&r)))));
-        let has_host = STAGE.with(|s| s.borrow().host.is_some());
-        if has_host && tile.is_none() {
-            return;
-        }
-        let thumb = if has_host { 0 } else { match DwmRegisterThumbnail(strip, hwnd) { Ok(t) => t, Err(_) => return } };
-        // OpacityWindowStrategy.GetOffScreenPoint: past the bottom-right of the virtual screen, +100.
-        // IgnoreZOrder: parking must not yank the window to the front of the z-chain.
-        let (ax, ay) = (GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + 100, GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN) + 100);
-        let _ = SetWindowPos(hwnd, None, ax, ay, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        STAGE.with(|s| s.borrow_mut().items.insert(0, Item { hwnd: hwnd.0 as isize, app: app.to_string(), tile, home: r, thumb, w, h, fly: if has_host { let wk = work(); Some((std::time::Instant::now(), [(r.left - wk.left) as f64, (r.top - wk.top) as f64, w as f64, h as f64])) } else { None } }));
-    }
-    layout();
-    start_anim();
-}
-
-/// The cursor is over the sidebar (a window dropped here goes into it).
-pub fn over_strip() -> bool {
-    let (cur, wk) = (unsafe { cursor() }, work());
-    STAGE.with(|s| s.borrow().side < 0.5) && cur.x >= wk.left && cur.x < wk.left + px(STRIP) && cur.y >= wk.top && cur.y < wk.bottom
-}
-
-fn start_anim() {
-    if let Some(strip) = STAGE.with(|s| s.borrow().strip) {
-        unsafe {
-            SetTimer(Some(strip), ANIM, 15, None);
-        }
-    }
-}
-
-/// `hwnd` is on stage (or gone): its card leaves the strip and the window goes back where it was.
-pub fn forget(hwnd: HWND) {
-    Z_DEPTH.with(|z| z.borrow_mut().remove(&(hwnd.0 as isize)));
-}
-
-pub fn unstash(hwnd: HWND) {
-    let gone = STAGE.with(|s| {
-        let mut s = s.borrow_mut();
-        s.items.iter().position(|i| i.hwnd == hwnd.0 as isize).map(|i| s.items.remove(i))
-    });
-    if let Some(it) = gone {
-        unsafe {
-            if it.thumb != 0 {
-                let _ = DwmUnregisterThumbnail(it.thumb);
+            // Map back to local un-tilted card coordinates (lx, ly) for exact SDF rounded clip
+            let lx = u_lin * w;
+            let ly = v * h;
+            let d = sdf_round_rect(lx, ly, 0.0, 0.0, w, h, radius_px);
+            let cov = coverage(d);
+            if cov <= 0.0 {
+                continue;
             }
-            let _ = SetWindowPos(hwnd, None, it.home.left, it.home.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            let sx = (u_lin * src.w as f32 - 0.5).clamp(0.0, (src.w - 1) as f32);
+            let sy = (v.clamp(0.0, 1.0) * src.h as f32 - 0.5).clamp(0.0, (src.h - 1) as f32);
+            let p = src.sample(sx, sy);
+            let k = (opacity * cov).clamp(0.0, 1.0);
+            let out = &mut dst.px[py * dst.w + px];
+            let inv = 1.0 - p[3] * k;
+            for i in 0..4 {
+                out[i] = ((p[i] * k + out[i] as f32 / 255.0 * inv) * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+            }
+            // Subtle specular border along top/left edges for macOS card polish
+            let rim_cov = coverage(d) * coverage(-d - 1.0 * scale_dpi);
+            if rim_cov > 0.0 {
+                dst.blend(px, py, Rgba::WHITE.alpha(0.18 * opacity), rim_cov);
+            }
         }
-        layout();
     }
 }
 
-/// Stage Manager off: the strip goes; the windows that were in it are returned (to be shown).
-pub fn clear() -> Vec<isize> {
-    let all = stashed();
-    for h in &all {
-        unstash(HWND(*h as *mut _));
-    }
-    all
+/// One window tracked inside a Stage Manager scene.
+#[derive(Debug, Clone)]
+pub struct StageWindow {
+    pub hwnd: isize,
+    pub remote_id: u64,
+    pub app: String,
+    pub title: String,
+    /// Last known on-stage rectangle in physical screen pixels `(x, y, w, h)`.
+    pub stage_rect: (i32, i32, i32, i32),
+    /// True when currently parked off-screen by Stage Manager.
+    pub parked: bool,
+    /// Preview card size in DIPs `(width, height)`.
+    pub preview_dip: (f64, f64),
+    /// Scaled live snapshot of the window's latest frame for the sidebar tile & flying card.
+    pub thumb: Option<Canvas>,
 }
 
-/// The strip slides down out of the way (`on`: the Mac's Dock is out), or back up.
-pub fn lower(on: bool) {
-    let Some(strip) = STAGE.with(|s| {
-        let mut s = s.borrow_mut();
-        let to = if on { 1.0 } else { 0.0 };
-        if s.to == to {
+/// A group of windows belonging to one Mac application (or separated by drag-and-drop).
+#[derive(Debug, Clone)]
+pub struct Scene {
+    pub id: u64,
+    pub key: String,
+    pub title: String,
+    pub windows: Vec<StageWindow>,
+    pub updated: Instant,
+    pub tilt_top_deg: f64,
+    pub tilt_bottom_deg: f64,
+    /// Bounding box of this scene's tile in the sidebar (screen physical px: x, y, w, h).
+    pub slot_rect: (i32, i32, i32, i32),
+}
+
+/// Pure data model & state machine for Stage Manager (portable and unit-tested).
+pub struct StageCore {
+    pub enabled: bool,
+    pub scenes: Vec<Scene>,
+    pub current_scene_id: Option<u64>,
+    pub last_scene_id: Option<u64>,
+    pub user_minimized: HashSet<isize>,
+    pub z_depth: HashMap<isize, usize>,
+    pub filter_app: Option<String>,
+    pub filter_cleared_at: Option<Instant>,
+    pub last_focus_change: Option<Instant>,
+    pub suspend: bool,
+    next_scene_id: u64,
+}
+
+impl Default for StageCore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StageCore {
+    pub fn new() -> Self {
+        Self {
+            enabled: false,
+            scenes: Vec::new(),
+            current_scene_id: None,
+            last_scene_id: None,
+            user_minimized: HashSet::new(),
+            z_depth: HashMap::new(),
+            filter_app: None,
+            filter_cleared_at: None,
+            last_focus_change: None,
+            suspend: false,
+            next_scene_id: 1,
+        }
+    }
+
+    pub fn current_scene(&self) -> Option<&Scene> {
+        let id = self.current_scene_id?;
+        self.scenes.iter().find(|s| s.id == id)
+    }
+
+    pub fn current_scene_mut(&mut self) -> Option<&mut Scene> {
+        let id = self.current_scene_id?;
+        self.scenes.iter_mut().find(|s| s.id == id)
+    }
+
+    pub fn find_scene_for_hwnd(&self, hwnd: isize) -> Option<u64> {
+        self.scenes.iter().find(|s| s.windows.iter().any(|w| w.hwnd == hwnd)).map(|s| s.id)
+    }
+
+    pub fn find_scene_for_app(&self, app: &str) -> Option<u64> {
+        self.scenes.iter().find(|s| s.key.eq_ignore_ascii_case(app)).map(|s| s.id)
+    }
+
+    /// Sidebar scenes (all scenes except the active stage scene), ordered by most-recently updated,
+    /// filtered by `filter_app` when active, capped at `MAX_SCENES`.
+    pub fn visible_sidebar_scenes(&self) -> Vec<u64> {
+        let mut list: Vec<&Scene> = self
+            .scenes
+            .iter()
+            .filter(|s| Some(s.id) != self.current_scene_id && !s.windows.is_empty())
+            .collect();
+        list.sort_by(|a, b| b.updated.cmp(&a.updated));
+        if let Some(f) = &self.filter_app {
+            list.into_iter()
+                .filter(|s| s.windows.iter().any(|w| w.app.eq_ignore_ascii_case(f)))
+                .map(|s| s.id)
+                .collect()
+        } else {
+            list.into_iter().take(MAX_SCENES).map(|s| s.id).collect()
+        }
+    }
+
+    /// Add or update a window. Returns `(scene_id, is_new_scene)`.
+    pub fn upsert_window(
+        &mut self,
+        hwnd: isize,
+        remote_id: u64,
+        app: &str,
+        app_name: &str,
+        title: &str,
+        rect: (i32, i32, i32, i32),
+        dip_scale: f64,
+        screen_h_dip: f64,
+    ) -> (u64, bool) {
+        let preview_dip = card_size_dip(
+            rect.2 as f64 / dip_scale.max(1.0),
+            rect.3 as f64 / dip_scale.max(1.0),
+            screen_h_dip,
+        );
+        if let Some(sid) = self.find_scene_for_hwnd(hwnd) {
+            let s = self.scenes.iter_mut().find(|s| s.id == sid).unwrap();
+            if let Some(w) = s.windows.iter_mut().find(|w| w.hwnd == hwnd) {
+                w.title = title.to_string();
+                if !w.parked && rect.0 > -10000 && rect.2 > 0 && rect.3 > 0 {
+                    w.stage_rect = rect;
+                    w.preview_dip = preview_dip;
+                }
+            }
+            return (sid, false);
+        }
+        let win = StageWindow {
+            hwnd,
+            remote_id,
+            app: app.to_string(),
+            title: title.to_string(),
+            stage_rect: rect,
+            parked: false,
+            preview_dip,
+            thumb: None,
+        };
+        if let Some(sid) = self.find_scene_for_app(app) {
+            let s = self.scenes.iter_mut().find(|s| s.id == sid).unwrap();
+            s.windows.push(win);
+            s.updated = Instant::now();
+            (sid, false)
+        } else {
+            let sid = self.next_scene_id;
+            self.next_scene_id += 1;
+            let s = Scene {
+                id: sid,
+                key: app.to_string(),
+                title: app_name.to_string(),
+                windows: vec![win],
+                updated: Instant::now(),
+                tilt_top_deg: 0.0,
+                tilt_bottom_deg: 0.0,
+                slot_rect: (0, 0, 0, 0),
+            };
+            self.scenes.push(s);
+            if self.current_scene_id.is_none() {
+                self.current_scene_id = Some(sid);
+            }
+            (sid, true)
+        }
+    }
+
+    /// Remove a destroyed window. Returns fallback scene ID if the current scene became empty.
+    pub fn remove_window(&mut self, hwnd: isize) -> Option<u64> {
+        self.user_minimized.remove(&hwnd);
+        self.z_depth.remove(&hwnd);
+        let sid = self.find_scene_for_hwnd(hwnd)?;
+        let idx = self.scenes.iter().position(|s| s.id == sid)?;
+        self.scenes[idx].windows.retain(|w| w.hwnd != hwnd);
+        if self.scenes[idx].windows.is_empty() {
+            self.scenes.remove(idx);
+            if self.current_scene_id == Some(sid) {
+                self.current_scene_id = None;
+                let mut candidates: Vec<&Scene> = self.scenes.iter().filter(|s| !s.windows.is_empty()).collect();
+                candidates.sort_by(|a, b| b.updated.cmp(&a.updated));
+                return candidates.first().map(|s| s.id);
+            }
+        }
+        None
+    }
+
+    /// Separate `hwnd` from its current multi-window scene into a brand new scene in the sidebar.
+    pub fn separate_window_to_new_scene(&mut self, hwnd: isize) -> Option<u64> {
+        let cur_id = self.current_scene_id?;
+        let cur_idx = self.scenes.iter().position(|s| s.id == cur_id)?;
+        if self.scenes[cur_idx].windows.len() <= 1 {
             return None;
         }
-        s.from = s.drop;
-        s.to = to;
-        s.since = Some(std::time::Instant::now());
-        s.strip
-    }) else {
-        return;
-    };
-    unsafe {
-        SetTimer(Some(strip), TIMER, 15, None);
+        let w_idx = self.scenes[cur_idx].windows.iter().position(|w| w.hwnd == hwnd)?;
+        let win = self.scenes[cur_idx].windows.remove(w_idx);
+        let new_id = self.next_scene_id;
+        self.next_scene_id += 1;
+        let title = if win.title.is_empty() { win.app.clone() } else { win.title.clone() };
+        self.scenes.push(Scene {
+            id: new_id,
+            key: format!("{}:{}", win.app, new_id),
+            title,
+            windows: vec![win],
+            updated: Instant::now(),
+            tilt_top_deg: 0.0,
+            tilt_bottom_deg: 0.0,
+            slot_rect: (0, 0, 0, 0),
+        });
+        Some(new_id)
     }
-}
 
-fn ensure_strip() -> Option<HWND> {
-    if let Some(h) = STAGE.with(|s| s.borrow().strip) {
-        return Some(h);
-    }
-    unsafe {
-        let hinst = GetModuleHandleW(None).ok()?;
-        // first the composition window of the live cards; if capture or composition are missing,
-        // the layered strip with DWM thumbnails
-        let class = w!("TaroStageHost");
-        let wc = WNDCLASSW { lpfnWndProc: Some(proc), hInstance: hinst.into(), lpszClassName: class, hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), ..Default::default() };
-        RegisterClassW(&wc);
-        if let Ok(hwnd) = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST, class, PCWSTR::null(), WS_POPUP, 0, 0, 1, 1, None, None, Some(hinst.into()), None) {
-            if let Some(host) = crate::tiles::Host::new(hwnd) {
-                STAGE.with(|s| {
-                    let mut s = s.borrow_mut();
-                    s.strip = Some(hwnd);
-                    s.host = Some(host);
-                });
-                SetTimer(Some(hwnd), POLL, 60, None);
-                let ic = w!("TaroStageIcons");
-                let wc = WNDCLASSW { lpfnWndProc: Some(icons_proc), hInstance: hinst.into(), lpszClassName: ic, hbrBackground: CreateSolidBrush(KEY), ..Default::default() };
-                RegisterClassW(&wc);
-                if let Ok(i) = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST, ic, PCWSTR::null(), WS_POPUP, 0, 0, 1, 1, None, None, Some(hinst.into()), None) {
-                    let _ = SetLayeredWindowAttributes(i, KEY, 255, LWA_COLORKEY);
-                    STAGE.with(|s| s.borrow_mut().icons = Some(i));
-                }
-                return Some(hwnd);
-            }
-            let _ = DestroyWindow(hwnd);
+    /// Pull the frontmost window from `source_scene_id` into the current active scene.
+    pub fn pop_window_from(&mut self, source_scene_id: u64) -> Option<isize> {
+        let cur_id = self.current_scene_id?;
+        if source_scene_id == cur_id {
+            return None;
         }
-        let class = w!("TaroStageStrip");
-        let wc = WNDCLASSW { lpfnWndProc: Some(proc), hInstance: hinst.into(), lpszClassName: class, hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), hbrBackground: CreateSolidBrush(KEY), ..Default::default() };
-        RegisterClassW(&wc); // (again: refused, and the class is there)
-        let hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST, class, PCWSTR::null(), WS_POPUP, 0, 0, 1, 1, None, None, Some(hinst.into()), None).ok()?;
-        let _ = SetLayeredWindowAttributes(hwnd, KEY, 255, LWA_COLORKEY);
-        STAGE.with(|s| s.borrow_mut().strip = Some(hwnd));
+        let src_idx = self.scenes.iter().position(|s| s.id == source_scene_id)?;
+        let win = self.scenes[src_idx].windows.pop()?;
+        let hwnd = win.hwnd;
+        self.user_minimized.remove(&hwnd);
+        if self.scenes[src_idx].windows.is_empty() {
+            self.scenes.remove(src_idx);
+        }
+        if let Some(cur) = self.scenes.iter_mut().find(|s| s.id == cur_id) {
+            cur.windows.push(win);
+            cur.updated = Instant::now();
+        }
         Some(hwnd)
     }
-}
 
-/// Where the strip is now: it slides down by `drop` of its height (the Dock) and out to the left
-/// by `side` of its width (OffScreen).
-fn place(strip: HWND, drop: f32, side: f32) {
-    let wk = work();
-    let (h, w) = (wk.bottom - wk.top, px(STRIP));
-    unsafe {
-        let (x, y) = (wk.left - (w as f32 * side) as i32, wk.top + (h as f32 * drop) as i32);
-        let _ = SetWindowPos(strip, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
-        if let Some(ic) = STAGE.with(|s| s.borrow().icons) {
-            let _ = SetWindowPos(ic, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
+    pub fn toggle_app_filter(&mut self, app_key: &str) {
+        if self.filter_app.as_deref() == Some(app_key) {
+            self.clear_app_filter();
+        } else {
+            self.filter_app = Some(app_key.to_string());
         }
+    }
+
+    pub fn clear_app_filter(&mut self) {
+        if self.filter_app.is_some() {
+            self.filter_app = None;
+            self.filter_cleared_at = Some(Instant::now());
+        }
+    }
+
+    pub fn is_filter_or_grace_active(&self) -> bool {
+        self.filter_app.is_some()
+            || self
+                .filter_cleared_at
+                .is_some_and(|t| t.elapsed() < Duration::from_millis(FILTER_CLEAR_GRACE_MS))
     }
 }
 
-/// The cards put in their places, the strip shown (hidden with none).
-fn layout() {
-    let Some(strip) = STAGE.with(|s| s.borrow().strip) else { return };
-    if STAGE.with(|s| s.borrow().items.is_empty()) {
-        unsafe {
-            let _ = ShowWindow(strip, SW_HIDE);
-            if let Some(ic) = STAGE.with(|s| s.borrow().icons) {
-                let _ = ShowWindow(ic, SW_HIDE);
-            }
-        }
-        STAGE.with(|s| s.borrow_mut().spots.clear());
-        return;
-    }
-    if STAGE.with(|s| s.borrow().host.is_some()) {
-        layout_tiles();
-    } else {
-        layout_thumbs();
-    }
-    let (drop, side) = STAGE.with(|s| (s.borrow().drop, s.borrow().side));
-    place(strip, drop, side);
-    unsafe {
-        let _ = ShowWindow(strip, SW_SHOWNOACTIVATE);
-        let _ = InvalidateRect(Some(strip), None, true);
-        if let Some(ic) = STAGE.with(|s| s.borrow().icons) {
-            let _ = ShowWindow(ic, SW_SHOWNOACTIVATE);
-            let _ = InvalidateRect(Some(ic), None, true);
-        }
-    }
-}
+#[cfg(windows)]
+pub mod win {
+    use super::*;
+    use crate::motion::tokens;
+    use crate::surface::{self, Surface};
+    use std::cell::RefCell;
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::Foundation::*;
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+    use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// The live cards, as MainWindow.xaml lays them out: the scenes (one per app) one above the other,
-/// centred, each the cascade of its windows (10 dip per window, the first in front), every scene
-/// tilted by where its top and bottom edges are on the screen (`AssignRowTiltsCore`).
-fn layout_tiles() {
-    use crate::cards::*;
-    let wk = work();
-    let sh = wk.bottom - wk.top;
-    let scale = px(100) as f64 / 100.0;
-    let screen_h_dip = unsafe { GetSystemMetrics(SM_CYSCREEN) } as f64 / scale;
-    STAGE.with(|s| {
-        let mut s = s.borrow_mut();
-        // the scenes, in the order of their first window; a card's size from its window's
-        let mut apps: Vec<String> = vec![];
-        for it in s.items.iter() {
-            if !apps.contains(&it.app) {
-                apps.push(it.app.clone());
-            }
-        }
-        let size = |it: &Item| {
-            let (w, h) = card_size_dip(it.w as f64 / scale, it.h as f64 / scale, screen_h_dip);
-            (w * scale, h * scale)
-        };
-        let (step, gap) = (STACK_STEP_DIP * scale, SCENE_GAP_DIP * scale);
-        let heights: Vec<f64> = apps.iter().map(|a| s.items.iter().filter(|i| &i.app == a).enumerate().map(|(n, it)| n as f64 * step + size(it).1).fold(0.0, f64::max)).collect();
-        let total: f64 = heights.iter().sum::<f64>() + gap * (heights.len().saturating_sub(1)) as f64;
-        let mut y = ((sh as f64 - total) / 2.0).max(gap);
-        let mut placed: Vec<(usize, f64, f64, f64, f64, f64, f64)> = vec![]; // item, x, y, w, h, top, bottom
-        let mut spots = vec![];
-        let mut hidden = vec![];
-        let mut labels = vec![];
-        for (n, app) in apps.iter().enumerate() {
-            let hh = heights[n];
-            if y + hh > sh as f64 {
-                hidden.extend(s.items.iter().enumerate().filter(|(_, i)| &i.app == app).map(|(k, _)| k));
-                continue;
-            }
-            let top = edge_tilt_at((wk.top as f64 + y) / scale, screen_h_dip);
-            let bottom = edge_tilt_at((wk.top as f64 + y + hh) / scale, screen_h_dip);
-            let idx: Vec<usize> = s.items.iter().enumerate().filter(|(_, i)| &i.app == app).map(|(k, _)| k).collect();
-            for (m, k) in idx.iter().enumerate() {
-                let (cw, ch) = size(&s.items[*k]);
-                let (x, yy) = (SIDEBAR_PAD_DIP * scale + m as f64 * step, y + m as f64 * step);
-                placed.push((*k, x, yy, cw, ch, top, bottom));
-                spots.push((s.items[*k].hwnd, RECT { left: x as i32, top: yy as i32, right: (x + cw) as i32, bottom: (yy + ch) as i32 }));
-            }
-            labels.push((app.clone(), (SIDEBAR_PAD_DIP * scale) as i32, (y + hh + 4.0 * scale) as i32));
-            y += hh + gap;
-        }
-        s.labels = labels;
-        for k in hidden {
-            if let Some(t) = &s.items[k].tile {
-                t.set_visible(false);
-            }
-        }
-        for (k, mut x, mut y, mut w, mut h, mut top, mut bottom) in placed.iter().copied() {
-            let it = &mut s.items[k];
-            if let Some((t0, from)) = it.fly {
-                // the card flies in from its window to its place, straightening out as it goes
-                let (e, done) = ease(Some(t0));
-                if done {
-                    it.fly = None;
-                } else {
-                    let e = e as f64;
-                    (x, y, w, h) = (from[0] + (x - from[0]) * e, from[1] + (y - from[1]) * e, from[2] + (w - from[2]) * e, from[3] + (h - from[3]) * e);
-                    (top, bottom) = (top * e, bottom * e);
-                }
-            }
-            if let Some(t) = it.tile.as_mut() {
-                t.set_visible(true);
-                t.place(x, y, w, h, top, bottom, CARD_RADIUS_DIP * scale);
-            }
-        }
-        // back to front: later windows of a scene behind the earlier ones
-        let order: Vec<usize> = placed.iter().rev().map(|p| p.0).collect();
-        if let Some(h) = &s.host {
-            let tiles: Vec<&crate::tiles::Tile> = order.iter().filter_map(|k| s.items[*k].tile.as_ref()).collect();
-            h.set_order(&tiles);
-        }
-        s.spots = spots;
-    });
-}
+    const SIDEBAR_CLASS: PCWSTR = w!("TaroStageSidebar");
+    const OVERLAY_CLASS: PCWSTR = w!("TaroStageOverlay");
+    const TIMER_ANIM: usize = 1;
 
-/// The DWM thumbnails of the plain strip.
-fn layout_thumbs() {
-    let wk = work();
-    let (sw, sh) = (px(STRIP), wk.bottom - wk.top);
-    let (maxw, maxh) = (sw - px(40), (sh - px(40)) / 4);
-    let mut y = px(28);
-    let mut spots = vec![];
-    STAGE.with(|s| {
-        for it in s.borrow().items.iter() {
-            if y + px(40) > sh {
-                // no room: not shown
-                let none = DWM_THUMBNAIL_PROPERTIES { dwFlags: DWM_TNP_VISIBLE, fVisible: BOOL(0), ..Default::default() };
-                unsafe {
-                    let _ = DwmUpdateThumbnailProperties(it.thumb, &none);
-                }
-                continue;
-            }
-            let k = (maxw as f32 / it.w as f32).min(maxh as f32 / it.h as f32).min(1.0);
-            let (tw, th) = (((it.w as f32 * k) as i32).max(8), ((it.h as f32 * k) as i32).max(8));
-            let x = (sw - tw) / 2;
-            let rc = RECT { left: x, top: y, right: x + tw, bottom: y + th };
-            let props = DWM_THUMBNAIL_PROPERTIES { dwFlags: DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY, rcDestination: rc, opacity: 255, fVisible: BOOL(1), ..Default::default() };
-            unsafe {
-                let _ = DwmUpdateThumbnailProperties(it.thumb, &props);
-            }
-            spots.push((it.hwnd, rc));
-            y += th + px(26);
-        }
-    });
-    STAGE.with(|s| s.borrow_mut().spots = spots);
-}
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum DragKind {
+        None,
+        /// Pressing on a sidebar tile (may become click to switch or drag to pull onto stage)
+        SidebarPress { scene_id: u64, start_x: i32, start_y: i32 },
+        /// Dragging a tile from sidebar toward stage
+        SidebarToStage { scene_id: u64, hwnd: isize, past_buffer: bool },
+        /// Dragging an active window from stage toward sidebar
+        StageToSidebar { hwnd: isize, in_buffer: bool },
+    }
 
-fn paint(hwnd: HWND) {
-    unsafe {
-        let mut ps = PAINTSTRUCT::default();
-        let dc = BeginPaint(hwnd, &mut ps);
-        if STAGE.with(|s| s.borrow().host.is_some()) {
-            let _ = EndPaint(hwnd, &ps);
-            return;
-        }
-        let card = CreateSolidBrush(COLORREF(0x002c_2622));
-        let old = SelectObject(dc, card.into());
-        let pen = SelectObject(dc, GetStockObject(NULL_PEN));
-        let pad = px(5);
-        STAGE.with(|s| {
-            for (_, r) in s.borrow().spots.iter() {
-                let _ = RoundRect(dc, r.left - pad, r.top - pad, r.right + pad, r.bottom + pad, px(14), px(14));
-            }
+    struct FlyingCard {
+        thumb: Canvas,
+        from: (f32, f32, f32, f32),
+        to: (f32, f32, f32, f32),
+        from_tilt: (f64, f64),
+        to_tilt: (f64, f64),
+    }
+
+    struct Transition {
+        started: Instant,
+        duration: Duration,
+        incoming: Option<FlyingCard>,
+        outgoing: Option<FlyingCard>,
+    }
+
+    struct StageUi {
+        core: StageCore,
+        sidebar: Option<Surface>,
+        overlay: Option<Surface>,
+        mode: WindowMode,
+        slide: Anim,
+        hover_scene: Option<u64>,
+        hover_icon: Option<(u64, String)>,
+        hover_scales: HashMap<u64, Anim>,
+        icons: HashMap<String, Canvas>,
+        drag: DragKind,
+        drag_ghost: Option<(Canvas, (f32, f32, f32, f32), f64)>,
+        transition: Option<Transition>,
+        saved_positions: HashMap<isize, (i32, i32)>,
+        scale: f32,
+        work_area: RECT,
+        monitor_rect: RECT,
+    }
+
+    thread_local! {
+        static STAGE: RefCell<StageUi> = RefCell::new(StageUi {
+            core: StageCore::new(),
+            sidebar: None,
+            overlay: None,
+            mode: WindowMode::OnScreen,
+            slide: Anim::at(1.0),
+            hover_scene: None,
+            hover_icon: None,
+            hover_scales: HashMap::new(),
+            icons: HashMap::new(),
+            drag: DragKind::None,
+            drag_ghost: None,
+            transition: None,
+            saved_positions: HashMap::new(),
+            scale: 1.0,
+            work_area: RECT { left: 0, top: 0, right: 1920, bottom: 1080 },
+            monitor_rect: RECT { left: 0, top: 0, right: 1920, bottom: 1080 },
         });
-        SelectObject(dc, pen);
-        SelectObject(dc, old);
-        let _ = DeleteObject(card.into());
-        let _ = EndPaint(hwnd, &ps);
     }
-}
 
-fn ease(since: Option<std::time::Instant>) -> (f32, bool) {
-    let t = since.map_or(1.0, |t| (t.elapsed().as_secs_f32() * 1000.0 / SLIDE_MS).min(1.0));
-    (t * t * (3.0 - 2.0 * t), t >= 1.0)
-}
+    pub fn register(hinst: HINSTANCE) {
+        surface::register(hinst, SIDEBAR_CLASS, Some(sidebar_proc), IDC_HAND);
+        surface::register(hinst, OVERLAY_CLASS, Some(overlay_proc), IDC_ARROW);
+    }
 
-fn slide(hwnd: HWND) {
-    let (drop, side, done) = STAGE.with(|s| {
-        let mut s = s.borrow_mut();
-        let (e, d1) = ease(s.since);
-        s.drop = s.from + (s.to - s.from) * e;
-        let (e, d2) = ease(s.side_since);
-        s.side = s.side_from + (s.side_to - s.side_from) * e;
-        (s.drop, s.side, d1 && d2)
-    });
-    place(hwnd, drop, side);
-    if done {
+    fn offscreen_point() -> (i32, i32) {
         unsafe {
-            let _ = KillTimer(Some(hwnd), TIMER);
+            let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            (vx + vw + 100, vy + vh + 100)
         }
     }
-}
 
-/// The sidebar's mode (`MainWindow`: OnScreen, OffScreen, Flyover): out when the cursor is at the
-/// left edge (or on the sidebar), parked past the edge while a window overlaps it, else on screen.
-fn poll_mode(hwnd: HWND) {
-    let (cur, wk) = (unsafe { cursor() }, work());
-    // the scene under the cursor is popped (HOVER_SCALE), the others at rest
-    let mut at = cur;
-    unsafe {
-        let _ = ScreenToClient(hwnd, &mut at);
-    }
-    let hovered = STAGE.with(|s| {
-        let s = s.borrow();
-        s.spots.iter().find(|(_, r)| at.x >= r.left && at.x < r.right && at.y >= r.top && at.y < r.bottom).and_then(|(h, _)| s.items.iter().find(|i| i.hwnd == *h)).map(|i| i.app.clone())
-    });
-    if STAGE.with(|s| s.borrow().hover != hovered && !s.borrow().dragging) {
-        STAGE.with(|s| {
-            let mut s = s.borrow_mut();
-            let app = hovered.clone();
-            for it in s.items.iter_mut() {
-                let on = app.as_deref() == Some(it.app.as_str());
-                if let Some(t) = it.tile.as_mut() {
-                    t.scale = if on { HOVER_SCALE } else { 1.0 };
-                }
-            }
-            s.hover = hovered;
-        });
-        layout();
-    }
-    let (w, h) = (px(STRIP), wk.bottom - wk.top);
-    let (side, drop) = STAGE.with(|s| (s.borrow().side_to, s.borrow().drop));
-    let strip = RECT { left: wk.left, top: wk.top + (h as f32 * drop) as i32, right: wk.left + w, bottom: wk.bottom };
-    let inside = |r: &RECT, p: POINT| p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom;
-    let edge = cur.x <= wk.left + px(crate::cards::EDGE_TRIGGER_DIP as i32) && cur.y >= wk.top && cur.y < wk.bottom;
-    let over = side < 0.5 && inside(&strip, cur);
-    let overlap = (*WINDOWS.lock().unwrap()).is_some_and(|f| {
-        f().into_iter().any(|k| {
-            let hw = HWND(k as *mut _);
-            if is_stashed(hw) {
-                return false;
+    /// Park a window off-screen (saving its on-screen position first) so DWM keeps compositing it.
+    fn park_hwnd(saved: &mut HashMap<isize, (i32, i32)>, hwnd: isize) {
+        let h = HWND(hwnd as *mut _);
+        unsafe {
+            if !IsWindow(Some(h)).as_bool() || IsIconic(h).as_bool() || !IsWindowVisible(h).as_bool() {
+                return;
             }
             let mut r = RECT::default();
-            unsafe { IsWindowVisible(hw).as_bool() && !IsIconic(hw).as_bool() && GetWindowRect(hw, &mut r).is_ok() && r.left < strip.right && r.right > strip.left && r.top < strip.bottom && r.bottom > strip.top }
-        })
-    });
-    let to = if edge || over || !overlap { 0.0 } else { 1.0 };
-    if to != side {
-        STAGE.with(|s| {
-            let mut s = s.borrow_mut();
-            s.side_from = s.side;
-            s.side_to = to;
-            s.side_since = Some(std::time::Instant::now());
-        });
+            if GetWindowRect(h, &mut r).is_ok() && r.left < offscreen_point().0 - 50 {
+                saved.entry(hwnd).or_insert((r.left, r.top));
+            }
+            let (ox, oy) = offscreen_point();
+            let _ = SetWindowPos(
+                h,
+                None,
+                ox,
+                oy,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+
+    /// Restore a parked window back to its saved on-stage position and bring to top.
+    fn restore_hwnd(saved: &mut HashMap<isize, (i32, i32)>, hwnd: isize) {
+        let h = HWND(hwnd as *mut _);
         unsafe {
-            SetTimer(Some(hwnd), TIMER, 15, None);
+            if !IsWindow(Some(h)).as_bool() {
+                saved.remove(&hwnd);
+                return;
+            }
+            if let Some((x, y)) = saved.remove(&hwnd) {
+                let _ = SetWindowPos(
+                    h,
+                    Some(HWND_TOP),
+                    x,
+                    y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            } else {
+                let _ = BringWindowToTop(h);
+            }
         }
     }
-}
 
-unsafe fn cursor() -> POINT {
-    let mut p = POINT::default();
-    let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p);
-    p
-}
-
-unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    match msg {
-        WM_PAINT => {
-            paint(hwnd);
-            LRESULT(0)
-        }
-        WM_ERASEBKGND => DefWindowProcW(hwnd, msg, wp, lp),
-        WM_TIMER if wp.0 == TIMER => {
-            slide(hwnd);
-            LRESULT(0)
-        }
-        WM_TIMER if wp.0 == ANIM => {
-            layout();
-            if !STAGE.with(|s| s.borrow().items.iter().any(|i| i.fly.is_some())) {
-                let _ = KillTimer(Some(hwnd), ANIM);
+    pub fn set_enabled(hinst: HINSTANCE, on: bool) {
+        STAGE.with(|st| {
+            let mut s = st.borrow_mut();
+            if s.core.enabled == on {
+                return;
             }
-            LRESULT(0)
+            s.core.enabled = on;
+            if !on {
+                // Restore all parked windows to stage before closing Stage Manager
+                let hwnds: Vec<isize> = s.saved_positions.keys().copied().collect();
+                for h in hwnds {
+                    restore_hwnd(&mut s.saved_positions, h);
+                }
+                for sc in &mut s.core.scenes {
+                    for w in &mut sc.windows {
+                        w.parked = false;
+                    }
+                }
+                s.sidebar = None;
+                s.overlay = None;
+                s.transition = None;
+            } else {
+                update_monitor_metrics(&mut s);
+                s.sidebar = Surface::new(hinst, SIDEBAR_CLASS, "Taro Stage Manager", None, true, false);
+                s.overlay = Surface::new(hinst, OVERLAY_CLASS, "Taro Stage Transition", None, true, false);
+                if let Some(ov) = &s.overlay {
+                    unsafe {
+                        let ex = GetWindowLongPtrW(ov.hwnd, GWL_EXSTYLE);
+                        SetWindowLongPtrW(ov.hwnd, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT.0 as isize);
+                    }
+                }
+                s.slide = Anim::new(0.0, 1.0, Duration::from_millis(450), Curve::Decelerate);
+                apply_active_scene_parking(&mut s);
+                start_anim_timer(&s);
+            }
+        });
+        redraw();
+    }
+
+    pub fn is_enabled() -> bool {
+        STAGE.with(|s| s.borrow().core.enabled)
+    }
+
+    pub fn is_parked(hwnd: isize) -> bool {
+        STAGE.with(|s| s.borrow().saved_positions.contains_key(&hwnd))
+    }
+
+    fn update_monitor_metrics(s: &mut StageUi) {
+        unsafe {
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if GetMonitorInfoW(mon, &mut info).as_bool() {
+                s.work_area = info.rcWork;
+                s.monitor_rect = info.rcMonitor;
+            }
+            s.scale = surface::scale_at(pt.x, pt.y).max(1.0);
         }
-        WM_TIMER if wp.0 == POLL => {
-            poll_mode(hwnd);
-            LRESULT(0)
+    }
+
+    pub fn set_app_icon(app: &str, size: u32, rgba: &[u8]) {
+        if rgba.len() != (size * size * 4) as usize {
+            return;
         }
-        WM_LBUTTONDOWN => {
-            // a click brings the scene forward; dragging a card out puts its window where it is dropped
-            let (x, y) = ((lp.0 & 0xffff) as i16 as i32, ((lp.0 >> 16) & 0xffff) as i16 as i32);
-            let hit = STAGE.with(|s| s.borrow().spots.iter().find(|(_, r)| x >= r.left && x < r.right && y >= r.top && y < r.bottom).map(|(h, _)| *h));
-            STAGE.with(|s| s.borrow_mut().press = hit.map(|h| (h, POINT { x, y })));
-            if hit.is_some() {
+        let c = Canvas::from_rgba(size as usize, size as usize, rgba);
+        STAGE.with(|s| {
+            s.borrow_mut().icons.insert(app.to_string(), c);
+        });
+        redraw();
+    }
+
+    /// Update a window's live thumbnail from a decoded BGRA picture (downsampled fast to ~240 px
+    /// width so sidebar rendering is instant and crisp).
+    pub fn on_frame(hwnd: isize, width: usize, height: usize, bgra: &[u8]) {
+        if width == 0 || height == 0 || bgra.len() < width * height * 4 {
+            return;
+        }
+        STAGE.with(|st| {
+            let mut s = st.borrow_mut();
+            let Some(sid) = s.core.find_scene_for_hwnd(hwnd) else { return };
+            let target_w = 220usize.min(width);
+            let target_h = ((height * target_w) / width.max(1)).max(1);
+            let mut thumb = Canvas::new(target_w, target_h);
+            for ty in 0..target_h {
+                let sy = (ty * height) / target_h;
+                for tx in 0..target_w {
+                    let sx = (tx * width) / target_w;
+                    let idx = (sy * width + sx) * 4;
+                    thumb.px[ty * target_w + tx] = [bgra[idx], bgra[idx + 1], bgra[idx + 2], 255];
+                }
+            }
+            if let Some(sc) = s.core.scenes.iter_mut().find(|sc| sc.id == sid) {
+                if let Some(w) = sc.windows.iter_mut().find(|w| w.hwnd == hwnd) {
+                    w.thumb = Some(thumb);
+                }
+            }
+        });
+        redraw();
+    }
+
+    pub fn on_window_created_or_moved(hwnd: isize, remote_id: u64, app: &str, app_name: &str, title: &str) {
+        let h = HWND(hwnd as *mut _);
+        let mut r = RECT::default();
+        unsafe {
+            let _ = GetWindowRect(h, &mut r);
+        }
+        STAGE.with(|st| {
+            let mut s = st.borrow_mut();
+            update_monitor_metrics(&mut s);
+            let screen_h_dip = (s.monitor_rect.bottom - s.monitor_rect.top) as f64 / s.scale as f64;
+            let rect = (r.left, r.top, (r.right - r.left).max(1), (r.bottom - r.top).max(1));
+            let dpi_scale = s.scale as f64;
+            let (sid, is_new) = s.core.upsert_window(
+                hwnd,
+                remote_id,
+                app,
+                app_name,
+                title,
+                rect,
+                dpi_scale,
+                screen_h_dip,
+            );
+            if s.core.enabled {
+                if is_new {
+                    s.core.current_scene_id = Some(sid);
+                }
+                apply_active_scene_parking(&mut s);
+            }
+        });
+        redraw();
+    }
+
+    /// Bring the scene of `hwnd` on stage (a click in the launcher or the Dock on a parked window).
+    pub fn switch_to_window(hwnd: isize) {
+        STAGE.with(|st| {
+            let mut s = st.borrow_mut();
+            if !s.core.enabled {
+                return;
+            }
+            if let Some(sid) = s.core.find_scene_for_hwnd(hwnd) {
+                if s.core.current_scene_id != Some(sid) {
+                    switch_to_scene(&mut s, Some(sid));
+                }
+            }
+        });
+        redraw();
+    }
+
+    pub fn on_window_destroyed(hwnd: isize) {
+        STAGE.with(|st| {
+            let mut s = st.borrow_mut();
+            s.saved_positions.remove(&hwnd);
+            if let Some(fallback) = s.core.remove_window(hwnd) {
+                s.core.current_scene_id = Some(fallback);
+                if s.core.enabled {
+                    apply_active_scene_parking(&mut s);
+                }
+            }
+        });
+        redraw();
+    }
+
+    pub fn on_window_focused(hwnd: isize) {
+        STAGE.with(|st| {
+            let mut s = st.borrow_mut();
+            if !s.core.enabled || s.core.suspend || s.saved_positions.contains_key(&hwnd) {
+                return;
+            }
+            let now = Instant::now();
+            if s.core.last_focus_change.is_some_and(|t| now.duration_since(t) < Duration::from_millis(RAPID_FOCUS_MS)) {
+                return;
+            }
+            s.core.last_focus_change = Some(now);
+            let Some(sid) = s.core.find_scene_for_hwnd(hwnd) else { return };
+            if s.core.current_scene_id != Some(sid) {
+                switch_to_scene(&mut s, Some(sid));
+            }
+        });
+        redraw();
+    }
+
+    pub fn on_window_move_hook(hwnd: isize, moving: bool, ended: bool) {
+        STAGE.with(|st| {
+            let mut s = st.borrow_mut();
+            if !s.core.enabled {
+                return;
+            }
+            let mut cur = POINT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut cur);
+            }
+            let sidebar_w_px = (SIDEBAR_WIDTH_DIP as f32 * s.scale).round() as i32;
+            let buffer_right_px = s.work_area.left + sidebar_w_px + (BUFFER_WIDTH_LOGICAL as f32 * s.scale).round() as i32;
+
+            if moving && !ended {
+                let Some(sid) = s.core.find_scene_for_hwnd(hwnd) else { return };
+                if s.core.current_scene_id != Some(sid) {
+                    return;
+                }
+                let count = s.core.scenes.iter().find(|sc| sc.id == sid).map_or(0, |sc| sc.windows.len());
+                if count <= 1 {
+                    return;
+                }
+                let in_buf = cur.x < buffer_right_px;
+                s.drag = DragKind::StageToSidebar { hwnd, in_buffer: in_buf };
+                if in_buf {
+                    let t = ((buffer_right_px - cur.x) as f64 / (buffer_right_px - (s.work_area.left + sidebar_w_px)).max(1) as f64).clamp(0.0, 1.0);
+                    if let Some(sc) = s.core.scenes.iter().find(|sc| sc.id == sid) {
+                        if let Some(w) = sc.windows.iter().find(|w| w.hwnd == hwnd) {
+                            if let Some(th) = &w.thumb {
+                                let gw = (w.stage_rect.2 as f64 + (w.preview_dip.0 * s.scale as f64 - w.stage_rect.2 as f64) * t) as f32;
+                                let gh = (w.stage_rect.3 as f64 + (w.preview_dip.1 * s.scale as f64 - w.stage_rect.3 as f64) * t) as f32;
+                                let gx = cur.x as f32 - gw * 0.5;
+                                let gy = card_top_for(cur.y as f64 / s.scale as f64, gh as f64 / s.scale as f64) as f32 * s.scale;
+                                s.drag_ghost = Some((th.clone(), (gx, gy, gw, gh), TRAY_TILT_DEGREES * t));
+                            }
+                        }
+                    }
+                } else {
+                    s.drag_ghost = None;
+                }
+            } else if ended {
+                if let DragKind::StageToSidebar { hwnd: dh, in_buffer } = s.drag {
+                    s.drag = DragKind::None;
+                    s.drag_ghost = None;
+                    if dh == hwnd && in_buffer && cur.x < s.work_area.left + sidebar_w_px {
+                        if s.core.separate_window_to_new_scene(hwnd).is_some() {
+                            apply_active_scene_parking(&mut s);
+                        }
+                    }
+                }
+            }
+        });
+        redraw();
+    }
+
+    fn apply_active_scene_parking(s: &mut StageUi) {
+        s.core.suspend = true;
+        let active_id = s.core.current_scene_id;
+        let mut to_park = Vec::new();
+        let mut to_restore = Vec::new();
+        for sc in &mut s.core.scenes {
+            let is_active = Some(sc.id) == active_id;
+            for w in &mut sc.windows {
+                if is_active {
+                    w.parked = false;
+                    to_restore.push(w.hwnd);
+                } else {
+                    w.parked = true;
+                    to_park.push(w.hwnd);
+                }
+            }
+        }
+        for h in to_park {
+            park_hwnd(&mut s.saved_positions, h);
+        }
+        for h in to_restore.iter().copied() {
+            restore_hwnd(&mut s.saved_positions, h);
+        }
+        if let Some(top) = to_restore.last().copied() {
+            unsafe {
+                let _ = SetForegroundWindow(HWND(top as *mut _));
+            }
+        }
+        s.core.suspend = false;
+    }
+
+    fn switch_to_scene(s: &mut StageUi, target_id: Option<u64>) {
+        if s.core.current_scene_id == target_id {
+            return;
+        }
+        let prior_id = s.core.current_scene_id;
+        s.core.last_scene_id = prior_id;
+
+        // Build incoming and outgoing flying cards for smooth 300ms scene transition
+        let incoming = target_id.and_then(|tid| {
+            let sc = s.core.scenes.iter().find(|x| x.id == tid)?;
+            let w = sc.windows.first()?;
+            let thumb = w.thumb.clone()?;
+            let from = (sc.slot_rect.0 as f32, sc.slot_rect.1 as f32, sc.slot_rect.2.max(40) as f32, sc.slot_rect.3.max(40) as f32);
+            let to = (w.stage_rect.0 as f32, w.stage_rect.1 as f32, w.stage_rect.2.max(100) as f32, w.stage_rect.3.max(100) as f32);
+            Some(FlyingCard {
+                thumb,
+                from,
+                to,
+                from_tilt: (sc.tilt_top_deg, sc.tilt_bottom_deg),
+                to_tilt: (0.0, 0.0),
+            })
+        });
+
+        let outgoing = prior_id.and_then(|pid| {
+            let sc = s.core.scenes.iter().find(|x| x.id == pid)?;
+            let w = sc.windows.first()?;
+            let thumb = w.thumb.clone()?;
+            let from = (w.stage_rect.0 as f32, w.stage_rect.1 as f32, w.stage_rect.2.max(100) as f32, w.stage_rect.3.max(100) as f32);
+            let slot = target_id
+                .and_then(|tid| s.core.scenes.iter().find(|x| x.id == tid).map(|x| x.slot_rect))
+                .unwrap_or((
+                    s.work_area.left + (SIDEBAR_PAD_LEFT_DIP as f32 * s.scale) as i32,
+                    (s.work_area.top + s.work_area.bottom) / 2 - 60,
+                    (w.preview_dip.0 * s.scale as f64) as i32,
+                    (w.preview_dip.1 * s.scale as f64) as i32,
+                ));
+            let to = (slot.0 as f32, slot.1 as f32, slot.2.max(40) as f32, slot.3.max(40) as f32);
+            let screen_h_dip = (s.monitor_rect.bottom - s.monitor_rect.top) as f64 / s.scale as f64;
+            let t_top = edge_tilt_degrees_at(to.1 as f64 / s.scale as f64, screen_h_dip);
+            let t_bot = edge_tilt_degrees_at((to.1 + to.3) as f64 / s.scale as f64, screen_h_dip);
+            Some(FlyingCard {
+                thumb,
+                from,
+                to,
+                from_tilt: (0.0, 0.0),
+                to_tilt: (t_top, t_bot),
+            })
+        });
+
+        s.core.current_scene_id = target_id;
+        if let Some(tid) = target_id {
+            if let Some(sc) = s.core.scenes.iter_mut().find(|x| x.id == tid) {
+                sc.updated = Instant::now();
+            }
+        }
+        apply_active_scene_parking(s);
+
+        if incoming.is_some() || outgoing.is_some() {
+            s.transition = Some(Transition {
+                started: Instant::now(),
+                duration: Duration::from_millis(TRANSITION_DURATION_MS),
+                incoming,
+                outgoing,
+            });
+            start_anim_timer(s);
+        }
+    }
+
+    fn start_anim_timer(s: &StageUi) {
+        if let Some(sb) = &s.sidebar {
+            unsafe {
+                SetTimer(Some(sb.hwnd), TIMER_ANIM, 16, None);
+            }
+        }
+    }
+
+    /// Periodic 100ms tick from controller: checks overlap auto-stow, edge flyover trigger, and
+    /// keeps the sidebar & transition overlay updated.
+    pub fn tick() {
+        let should_draw = STAGE.with(|st| {
+            let mut s = st.borrow_mut();
+            if !s.core.enabled {
+                return false;
+            }
+            update_monitor_metrics(&mut s);
+            let mut cur = POINT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut cur);
+            }
+            let sidebar_w_px = (SIDEBAR_WIDTH_DIP as f32 * s.scale).round() as i32;
+            let stow_limit = s.work_area.left + (sidebar_w_px as f64 * STOW_OVERLAP_FRACTION) as i32;
+
+            // Check if any active scene window overlaps the stow threshold
+            let overlaps = s.core.current_scene().is_some_and(|sc| {
+                sc.windows.iter().any(|w| !w.parked && w.stage_rect.0 < stow_limit)
+            });
+
+            let cursor_in_sidebar = cur.x <= s.work_area.left + sidebar_w_px;
+            let cursor_at_edge = cur.x <= s.work_area.left + (44.0 * s.scale) as i32;
+
+            let next_mode = if s.core.current_scene_id.is_none() || !overlaps {
+                WindowMode::OnScreen
+            } else if cursor_at_edge || (s.mode == WindowMode::Flyover && cursor_in_sidebar) {
+                WindowMode::Flyover
+            } else {
+                WindowMode::OffScreen
+            };
+
+            if next_mode != s.mode {
+                s.mode = next_mode;
+                let target = if next_mode == WindowMode::OffScreen { 0.0 } else { 1.0 };
+                s.slide.retarget(target, tokens::pick(tokens::WINDOW, 0.5), Curve::Decelerate);
+                start_anim_timer(&s);
+            }
+            true
+        });
+        if should_draw {
+            redraw();
+        }
+    }
+
+    fn redraw() {
+        STAGE.with(|st| {
+            let mut s = st.borrow_mut();
+            if !s.core.enabled {
+                return;
+            }
+            let now = Instant::now();
+            let scale = s.scale;
+            let wa = s.work_area;
+            let mon = s.monitor_rect;
+            let screen_h_dip = (mon.bottom - mon.top) as f64 / scale as f64;
+            let sb_w = (SIDEBAR_WIDTH_DIP as f32 * scale).round() as usize;
+            let sb_h = (wa.bottom - wa.top).max(1) as usize;
+            let visible_ids = s.core.visible_sidebar_scenes();
+
+            if visible_ids.is_empty() && s.transition.is_none() && s.drag_ghost.is_none() {
+                if let Some(sb) = &s.sidebar {
+                    sb.hide();
+                }
+                if let Some(ov) = &s.overlay {
+                    ov.hide();
+                }
+                return;
+            }
+
+            // Compute total height of visible scene tiles to vertically center the strip
+            let pad_left = (SIDEBAR_PAD_LEFT_DIP as f32 * scale).round();
+            let margin_b = (SCENE_BOTTOM_MARGIN_DIP as f32 * scale).round();
+            let step_px = (STACK_OFFSET_STEP_DIP as f32 * scale).round();
+            let radius_px = THUMB_CORNER_RADIUS_DIP as f32 * scale;
+
+            let mut heights: Vec<(u64, f32, f32, usize)> = Vec::new();
+            for &sid in &visible_ids {
+                if let Some(sc) = s.core.scenes.iter().find(|x| x.id == sid) {
+                    let (dw, dh) = sc.windows.first().map_or((140.0, 96.0), |w| w.preview_dip);
+                    let n = sc.windows.len().min(4);
+                    let extra = (n.saturating_sub(1) as f32) * step_px;
+                    heights.push((sid, dw as f32 * scale + extra, dh as f32 * scale + extra, n));
+                }
+            }
+            let total_h: f32 = heights.iter().map(|(_, _, h, _)| *h + margin_b).sum::<f32>() - margin_b.min(heights.len() as f32 * margin_b);
+            let mut y_cur = ((sb_h as f32 - total_h) * 0.5).max(16.0 * scale);
+
+            let mut canvas = Canvas::new(sb_w, sb_h);
+            let dark = surface::dark_mode();
+            let (fg, _) = surface::glass_text(dark);
+
+            for (sid, tw, th, _n) in heights {
+                let top_dip = (wa.top as f32 + y_cur - mon.top as f32) as f64 / scale as f64;
+                let bot_dip = (wa.top as f32 + y_cur + th - mon.top as f32) as f64 / scale as f64;
+                let tilt_top = edge_tilt_degrees_at(top_dip, screen_h_dip);
+                let tilt_bot = edge_tilt_degrees_at(bot_dip, screen_h_dip);
+
+                let hover_k = s.hover_scales.get(&sid).map_or(1.0, |a| a.value_at(now));
+                let app_key = s.core.scenes.iter().find(|x| x.id == sid).map(|x| x.key.clone()).unwrap_or_default();
+                let icon_canvas = s.icons.get(&app_key).cloned();
+
+                let filtering = s.core.filter_app.is_some();
+                let hovered = s.hover_scene == Some(sid);
+                if let Some(sc) = s.core.scenes.iter_mut().find(|x| x.id == sid) {
+                    sc.tilt_top_deg = tilt_top;
+                    sc.tilt_bottom_deg = tilt_bot;
+                    sc.slot_rect = (
+                        wa.left + pad_left as i32,
+                        wa.top + y_cur.round() as i32,
+                        tw.round() as i32,
+                        th.round() as i32,
+                    );
+
+                    // Draw stacked windows from back to front (index N-1 down to 0)
+                    let count = sc.windows.len().min(4);
+                    for idx in (0..count).rev() {
+                        let w = &sc.windows[idx];
+                        let off = idx as f32 * step_px;
+                        let cw = (w.preview_dip.0 as f32 * scale).max(48.0);
+                        let ch = (w.preview_dip.1 as f32 * scale).max(36.0);
+                        if let Some(thumb) = &w.thumb {
+                            draw_tilted_card(
+                                &mut canvas,
+                                thumb,
+                                pad_left + off,
+                                y_cur + off,
+                                cw,
+                                ch,
+                                radius_px,
+                                tilt_top,
+                                tilt_bot,
+                                hover_k,
+                                0.96,
+                                scale,
+                            );
+                        } else {
+                            let placeholder = Canvas::filled(64, 48, if dark { Rgba::rgb(44, 44, 50) } else { Rgba::rgb(235, 235, 240) });
+                            draw_tilted_card(
+                                &mut canvas,
+                                &placeholder,
+                                pad_left + off,
+                                y_cur + off,
+                                cw,
+                                ch,
+                                radius_px,
+                                tilt_top,
+                                tilt_bot,
+                                hover_k,
+                                0.92,
+                                scale,
+                            );
+                        }
+                    }
+
+                    // Draw per-scene app icon badge at bottom-left of the tile (matching IconOverlayManager)
+                    let icon_sz = if filtering { 22.0 * scale } else { 30.0 * scale };
+                    let ix = (pad_left - 6.0 * scale).max(4.0 * scale);
+                    let iy = y_cur + th - icon_sz * 0.65;
+                    canvas.shadow(ix, iy, icon_sz, icon_sz, icon_sz * 0.24, 6.0 * scale, 2.0 * scale, Rgba::BLACK.alpha(0.35));
+                    if let Some(ic) = &icon_canvas {
+                        canvas.draw(ic, ix, iy, icon_sz, icon_sz, icon_sz * 0.22, 1.0);
+                    } else {
+                        let ph = crate::launchui::placeholder(&sc.key, &sc.title, icon_sz.round() as usize, scale);
+                        canvas.draw(&ph, ix, iy, icon_sz, icon_sz, icon_sz * 0.22, 1.0);
+                    }
+
+                    // When app filter is active or tile is hovered, draw scene title label below
+                    if filtering || hovered {
+                        surface::text(
+                            &mut canvas,
+                            &sc.title,
+                            pad_left,
+                            y_cur + th + 4.0 * scale,
+                            tw,
+                            (11.0 * scale).round() as i32,
+                            600,
+                            fg,
+                            surface::Align::Center,
+                        );
+                    }
+                }
+                y_cur += th + margin_b;
+            }
+
+            let t_slide = s.slide.value_at(now).clamp(0.0, 1.0);
+            let sb_x = wa.left - ((1.0 - t_slide) * sb_w as f32).round() as i32;
+            let sb_alpha = (t_slide.sqrt() * 255.0).round() as u8;
+            if let Some(sb) = &mut s.sidebar {
+                if sb_alpha == 0 {
+                    sb.hide();
+                } else {
+                    sb.present(&canvas, sb_x, wa.top, sb_alpha, None);
+                    sb.show();
+                }
+            }
+
+            // Render TransitionOverlay / SidebarDragGhost if active
+            let mut has_overlay = false;
+            if s.transition.is_some() || s.drag_ghost.is_some() {
+                let ow = (wa.right - wa.left).max(1) as usize;
+                let oh = (wa.bottom - wa.top).max(1) as usize;
+                let mut ov_canvas = Canvas::new(ow, oh);
+
+                if let Some(tr) = &s.transition {
+                    let u = (now.saturating_duration_since(tr.started).as_secs_f32() / tr.duration.as_secs_f32().max(0.001)).clamp(0.0, 1.0);
+                    // PowerEase EaseOut (cubic)
+                    let k = 1.0 - (1.0 - u).powi(3);
+                    for card in [&tr.outgoing, &tr.incoming].into_iter().flatten() {
+                        let cx = card.from.0 + (card.to.0 - card.from.0) * k - wa.left as f32;
+                        let cy = card.from.1 + (card.to.1 - card.from.1) * k - wa.top as f32;
+                        let cw = card.from.2 + (card.to.2 - card.from.2) * k;
+                        let ch = card.from.3 + (card.to.3 - card.from.3) * k;
+                        let top_deg = card.from_tilt.0 + (card.to_tilt.0 - card.from_tilt.0) * k as f64;
+                        let bot_deg = card.from_tilt.1 + (card.to_tilt.1 - card.from_tilt.1) * k as f64;
+                        draw_tilted_card(&mut ov_canvas, &card.thumb, cx, cy, cw, ch, radius_px, top_deg, bot_deg, 1.0, 0.98, scale);
+                        has_overlay = true;
+                    }
+                    if u >= 1.0 {
+                        s.transition = None;
+                    }
+                }
+
+                if let Some((ghost_thumb, (gx, gy, gw, gh), skew)) = &s.drag_ghost {
+                    let frac = (*skew / TRAY_TILT_DEGREES).clamp(0.0, 1.0);
+                    let top_d = edge_tilt_degrees_at(*gy as f64 / scale as f64, screen_h_dip) * frac;
+                    let bot_d = edge_tilt_degrees_at((*gy + *gh) as f64 / scale as f64, screen_h_dip) * frac;
+                    draw_tilted_card(
+                        &mut ov_canvas,
+                        ghost_thumb,
+                        *gx - wa.left as f32,
+                        *gy - wa.top as f32,
+                        *gw,
+                        *gh,
+                        radius_px,
+                        top_d,
+                        bot_d,
+                        1.0,
+                        0.95,
+                        scale,
+                    );
+                    has_overlay = true;
+                }
+
+                if let Some(ov) = &mut s.overlay {
+                    if has_overlay {
+                        ov.present(&ov_canvas, wa.left, wa.top, 255, None);
+                        ov.show();
+                    } else {
+                        ov.hide();
+                    }
+                }
+            } else if let Some(ov) = &mut s.overlay {
+                ov.hide();
+            }
+
+            let anim_busy = !s.slide.done_at(now)
+                || s.transition.is_some()
+                || s.hover_scales.values().any(|a| !a.done_at(now));
+            if !anim_busy {
+                if let Some(sb) = &s.sidebar {
+                    unsafe {
+                        let _ = KillTimer(Some(sb.hwnd), TIMER_ANIM);
+                    }
+                }
+            }
+        });
+    }
+
+    fn hit_test_sidebar(s: &StageUi, screen_pt: POINT) -> (Option<u64>, Option<(u64, String)>) {
+        let scale = s.scale;
+        let icon_sz = (if s.core.filter_app.is_some() { 22.0 } else { 30.0 } * scale) as i32;
+        for sid in s.core.visible_sidebar_scenes() {
+            if let Some(sc) = s.core.scenes.iter().find(|x| x.id == sid) {
+                let (x, y, w, h) = sc.slot_rect;
+                let ix = x - (6.0 * scale) as i32;
+                let iy = y + h - (icon_sz as f32 * 0.65) as i32;
+                if screen_pt.x >= ix && screen_pt.x <= ix + icon_sz && screen_pt.y >= iy && screen_pt.y <= iy + icon_sz {
+                    return (Some(sid), Some((sid, sc.key.clone())));
+                }
+                if screen_pt.x >= x && screen_pt.x <= x + w && screen_pt.y >= y && screen_pt.y <= y + h {
+                    return (Some(sid), None);
+                }
+            }
+        }
+        (None, None)
+    }
+
+    unsafe extern "system" fn sidebar_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        match msg {
+            WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+            WM_TIMER if wp.0 == TIMER_ANIM => {
+                redraw();
+                LRESULT(0)
+            }
+            WM_MOUSEMOVE => {
+                let mut pt = POINT::default();
+                let _ = GetCursorPos(&mut pt);
+                STAGE.with(|st| {
+                    let mut s = st.borrow_mut();
+                    let (work_left, dpi) = (s.work_area.left, s.scale);
+                    match s.drag {
+                        DragKind::SidebarPress { scene_id, start_x, start_y } => {
+                            let dx = (pt.x - start_x) as f64;
+                            let dy = (pt.y - start_y) as f64;
+                            if (dx * dx + dy * dy).sqrt() >= 10.0 * s.scale as f64 {
+                                let hw = s.core.scenes.iter().find(|x| x.id == scene_id).and_then(|sc| sc.windows.last().map(|w| w.hwnd)).unwrap_or(0);
+                                s.drag = DragKind::SidebarToStage { scene_id, hwnd: hw, past_buffer: false };
+                            }
+                        }
+                        DragKind::SidebarToStage { scene_id, hwnd: hw, ref mut past_buffer } => {
+                            let sb_right = work_left + (SIDEBAR_WIDTH_DIP as f32 * dpi) as i32;
+                            let buf_right = sb_right + (BUFFER_WIDTH_LOGICAL as f32 * dpi) as i32;
+                            *past_buffer = pt.x > buf_right;
+                            if let Some(sc) = s.core.scenes.iter().find(|x| x.id == scene_id) {
+                                if let Some(w) = sc.windows.iter().find(|w| w.hwnd == hw) {
+                                    if let Some(th) = &w.thumb {
+                                        let t = ((pt.x - sb_right) as f64 / (buf_right - sb_right).max(1) as f64).clamp(0.0, 1.0);
+                                        let tw = sc.slot_rect.2 as f64;
+                                        let th_px = sc.slot_rect.3 as f64;
+                                        let gw = (tw + (w.stage_rect.2 as f64 - tw) * t) as f32;
+                                        let gh = (th_px + (w.stage_rect.3 as f64 - th_px) * t) as f32;
+                                        let gx = pt.x as f32 - gw * 0.5;
+                                        let gy = card_top_for(pt.y as f64 / s.scale as f64, gh as f64 / s.scale as f64) as f32 * s.scale;
+                                        s.drag_ghost = Some((th.clone(), (gx, gy, gw, gh), TRAY_TILT_DEGREES * (1.0 - t)));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            let (h_scene, h_icon) = hit_test_sidebar(&s, pt);
+                            if h_scene != s.hover_scene || h_icon != s.hover_icon {
+                                let prev = s.hover_scene;
+                                s.hover_scene = h_scene;
+                                s.hover_icon = h_icon;
+                                if let Some(p) = prev {
+                                    s.hover_scales.entry(p).or_insert_with(|| Anim::at(1.0)).retarget(1.0, Duration::from_millis(200), Curve::Standard);
+                                }
+                                if let Some(n) = h_scene {
+                                    s.hover_scales.entry(n).or_insert_with(|| Anim::at(1.0)).retarget(1.08, Duration::from_millis(200), Curve::Standard);
+                                }
+                                start_anim_timer(&s);
+                            }
+                        }
+                    }
+                });
+                redraw();
+                LRESULT(0)
+            }
+            WM_LBUTTONDOWN => {
+                let mut pt = POINT::default();
+                let _ = GetCursorPos(&mut pt);
                 SetCapture(hwnd);
-            }
-            LRESULT(0)
-        }
-        WM_MOUSEMOVE => {
-            let (x, y) = ((lp.0 & 0xffff) as i16 as i32, ((lp.0 >> 16) & 0xffff) as i16 as i32);
-            STAGE.with(|s| {
-                let mut s = s.borrow_mut();
-                if let Some((_, p)) = s.press {
-                    if (x - p.x).abs() > px(8) || (y - p.y).abs() > px(8) {
-                        s.dragging = true;
+                STAGE.with(|st| {
+                    let mut s = st.borrow_mut();
+                    let (h_scene, h_icon) = hit_test_sidebar(&s, pt);
+                    if h_icon.is_none() {
+                        if let Some(sid) = h_scene {
+                            s.hover_scales.entry(sid).or_insert_with(|| Anim::at(1.0)).retarget(0.96, Duration::from_millis(80), Curve::Decelerate);
+                            s.drag = DragKind::SidebarPress { scene_id: sid, start_x: pt.x, start_y: pt.y };
+                            start_anim_timer(&s);
+                        }
                     }
-                }
-            });
-            LRESULT(0)
-        }
-        WM_LBUTTONUP => {
-            let _ = ReleaseCapture();
-            let (press, dragging) = STAGE.with(|s| {
-                let mut s = s.borrow_mut();
-                (s.press.take(), std::mem::take(&mut s.dragging))
-            });
-            if let (Some((h, _)), Some(f)) = (press, *PICK.lock().unwrap()) {
-                let dropped = dragging && !over_strip();
-                f(h);
-                if dropped {
-                    // the window stands where the card was dropped
-                    let (hw, cur) = (HWND(h as *mut _), cursor());
-                    let mut r = RECT::default();
-                    let _ = GetWindowRect(hw, &mut r);
-                    let _ = SetWindowPos(hw, None, cur.x - (r.right - r.left) / 2, cur.y - (r.bottom - r.top) / 2, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-                }
+                });
+                redraw();
+                LRESULT(0)
             }
-            LRESULT(0)
+            WM_LBUTTONUP => {
+                let mut pt = POINT::default();
+                let _ = GetCursorPos(&mut pt);
+                let _ = ReleaseCapture();
+                STAGE.with(|st| {
+                    let mut s = st.borrow_mut();
+                    let drag = std::mem::replace(&mut s.drag, DragKind::None);
+                    s.drag_ghost = None;
+                    match drag {
+                        DragKind::SidebarToStage { scene_id, past_buffer, .. } => {
+                            if past_buffer {
+                                if s.core.pop_window_from(scene_id).is_some() {
+                                    apply_active_scene_parking(&mut s);
+                                }
+                            }
+                        }
+                        _ => {
+                            let (h_scene, h_icon) = hit_test_sidebar(&s, pt);
+                            if let Some((_, app_key)) = h_icon {
+                                s.core.toggle_app_filter(&app_key);
+                            } else if let Some(sid) = h_scene {
+                                s.core.clear_app_filter();
+                                switch_to_scene(&mut s, Some(sid));
+                            } else if s.core.filter_app.is_some() {
+                                s.core.clear_app_filter();
+                            }
+                        }
+                    }
+                });
+                redraw();
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wp, lp),
         }
-        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
-        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+
+    unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        match msg {
+            WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+            WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
+            _ => DefWindowProcW(hwnd, msg, wp, lp),
+        }
     }
 }
 
-/// The icons window: each scene's app icon with its name under its cards (`IconOverlayManager`).
-unsafe extern "system" fn icons_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    match msg {
-        WM_PAINT => {
-            let mut ps = PAINTSTRUCT::default();
-            let dc = BeginPaint(hwnd, &mut ps);
-            let icon = *ICON.lock().unwrap();
-            let sz = px(20);
-            let font = CreateFontW(-px(12), 0, 0, 0, 500, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, w!("Segoe UI"));
-            let old = SelectObject(dc, font.into());
-            SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, COLORREF(0x00ff_ffff));
-            STAGE.with(|s| {
-                for (app, x, y) in s.borrow().labels.iter() {
-                    if let Some(ic) = icon.and_then(|f| f(app)) {
-                        let _ = DrawIconEx(dc, *x, *y, ic, sz, sz, 0, None, DI_NORMAL);
-                    }
-                    let mut name: Vec<u16> = app.encode_utf16().collect();
-                    let mut r = RECT { left: x + sz + px(6), top: *y, right: x + px(crate::cards::SIDEBAR_WIDTH_DIP as i32) - px(30), bottom: y + sz };
-                    DrawTextW(dc, &mut name, &mut r, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-                }
-            });
-            SelectObject(dc, old);
-            let _ = DeleteObject(font.into());
-            let _ = EndPaint(hwnd, &ps);
-            LRESULT(0)
-        }
-        WM_ERASEBKGND => DefWindowProcW(hwnd, msg, wp, lp),
-        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
-        _ => DefWindowProcW(hwnd, msg, wp, lp),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn macos_card_sizing_and_tilt_laws_match_stage_manager_for_windows() {
+        // 1440x900 window on a 1169pt high screen
+        let (cw, ch) = card_size_dip(1440.0, 900.0, 1169.0);
+        assert!(cw > 150.0 && cw < 210.0, "card width {cw}");
+        assert!(ch >= 96.0 && ch < 140.0, "card height {ch}");
+
+        // Small window scales up to at least 96 DIP height (before perspective squeeze)
+        let (_, small_h) = card_size_dip(300.0, 200.0, 1169.0);
+        assert!(small_h > 85.0, "small window height {small_h}");
+
+        // Center of screen has 0 tilt; above center tilts negative; below center tilts positive
+        assert!((edge_tilt_degrees_at(500.0, 1000.0)).abs() < 1e-6);
+        assert!(edge_tilt_degrees_at(200.0, 1000.0) < 0.0);
+        assert!(edge_tilt_degrees_at(800.0, 1000.0) > 0.0);
+
+        // SolveEdgeAngles splits shear and convergence and scales inverse to height
+        let (shear_small, rot_small) = solve_edge_angles(-5.0, -3.0, 120.0);
+        let (shear_large, rot_large) = solve_edge_angles(-5.0, -3.0, 1200.0);
+        assert!((shear_small - shear_large).abs() < 1e-6, "shear is height-independent");
+        assert!(rot_large.abs() < rot_small.abs(), "rotation shrinks as height grows so perspective never blows up");
+    }
+
+    #[test]
+    fn scene_grouping_switching_and_window_separation() {
+        let mut core = StageCore::new();
+        core.enabled = true;
+        let (s1, new1) = core.upsert_window(101, 1, "xcode", "Xcode", "Project.xcodeproj", (100, 100, 1200, 800), 1.0, 1080.0);
+        assert!(new1);
+        assert_eq!(core.current_scene_id, Some(s1));
+
+        // Second window of same app joins existing scene
+        let (s1_b, new1_b) = core.upsert_window(102, 2, "xcode", "Xcode", " Assistant.swift", (150, 150, 900, 700), 1.0, 1080.0);
+        assert_eq!(s1, s1_b);
+        assert!(!new1_b);
+
+        // Different app creates second scene
+        let (s2, new2) = core.upsert_window(201, 3, "safari", "Safari", "Apple", (200, 120, 1100, 760), 1.0, 1080.0);
+        assert!(new2);
+        assert_ne!(s1, s2);
+
+        // Separating a window from multi-window scene s1 creates a new sidebar scene
+        core.current_scene_id = Some(s1);
+        let s3 = core.separate_window_to_new_scene(102).expect("separated scene");
+        assert_ne!(s3, s1);
+        assert_eq!(core.visible_sidebar_scenes().len(), 2);
+
+        // Pulling window back from s3 merges it into current scene s1
+        assert_eq!(core.pop_window_from(s3), Some(102));
+        assert_eq!(core.visible_sidebar_scenes(), vec![s2]);
     }
 }

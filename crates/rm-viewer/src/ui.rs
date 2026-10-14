@@ -311,9 +311,7 @@ pub fn run(opts: Options) -> i32 {
         crate::palette::register(hinst);
         crate::banner::register(hinst);
         crate::dock::register(hinst);
-        crate::stage::set_picker(stage_pick);
-        crate::stage::set_windows(stage_windows);
-        crate::stage::set_icon_fn(stage_icon);
+        crate::stage::win::register(hinst);
         crate::settings_ui::register(hinst);
         crate::navball::register(hinst, ball_menu);
         let controller = match CreateWindowExW(WINDOW_EX_STYLE(0), w!("RmController"), w!("rm-controller"), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(hinst), None) {
@@ -828,6 +826,8 @@ unsafe extern "system" fn controller_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             taskbar_tick();
             dock_tick();
             update_tick();
+            crate::stage::win::tick();
+            stage_capture_next();
             with_app(|a| a.launcher.as_mut().map(|l| l.poll()));
             smoke_tick();
             showcase_tick();
@@ -1452,111 +1452,85 @@ fn app_of(k: isize) -> String {
     with_app(|a| a.remotes.get(&k).map(|r| r.app.clone())).flatten().unwrap_or_default()
 }
 
-/// `hwnd`'s app on stage: its windows in the middle, the other apps' windows as pictures at the
-/// left. `center`: also placed in the middle of the stage (a new window, one coming from the strip).
-fn stage_focus(hwnd: HWND, center: bool) {
-    if !stage_on() || crate::stage::suspended() {
-        return;
-    }
-    // SceneManager: a focus change right after another is the system's, not the user's.
-    if !center && crate::stage::rapid_focus() {
-        return;
-    }
-    crate::stage::set_suspended(true);
-    let (me, app) = (hwnd.0 as isize, app_of(hwnd.0 as isize));
-    let came_back = crate::stage::is_stashed(hwnd);
-    unsafe {
-        // SwitchTo: read the outgoing stacking BEFORE anything is parked, park the others, then
-        // show the scene's windows bottom-most first so the last one shown ends on top.
-        let all = stage_windows();
-        let outgoing: Vec<isize> = all.iter().copied().filter(|k| *k != me && app_of(*k) != app).collect();
-        crate::stage::capture_z(&outgoing);
-        for k in &outgoing {
-            let h = hwnd_of(*k);
-            if !crate::stage::is_stashed(h) && IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() {
-                crate::stage::stash(h, &app_of(*k));
-            }
-        }
-        let incoming = crate::stage::bottom_to_top(all.iter().copied().filter(|k| *k == me || app_of(*k) == app).collect());
-        for k in incoming {
-            let h = hwnd_of(k);
-            if crate::stage::is_stashed(h) {
-                crate::stage::unstash(h);
-                let _ = ShowWindow(h, SW_SHOW);
-            }
-            if k != me {
-                let _ = BringWindowToTop(h);
-            }
-        }
-        if IsIconic(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-        }
-        if center || came_back {
-            let area = crate::stage::stage_area();
-            let mut r = RECT::default();
-            let _ = GetWindowRect(hwnd, &mut r);
-            let (w, h) = ((r.right - r.left).min(area.right - area.left), (r.bottom - r.top).min(area.bottom - area.top));
-            let _ = SetWindowPos(hwnd, None, area.left + (area.right - area.left - w) / 2, area.top + (area.bottom - area.top - h) / 2, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
-        }
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        bring_to_front(hwnd);
-    }
-    crate::stage::set_suspended(false);
+fn hinst_of() -> HINSTANCE {
+    HINSTANCE(with_app(|a| a.hinst).unwrap_or(0) as *mut _)
 }
 
-/// The app's icon for the sidebar.
-fn stage_icon(app: &str) -> Option<HICON> {
-    with_app(|a| a.icons.get(app).copied()).flatten().map(|h| HICON(h as *mut _))
+/// A window is on the Stage Manager's books (it is created, or Stage Manager was turned on).
+fn stage_register(k: isize, id: u64, title: &str) {
+    let app = app_of(k);
+    crate::stage::win::on_window_created_or_moved(k, id, &app, &app, title);
 }
 
-/// A window was let go (after a move): over the sidebar it goes into it, like a card.
-fn stage_dropped(hwnd: HWND) {
-    if !stage_on() || crate::stage::is_stashed(hwnd) || !crate::stage::over_strip() || !stage_windows().contains(&(hwnd.0 as isize)) {
-        return;
-    }
-    let me = hwnd.0 as isize;
-    crate::stage::stash(hwnd, &app_of(me));
-    if !stage_windows().iter().any(|w| !crate::stage::is_stashed(hwnd_of(*w))) {
-        if let Some(next) = crate::stage::stashed().into_iter().find(|h| *h != me) {
-            stage_focus(hwnd_of(next), true);
-        }
-    }
-}
-
-/// A picture of the strip was clicked.
-fn stage_pick(k: isize) {
-    stage_focus(hwnd_of(k), true);
-}
-
-/// A window is gone: its picture too; with nothing left on stage the newest picture comes forward.
-fn stage_after_close(k: isize) {
-    crate::stage::unstash(hwnd_of(k));
-    crate::stage::forget(hwnd_of(k)); // WindowDestroyed: ForgetZOrder
+/// `hwnd`'s scene on stage (a click in the launcher or the Dock).
+fn stage_focus(hwnd: HWND, _center: bool) {
     if !stage_on() {
         return;
     }
-    let on_stage = stage_windows().iter().any(|w| !crate::stage::is_stashed(hwnd_of(*w)));
-    if !on_stage {
-        if let Some(first) = crate::stage::stashed().first() {
-            stage_focus(hwnd_of(*first), true);
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
         }
     }
+    crate::stage::win::switch_to_window(hwnd.0 as isize);
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOW);
+    }
+    bring_to_front(hwnd);
+}
+
+/// A window is gone: its card too; the next scene comes forward if nothing is left on stage.
+fn stage_after_close(k: isize) {
+    crate::stage::win::on_window_destroyed(k);
 }
 
 /// Stage Manager turned on or off in Settings.
 fn stage_setting(on: bool) {
+    crate::stage::win::set_enabled(hinst_of(), on);
     if on {
-        let fg = unsafe { GetForegroundWindow() }.0 as isize;
-        let all = stage_windows();
-        if let Some(k) = all.iter().copied().find(|k| *k == fg).or(all.first().copied()) {
-            stage_focus(hwnd_of(k), false);
+        for k in stage_windows() {
+            let id = with_app(|a| a.remotes.get(&k).map(|r| r.id)).flatten().unwrap_or(0);
+            stage_register(k, id, "");
         }
-    } else {
-        for h in crate::stage::clear() {
-            unsafe {
-                let _ = ShowWindow(hwnd_of(h), SW_SHOW);
+    }
+}
+
+/// A picture of a window that is parked, for its card in the sidebar (the window is composed, off
+/// screen; one window per call, the next the next time).
+fn stage_capture_next() {
+    use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
+    thread_local! {
+        static NEXT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    let parked: Vec<isize> = stage_windows().into_iter().filter(|k| crate::stage::win::is_parked(*k)).collect();
+    if parked.is_empty() {
+        return;
+    }
+    let k = parked[NEXT.with(|n| n.replace(n.get().wrapping_add(1))) % parked.len()];
+    unsafe {
+        let h = hwnd_of(k);
+        let mut r = RECT::default();
+        if GetWindowRect(h, &mut r).is_err() {
+            return;
+        }
+        let (w, hh) = ((r.right - r.left).max(0), (r.bottom - r.top).max(0));
+        if w == 0 || hh == 0 {
+            return;
+        }
+        let bmi = BITMAPINFO { bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -hh, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() }, ..Default::default() };
+        let dc = GetDC(None);
+        let mem = CreateCompatibleDC(Some(dc));
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        if let Ok(bmp) = CreateDIBSection(Some(dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) {
+            let old = SelectObject(mem, bmp.into());
+            if PrintWindow(h, mem, PRINT_WINDOW_FLAGS(2)).as_bool() && !bits.is_null() {
+                crate::stage::win::on_frame(k, w as usize, hh as usize, std::slice::from_raw_parts(bits as *const u8, (w * hh * 4) as usize));
             }
+            SelectObject(mem, old);
+            let _ = DeleteObject(bmp.into());
         }
+        let _ = DeleteDC(mem);
+        ReleaseDC(None, dc);
     }
 }
 
@@ -2052,6 +2026,7 @@ fn handle_event(ev: UiEvent) {
             }
             let windows: Vec<isize> = with_app(|a| {
                 a.icons.insert(app.clone(), icon.0 as isize);
+                crate::stage::win::set_app_icon(&app, size, &rgba);
                 if let Some(l) = a.launcher.as_mut() {
                     l.set_icon(&app, size, &rgba);
                 }
@@ -2309,7 +2284,7 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         eprintln!("window created id={id} app={app} role={role:?} parent={parent:?} renderer={renderer} {w}x{h}pt scale={scale} title={title:?}");
         launcher_sync();
         if !popup && !owned && parent.is_none() && role == WindowRole::Window && app != DESKTOP_APP {
-            stage_focus(hwnd, true);
+            stage_register(hwnd.0 as isize, id, title);
         }
         if app == DESKTOP_APP {
             // the whole Mac: straight to fullscreen, as a remote desktop is used
@@ -3326,8 +3301,12 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             invoke_menu_cmd(hwnd, (wp.0 & 0xffff) as u16);
             LRESULT(0)
         }
+        WM_MOVING => {
+            crate::stage::win::on_window_move_hook(hwnd.0 as isize, true, false);
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
         WM_EXITSIZEMOVE => {
-            stage_dropped(hwnd);
+            crate::stage::win::on_window_move_hook(hwnd.0 as isize, false, true);
             request_remote_resize(hwnd);
             LRESULT(0)
         }
