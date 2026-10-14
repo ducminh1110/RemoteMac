@@ -46,6 +46,59 @@ struct Stage {
 
 thread_local! {
     static STAGE: RefCell<Stage> = RefCell::new(Stage::default());
+    /// SceneManager._suspend: set around a switch so the focus events it causes are not followed.
+    static SUSPEND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// SceneManager._lastFocusChange
+    static LAST_FOCUS: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+    /// SceneManager._zDepth: how deep each window sat in the z-chain when its scene was last on screen
+    static Z_DEPTH: RefCell<std::collections::HashMap<isize, usize>> = RefCell::new(Default::default());
+}
+
+pub fn suspended() -> bool {
+    SUSPEND.with(|s| s.get())
+}
+
+pub fn set_suspended(on: bool) {
+    SUSPEND.with(|s| s.set(on));
+}
+
+/// SceneManager.IsRapidFocusChange: focus changes less than 100 ms apart are the system's (modal
+/// dialogs, a minimise handing focus on), not the user's; they must not start a switch loop.
+pub fn rapid_focus() -> bool {
+    let now = std::time::Instant::now();
+    LAST_FOCUS.with(|l| l.replace(Some(now))).is_some_and(|t| now.duration_since(t).as_millis() < 100)
+}
+
+/// SceneManager.CaptureZOrder: walk the z-chain once, front to back, and note each window's depth.
+pub fn capture_z(windows: &[isize]) {
+    if windows.is_empty() {
+        return;
+    }
+    let mut found = std::collections::HashMap::new();
+    unsafe {
+        let mut h = GetTopWindow(None).ok();
+        let mut depth = 0;
+        while let Some(w) = h {
+            if found.len() >= windows.len() {
+                break;
+            }
+            if windows.contains(&(w.0 as isize)) {
+                found.insert(w.0 as isize, depth);
+                depth += 1;
+            }
+            h = GetWindow(w, GW_HWNDNEXT).ok();
+        }
+    }
+    Z_DEPTH.with(|z| z.borrow_mut().extend(found));
+}
+
+/// SceneManager.OrderBottomToTop: back to front, windows with no depth recorded at the back.
+pub fn bottom_to_top(mut windows: Vec<isize>) -> Vec<isize> {
+    Z_DEPTH.with(|z| {
+        let z = z.borrow();
+        windows.sort_by_key(|w| std::cmp::Reverse(z.get(w).copied().unwrap_or(usize::MAX)));
+    });
+    windows
 }
 
 /// What a click on a card does (set once by ui.rs).
@@ -100,14 +153,20 @@ pub fn stash(hwnd: HWND) {
         }
         let Some(strip) = ensure_strip() else { return };
         let Ok(thumb) = DwmRegisterThumbnail(strip, hwnd) else { return };
-        let away = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + 64;
-        let _ = SetWindowPos(hwnd, None, away, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        // OpacityWindowStrategy.GetOffScreenPoint: past the bottom-right of the virtual screen, +100.
+        // IgnoreZOrder: parking must not yank the window to the front of the z-chain.
+        let (ax, ay) = (GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + 100, GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN) + 100);
+        let _ = SetWindowPos(hwnd, None, ax, ay, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         STAGE.with(|s| s.borrow_mut().items.insert(0, Item { hwnd: hwnd.0 as isize, home: r, thumb, w, h }));
     }
     layout();
 }
 
 /// `hwnd` is on stage (or gone): its card leaves the strip and the window goes back where it was.
+pub fn forget(hwnd: HWND) {
+    Z_DEPTH.with(|z| z.borrow_mut().remove(&(hwnd.0 as isize)));
+}
+
 pub fn unstash(hwnd: HWND) {
     let gone = STAGE.with(|s| {
         let mut s = s.borrow_mut();

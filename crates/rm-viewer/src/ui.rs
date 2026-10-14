@@ -1383,21 +1383,37 @@ fn app_of(k: isize) -> String {
 /// `hwnd`'s app on stage: its windows in the middle, the other apps' windows as pictures at the
 /// left. `center`: also placed in the middle of the stage (a new window, one coming from the strip).
 fn stage_focus(hwnd: HWND, center: bool) {
-    if !stage_on() {
+    if !stage_on() || crate::stage::suspended() {
         return;
     }
+    // SceneManager: a focus change right after another is the system's, not the user's.
+    if !center && crate::stage::rapid_focus() {
+        return;
+    }
+    crate::stage::set_suspended(true);
     let (me, app) = (hwnd.0 as isize, app_of(hwnd.0 as isize));
     let came_back = crate::stage::is_stashed(hwnd);
     unsafe {
-        for k in stage_windows() {
+        // SwitchTo: read the outgoing stacking BEFORE anything is parked, park the others, then
+        // show the scene's windows bottom-most first so the last one shown ends on top.
+        let all = stage_windows();
+        let outgoing: Vec<isize> = all.iter().copied().filter(|k| *k != me && app_of(*k) != app).collect();
+        crate::stage::capture_z(&outgoing);
+        for k in &outgoing {
+            let h = hwnd_of(*k);
+            if !crate::stage::is_stashed(h) && IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() {
+                crate::stage::stash(h);
+            }
+        }
+        let incoming = crate::stage::bottom_to_top(all.iter().copied().filter(|k| *k == me || app_of(*k) == app).collect());
+        for k in incoming {
             let h = hwnd_of(k);
-            if k != me && app_of(k) != app {
-                if !crate::stage::is_stashed(h) && IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() {
-                    crate::stage::stash(h);
-                }
-            } else if crate::stage::is_stashed(h) {
+            if crate::stage::is_stashed(h) {
                 crate::stage::unstash(h);
                 let _ = ShowWindow(h, SW_SHOW);
+            }
+            if k != me {
+                let _ = BringWindowToTop(h);
             }
         }
         if IsIconic(hwnd).as_bool() {
@@ -1413,6 +1429,7 @@ fn stage_focus(hwnd: HWND, center: bool) {
         let _ = ShowWindow(hwnd, SW_SHOW);
         bring_to_front(hwnd);
     }
+    crate::stage::set_suspended(false);
 }
 
 /// A picture of the strip was clicked.
@@ -1423,6 +1440,7 @@ fn stage_pick(k: isize) {
 /// A window is gone: its picture too; with nothing left on stage the newest picture comes forward.
 fn stage_after_close(k: isize) {
     crate::stage::unstash(hwnd_of(k));
+    crate::stage::forget(hwnd_of(k)); // WindowDestroyed: ForgetZOrder
     if !stage_on() {
         return;
     }
