@@ -119,7 +119,8 @@ pub fn bottom_to_top(mut windows: Vec<isize>) -> Vec<isize> {
 /// What a click on a card does (set once by ui.rs).
 static PICK: Mutex<Option<fn(isize)>> = Mutex::new(None);
 /// The windows on stage, to know whether one overlaps the sidebar (set once by ui.rs).
-static WINDOWS: Mutex<Option<fn() -> Vec<isize>>> = Mutex::new(None);
+type Windows = fn() -> Vec<isize>;
+static WINDOWS: Mutex<Option<Windows>> = Mutex::new(None);
 
 pub fn set_windows(f: fn() -> Vec<isize>) {
     *WINDOWS.lock().unwrap() = Some(f);

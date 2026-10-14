@@ -174,6 +174,7 @@ impl Tile {
     /// Where the card is and how it leans (`RecomputePixelSize` + `ApplyTransform` +
     /// `ApplyCornerRadius`). `x`,`y`: the card's top-left in the host (px); `w`,`h`: its size (px);
     /// `top`,`bottom`: the slopes of its edges, in degrees.
+    #[allow(clippy::too_many_arguments)]
     pub fn place(&mut self, x: f64, y: f64, w: f64, h: f64, top: f64, bottom: f64, radius: f64) {
         let (hw, hh) = (w * (1.0 + 2.0 * cards::HOVER_HEADROOM), h * (1.0 + 2.0 * cards::HOVER_HEADROOM));
         let _ = self.root.SetOffset(Vector3::new((x - w * cards::HOVER_HEADROOM) as f32, (y - h * cards::HOVER_HEADROOM) as f32, 0.0));
