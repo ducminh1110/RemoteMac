@@ -3,6 +3,7 @@
 //! so clients can be tested with several apps and windows at once, an Open panel (Cmd+O) that is
 //! a child window, and file uploads. Lets clients be tested without a Mac.
 
+pub mod demo;
 pub mod replay;
 pub mod udp_agent;
 

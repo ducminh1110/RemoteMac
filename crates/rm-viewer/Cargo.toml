@@ -15,6 +15,7 @@ rm-protocol = { path = "../rm-protocol" }
 rm-client = { path = "../rm-client" }
 rm-relay = { path = "../rm-relay" }
 rm-decode = { path = "../rm-decode" }
+rm-fakeagent = { path = "../rm-fakeagent" }
 moonlight-sys = { path = "../moonlight-sys" }
 rm-gamestream = { path = "../rm-gamestream" }
 serde_json.workspace = true
@@ -85,5 +86,4 @@ features = [
 ]
 
 [dev-dependencies]
-rm-fakeagent = { path = "../rm-fakeagent" }
 openh264 = "0.9"
