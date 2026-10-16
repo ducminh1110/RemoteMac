@@ -5,7 +5,7 @@ import Foundation
 import CryptoKit
 
 /// Taro's version (the same as the Windows app's, Cargo.toml).
-let appVersion = "1.3.0"
+let appVersion = "1.4.0"
 
 /// The relay used when none is given: built in by release builds, none from source.
 let defaultRelay: String? = builtinRelay.trimmingCharacters(in: .whitespaces).isEmpty ? nil : builtinRelay

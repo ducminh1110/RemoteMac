@@ -4,7 +4,7 @@ Each version of Taro (called MacBridge until 1.2.0), newest first. Both sides sh
 same version; a newer Windows app works with an older Mac app without the features the Mac
 lacks.
 
-## 1.3.0
+## 1.4.0
 
 ### Added
 - The connect window lists the Macs kept on this PC ("No Computers" when there are none). + adds
@@ -30,7 +30,7 @@ lacks.
   cards (300 ms), the sidebar on screen, off screen or flying over when a window covers it, the
   hover, press and drag of cards, app icons under each scene that filter the sidebar to an app.
 - Windows waiting in the Stage Manager sidebar ask the Mac for 10 pictures a second instead of
-  the full rate (Mac 1.3.0, feature "background"): the Mac's encoder and the link go to the
+  the full rate (Mac 1.4.0, feature "background"): the Mac's encoder and the link go to the
   windows in use; on stage again, the full rate and a keyframe at once.
 
 ### Fixed
