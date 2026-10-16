@@ -301,8 +301,9 @@ fn draw_test(device: &ID3D11Device, ctx: &ID3D11DeviceContext, r: &Nv12Renderer,
 mod tests {
     #[test]
     fn colours_come_out_right() {
-        // the shared device (WARP on a machine without a GPU): shaders compile, NV12 views work
-        let g = crate::gpu::shared().expect("a D3D11 device");
+        // a device as the viewer makes it (WARP on a machine without a GPU): shaders compile, NV12
+        // views work
+        let g = crate::gpu::fresh().expect("a D3D11 device");
         let r = super::Nv12Renderer::new(&g.device).unwrap();
         super::self_test(&g.device, &g.ctx, &r).unwrap();
     }
@@ -312,7 +313,7 @@ mod tests {
         // the window's shape from the Mac: the left half is not the window (clear here), the
         // right half is, opaque; premultiplied, so nothing of the picture's colour is left where
         // it is clear
-        let g = crate::gpu::shared().expect("a D3D11 device");
+        let g = crate::gpu::fresh().expect("a D3D11 device");
         let r = super::Nv12Renderer::new(&g.device).unwrap();
         let mask: Vec<u8> = (0..256).map(|i| if i % 16 < 8 { 0 } else { 255 }).collect();
         for out in [16, 24] {
@@ -325,7 +326,7 @@ mod tests {
     #[test]
     fn resampled_colours_come_out_right() {
         // the cubic resampling shader, shrinking (Ultra pictures) and enlarging
-        let g = crate::gpu::shared().expect("a D3D11 device");
+        let g = crate::gpu::fresh().expect("a D3D11 device");
         let r = super::Nv12Renderer::new(&g.device).unwrap();
         super::check(&g.device, &g.ctx, &r, 10).unwrap();
         super::check(&g.device, &g.ctx, &r, 24).unwrap();

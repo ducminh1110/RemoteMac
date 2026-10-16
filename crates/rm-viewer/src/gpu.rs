@@ -41,6 +41,14 @@ fn create() -> Option<Gpu> {
     None
 }
 
+/// A device of its own: for tests, which run side by side and would otherwise interleave their
+/// draws on the shared device's one immediate context (its lock covers each call, not a draw's
+/// sequence of state, draw, copy and read back).
+#[cfg(test)]
+pub fn fresh() -> Option<Gpu> {
+    create()
+}
+
 /// The shared device (created on first use).
 pub fn shared() -> Option<&'static Gpu> {
     static G: OnceLock<Option<Gpu>> = OnceLock::new();
