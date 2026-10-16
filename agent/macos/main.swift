@@ -302,7 +302,7 @@ do {
     guard cmin <= 1 && cmax >= 1 else {
         try conn.send(["type": "error", "code": "version_mismatch", "message": "agent speaks protocol 1, client \(cmin)...\(cmax)"]); exit(1)
     }
-    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "mask", "exact", "menubar", "bye", "dock", "update"],
+    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "mask", "exact", "menubar", "bye", "dock", "update", "background"],
                    "max_surface": [3840, 2160], "agent": "taro \(appVersion) \(ProcessInfo.processInfo.operatingSystemVersionString)"])
     try conn.send(probeCapabilities())
 } catch { fail("handshake: \(error)") }
@@ -957,6 +957,11 @@ func handle(_ m: [String: Any]) {
             // replacing it would leave the Mac's screen mirroring nothing
             if keepMirror, let st = displays.status() { send(st) } else { send(displays.configure(width: w, height: h, scale: sc)) }
         }
+    case "window_background":
+        // its window is a card in the viewer's Stage Manager sidebar, or back in use
+        let wid = CGWindowID(clamping: int(m["window_id"]))
+        streamsLock.lock(); let ws = streams[wid]; streamsLock.unlock()
+        ws?.setBackground(m["on"] as? Bool ?? false)
     case "window_fullscreen":
         let wid = CGWindowID(clamping: int(m["window_id"]))
         guard let w = tracker.current(wid) else { send(["type": "error", "code": "no_such_window", "message": "\(wid)"]); break }

@@ -54,8 +54,9 @@ Taro's Stage Manager (`crates/rm-viewer/src/stage.rs`) follows the approach of
 [StageManagerForWindows](https://github.com/depoledna/StageManagerForWindows) by depoledna, itself
 based on [awaescher/StageManager](https://github.com/awaescher/StageManager): a window that leaves
 the stage is parked past the edge of the screens so that DWM keeps composing it and its card in the
-strip stays live. Its code is ported to Rust (`cards.rs`, `tiles.rs`, and the scene rules in `stage.rs`: card sizes,
-tilt, capture session, scene switching); its license is kept here.
+strip stays live. Its code is ported to Rust (`cards.rs`, `tiles.rs`, `scenes.rs` and `stage.rs`: card sizes and
+tilt, the capture session, `SceneManager` and `Scene`, `SceneTransitionAnimator`'s flights,
+`DragDropManager`, `IconOverlayManager` and the sidebar's modes); its license is kept here.
 
 ```
 MIT License

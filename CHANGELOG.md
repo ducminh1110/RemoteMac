@@ -4,6 +4,42 @@ Each version of Taro (called MacBridge until 1.2.0), newest first. Both sides sh
 same version; a newer Windows app works with an older Mac app without the features the Mac
 lacks.
 
+## 1.3.0
+
+### Added
+- The connect window lists the Macs kept on this PC ("No Computers" when there are none). + adds
+  one: its ID and password, or an address; "Have a custom relay" takes a relay of one's own and
+  its RM key. Save keeps it (passwords encrypted for this Windows user with DPAPI, in
+  %APPDATA%\RemoteMac\computers.json); the ID typed before is brought over. A wrong password
+  opens the Mac's sheet again with the password cleared; a kept password clears when its field
+  is clicked, to type a new one.
+- A Demo Mac inside Taro (Notes, TextEdit and Calculator, drawn and streamed on this PC) and a new
+  guided tour after an update: try the demo, open an app from the launcher, push the pointer to
+  the screen's edge for the Dock, search; then Taro starts again from the beginning to add your
+  own Mac.
+- The navigation ball's menu shows the stream at a glance (frame rate, bitrate, round trip,
+  latency) and turns the stats overlay on and off.
+- Crash records with no --logs-enabled needed: a panic, or a crash Rust never sees (an illegal
+  instruction, a driver's access violation), goes to %LOCALAPPDATA%\Taro\crash.log, with a
+  minidump beside it for the latter (the newest five are kept).
+- Taro.exe carries its version (Properties > Details, and Windows' crash reports).
+
+### Changed
+- Stage Manager is rewritten after StageManagerForWindows (MIT, see NOTICE.md): scenes in
+  most-recently-used order (five in the sidebar), windows flying between the stage and their
+  cards (300 ms), the sidebar on screen, off screen or flying over when a window covers it, the
+  hover, press and drag of cards, app icons under each scene that filter the sidebar to an app.
+- Windows waiting in the Stage Manager sidebar ask the Mac for 10 pictures a second instead of
+  the full rate (Mac 1.3.0, feature "background"): the Mac's encoder and the link go to the
+  windows in use; on stage again, the full rate and a keyframe at once.
+
+### Fixed
+- A crash at start (0xC000001D, illegal instruction) on PCs whose processor has AVX2 or AVX-512
+  but whose Windows does not enable it: the video error correction now checks what the OS
+  enables (XGETBV) before choosing its fast paths.
+- Clicking an app in the launcher sometimes did nothing (Enter after a search worked): a press
+  now survives the leave Windows sends as the mouse is captured.
+
 ## 1.2.8
 
 ### Added

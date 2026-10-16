@@ -326,7 +326,7 @@ pub fn run(opts: Options) -> i32 {
         crate::banner::register(hinst);
         crate::dock::register(hinst);
         crate::tour::set_session_hooks(tour_probe, back_to_start);
-        crate::stage::set_hooks(crate::stage::Hooks { front: bring_to_front, icon: |app| with_app(|a| a.icon_rgba.get(app).cloned()).flatten(), name: app_name });
+        crate::stage::set_hooks(crate::stage::Hooks { front: bring_to_front, icon: |app| with_app(|a| a.icon_rgba.get(app).cloned()).flatten(), name: app_name, background: stage_background });
         crate::settings_ui::register(hinst);
         crate::navball::register(hinst, ball_menu);
         let controller = match CreateWindowExW(WINDOW_EX_STYLE(0), w!("RmController"), w!("rm-controller"), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(hinst), None) {
@@ -1510,6 +1510,49 @@ fn recently_launched() -> bool {
 
 /// Windows lets only the program in front take the front (a new window then opens behind the
 /// PC's other windows): this one joins the input of the window that is in front for a moment.
+/// A window went into Stage Manager's sidebar or came back: a Mac that can (feature
+/// "background") sends its card a few pictures a second, and the full rate again on stage.
+fn stage_background(hwnd: HWND, on: bool) {
+    if !net::mac_has("background") {
+        return;
+    }
+    BACKGROUND.with(|b| {
+        let mut b = b.borrow_mut();
+        b.retain(|(h, _)| *h != hwnd.0 as isize);
+        b.push((hwnd.0 as isize, on));
+    });
+    send_background();
+}
+
+thread_local! {
+    /// background hints not sent yet (the app's state was in use when they came: sent on the
+    /// next try, the stats tick at the latest)
+    static BACKGROUND: RefCell<Vec<(isize, bool)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn send_background() {
+    let pending = BACKGROUND.with(|b| std::mem::take(&mut *b.borrow_mut()));
+    if pending.is_empty() {
+        return;
+    }
+    let sent = with_app(|a| {
+        for (h, on) in &pending {
+            if let Some(r) = a.remotes.get(h) {
+                a.link.send(&Message::WindowBackground { window_id: r.id, on: *on });
+            }
+        }
+    });
+    if sent.is_none() {
+        BACKGROUND.with(|b| {
+            let mut b = b.borrow_mut();
+            let newer: Vec<(isize, bool)> = std::mem::take(&mut *b);
+            let mut kept: Vec<(isize, bool)> = pending.into_iter().filter(|(h, _)| !newer.iter().any(|(n, _)| n == h)).collect();
+            kept.extend(newer);
+            *b = kept;
+        });
+    }
+}
+
 fn bring_to_front(hwnd: HWND) {
     unsafe {
         let fg = GetForegroundWindow();
@@ -1741,6 +1784,7 @@ fn on_local_clipboard(owner: HWND) {
 }
 
 fn stats_tick() {
+    send_background();
     let Some((lines, overlay)) = with_app(|a| {
         if a.stats.since.elapsed() < Duration::from_secs(1) {
             return None;

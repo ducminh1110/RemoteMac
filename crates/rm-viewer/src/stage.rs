@@ -264,6 +264,8 @@ pub struct Hooks {
     pub front: fn(HWND),
     pub icon: IconOf,
     pub name: fn(&str) -> String,
+    /// the window went into the sidebar (true) or came back on stage: its Mac stream can slow down
+    pub background: fn(HWND, bool),
 }
 
 struct Stage {
@@ -440,7 +442,18 @@ fn park(it: &mut Item, hwnd: isize) {
         let (x, y) = away();
         // IgnoreZOrder: parking must not bring it to the front of the z-chain
         let _ = SetWindowPos(h, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        if !it.parked {
+            background(h, true);
+        }
         it.parked = true;
+    }
+}
+
+/// Tell the Mac a window is off stage, or back (fewer pictures a second for a sidebar card).
+fn background(h: HWND, on: bool) {
+    let f = HOOKS.lock().unwrap().as_ref().map(|h| h.background);
+    if let Some(f) = f {
+        f(h, on);
     }
 }
 
@@ -450,6 +463,7 @@ fn unpark(it: &mut Item, hwnd: isize) {
     unsafe {
         if it.parked {
             let _ = SetWindowPos(h, Some(HWND_TOP), it.home.left, it.home.top, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+            background(h, false);
         }
         if !IsWindowVisible(h).as_bool() {
             let _ = ShowWindow(h, SW_SHOWNOACTIVATE);

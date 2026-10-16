@@ -325,6 +325,10 @@ pub enum Message {
     /// Client -> agent: enter / leave fullscreen for this window (on the virtual display when
     /// there is one); the new size arrives as `WindowMoved`.
     WindowFullscreen { window_id: u64, on: bool },
+    /// Client -> agent (feature "background"): the window waits off stage (a card in the
+    /// viewer's Stage Manager sidebar), `on`; a few pictures a second are enough for it until it
+    /// comes back (`on` false: its full rate and a keyframe).
+    WindowBackground { window_id: u64, on: bool },
     /// Client -> agent: the decoder lost sync (or just started): send an IDR frame now. Like
     /// Moonlight, keyframes come on request instead of on a fixed timer.
     RequestKeyframe { window_id: u64 },
@@ -1256,6 +1260,7 @@ mod display_tests {
             Message::DisplayConfigure { width: 1920, height: 1080, scale: 1 },
             Message::DisplayStatus { available: true, display_id: 7, width: 1920, height: 1080, reason: None },
             Message::WindowFullscreen { window_id: 3, on: true },
+            Message::WindowBackground { window_id: 3, on: false },
         ] {
             let b = encode(&m).unwrap();
             assert_eq!(decode(&b).unwrap().unwrap().0, m);
@@ -1263,6 +1268,8 @@ mod display_tests {
         }
         let j = serde_json::to_string(&Message::WindowFullscreen { window_id: 3, on: true }).unwrap();
         assert_eq!(j, r#"{"type":"window_fullscreen","window_id":3,"on":true}"#);
+        let j = serde_json::to_string(&Message::WindowBackground { window_id: 3, on: true }).unwrap();
+        assert_eq!(j, r#"{"type":"window_background","window_id":3,"on":true}"#);
     }
 }
 
