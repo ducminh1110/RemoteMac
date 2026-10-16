@@ -6,6 +6,7 @@ pub mod banner;
 pub mod cards;
 pub mod chrome;
 pub mod connectui;
+pub mod crash;
 pub mod demo;
 pub mod dock;
 pub mod field;
@@ -81,7 +82,7 @@ pub fn log_hint() -> String {
     if logs_enabled() {
         format!("Log: {}", log_path().display())
     } else {
-        "For a log, start Taro.exe with --logs-enabled.".into()
+        format!("Crash records: {}. For a full log, start Taro.exe with --logs-enabled.", crash::log_path().display())
     }
 }
 

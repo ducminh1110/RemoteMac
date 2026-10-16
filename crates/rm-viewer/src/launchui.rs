@@ -426,10 +426,13 @@ impl View {
         if pressed.is_some() {
             self.press.retarget(1.0, d(500), BACK);
         }
-        if down != self.hot {
+        // a tile pressed and let go on itself opens, even when something in between (a leave
+        // Windows sends as the mouse is captured, a list refresh) forgot what was down
+        let tile = matches!(self.hot, Hot::Tile(i) if pressed == Some(i));
+        if down != self.hot && !tile {
             return None;
         }
-        match down {
+        match self.hot {
             Hot::Lights(Some(l)) => Some(Act::Window(l)),
             Hot::Desktop => Some(Act::Launch("desktop".into())),
             Hot::Settings => Some(Act::Settings),
@@ -895,6 +898,14 @@ mod tests {
         let (cx, cy) = (x + w / 2.0, y + 40.0);
         v.mouse_down(cx, cy);
         assert_eq!(v.mouse_up(cx, cy), Some(Act::Launch("safari".into())));
+        // a leave between press and release (Windows posts one as the press captures the mouse)
+        v.mouse_down(cx, cy);
+        v.mouse_leave();
+        assert_eq!(v.mouse_up(cx, cy), Some(Act::Launch("safari".into())), "the press survives a leave");
+        // pressed on one app, let go on another: nothing
+        let (x2, y2, w2, _) = g.cell(2, 0.0);
+        v.mouse_down(cx, cy);
+        assert_eq!(v.mouse_up(x2 + w2 / 2.0, y2 + 40.0), None);
         // the lights, the Mac Desktop, Settings
         let (lx, ly) = v.lights();
         v.mouse_down(lx, ly);

@@ -196,6 +196,8 @@ struct App {
     /// stats overlay on (Ctrl+Alt+Shift+S), and its last text
     overlay: bool,
     overlay_lines: Vec<String>,
+    /// the last second's numbers at a glance, for the navigation ball's menu
+    glance: Vec<String>,
     stats_logged: Instant,
 }
 
@@ -245,6 +247,18 @@ impl Stats {
                 self.shown_n += 1;
             }
         }
+    }
+
+    /// Two short lines for the navigation ball's menu: frame rate and bitrate; round trip and
+    /// capture-to-screen latency.
+    fn glance(&self, link: Option<&rm_client::udp::LinkStats>) -> Vec<String> {
+        let secs = self.since.elapsed().as_secs_f64().max(0.001);
+        let rtt = link.and_then(|l| l.rtt_ms).map_or("-".into(), |r| format!("{r:.0} ms"));
+        let latency = if self.shown_n > 0 { format!("{:.0} ms", self.shown_ms / self.shown_n as f64) } else { "-".into() };
+        vec![
+            format!("{:.0} fps  ·  {:.1} Mbit/s", self.shown as f64 / secs, self.bytes as f64 * 8.0 / secs / 1e6),
+            format!("RTT {rtt}  ·  Latency {latency}"),
+        ]
     }
 
     /// The overlay's lines (as Moonlight's: video, network, latency, decoder).
@@ -449,7 +463,7 @@ pub fn run(opts: Options) -> i32 {
                 icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_applied_image: None, clip_seq: 0, d3d: opts.d3d, comp: use_comp,
                 launcher, panels: HashMap::new(), uploads: HashMap::new(), open_uploads: HashMap::new(), next_transfer: 1, redirect_panels: opts.windows_file_picker,
                 shortcut_dir, app_names: vec![], icon_rgba: HashMap::new(), menus: HashMap::new(), display_req: None, display: None, stats: Stats::default(),
-                pending: HashMap::new(), vsync: None, overlay: std::env::var_os("RM_STATS").is_some(), overlay_lines: vec![], stats_logged: Instant::now() - Duration::from_secs(4) })
+                pending: HashMap::new(), vsync: None, overlay: std::env::var_os("RM_STATS").is_some(), overlay_lines: vec![], glance: vec![], stats_logged: Instant::now() - Duration::from_secs(4) })
         });
         let pacer = if use_comp { start_pacer(ctl) } else { None };
         eprintln!("frame pacing: {}", if pacer.is_some() { "vsync" } else { "off" });
@@ -1006,6 +1020,8 @@ unsafe extern "system" fn launcher_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             let _ = TrackMouseEvent(&mut tme);
             LRESULT(0)
         }
+        // SetCapture on a press can post a leave: the press stays until the button comes up
+        WM_MOUSE_LEAVE if GetCapture() == hwnd => LRESULT(0),
         WM_MOUSE_LEAVE => {
             with_app(|a| a.launcher.as_mut().map(|l| l.mouse_leave()));
             LRESULT(0)
@@ -1730,6 +1746,7 @@ fn stats_tick() {
             return None;
         }
         let link = a.link.udp.as_ref().and_then(|u| u.stats.lock().ok().map(|s| s.clone()));
+        a.glance = a.stats.glance(link.as_ref());
         let lines = a.stats.lines(link, a.vsync.is_some());
         if a.stats.shown > 0 && a.stats_logged.elapsed() >= Duration::from_secs(5) {
             eprintln!("stream: {}", lines.join(" | "));
@@ -1743,6 +1760,16 @@ fn stats_tick() {
     if overlay {
         draw_overlays(&lines);
     }
+}
+
+/// The stats overlay on or off (Ctrl+Alt+Shift+S, or the navigation ball's menu).
+fn toggle_stats() {
+    let (on, lines) = with_app(|a| {
+        a.overlay = !a.overlay;
+        (a.overlay, a.overlay_lines.clone())
+    })
+    .unwrap_or((false, vec![]));
+    if on { draw_overlays(&lines) } else { hide_overlays() }
 }
 
 /// Draw the stats panel on every composition window (top left of the picture).
@@ -2613,15 +2640,20 @@ fn ball_menu(frame: HWND, at: POINT) {
     const CLOSE: u32 = 5;
     const SOUND: u32 = 6;
     const SEARCH: u32 = 7;
+    const STATS: u32 = 8;
     let pointer = local_cursor().load(std::sync::atomic::Ordering::Relaxed);
     let sound = !crate::audio::audio().muted();
-    let mut items = vec![
+    let (glance, overlay) = with_app(|a| (a.glance.clone(), a.overlay)).unwrap_or_default();
+    // the stream at a glance: frame rate, bitrate, round trip, latency (each second)
+    let mut items: Vec<Item> = glance.iter().map(|l| Item::info(l)).collect();
+    items.extend([Item::action(STATS, "Show Stats").with_shortcut("Ctrl+Alt+Shift+S").checked(overlay), Item::Separator]);
+    items.extend([
         Item::action(EXIT, "Exit Full Screen").with_shortcut("F11"),
         Item::action(MINIMIZE, "Minimize"),
         Item::Separator,
         Item::action(SEARCH, "Open an App…").with_shortcut("Ctrl+Alt+Space"),
         Item::action(POINTER, "Show This PC's Pointer").with_shortcut("Ctrl+Alt+Shift+C").checked(pointer),
-    ];
+    ]);
     if crate::audio::audio().supported() {
         items.push(Item::action(SOUND, "Sound").with_shortcut("Ctrl+Alt+Shift+M").checked(sound));
     }
@@ -2639,6 +2671,7 @@ fn ball_menu(frame: HWND, at: POINT) {
             Some(POINTER) => set_local_pointer(!pointer),
             Some(SOUND) => toggle_mute(),
             Some(SEARCH) => open_palette(),
+            Some(STATS) => toggle_stats(),
             Some(CLOSE) => {
                 let _ = PostMessageW(Some(frame), WM_CLOSE, WPARAM(0), LPARAM(0));
             }
@@ -3599,12 +3632,7 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             // Ctrl+Alt+Shift+S: the stats overlay, as in Moonlight
             if vk == 'S' as u32 && mods.ctrl && mods.alt && mods.shift {
                 if down && !repeat {
-                    let (on, lines) = with_app(|a| {
-                        a.overlay = !a.overlay;
-                        (a.overlay, a.overlay_lines.clone())
-                    })
-                    .unwrap_or((false, vec![]));
-                    if on { draw_overlays(&lines) } else { hide_overlays() }
+                    toggle_stats();
                 }
                 return LRESULT(0);
             }

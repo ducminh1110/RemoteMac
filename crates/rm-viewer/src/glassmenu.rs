@@ -27,6 +27,11 @@ impl Item {
         }
     }
 
+    /// A row that only tells something (greyed, not chosen).
+    pub fn info(label: &str) -> Item {
+        Item::Action { id: 0, label: label.into(), shortcut: None, checked: false, enabled: false }
+    }
+
     pub fn submenu(label: &str, items: Vec<Item>) -> Item {
         Item::Submenu { label: label.into(), enabled: true, items }
     }

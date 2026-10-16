@@ -2,6 +2,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 fn main() {
+    // before anything can go wrong: crash.log and minidumps, with or without --logs-enabled
+    rm_viewer::crash::install();
     let args: Vec<String> = std::env::args().collect();
     let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let has = |k: &str| args.iter().any(|a| a == k);
@@ -45,7 +47,10 @@ fn main() {
             rm_viewer::native::log_to_file(&rm_viewer::log_path());
         }
         let quiet = has("--smoke") || has("--showcase");
+        // crash.log's hook first, so the record is written before the message box waits
+        let crash_log = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            crash_log(info);
             let msg = format!("Taro stopped because of an internal error:\n\n{info}\n\n{}", rm_viewer::log_hint());
             eprintln!("{msg}");
             if !quiet {
