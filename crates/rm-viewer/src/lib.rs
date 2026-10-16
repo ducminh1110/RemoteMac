@@ -55,6 +55,7 @@ pub mod minimize;
 pub mod navball;
 #[cfg(windows)]
 pub mod shortcuts;
+#[cfg(windows)]
 pub mod stage;
 #[cfg(windows)]
 pub mod tiles;

@@ -4,19 +4,6 @@ Each version of Taro (called MacBridge until 1.2.0), newest first. Both sides sh
 same version; a newer Windows app works with an older Mac app without the features the Mac
 lacks.
 
-## 1.2.9
-
-### Changed
-- Stage Manager is the new one (from Minh): scenes per app in a sidebar of tilted cards, auto-stow
-  and flyover at the left edge, scene transitions with flying cards, drag and drop between the
-  sidebar and the stage, app icon badges and an app filter. Its cards show a picture of the parked
-  window taken every so often (no longer a live capture), and the sidebar no longer slides down
-  with the Mac's Dock.
-
-### Fixed
-- The new Stage Manager did not compile as sent (a space in a function name, borrow errors); fixed
-  and wired into the windows, the app icons and the controller's timer.
-
 ## 1.2.8
 
 ### Added

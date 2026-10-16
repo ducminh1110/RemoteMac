@@ -390,6 +390,7 @@ mod win {
             self.place_and_glass();
             self.shown.retarget(1.0, tokens::pick(tokens::WINDOW, 0.3), Curve::ARRIVE);
             self.left_at = None;
+            crate::stage::lower(true); // Stage Manager strip slides down while the Dock is out
             self.push.reset();
             unsafe {
                 let _ = ShowWindow(self.surf.hwnd, SW_SHOWNOACTIVATE);
@@ -398,6 +399,7 @@ mod win {
         }
 
         fn go_away(&mut self) {
+            crate::stage::lower(false); // Stage Manager strip comes back up
             self.shown.retarget(0.0, tokens::pick(tokens::WINDOW, 0.2), Curve::Accelerate);
             self.hover = None;
             self.held = None;
