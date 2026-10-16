@@ -31,7 +31,6 @@
 
 #![allow(clippy::too_many_arguments, clippy::type_complexity, clippy::collapsible_if, clippy::collapsible_else_if, clippy::manual_range_contains, clippy::unnecessary_sort_by)]
 
-#[cfg(windows)]
 use crate::motion::{Anim, Curve};
 use crate::paint::{sdf_round_rect, coverage, Canvas, Rgba};
 use std::collections::{HashMap, HashSet};
