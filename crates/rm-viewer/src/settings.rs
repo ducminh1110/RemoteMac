@@ -48,11 +48,14 @@ pub struct Settings {
     pub stage_manager: bool,
     /// The version (major*1e6 + minor*1e3 + patch) whose guided tour was shown (0: none yet)
     pub tour_seen: u32,
+    /// The version whose tour got past its demo Mac (Taro started again for its second part:
+    /// adding one's own Mac)
+    pub tour_demo: u32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { fps: 60, bitrate_mbps: 0, quality: 0, decoder: 0, pacing: false, local_cursor: false, desktop_2x: true, workspace: 1, audio: true, volume: 100, keyboard: 0, glass: 0, motion: 0, dock: 1, frame: 0, auto_update: true, stage_manager: false, tour_seen: 0 }
+        Self { fps: 60, bitrate_mbps: 0, quality: 0, decoder: 0, pacing: false, local_cursor: false, desktop_2x: true, workspace: 1, audio: true, volume: 100, keyboard: 0, glass: 0, motion: 0, dock: 1, frame: 0, auto_update: true, stage_manager: false, tour_seen: 0, tour_demo: 0 }
     }
 }
 
@@ -105,6 +108,7 @@ impl Settings {
             s.auto_update = b("auto_update").unwrap_or(s.auto_update);
             s.stage_manager = b("stage_manager").unwrap_or(s.stage_manager);
             s.tour_seen = n("tour_seen").map_or(s.tour_seen, |x| x as u32);
+            s.tour_demo = n("tour_demo").map_or(s.tour_demo, |x| x as u32);
         }
         s
     }
@@ -132,6 +136,7 @@ impl Settings {
             "auto_update": self.auto_update,
             "stage_manager": self.stage_manager,
             "tour_seen": self.tour_seen,
+            "tour_demo": self.tour_demo,
         });
         if let Some(d) = path().parent() {
             std::fs::create_dir_all(d)?;

@@ -9,6 +9,12 @@ fn main() {
         eprintln!("usage: Taro.exe                      (asks for the Mac's ID and password)\n       Taro.exe --id 123456789 --password PASS\n       RM_SESSION_TOKEN=.. Taro.exe --session NAME   (legacy)\n  [--relay HOST:PORT | --direct HOST[:PORT]] [--app testapp] [--logs-enabled] [--raw-ctrl] [--no-clipboard] [--renderer d3d11|gdi] [--mac-file-panel] [--no-shortcuts] [--smoke] [--showcase DIR --apps xcode,textedit --settle SECS --type TEXT]");
         std::process::exit(0)
     }
+    // started again by Taro itself (the guided tour leaving its demo Mac): once the old one is
+    // gone, so that this one is not handed over to it as a second copy
+    #[cfg(windows)]
+    if let Some(pid) = get("--wait-pid").and_then(|p| p.parse::<u32>().ok()) {
+        rm_viewer::native::wait_for_process(pid, std::time::Duration::from_secs(10));
+    }
     // Taro's icon as an .ico file (the installer and its shortcuts take it)
     if let Some(path) = get("--write-icon") {
         let ico = rm_viewer::ico::rgba_to_ico(256, &rm_viewer::logo::rgba(256)).expect("icon");

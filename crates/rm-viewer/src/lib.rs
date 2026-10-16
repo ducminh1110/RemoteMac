@@ -6,6 +6,7 @@ pub mod banner;
 pub mod cards;
 pub mod chrome;
 pub mod connectui;
+pub mod demo;
 pub mod dock;
 pub mod field;
 pub mod ico;

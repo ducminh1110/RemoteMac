@@ -149,6 +149,16 @@ impl Launcher {
         }
     }
 
+    /// App `id`'s tile on the screen (px), while it is in sight.
+    pub fn tile_screen_rect(&self, id: &str) -> Option<RECT> {
+        let (x, y, w, h) = self.view.tile_rect(id)?;
+        let mut o = POINT::default();
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::ClientToScreen(self.hwnd, &mut o);
+        }
+        Some(RECT { left: o.x + x as i32, top: o.y + y as i32, right: o.x + (x + w) as i32, bottom: o.y + (y + h) as i32 })
+    }
+
     pub fn count(&self) -> usize {
         self.view.tiles().len()
     }

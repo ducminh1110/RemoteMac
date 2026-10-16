@@ -137,7 +137,7 @@ impl Push {
 }
 
 #[cfg(windows)]
-pub use win::{close, first_item, hold, hwnd, register, reveal_now, sync};
+pub use win::{close, first_item, hold, hwnd, is_out, register, reveal_now, sync};
 
 #[cfg(windows)]
 mod win {
@@ -218,6 +218,11 @@ mod win {
             let i = k.items.iter().position(|i| !i.separator)?;
             Some((k.items[i].id.clone(), k.beside(i)))
         })
+    }
+
+    /// The Dock is out (or coming out): the guided tour waits for it.
+    pub fn is_out() -> bool {
+        DOCK.with(|d| d.borrow().as_ref().is_some_and(|k| k.shown.target() > 0.5))
     }
 
     /// Keep it out (a menu of it is open) or let it go again.

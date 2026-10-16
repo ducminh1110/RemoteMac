@@ -311,6 +311,7 @@ pub fn run(opts: Options) -> i32 {
         crate::palette::register(hinst);
         crate::banner::register(hinst);
         crate::dock::register(hinst);
+        crate::tour::set_session_hooks(tour_probe, back_to_start);
         crate::stage::set_picker(stage_pick);
         crate::stage::set_windows(stage_windows);
         crate::stage::set_icon_fn(stage_icon);
@@ -352,30 +353,48 @@ pub fn run(opts: Options) -> i32 {
         let (link, rx) = if opts.prompt {
             // ID + password window; it connects in the background and shows why an attempt failed
             let app = opts.app.clone();
-            let id = crate::connect::last_id();
-            let got = crate::connect::connect_window(id.as_deref(), None, |typed, password, via| {
+            let got = crate::connect::connect_window(None, |typed, password, via, key| {
+                // the guided tour's demo Mac: a pretend Mac inside Taro, through a relay on this PC
+                if *via == crate::connect::Via::Demo {
+                    let d = crate::demo::start()?;
+                    net::set_direct(None);
+                    rm_relay::set_key_override(Some(String::new()));
+                    return net::connect_with(Some(&d.relay), &d.session, &d.token, app.as_deref(), false, wake)
+                        .map(|x| {
+                            DEMO.store(true, std::sync::atomic::Ordering::Relaxed);
+                            crate::tour::demo_connected();
+                            (x, "Demo Mac".to_string())
+                        })
+                        .map_err(|e| {
+                            eprintln!("demo Mac: {e}");
+                            net::friendly_error(&e)
+                        });
+                }
                 // by its ID: the session of that ID; straight to an address: the direct session,
                 // the password alone (no ID, no relay)
                 let (session, token) = match via {
                     crate::connect::Via::Address(_) => (rm_protocol::session::DIRECT.to_string(), rm_protocol::session::direct_token(password)),
-                    crate::connect::Via::Id(_) => (rm_protocol::session::relay_session(typed), rm_protocol::session::token(typed, password)),
+                    _ => (rm_protocol::session::relay_session(typed), rm_protocol::session::token(typed, password)),
                 };
                 let relay = match via {
-                    crate::connect::Via::Id(r) => {
-                        net::set_direct(None);
-                        Some(r.as_str()).filter(|r| !r.trim().is_empty())
-                    }
                     crate::connect::Via::Address(a) => {
                         net::set_direct(Some(a.clone()));
                         None
                     }
+                    crate::connect::Via::Id(r) => {
+                        net::set_direct(None);
+                        Some(r.as_str()).filter(|r| !r.trim().is_empty())
+                    }
+                    crate::connect::Via::Demo => None,
                 };
+                // a relay of one's own gets its own key (none: nothing), never the built-in one
+                rm_relay::set_key_override(relay.map(|_| key.trim().to_string()));
                 net::connect_with(relay, &session, &token, app.as_deref(), false, wake)
                     .map(|x| {
                         remember_session(relay, &session, &token);
                         (x, match via {
                             crate::connect::Via::Address(a) => a.trim().to_string(),
-                            crate::connect::Via::Id(_) => rm_protocol::session::display_id(typed),
+                            _ => rm_protocol::session::display_id(typed),
                         })
                     })
                     .map_err(|e| {
@@ -385,6 +404,10 @@ pub fn run(opts: Options) -> i32 {
             });
             let Some((x, shown_id)) = got else { return 0 };
             opts.session = shown_id;
+            if DEMO.load(std::sync::atomic::Ordering::Relaxed) {
+                // a pretend Mac: no Start menu shortcuts for its apps
+                opts.shortcuts = false;
+            }
             x
         } else {
             match net::connect(opts.relay.as_deref(), &opts.session, &opts.token, opts.app.as_deref(), wake) {
@@ -668,6 +691,57 @@ fn shortcuts_tick() {
         }
         SHORTCUTS_BUSY.store(false, Ordering::Release);
     });
+}
+
+/// Connected to the guided tour's demo Mac (not a real one).
+static DEMO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The app the guided tour opens on the demo Mac.
+const TOUR_APP: &str = "notes";
+
+/// What the guided tour looks at over the demo Mac's session (screen px).
+fn tour_probe() -> Option<crate::tour::SessionProbe> {
+    if !DEMO.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let app = with_app(|a| {
+        let l = a.launcher.as_ref()?;
+        if !unsafe { IsWindowVisible(l.hwnd).as_bool() } {
+            return None;
+        }
+        l.tile_screen_rect(TOUR_APP)
+    })
+    .flatten()
+    .map(|r| (r.left as f32, r.top as f32, (r.right - r.left) as f32, (r.bottom - r.top) as f32));
+    let app_open = with_app(|a| a.remotes.values().any(|r| r.app == TOUR_APP && r.role == WindowRole::Window)).unwrap_or(false);
+    // the Dock's edge of the main screen (with the Dock off, there is nothing to wait for)
+    let edge = crate::dock::Edge::from_setting(crate::settings::Settings::load_cached().dock);
+    let mon = crate::stage::work();
+    let full = unsafe {
+        let m = MonitorFromPoint(POINT { x: mon.left + 1, y: mon.top + 1 }, MONITOR_DEFAULTTOPRIMARY);
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let _ = GetMonitorInfoW(m, &mut info);
+        info.rcMonitor
+    };
+    let strip = 6.0;
+    let edge_rect = match edge {
+        Some(crate::dock::Edge::Right) => (full.right as f32 - strip, full.top as f32, strip, (full.bottom - full.top) as f32),
+        _ => (full.left as f32, full.top as f32, strip, (full.bottom - full.top) as f32),
+    };
+    Some(crate::tour::SessionProbe { app, app_open, edge: edge_rect, dock_out: edge.is_none() || crate::dock::is_out() })
+}
+
+/// The guided tour leaves the demo Mac: Taro starts again from its first window, the way it was
+/// started (the new one waits for this one to be gone), and this one ends with the demo.
+fn back_to_start() {
+    if let Ok(exe) = std::env::current_exe() {
+        let mut args: Vec<String> = std::env::args().skip(1).collect();
+        if let Some(i) = args.iter().position(|a| a == "--wait-pid") {
+            args.drain(i..(i + 2).min(args.len()));
+        }
+        let _ = std::process::Command::new(exe).args(args).arg("--wait-pid").arg(std::process::id().to_string()).spawn();
+    }
+    quit(0);
 }
 
 /// Taro ends for its installer: the connection is dropped, not closed, and the Mac keeps the

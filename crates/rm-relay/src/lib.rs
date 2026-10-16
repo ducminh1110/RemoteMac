@@ -48,9 +48,22 @@ fn is_true(b: &bool) -> bool {
     *b
 }
 
-/// Admission key for joins: the environment (`RM_RELAY_KEY`), else the key built into this
-/// binary (release builds set `RM_RELAY_KEY` at compile time, so users need not configure it).
+/// The key this process's joins present when it is not the usual one: `Some(k)` for a relay of
+/// one's own (its key, "" none: the built-in key is never sent to another relay), `None` for the
+/// usual key below.
+static KEY_OVERRIDE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_key_override(key: Option<String>) {
+    *KEY_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = key;
+}
+
+/// Admission key for joins: a relay of one's own's ([`set_key_override`]), else the environment
+/// (`RM_RELAY_KEY`), else the key built into this binary (release builds set `RM_RELAY_KEY` at
+/// compile time, so users need not configure it).
 pub fn env_key() -> Option<String> {
+    if let Some(k) = KEY_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return Some(k).filter(|k| !k.is_empty());
+    }
     std::env::var("RM_RELAY_KEY").ok().filter(|k| !k.is_empty()).or_else(|| option_env!("RM_RELAY_KEY").filter(|k| !k.is_empty()).map(String::from))
 }
 

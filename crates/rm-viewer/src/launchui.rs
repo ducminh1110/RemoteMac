@@ -196,6 +196,14 @@ impl View {
         &self.tiles
     }
 
+    /// Where app `id`'s icon and name are (client px), while its tile is shown and not scrolled
+    /// out of sight: the guided tour points at it.
+    pub fn tile_rect(&self, id: &str) -> Option<(f32, f32, f32, f32)> {
+        let k = self.shown.iter().position(|&i| self.tiles.get(i).is_some_and(|t| t.id == id))?;
+        let (cx, cy, cw, ch) = self.grid().cell(k, self.scroll.value());
+        (cy >= self.tb() && cy + ch <= self.h as f32).then_some((cx, cy, cw, ch))
+    }
+
     pub fn set_apps(&mut self, apps: &[(String, String, bool)]) {
         let open: Vec<String> = self.tiles.iter().filter(|t| t.open).map(|t| t.id.clone()).collect();
         let first = self.tiles.is_empty() && !apps.is_empty();

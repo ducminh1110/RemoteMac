@@ -382,3 +382,14 @@ pub fn log_to_file(path: &std::path::Path) {
         }
     }
 }
+
+/// Wait until process `pid` has ended (at most `limit`).
+pub fn wait_for_process(pid: u32, limit: std::time::Duration) {
+    use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+    unsafe {
+        if let Ok(h) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            let _ = WaitForSingleObject(h, limit.as_millis() as u32);
+            let _ = windows::Win32::Foundation::CloseHandle(h);
+        }
+    }
+}
