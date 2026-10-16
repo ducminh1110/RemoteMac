@@ -191,7 +191,8 @@ impl Provider for Mock {
             if let Some((r, _)) = &m.provisioning {
                 return Ok(r.clone());
             }
-            let r = format!("prov-{key}");
+            // unique per Mac: two Macs provisioned under one key must never share a reference
+            let r = format!("prov-{external_id}-{key}");
             m.provisioning = Some((r.clone(), Instant::now() + delay));
             m.r.state = ResourceState::Provisioning;
             Ok(r)

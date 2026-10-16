@@ -289,7 +289,10 @@ fn common(state: &AppState, router: Router<AppState>, audience: Audience) -> Rou
         .route("/readyz", get(readyz))
         .route("/api/{*rest}", axum::routing::any(api_not_found))
         // the design tokens both apps share
-        .nest_service("/_shared", ServeDir::new(state.config.web_dir.join("packages/design-tokens")))
+        .nest_service(
+            "/_shared",
+            ServeDir::new(state.config.web_dir.join("packages/design-tokens")),
+        )
         .layer(middleware::from_fn_with_state(state.clone(), origin_check))
         .layer(middleware::from_fn_with_state(state.clone(), observe))
         .layer(Extension(audience))
