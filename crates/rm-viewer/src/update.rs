@@ -340,9 +340,9 @@ fn download_and_run(_: &Release, _: &Installer) -> Result<(), String> {
     Err("updates install on Windows".into())
 }
 
-/// HTTPS GET with WinHTTP (the system's proxy and certificates; redirects followed).
+/// HTTPS with WinHTTP (the system's proxy and certificates; redirects followed).
 #[cfg(windows)]
-mod http {
+pub(crate) mod http {
     use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::Networking::WinHttp::*;
 
@@ -366,27 +366,59 @@ mod http {
     }
 
     /// The body of `url` (https only); `progress` gets bytes so far and in all (0: not known).
-    pub fn get(url: &str, accept: &str, mut progress: impl FnMut(u64, u64)) -> Result<Vec<u8>, String> {
-        let rest = url.strip_prefix("https://").ok_or("not an https address")?;
-        let (host, path) = rest.split_once('/').map_or((rest, "/".to_string()), |(h, p)| (h, format!("/{p}")));
+    pub fn get(url: &str, accept: &str, progress: impl FnMut(u64, u64)) -> Result<Vec<u8>, String> {
+        let (status, body) = request("GET", url, &format!("Accept: {accept}\r\n"), None, progress)?;
+        if status != 200 {
+            let host = url.split('/').nth(2).unwrap_or(url);
+            return Err(format!("{host} answered {status}"));
+        }
+        Ok(body)
+    }
+
+    /// POST a JSON body; the status and the body, whatever the status (the caller reads errors).
+    pub fn post_json(url: &str, json: &str) -> Result<(u16, Vec<u8>), String> {
+        let (status, body) = request("POST", url, "Accept: application/json\r\nContent-Type: application/json\r\n", Some(json.as_bytes()), |_, _| {})?;
+        Ok((status as u16, body))
+    }
+
+    /// `https://host[:port]/path`, or plain http to this computer only (development).
+    fn split(url: &str) -> Result<(bool, String, u16, String), String> {
+        let (secure, rest) = match (url.strip_prefix("https://"), url.strip_prefix("http://")) {
+            (Some(r), _) => (true, r),
+            (None, Some(r)) => (false, r),
+            _ => return Err("not an https address".into()),
+        };
+        let (hostport, path) = rest.split_once('/').map_or((rest, "/".to_string()), |(h, p)| (h, format!("/{p}")));
+        let (host, port) = match hostport.rsplit_once(':') {
+            Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => (h.to_string(), p.parse::<u16>().map_err(|_| "bad port")?),
+            _ => (hostport.to_string(), if secure { 443 } else { 80 }),
+        };
+        if !secure && !matches!(host.as_str(), "127.0.0.1" | "localhost" | "[::1]") {
+            return Err("only https addresses are allowed".into());
+        }
+        Ok((secure, host, port, path))
+    }
+
+    fn request(method: &str, url: &str, headers: &str, body: Option<&[u8]>, mut progress: impl FnMut(u64, u64)) -> Result<(u64, Vec<u8>), String> {
+        let (secure, host, port, path) = split(url)?;
+        let host = host.as_str();
         unsafe {
             let agent = HSTRING::from(format!("Taro/{} (Windows)", super::VERSION));
             let session = open(WinHttpOpen(&agent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PCWSTR::null(), PCWSTR::null(), 0), "WinHttpOpen")?;
             let _ = WinHttpSetTimeouts(session.0, 10_000, 10_000, 20_000, 30_000);
-            let connect = open(WinHttpConnect(session.0, &HSTRING::from(host), INTERNET_DEFAULT_HTTPS_PORT, 0), "connect")?;
-            let request = open(WinHttpOpenRequest(connect.0, &HSTRING::from("GET"), &HSTRING::from(path), PCWSTR::null(), PCWSTR::null(), std::ptr::null(), WINHTTP_FLAG_SECURE), "request")?;
-            let headers: Vec<u16> = format!("Accept: {accept}\r\n").encode_utf16().collect();
+            let connect = open(WinHttpConnect(session.0, &HSTRING::from(host), port, 0), "connect")?;
+            let flags = if secure { WINHTTP_FLAG_SECURE } else { WINHTTP_OPEN_REQUEST_FLAGS(0) };
+            let request = open(WinHttpOpenRequest(connect.0, &HSTRING::from(method), &HSTRING::from(path.as_str()), PCWSTR::null(), PCWSTR::null(), std::ptr::null(), flags), "request")?;
+            let headers: Vec<u16> = headers.encode_utf16().collect();
             WinHttpAddRequestHeaders(request.0, &headers, WINHTTP_ADDREQ_FLAG_ADD).map_err(|e| format!("headers: {e}"))?;
-            WinHttpSendRequest(request.0, None, None, 0, 0, 0).map_err(|e| format!("could not reach {host} ({})", e.message()))?;
+            let (ptr, len) = body.map_or((None, 0), |b| (Some(b.as_ptr() as *const core::ffi::c_void), b.len() as u32));
+            WinHttpSendRequest(request.0, None, ptr, len, len, 0).map_err(|e| format!("could not reach {host} ({})", e.message()))?;
             WinHttpReceiveResponse(request.0, std::ptr::null_mut()).map_err(|e| format!("no answer from {host} ({})", e.message()))?;
             let number = |info: u32| -> Option<u64> {
                 let (mut v, mut len) = (0u32, 4u32);
                 WinHttpQueryHeaders(request.0, info | WINHTTP_QUERY_FLAG_NUMBER, PCWSTR::null(), Some(&mut v as *mut u32 as *mut _), &mut len, std::ptr::null_mut()).ok().map(|_| v as u64)
             };
             let status = number(WINHTTP_QUERY_STATUS_CODE).unwrap_or(0);
-            if status != 200 {
-                return Err(format!("{host} answered {status}"));
-            }
             let total = number(WINHTTP_QUERY_CONTENT_LENGTH).unwrap_or(0);
             let mut body = Vec::with_capacity(total.min(64 << 20) as usize);
             loop {
@@ -405,7 +437,7 @@ mod http {
                 body.truncate(start + read as usize);
                 progress(body.len() as u64, total);
             }
-            Ok(body)
+            Ok((status, body))
         }
     }
 }

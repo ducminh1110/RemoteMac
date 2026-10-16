@@ -27,8 +27,42 @@ fn main() {
     let relay = get("--relay").or_else(|| std::env::var("RM_RELAY").ok().filter(|r| !r.is_empty())).or_else(|| rm_protocol::session::default_relay().map(String::from));
     // or straight to the Mac at an address (IP or host name, IPv4 or IPv6), any network
     rm_viewer::net::set_direct(get("--direct"));
+    // a taro:// link from a Taro Enterprise portal: its grant is traded once for the rented
+    // Mac's ID, relay and password, and Taro connects with them
+    #[cfg(windows)]
+    let mut relay = relay;
+    #[cfg(windows)]
+    let from_link = match get("--url") {
+        Some(url) => {
+            let quiet = has("--smoke") || has("--showcase");
+            let fail = |why: String| -> ! {
+                if !quiet {
+                    rm_viewer::native::message_box("Taro", &format!("This link could not be opened:\n\n{why}"));
+                }
+                std::process::exit(1)
+            };
+            // never spend the one-time grant while another Taro holds the session
+            if rm_viewer::launcher::running() {
+                fail("Taro is already connected to a Mac. Disconnect first (the red Disconnect button in Taro), then open the link again from the portal.".into());
+            }
+            let link = rm_viewer::enterprise::parse_link(&url).unwrap_or_else(|e| fail(e));
+            let mac = rm_viewer::enterprise::redeem(&link).unwrap_or_else(|e| fail(e));
+            eprintln!("Taro Enterprise: connecting to {} ({})", mac.name, rm_protocol::session::display_id(&mac.taro_id));
+            if let Some(r) = &mac.relay {
+                relay = Some(r.clone());
+            }
+            Some((rm_protocol::session::relay_session(&mac.taro_id), rm_protocol::session::token(&mac.taro_id, &mac.password)))
+        }
+        None => None,
+    };
+    #[cfg(not(windows))]
+    let from_link: Option<(String, String)> = None;
     // --session (legacy, token from RM_SESSION_TOKEN) | --id + --password | the connect window
     let (session, token, prompt) = match (get("--session"), get("--id"), get("--password").or_else(|| std::env::var("RM_PASSWORD").ok())) {
+        _ if from_link.is_some() => {
+            let (s, t) = from_link.clone().unwrap();
+            (s, t, false)
+        }
         (Some(s), _, _) => (s, std::env::var("RM_SESSION_TOKEN").unwrap_or_default(), false),
         (None, Some(id), Some(pw)) => match rm_protocol::session::normalize_id(&id) {
             Some(id) => (rm_protocol::session::relay_session(&id), rm_protocol::session::token(&id, &pw), false),
@@ -45,6 +79,9 @@ fn main() {
         // never die without a word
         if rm_viewer::logs_enabled() {
             rm_viewer::native::log_to_file(&rm_viewer::log_path());
+        }
+        if !has("--smoke") && !has("--showcase") {
+            rm_viewer::native::register_url_scheme();
         }
         let quiet = has("--smoke") || has("--showcase");
         // crash.log's hook first, so the record is written before the message box waits

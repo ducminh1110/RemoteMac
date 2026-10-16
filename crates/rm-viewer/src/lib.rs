@@ -9,6 +9,7 @@ pub mod connectui;
 pub mod crash;
 pub mod demo;
 pub mod dock;
+pub mod enterprise;
 pub mod field;
 pub mod ico;
 pub mod keymap;

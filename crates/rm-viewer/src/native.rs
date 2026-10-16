@@ -363,6 +363,23 @@ pub fn message_box(title: &str, text: &str) {
     }
 }
 
+/// `taro://` links (from a Taro Enterprise portal) open this Taro.exe with `--url <link>`
+/// (per user, no administrator; written again at each start so a moved Taro.exe still works).
+pub fn register_url_scheme() {
+    use windows::Win32::System::Registry::{RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ};
+    let Ok(exe) = std::env::current_exe() else { return };
+    let command = format!("\"{}\" --url \"%1\"", exe.display());
+    let set = |key: &str, name: Option<&str>, value: &str| unsafe {
+        let wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
+        let name = name.map(HSTRING::from);
+        let _ = RegSetKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(key), name.as_ref().map_or(windows::core::PCWSTR::null(), |n| windows::core::PCWSTR(n.as_ptr())), REG_SZ.0, Some(wide.as_ptr() as *const c_void), (wide.len() * 2) as u32);
+    };
+    set("Software\\Classes\\taro", None, "URL:Taro");
+    set("Software\\Classes\\taro", Some("URL Protocol"), "");
+    set("Software\\Classes\\taro\\DefaultIcon", None, &format!("\"{}\",0", exe.display()));
+    set("Software\\Classes\\taro\\shell\\open\\command", None, &command);
+}
+
 /// Ask before something that cannot be undone: true for Yes.
 pub fn confirm(owner: HWND, title: &str, text: &str) -> bool {
     unsafe { MessageBoxW(Some(owner), &HSTRING::from(text), &HSTRING::from(title), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_SETFOREGROUND) == IDYES }

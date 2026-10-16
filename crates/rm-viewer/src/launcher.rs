@@ -284,6 +284,11 @@ impl Launcher {
 }
 
 /// If another viewer is already running, hand it `app` and return true (this process should exit).
+/// Another Taro is running in this session (its launcher window exists).
+pub fn running() -> bool {
+    unsafe { FindWindowW(CLASS, PCWSTR::null()).is_ok_and(|w| !w.0.is_null()) }
+}
+
 pub fn forward_to_running_instance(app: Option<&str>) -> bool {
     unsafe {
         let Ok(existing) = FindWindowW(CLASS, PCWSTR::null()) else { return false };
