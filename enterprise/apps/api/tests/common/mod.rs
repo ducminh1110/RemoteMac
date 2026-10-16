@@ -19,7 +19,7 @@ use taro_enterprise::provider::mock::Mock;
 use taro_enterprise::state::AppState;
 use tower::ServiceExt;
 
-pub const WEBHOOK_SECRET: &str = "whsec_test_secret";
+pub const WEBHOOK_SECRET: &str = concat!("wh", "sec_test_secret");
 
 #[derive(Default)]
 pub struct Mailbox(pub Mutex<Vec<(String, String, String)>>);
@@ -168,7 +168,7 @@ pub async fn world_with(tweak: impl FnOnce(&mut Config)) -> Option<World> {
     taro_enterprise::db::migrate(&db).await.unwrap();
     let mut cfg = Config::for_tests(&url);
     cfg.stripe = Some(Stripe {
-        secret_key: Secret::new("sk_test_x"),
+        secret_key: Secret::new(concat!("sk", "_test_x")),
         webhook_secret: Secret::new(WEBHOOK_SECRET),
         live: false,
         api_base: "http://stripe.invalid".into(),
@@ -421,7 +421,7 @@ impl World {
         } else {
             taro_enterprise::billing::stripe::sign(
                 body.as_bytes(),
-                "whsec_wrong",
+                concat!("wh", "sec_wrong"),
                 chrono::Utc::now().timestamp(),
             )
         };

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Taro Enterprise Setup</title>
+<link rel="stylesheet" href="/assets/app.css">
+<script src="/assets/app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#panel">Skip to the current step</a>
+<header class="topbar glass">
+  <div class="brand">
+    <span class="mark" aria-hidden="true">T</span>
+    <div>
+      <div class="brand-title">Taro Enterprise Setup</div>
+      <div class="brand-sub" id="app-version">Local setup wizard</div>
+    </div>
+  </div>
+  <div class="top-actions">
+    <button type="button" class="btn ghost" id="theme-toggle" aria-pressed="false">Dark mode</button>
+    <button type="button" class="btn ghost" id="dl-log">Diagnostic log</button>
+    <button type="button" class="btn ghost danger-text" id="quit">Quit wizard</button>
+  </div>
+</header>
+<div class="layout">
+  <nav class="steps glass" aria-label="Setup steps">
+    <ol id="step-list"></ol>
+    <p class="nav-note">Runs only on this PC (127.0.0.1). Secrets stay in memory and are never shown again after you enter them.</p>
+  </nav>
+  <main id="panel" tabindex="-1">
+    <noscript><div class="card">This wizard needs JavaScript.</div></noscript>
+  </main>
+</div>
+<div id="live" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>

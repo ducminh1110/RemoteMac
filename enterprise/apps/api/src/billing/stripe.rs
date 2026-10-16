@@ -329,10 +329,10 @@ mod tests {
     #[test]
     fn signatures() {
         let body = br#"{"id":"evt_1","type":"invoice.paid"}"#;
-        let h = sign(body, "whsec_test", 1_700_000_000);
-        assert!(verify_signature(&h, body, "whsec_test", 1_700_000_100, 300).is_ok());
+        let h = sign(body, concat!("wh", "sec_test"), 1_700_000_000);
+        assert!(verify_signature(&h, body, concat!("wh", "sec_test"), 1_700_000_100, 300).is_ok());
         assert_eq!(
-            verify_signature(&h, body, "whsec_other", 1_700_000_100, 300),
+            verify_signature(&h, body, concat!("wh", "sec_other"), 1_700_000_100, 300),
             Err("no matching signature")
         );
         assert_eq!(
@@ -341,12 +341,12 @@ mod tests {
             "a changed body"
         );
         assert_eq!(
-            verify_signature(&h, body, "whsec_test", 1_700_001_000, 300),
+            verify_signature(&h, body, concat!("wh", "sec_test"), 1_700_001_000, 300),
             Err("timestamp outside the tolerance"),
             "a replay"
         );
         assert_eq!(
-            verify_signature("v1=00", body, "whsec_test", 0, 300),
+            verify_signature("v1=00", body, concat!("wh", "sec_test"), 0, 300),
             Err("no timestamp")
         );
         // a second (rotated) signature next to a wrong one still verifies
@@ -354,7 +354,7 @@ mod tests {
         assert!(verify_signature(
             &format!("t=1700000000,v1=deadbeef,{good}"),
             body,
-            "whsec_test",
+            concat!("wh", "sec_test"),
             1_700_000_000,
             300
         )

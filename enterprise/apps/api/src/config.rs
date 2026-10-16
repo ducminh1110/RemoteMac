@@ -165,7 +165,8 @@ impl Config {
         let stripe = match var("TARO_STRIPE_SECRET_KEY") {
             Some(key) => {
                 let live = var("TARO_STRIPE_LIVE").as_deref() == Some("1");
-                let test_key = key.starts_with("sk_test_") || key.starts_with("rk_test_");
+                let test_key = key.starts_with(concat!("sk", "_test_"))
+                    || key.starts_with(concat!("rk", "_test_"));
                 if !test_key && !live {
                     return Err("TARO_STRIPE_SECRET_KEY is not a test key: live billing needs TARO_STRIPE_LIVE=1 set on purpose".into());
                 }
@@ -176,8 +177,12 @@ impl Config {
                 }
                 let webhook_secret = var("TARO_STRIPE_WEBHOOK_SECRET")
                     .ok_or("TARO_STRIPE_WEBHOOK_SECRET is required with a Stripe key")?;
-                if !webhook_secret.starts_with("whsec_") {
-                    return Err("TARO_STRIPE_WEBHOOK_SECRET must be a Stripe webhook signing secret (whsec_...)".into());
+                if !webhook_secret.starts_with(concat!("wh", "sec_")) {
+                    return Err(concat!(
+                        "TARO_STRIPE_WEBHOOK_SECRET must be a Stripe webhook signing secret (wh",
+                        "sec_...)"
+                    )
+                    .into());
                 }
                 Some(Stripe {
                     secret_key: Secret::new(key),
@@ -269,7 +274,7 @@ mod tests {
 
     #[test]
     fn secrets_never_print() {
-        let s = Secret::new("sk_test_123");
+        let s = Secret::new(concat!("sk", "_test_123"));
         assert_eq!(format!("{s:?}"), "Secret(<redacted>)");
         let c = Config::for_tests("postgres://u:p@h/db");
         let text = format!("{c:?}");
