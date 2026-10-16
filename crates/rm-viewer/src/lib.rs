@@ -24,6 +24,7 @@ pub mod menu;
 pub mod glass;
 pub mod glassmenu;
 pub mod gsdesktop;
+pub mod scenes;
 pub mod settings;
 pub mod settingsui;
 pub mod text;

@@ -1,9 +1,12 @@
 //! Live cards for Stage Manager: each parked window is captured with Windows.Graphics.Capture into
-//! a Composition drawing surface and shown, tilted in perspective, on one composition-only window.
+//! a Composition drawing surface and shown, tilted in perspective, on composition-only windows:
+//! the sidebar, and the overlay the cards fly across between the sidebar and the stage (a card
+//! moves from one to the other: one compositor holds both, as `LiveCardHost` borrows a tile).
 //! Ported from StageManagerForWindows (MIT, depoledna / Andreas Wäscher): `CaptureSession`,
 //! `D3DDeviceHolder`, `CompositorFactory`, `CompositionHost`. Where they host one HWND per card,
 //! one window holds every card's visual tree (root → content → sprite, as theirs).
 //! Everything here is on the UI thread except the frame callback, which is free-threaded.
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use windows::core::{Interface, IInspectable};
@@ -35,6 +38,8 @@ pub struct Host {
     compositor: Compositor,
     _target: DesktopWindowTarget,
     root: ContainerVisual,
+    /// the transition overlay's target and root, once attached
+    overlay: Option<(DesktopWindowTarget, ContainerVisual)>,
     gdev: CompositionGraphicsDevice,
     winrt: IDirect3DDevice,
     d3d: ID3D11Device,
@@ -70,7 +75,43 @@ impl Host {
             let target = compositor.cast::<ICompositorDesktopInterop>().ok()?.CreateDesktopWindowTarget(hwnd, false).ok()?;
             let root = compositor.CreateContainerVisual().ok()?;
             target.SetRoot(&root).ok()?;
-            Some(Host { compositor, _target: target, root, gdev, winrt, d3d, ctx })
+            Some(Host { compositor, _target: target, root, overlay: None, gdev, winrt, d3d, ctx })
+        }
+    }
+
+    /// The overlay window the cards fly over (`TransitionOverlayWindow`).
+    pub fn attach_overlay(&mut self, hwnd: HWND) -> bool {
+        unsafe {
+            let made = (|| {
+                let target = self.compositor.cast::<ICompositorDesktopInterop>().ok()?.CreateDesktopWindowTarget(hwnd, true).ok()?;
+                let root = self.compositor.CreateContainerVisual().ok()?;
+                target.SetRoot(&root).ok()?;
+                Some((target, root))
+            })();
+            self.overlay = made;
+            self.overlay.is_some()
+        }
+    }
+
+    /// A card onto the overlay, in front of what is there (it leaves the sidebar).
+    pub fn lift(&self, t: &Tile) {
+        if let Some((_, root)) = &self.overlay {
+            if let Ok(c) = self.root.Children() {
+                let _ = c.Remove(&t.root);
+            }
+            if let Ok(c) = root.Children() {
+                let _ = c.Remove(&t.root);
+                let _ = c.InsertAtTop(&t.root);
+            }
+        }
+    }
+
+    /// A card off the overlay (it goes back to the sidebar at the next `set_order`, or away).
+    pub fn drop_card(&self, t: &Tile) {
+        if let Some((_, root)) = &self.overlay {
+            if let Ok(c) = root.Children() {
+                let _ = c.Remove(&t.root);
+            }
         }
     }
 
@@ -100,6 +141,9 @@ pub struct Tile {
     pub source: (i32, i32),
     /// the hover scale (1 at rest), anchored on the card's left edge
     pub scale: f64,
+    /// a captured frame has reached the surface (it starts blank): a card stands in for its
+    /// window only once it has one
+    frame: Arc<AtomicBool>,
 }
 
 impl Tile {
@@ -126,6 +170,8 @@ impl Tile {
             let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&host.winrt, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size).ok()?;
             // the frame callback: blit the captured frame into the drawing surface
             let st = Arc::new(Mutex::new((size, size)));
+            let frame_flag = Arc::new(AtomicBool::new(false));
+            let got = frame_flag.clone();
             let (dev, ctx, sf) = (Agile(host.winrt.clone()), Agile(host.ctx.clone()), Agile(surface_interop));
             let _keep = Agile(host.d3d.clone());
             let token = pool
@@ -159,6 +205,7 @@ impl Tile {
                         let dst_tex: ID3D11Texture2D = dst_surface.cast()?;
                         let src_tex: ID3D11Texture2D = frame.Surface()?.cast::<IDirect3DDxgiInterfaceAccess>()?.GetInterface()?;
                         ctx.0.CopySubresourceRegion(&dst_tex, 0, off.x as u32, off.y as u32, 0, &src_tex, 0, None);
+                        got.store(true, Ordering::Release);
                         Ok(())
                     })();
                     let _ = sf.0.EndDraw();
@@ -169,7 +216,7 @@ impl Tile {
             let _ = session.SetIsCursorCaptureEnabled(false);
             let _ = session.SetIsBorderRequired(false); // needs consent on some builds; ignored then
             session.StartCapture().ok()?;
-            Some(Tile { root, content, sprite, clip: None, compositor: host.compositor.clone(), pool, session, item, token, source, scale: 1.0 })
+            Some(Tile { root, content, sprite, clip: None, compositor: host.compositor.clone(), pool, session, item, token, source, scale: 1.0, frame: frame_flag })
         }
     }
 
@@ -205,6 +252,15 @@ impl Tile {
 
     pub fn set_visible(&self, on: bool) {
         let _ = self.root.SetIsVisible(on);
+    }
+
+    pub fn set_opacity(&self, a: f32) {
+        let _ = self.root.SetOpacity(a.clamp(0.0, 1.0));
+    }
+
+    /// A captured frame is on the card (`CaptureSession.HasFrame`).
+    pub fn has_frame(&self) -> bool {
+        self.frame.load(Ordering::Acquire)
     }
 }
 
