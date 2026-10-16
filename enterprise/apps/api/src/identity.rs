@@ -80,7 +80,7 @@ fn set_cookie(state: &AppState, name: &str, value: &str, max_age: i64) -> Header
     .expect("cookie is ASCII")
 }
 
-/// The caller's IP: the socket's, or the first X-Forwarded-For hop behind a trusted proxy.
+/// The caller's IP: the socket's, or the last X-Forwarded-For hop behind a trusted proxy.
 pub fn client_ip(parts: &Parts, state: &AppState) -> Option<String> {
     if state.config.trusted_proxies {
         if let Some(f) = parts
@@ -88,7 +88,8 @@ pub fn client_ip(parts: &Parts, state: &AppState) -> Option<String> {
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
         {
-            return f.split(',').next().map(|s| s.trim().to_string());
+            // the hop our own proxy added (the last): earlier ones are the client's to make up
+            return f.rsplit(',').next().map(|s| s.trim().to_string());
         }
     }
     parts

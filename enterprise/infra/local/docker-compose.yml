@@ -1,0 +1,16 @@
+# Development: only Postgres. Run the API with cargo (see enterprise/README.md).
+#   docker compose -f infra/local/docker-compose.yml up -d
+#   TARO_DATABASE_URL=postgres://taro:taro@127.0.0.1:5432/taro
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: taro
+      POSTGRES_PASSWORD: taro
+      POSTGRES_DB: taro
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - db:/var/lib/postgresql/data
+volumes:
+  db:

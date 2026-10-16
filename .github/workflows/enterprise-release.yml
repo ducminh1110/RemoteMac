@@ -1,0 +1,142 @@
+name: Enterprise release
+# A Taro Enterprise release: the server (Linux x86_64, with the two web apps), its container
+# image on GHCR, and TaroEnterpriseSetup.exe. Dispatched by hand or by the Setup Wizard; the
+# release is published only after every artifact is built. In the Taro repository use a tag that
+# cannot collide with Taro's own (e.g. enterprise-0.1.0); a repository made from the template
+# can use plain versions.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag (e.g. 0.1.0, or enterprise-0.1.0 in the Taro repository)"
+        required: true
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: A tag of letters, digits, dots and dashes
+        env:
+          V: ${{ inputs.version }}
+        run: |
+          echo "$V" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,40}$' || { echo "bad version: $V"; exit 1; }
+
+  server:
+    needs: check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: enterprise
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      TARO_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+      TARO_REQUIRE_DB_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --workspace --locked
+      - run: cargo build --release --locked -p taro-enterprise
+      - name: Bundle the server with the web apps
+        env:
+          V: ${{ inputs.version }}
+        run: |
+          d=taro-enterprise-$V-linux-x86_64
+          mkdir -p $d/apps $d/packages
+          cp target/release/taro-enterprise $d/
+          cp -r apps/customer-portal apps/provider-console $d/apps/
+          cp -r packages/design-tokens $d/packages/
+          cp .env.example Dockerfile $d/
+          cp -r infra $d/
+          tar czf $d.tar.gz $d
+          sha256sum $d.tar.gz > $d.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server
+          path: |
+            enterprise/taro-enterprise-*.tar.gz
+            enterprise/taro-enterprise-*.tar.gz.sha256
+
+  image:
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and push ghcr.io/<owner>/taro-enterprise
+        env:
+          V: ${{ inputs.version }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          img=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/taro-enterprise
+          echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build -t $img:$V -f enterprise/Dockerfile enterprise
+          docker push $img:$V
+          echo "$img:$V" > image.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image
+          path: image.txt
+
+  setup-wizard:
+    needs: check
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: enterprise
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release --locked -p taro-enterprise-setup
+      - shell: pwsh
+        run: |
+          Copy-Item target/release/taro-enterprise-setup.exe TaroEnterpriseSetup.exe
+          (Get-FileHash TaroEnterpriseSetup.exe -Algorithm SHA256).Hash.ToLower() + "  TaroEnterpriseSetup.exe" | Out-File -Encoding ascii TaroEnterpriseSetup.exe.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: setup
+          path: |
+            enterprise/TaroEnterpriseSetup.exe
+            enterprise/TaroEnterpriseSetup.exe.sha256
+
+  publish:
+    needs: [server, image, setup-wizard]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ inputs.version }}
+        run: |
+          img=$(cat out/image/image.txt)
+          cat > notes.md <<EOF
+          Taro Enterprise $V.
+
+          - \`taro-enterprise-$V-linux-x86_64.tar.gz\`: the server with the Customer Portal and the Provider Console (see enterprise/docs/operations/DEPLOYMENT.md)
+          - Container image: \`$img\`
+          - \`TaroEnterpriseSetup.exe\`: the Setup Wizard for Windows (not code-signed yet)
+
+          SHA-256 checksums are attached next to each file.
+          EOF
+          sed -i 's/^          //' notes.md
+          gh release create "$V" --target "$GITHUB_SHA" --title "Taro Enterprise $V" --notes-file notes.md --prerelease \
+            out/server/* out/setup/*
+      - name: The release and its files are there
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ inputs.version }}
+        run: |
+          n=$(gh release view "$V" --json assets --jq '.assets | length')
+          echo "assets: $n"; test "$n" -ge 4
