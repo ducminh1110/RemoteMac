@@ -363,6 +363,11 @@ pub fn message_box(title: &str, text: &str) {
     }
 }
 
+/// Ask before something that cannot be undone: true for Yes.
+pub fn confirm(owner: HWND, title: &str, text: &str) -> bool {
+    unsafe { MessageBoxW(Some(owner), &HSTRING::from(text), &HSTRING::from(title), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_SETFOREGROUND) == IDYES }
+}
+
 /// Send this process's stderr (all the viewer's logging) to `path` when it has no console
 /// (the release build is a GUI app), so problems can be read afterwards.
 pub fn log_to_file(path: &std::path::Path) {

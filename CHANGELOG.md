@@ -4,6 +4,18 @@ Each version of Taro (called MacBridge until 1.2.0), newest first. Both sides sh
 same version; a newer Windows app works with an older Mac app without the features the Mac
 lacks.
 
+## 1.4.1
+
+### Added
+- A red Disconnect button in the launcher's toolbar while a Mac is connected: after a yes, the
+  session ends (the Mac closes its apps, as when Taro quits) and Taro comes back to the list of
+  Macs, to pick another one.
+
+### Fixed
+- A Mac kept without a relay of its own could not be reached from another network ("not found"):
+  the connect window now goes through the relay built into Taro (or --relay / RM_RELAY) when
+  the Mac is not on this network, with that relay's usual key.
+
 ## 1.4.0
 
 ### Added

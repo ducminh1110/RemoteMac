@@ -30,6 +30,8 @@ pub const MIN_H: f32 = 400.0;
 pub enum Act {
     Launch(String),
     Settings,
+    /// the red Disconnect button
+    Disconnect,
 }
 
 pub struct Launcher {
@@ -66,6 +68,11 @@ impl Launcher {
     pub fn set_connection(&mut self, mac: &str, state: &str, route: &str) {
         self.view.set_connection(mac, state, route);
         self.redraw();
+    }
+
+    /// The Mac's name as the toolbar shows it.
+    pub fn mac_name(&self) -> String {
+        self.view.mac.clone()
     }
 
     /// The connection's phase now (connecting again, lost…): shown when it changes.
@@ -194,6 +201,7 @@ impl Launcher {
         match act? {
             crate::launchui::Act::Launch(id) => Some(Act::Launch(id)),
             crate::launchui::Act::Settings => Some(Act::Settings),
+            crate::launchui::Act::Disconnect => Some(Act::Disconnect),
             crate::launchui::Act::Window(l) => {
                 crate::frame::press(self.hwnd, l);
                 None

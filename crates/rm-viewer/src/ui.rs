@@ -365,6 +365,9 @@ pub fn run(opts: Options) -> i32 {
         let (link, rx) = if opts.prompt {
             // ID + password window; it connects in the background and shows why an attempt failed
             let app = opts.app.clone();
+            // the relay a Mac without one of its own goes through: --relay, $RM_RELAY or the one
+            // built into this build
+            let built_in = opts.relay.clone();
             let got = crate::connect::connect_window(None, |typed, password, via, key| {
                 // the guided tour's demo Mac: a pretend Mac inside Taro, through a relay on this PC
                 if *via == crate::connect::Via::Demo {
@@ -388,19 +391,26 @@ pub fn run(opts: Options) -> i32 {
                     crate::connect::Via::Address(_) => (rm_protocol::session::DIRECT.to_string(), rm_protocol::session::direct_token(password)),
                     _ => (rm_protocol::session::relay_session(typed), rm_protocol::session::token(typed, password)),
                 };
+                // a relay of one's own, when the Mac has one ("": the built-in relay)
+                let own = match via {
+                    crate::connect::Via::Id(r) => Some(r.trim()).filter(|r| !r.is_empty()),
+                    _ => None,
+                };
                 let relay = match via {
                     crate::connect::Via::Address(a) => {
                         net::set_direct(Some(a.clone()));
                         None
                     }
-                    crate::connect::Via::Id(r) => {
+                    crate::connect::Via::Id(_) => {
                         net::set_direct(None);
-                        Some(r.as_str()).filter(|r| !r.trim().is_empty())
+                        // found on this network first, else through its relay or the built-in one
+                        own.or(built_in.as_deref())
                     }
                     crate::connect::Via::Demo => None,
                 };
-                // a relay of one's own gets its own key (none: nothing), never the built-in one
-                rm_relay::set_key_override(relay.map(|_| key.trim().to_string()));
+                // a relay of one's own gets its own key (none: nothing), never the built-in one;
+                // the built-in relay its usual key
+                rm_relay::set_key_override(own.map(|_| key.trim().to_string()));
                 net::connect_with(relay, &session, &token, app.as_deref(), false, wake)
                     .map(|x| {
                         remember_session(relay, &session, &token);
@@ -745,11 +755,24 @@ fn tour_probe() -> Option<crate::tour::SessionProbe> {
 
 /// The guided tour leaves the demo Mac: Taro starts again from its first window, the way it was
 /// started (the new one waits for this one to be gone), and this one ends with the demo.
+/// The launcher's red Disconnect: after a yes, the session ends (the Mac closes its apps, as when
+/// Taro quits) and Taro starts again at the list of Macs.
+fn disconnect(owner: HWND) {
+    let mac = with_app(|a| a.launcher.as_ref().map(|l| l.mac_name())).flatten().unwrap_or_else(|| "this Mac".into());
+    if !native::confirm(owner, "Disconnect", &format!("Disconnect from {mac}?\n\nIts apps open on this PC close.")) {
+        return;
+    }
+    back_to_start();
+}
+
 fn back_to_start() {
     if let Ok(exe) = std::env::current_exe() {
         let mut args: Vec<String> = std::env::args().skip(1).collect();
-        if let Some(i) = args.iter().position(|a| a == "--wait-pid") {
-            args.drain(i..(i + 2).min(args.len()));
+        // not straight back to the same Mac: the list of Macs, as at the start
+        for flag in ["--wait-pid", "--id", "--password", "--session", "--app"] {
+            if let Some(i) = args.iter().position(|a| a == flag) {
+                args.drain(i..(i + 2).min(args.len()));
+            }
         }
         let _ = std::process::Command::new(exe).args(args).arg("--wait-pid").arg(std::process::id().to_string()).spawn();
     }
@@ -954,6 +977,7 @@ fn launcher_act(hwnd: HWND, act: Option<launcher::Act>) {
     match act {
         Some(launcher::Act::Launch(app)) => launch_app(&app),
         Some(launcher::Act::Settings) => open_settings(Some(hwnd)),
+        Some(launcher::Act::Disconnect) => disconnect(hwnd),
         None => {}
     }
 }
