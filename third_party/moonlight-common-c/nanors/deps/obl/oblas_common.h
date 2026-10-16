@@ -45,33 +45,51 @@ static inline int __builtin_ctz(unsigned int x)
 }
 
 #if defined(OBLAS_ARCH_X86)
+/* The extended register state the OS has enabled (XCR0), or 0 when it manages none (no OSXSAVE).
+ * CPUID alone says what the processor can do, not what the OS (or the hypervisor) lets a program
+ * use: a guest can advertise AVX-512 with XCR0 = 0x7, and the first zmm instruction then faults
+ * with an illegal instruction. */
+static inline unsigned long long oblas_xcr0(void)
+{
+    int info[4] = {0};
+    __cpuid(info, 1);
+    if (!(info[2] & (1 << 27)))
+        return 0;
+    return _xgetbv(0);
+}
+
+/* MSVC has no __builtin_cpu_supports: this one answers for the features oblas_lite.c asks about,
+ * with the OS state checked as GCC and Clang do. "avx512f" stands for every AVX-512 subset the
+ * kernels are built for (F, BW, DQ, VL). */
 static inline int __builtin_cpu_supports(const char *feature)
 {
-    int cpuInfo[4] = {0};
-    __cpuid(cpuInfo, 0);
-    int max_leaf = cpuInfo[0];
-
-    if (strcmp(feature, "ssse3") == 0) {
-        if (max_leaf >= 1) {
-            __cpuid(cpuInfo, 1);
-            return (cpuInfo[2] & (1 << 9)) != 0;
-        }
-    } else if (strcmp(feature, "avx2") == 0) {
-        if (max_leaf >= 7) {
-            __cpuidex(cpuInfo, 7, 0);
-            return (cpuInfo[1] & (1 << 5)) != 0;
-        }
-    } else if (strcmp(feature, "avx512f") == 0) {
-        if (max_leaf >= 7) {
-            __cpuidex(cpuInfo, 7, 0);
-            return (cpuInfo[1] & (1 << 16)) != 0;
-        }
-    } else if (strcmp(feature, "gfni") == 0) {
-        if (max_leaf >= 7) {
-            __cpuidex(cpuInfo, 7, 0);
-            return (cpuInfo[2] & (1 << 8)) != 0;
-        }
+    int info[4] = {0};
+    unsigned ecx1 = 0, ebx7 = 0, ecx7 = 0;
+    __cpuid(info, 0);
+    int max_leaf = info[0];
+    if (max_leaf >= 1) {
+        __cpuid(info, 1);
+        ecx1 = (unsigned)info[2];
     }
+    if (max_leaf >= 7) {
+        __cpuidex(info, 7, 0);
+        ebx7 = (unsigned)info[1];
+        ecx7 = (unsigned)info[2];
+    }
+    unsigned long long xcr0 = oblas_xcr0();
+    /* AVX and the XMM|YMM state */
+    int ymm = (ecx1 & (1u << 28)) && (xcr0 & 0x6) == 0x6;
+    /* and the opmask, ZMM_Hi256 and Hi16_ZMM state */
+    int zmm = ymm && (xcr0 & 0xE6) == 0xE6;
+
+    if (strcmp(feature, "ssse3") == 0)
+        return (ecx1 & (1u << 9)) != 0;
+    if (strcmp(feature, "avx2") == 0)
+        return ymm && (ebx7 & (1u << 5)) != 0;
+    if (strcmp(feature, "avx512f") == 0)
+        return zmm && (ebx7 & (1u << 16)) && (ebx7 & (1u << 17)) && (ebx7 & (1u << 30)) && (ebx7 & (1u << 31));
+    if (strcmp(feature, "gfni") == 0)
+        return (ecx7 & (1u << 8)) != 0;
     return 0;
 }
 #endif /* OBLAS_ARCH_X86 */

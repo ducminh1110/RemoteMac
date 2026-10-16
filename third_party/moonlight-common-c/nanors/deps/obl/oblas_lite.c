@@ -450,13 +450,21 @@ void oblas_get_impl(struct oblas_impl *impl)
     impl->align_size = sizeof(void *);
 
 #if defined(OBLAS_ARCH_X86)
-    if (__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("gfni")) {
+    /* The AVX-512 kernels are built for F, BW, DQ and VL: all four must be there (on MSVC the
+     * shim in oblas_common.h answers for all of them under "avx512f"). */
+#if defined(_MSC_VER) && !defined(__clang__)
+    const int avx512 = __builtin_cpu_supports("avx512f");
+#else
+    const int avx512 = __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw") &&
+                       __builtin_cpu_supports("avx512dq") && __builtin_cpu_supports("avx512vl");
+#endif
+    if (avx512 && __builtin_cpu_supports("gfni")) {
         impl->axpy = obl_axpy_avx512_gfni;
         impl->scal = obl_scal_avx512_gfni;
         impl->axiy = obl_axiy_avx512_gfni;
         impl->axpyb32 = obl_axpyb32_avx512;
         impl->align_size = 64;
-    } else if (__builtin_cpu_supports("avx512f")) {
+    } else if (avx512) {
         impl->axpy = obl_axpy_avx512_std;
         impl->scal = obl_scal_avx512_std;
         impl->axiy = obl_axiy_avx512_std;
