@@ -99,7 +99,8 @@ pub struct Config {
     pub provider: String,
     /// the first platform administrator (granted at start, if that user exists or signs in)
     pub bootstrap_admin_email: Option<String>,
-    /// where the two web apps' files are
+    /// the enterprise/ directory: the web apps are in apps/customer-portal and
+    /// apps/provider-console, the shared design tokens in packages/design-tokens
     pub web_dir: std::path::PathBuf,
     /// hostnames the customer listener answers for besides the public URL's (verified custom
     /// domains are added from the database)
@@ -226,7 +227,7 @@ impl Config {
             bootstrap_admin_email: var("TARO_BOOTSTRAP_ADMIN_EMAIL").map(|e| e.to_lowercase()),
             web_dir: var("TARO_WEB_DIR")
                 .map(Into::into)
-                .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/..").into()),
+                .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/../..").into()),
             trusted_proxies: var("TARO_TRUSTED_PROXY").as_deref() == Some("1"),
         })
     }
@@ -256,7 +257,7 @@ impl Config {
             stripe: None,
             provider: "mock".into(),
             bootstrap_admin_email: None,
-            web_dir: concat!(env!("CARGO_MANIFEST_DIR"), "/..").into(),
+            web_dir: concat!(env!("CARGO_MANIFEST_DIR"), "/../..").into(),
             trusted_proxies: false,
         }
     }

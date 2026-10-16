@@ -278,7 +278,7 @@ async fn metrics(
 }
 
 fn web(state: &AppState, app: &str) -> ServeDir<ServeFile> {
-    let dir = state.config.web_dir.join(app);
+    let dir = state.config.web_dir.join("apps").join(app);
     // an SPA: unknown paths are the app's index (its router shows the page or a not-found)
     ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")))
 }
@@ -288,6 +288,8 @@ fn common(state: &AppState, router: Router<AppState>, audience: Audience) -> Rou
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/api/{*rest}", axum::routing::any(api_not_found))
+        // the design tokens both apps share
+        .nest_service("/_shared", ServeDir::new(state.config.web_dir.join("packages/design-tokens")))
         .layer(middleware::from_fn_with_state(state.clone(), origin_check))
         .layer(middleware::from_fn_with_state(state.clone(), observe))
         .layer(Extension(audience))

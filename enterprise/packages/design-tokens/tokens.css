@@ -1,0 +1,139 @@
+/* Taro Enterprise design tokens, shared by the Customer Portal and the Provider Console.
+   Liquid Glass-inspired: light by default, translucent surfaces used sparingly (chrome and
+   cards), solid high-contrast surfaces for tables, forms and dialogs. The accent comes from
+   branding (set at run time on :root as --accent). */
+
+:root {
+  color-scheme: light;
+  --accent: #6d5ae6;
+  --accent-ink: #ffffff;
+  --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
+  --accent-strong: color-mix(in srgb, var(--accent) 82%, #000);
+
+  --bg: #f4f5f9;
+  --bg-tint: radial-gradient(1200px 600px at 10% -10%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 60%),
+             radial-gradient(900px 500px at 110% 10%, rgba(80, 160, 255, 0.10), transparent 60%);
+  --surface: #ffffff;
+  --surface-2: #f7f7fa;
+  --glass: rgba(255, 255, 255, 0.66);
+  --glass-strong: rgba(255, 255, 255, 0.86);
+  --glass-border: rgba(255, 255, 255, 0.7);
+  --glass-blur: saturate(180%) blur(22px);
+  --hairline: rgba(15, 18, 34, 0.09);
+  --hairline-strong: rgba(15, 18, 34, 0.16);
+
+  --text: #15171f;
+  --text-2: #4a4f5e;
+  --text-3: #6b7080;
+  --link: var(--accent-strong);
+
+  --ok: #1f8a4c;
+  --ok-soft: #e3f4ea;
+  --warn: #9a6200;
+  --warn-soft: #fff3d6;
+  --bad: #c4291d;
+  --bad-soft: #fde7e5;
+  --info: #1a5fb4;
+  --info-soft: #e4eefb;
+
+  --radius-s: 8px;
+  --radius: 12px;
+  --radius-l: 18px;
+  --radius-xl: 24px;
+  --shadow-1: 0 1px 2px rgba(16, 20, 40, 0.06), 0 1px 1px rgba(16, 20, 40, 0.04);
+  --shadow-2: 0 8px 24px rgba(16, 20, 40, 0.08), 0 2px 6px rgba(16, 20, 40, 0.05);
+  --shadow-3: 0 24px 64px rgba(16, 20, 40, 0.16), 0 6px 18px rgba(16, 20, 40, 0.08);
+  --focus: 0 0 0 3px color-mix(in srgb, var(--accent) 38%, transparent);
+
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI Variable Display", "Segoe UI", Inter, Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --row: 44px;
+
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.32, 0.64, 1);
+  --dur-1: 120ms;
+  --dur-2: 220ms;
+  --dur-3: 360ms;
+}
+
+:root[data-density="compact"] {
+  --row: 36px;
+  --space-4: 12px;
+  --space-5: 18px;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0e0f14;
+  --bg-tint: radial-gradient(1200px 600px at 10% -10%, color-mix(in srgb, var(--accent) 22%, transparent), transparent 60%),
+             radial-gradient(900px 500px at 110% 10%, rgba(80, 160, 255, 0.10), transparent 60%);
+  --surface: #17181f;
+  --surface-2: #1d1f27;
+  --glass: rgba(28, 30, 38, 0.62);
+  --glass-strong: rgba(28, 30, 38, 0.86);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --hairline: rgba(255, 255, 255, 0.08);
+  --hairline-strong: rgba(255, 255, 255, 0.16);
+  --text: #f2f3f7;
+  --text-2: #b9bdc9;
+  --text-3: #8d92a1;
+  --link: color-mix(in srgb, var(--accent) 70%, #fff);
+  --ok: #4cc77d;
+  --ok-soft: rgba(76, 199, 125, 0.14);
+  --warn: #f0b440;
+  --warn-soft: rgba(240, 180, 64, 0.14);
+  --bad: #ff6b5e;
+  --bad-soft: rgba(255, 107, 94, 0.14);
+  --info: #6ea8ff;
+  --info-soft: rgba(110, 168, 255, 0.14);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --shadow-3: 0 24px 64px rgba(0, 0, 0, 0.55);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    color-scheme: dark;
+    --bg: #0e0f14;
+    --surface: #17181f;
+    --surface-2: #1d1f27;
+    --glass: rgba(28, 30, 38, 0.62);
+    --glass-strong: rgba(28, 30, 38, 0.86);
+    --glass-border: rgba(255, 255, 255, 0.08);
+    --hairline: rgba(255, 255, 255, 0.08);
+    --hairline-strong: rgba(255, 255, 255, 0.16);
+    --text: #f2f3f7;
+    --text-2: #b9bdc9;
+    --text-3: #8d92a1;
+    --link: color-mix(in srgb, var(--accent) 70%, #fff);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-1: 0ms;
+    --dur-2: 0ms;
+    --dur-3: 0ms;
+  }
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Where the browser has no backdrop-filter, glass becomes a solid surface (readable first). */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root {
+    --glass: var(--surface);
+    --glass-strong: var(--surface);
+  }
+}
