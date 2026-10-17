@@ -64,10 +64,17 @@ pub fn run(url: &str, on_ready: impl FnOnce(Shell)) -> Result<(), String> {
         u.origin().ascii_serialization()
     };
     let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    // 1360x880, or less on a small screen (at most 92% x 88% of the primary monitor)
+    let (mut w, mut h) = (1360.0f64, 880.0f64);
+    if let Some(m) = event_loop.primary_monitor() {
+        let size = m.size().to_logical::<f64>(m.scale_factor());
+        w = w.min(size.width * 0.92).max(800.0);
+        h = h.min(size.height * 0.88).max(560.0);
+    }
     let window = WindowBuilder::new()
         .with_title("Taro Enterprise Setup")
-        .with_inner_size(LogicalSize::new(1360.0, 880.0))
-        .with_min_inner_size(LogicalSize::new(960.0, 640.0))
+        .with_inner_size(LogicalSize::new(w, h))
+        .with_min_inner_size(LogicalSize::new(800.0, 560.0))
         .with_window_icon(icon())
         .build(&event_loop)
         .map_err(|e| format!("could not open the window: {e}"))?;
