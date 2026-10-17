@@ -1,26 +1,170 @@
 name: Enterprise release
-# A Taro Enterprise release: the server (Linux x86_64, with the two web apps), its container
-# image on GHCR, and TaroEnterpriseSetup.exe. Dispatched by hand or by the Setup Wizard; the
-# release is published only after every artifact is built. In the Taro repository use a tag that
-# cannot collide with Taro's own (e.g. enterprise-0.1.0); a repository made from the template
-# can use plain versions.
+# A Taro Enterprise release, tag enterprise-v<version> (a pre-release, never "latest": Taro's own
+# updater follows the latest Taro release and must never see these).
+#
+#   taro-relay-<v>-linux-x86_64.tar.gz / -aarch64   the relay package (Wizard 2 inside); the
+#                                                     package builder adds the provider folder
+#   enterprise-update.zip                            signed partial update of the relay's
+#                                                     shared core, for existing installations
+#   enterprise-core-files.json                       this release's core (the next update's base)
+#   taro-enterprise-components.json (+ .sig)         signed list of the exact files a provider
+#                                                     package is built from (clients from the
+#                                                     pinned Taro release, the relay above)
+#   TaroEnterpriseSetup.exe                          Wizard 1, the package builder (Windows)
+#   taro-enterprise-<v>-server-linux-x86_64.tar.gz   the control plane (portal/console API) and
+#   ghcr.io/<owner>/taro-enterprise:<v>              its container image
+#   taro-enterprise-<v>-full.tar.gz                  the full installation bundle (all of it)
+#   SHA256SUMS
+#
+# Signing needs the TARO_ENTERPRISE_SIGNING_KEY secret (its public half is in
+# enterprise/keys/release-signing.pub). Nothing is published unless every artifact was built.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release tag (e.g. 0.1.0, or enterprise-0.1.0 in the Taro repository)"
+        description: "Enterprise version (e.g. 0.1.0; must equal enterprise/Cargo.toml's)"
         required: true
+      taro_version:
+        description: "The Taro release whose Windows and Mac clients providers get (default: Cargo.toml's)"
+        required: false
+        default: ""
 permissions:
   contents: read
 jobs:
   check:
     runs-on: ubuntu-latest
+    outputs:
+      taro: ${{ steps.v.outputs.taro }}
     steps:
-      - name: A tag of letters, digits, dots and dashes
+      - uses: actions/checkout@v4
+      - id: v
+        name: Versions
         env:
           V: ${{ inputs.version }}
+          T: ${{ inputs.taro_version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "$V" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,40}$' || { echo "bad version: $V"; exit 1; }
+          set -euo pipefail
+          echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || { echo "bad version: $V"; exit 1; }
+          have=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' enterprise/Cargo.toml)
+          [ "$have" = "$V" ] || { echo "enterprise/Cargo.toml says $have, not $V"; exit 1; }
+          [ -z "$T" ] && T=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          for f in Taro-windows.zip Taro-macos.tar.gz; do
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$T" --jq ".assets[] | select(.name == \"$f\") | .name" | grep -qx "$f" || { echo "Taro $T has no $f"; exit 1; }
+          done
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/enterprise-v$V" >/dev/null 2>&1; then echo "enterprise-v$V exists already"; exit 1; fi
+          echo "taro=$T" >> "$GITHUB_OUTPUT"
+      - name: The signing key is there
+        env:
+          K: ${{ secrets.TARO_ENTERPRISE_SIGNING_KEY }}
+        run: |
+          [ -n "$K" ] || { echo "Add the TARO_ENTERPRISE_SIGNING_KEY secret (Settings > Secrets and variables > Actions): enterprise releases are signed with it."; exit 1; }
+
+  relay:
+    needs: check
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: enterprise
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static taro-relay (musl)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+          rustup target add ${{ matrix.arch }}-unknown-linux-musl
+          cargo build --release --locked -p taro-relay --target ${{ matrix.arch }}-unknown-linux-musl
+          B=target/${{ matrix.arch }}-unknown-linux-musl/release/taro-relay
+          file $B
+          $B version
+      - name: Package, and test the package (install, refuse a second install, recover)
+        env:
+          SOURCE_DATE_EPOCH: "0"
+        run: |
+          set -euo pipefail
+          B=target/${{ matrix.arch }}-unknown-linux-musl/release/taro-relay
+          scripts/package-relay.sh "${{ inputs.version }}" ${{ matrix.arch }} $B dist
+          scripts/test-relay-package.sh $B
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relay-${{ matrix.arch }}
+          path: enterprise/dist/taro-relay-*.tar.gz
+
+  update:
+    needs: [check, relay]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: enterprise
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: relay-*
+          path: enterprise/pkgs
+          merge-multiple: true
+      - run: cargo build --release --locked -p taro-update
+      - name: The previous release's core (the base of this update)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          prev=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '[.[] | select(.tag_name | startswith("enterprise-v")) | select(.draft | not) | select([.assets[].name] | index("enterprise-core-files.json"))][0].tag_name // empty')
+          if [ -n "$prev" ]; then
+            gh release download "$prev" --repo "$GITHUB_REPOSITORY" -p enterprise-core-files.json -D base
+            echo "base: $prev"
+          else
+            echo "no earlier Enterprise release: this update carries the whole core (fresh installs use the package)"
+          fi
+      - name: enterprise-update.zip
+        env:
+          TARO_ENTERPRISE_SIGNING_KEY: ${{ secrets.TARO_ENTERPRISE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          base=(); [ -f base/enterprise-core-files.json ] && base=(--base base/enterprise-core-files.json)
+          scripts/build-enterprise-update.sh "${{ inputs.version }}" out pkgs/taro-relay-*.tar.gz "${base[@]}"
+          # it verifies with the official public key built into the updater
+          target/release/taro-update inspect out/enterprise-update.zip | head -20
+      - name: Components manifest (signed)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARO_ENTERPRISE_SIGNING_KEY: ${{ secrets.TARO_ENTERPRISE_SIGNING_KEY }}
+          V: ${{ inputs.version }}
+          T: ${{ needs.check.outputs.taro }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$T" > taro-release.json
+          python3 - <<'PY'
+          import hashlib, json, os, glob, datetime
+          V, T, repo = os.environ["V"], os.environ["T"], os.environ["GITHUB_REPOSITORY"]
+          rel = json.load(open("taro-release.json"))
+          comps = []
+          for cid, name in [("windows-client", "Taro-windows.zip"), ("macos-client", "Taro-macos.tar.gz")]:
+              a = next(a for a in rel["assets"] if a["name"] == name)
+              d = a.get("digest") or ""
+              assert d.startswith("sha256:"), f"{name}: GitHub reports no sha256"
+              comps.append({"id": cid, "version": T, "file": name, "url": a["browser_download_url"], "sha256": d[7:], "size": a["size"]})
+          for p in sorted(glob.glob("pkgs/taro-relay-*.tar.gz")):
+              arch = p.rsplit("-", 1)[1].split(".")[0]
+              b = open(p, "rb").read()
+              n = os.path.basename(p)
+              comps.append({"id": f"linux-relay-{arch}", "version": V, "file": n, "url": f"https://github.com/{repo}/releases/download/enterprise-v{V}/{n}", "sha256": hashlib.sha256(b).hexdigest(), "size": len(b)})
+          m = {"schema": "taro.components/v1", "enterprise_version": V, "taro_version": T,
+               "released_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "components": comps}
+          json.dump(m, open("out/taro-enterprise-components.json", "w"), indent=2)
+          PY
+          target/release/taro-update sign out/taro-enterprise-components.json
+          target/release/taro-update verify out/taro-enterprise-components.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: update
+          path: enterprise/out/*
 
   server:
     needs: check
@@ -42,25 +186,23 @@ jobs:
       - uses: actions/checkout@v4
       - run: cargo test --workspace --locked
       - run: cargo build --release --locked -p taro-enterprise
-      - name: Bundle the server with the web apps
+      - name: The control plane bundle
         env:
           V: ${{ inputs.version }}
         run: |
-          d=taro-enterprise-$V-linux-x86_64
+          set -euo pipefail
+          d=taro-enterprise-$V-server-linux-x86_64
           mkdir -p $d/apps $d/packages
           cp target/release/taro-enterprise $d/
-          cp -r apps/customer-portal apps/provider-console $d/apps/
+          for a in customer-portal provider-console; do [ -d apps/$a ] && cp -r apps/$a $d/apps/; done
           cp -r packages/design-tokens $d/packages/
           cp .env.example Dockerfile $d/
           cp -r infra $d/
           tar czf $d.tar.gz $d
-          sha256sum $d.tar.gz > $d.tar.gz.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: server
-          path: |
-            enterprise/taro-enterprise-*.tar.gz
-            enterprise/taro-enterprise-*.tar.gz.sha256
+          path: enterprise/taro-enterprise-*-server-*.tar.gz
 
   image:
     needs: check
@@ -95,18 +237,14 @@ jobs:
       - uses: actions/checkout@v4
       - run: cargo build --release --locked -p taro-enterprise-setup
       - shell: pwsh
-        run: |
-          Copy-Item target/release/taro-enterprise-setup.exe TaroEnterpriseSetup.exe
-          (Get-FileHash TaroEnterpriseSetup.exe -Algorithm SHA256).Hash.ToLower() + "  TaroEnterpriseSetup.exe" | Out-File -Encoding ascii TaroEnterpriseSetup.exe.sha256
+        run: Copy-Item target/release/taro-enterprise-setup.exe TaroEnterpriseSetup.exe
       - uses: actions/upload-artifact@v4
         with:
           name: setup
-          path: |
-            enterprise/TaroEnterpriseSetup.exe
-            enterprise/TaroEnterpriseSetup.exe.sha256
+          path: enterprise/TaroEnterpriseSetup.exe
 
   publish:
-    needs: [server, image, setup-wizard]
+    needs: [check, update, server, image, setup-wizard]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -114,29 +252,69 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          path: out
-      - name: Publish the release
+          path: art
+      - name: The full installation bundle and the checksums
+        env:
+          V: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p rel
+          cp art/relay-*/taro-relay-*.tar.gz art/update/* art/server/*.tar.gz art/setup/TaroEnterpriseSetup.exe rel/
+          b=taro-enterprise-$V-full
+          mkdir -p $b
+          cp rel/taro-relay-*.tar.gz rel/taro-enterprise-*-server-*.tar.gz rel/TaroEnterpriseSetup.exe rel/taro-enterprise-components.json* $b/
+          cat > $b/README.md <<EOF
+          # Taro Enterprise $V: full installation bundle
+
+          For fresh installations and recovery. Routine upgrades of a running relay use
+          \`enterprise-update.zip\` (\`sudo taro-relay update apply --latest --yes\`), which keeps the
+          provider folder, the settings and the data.
+
+          - \`TaroEnterpriseSetup.exe\`: the package builder (Windows): builds your branded Windows and
+            Mac clients and your relay package from the files listed in taro-enterprise-components.json.
+          - \`taro-relay-$V-linux-*.tar.gz\`: the generic relay packages (the builder adds your provider folder).
+          - \`taro-enterprise-$V-server-linux-x86_64.tar.gz\`: the control plane (optional).
+          EOF
+          sed -i 's/^          //' $b/README.md
+          tar czf rel/$b.tar.gz $b
+          (cd rel && sha256sum * > SHA256SUMS)
+          cat rel/SHA256SUMS
+      - name: Publish (a pre-release, never latest)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           V: ${{ inputs.version }}
+          T: ${{ needs.check.outputs.taro }}
         run: |
-          img=$(cat out/image/image.txt)
+          set -euo pipefail
+          img=$(cat art/image/image.txt)
           cat > notes.md <<EOF
-          Taro Enterprise $V.
+          Taro Enterprise $V, with the Taro $T clients.
 
-          - \`taro-enterprise-$V-linux-x86_64.tar.gz\`: the server with the Customer Portal and the Provider Console (see enterprise/docs/operations/DEPLOYMENT.md)
-          - Container image: \`$img\`
-          - \`TaroEnterpriseSetup.exe\`: the Setup Wizard for Windows (not code-signed yet)
+          | File | For |
+          |---|---|
+          | \`TaroEnterpriseSetup.exe\` | Wizard 1, the package builder (Windows): your branded Windows and Mac clients and relay package |
+          | \`taro-relay-$V-linux-x86_64.tar.gz\`, \`-aarch64\` | the relay package; \`sudo ./install.sh\` installs it and starts Wizard 2 |
+          | \`enterprise-update.zip\` | the update of existing relays' shared core (signed; keeps branding, settings, data) |
+          | \`taro-enterprise-components.json\` (+ \`.sig\`) | the signed list of files provider packages are built from |
+          | \`enterprise-core-files.json\` | this release's core files (the next update's base) |
+          | \`taro-enterprise-$V-server-linux-x86_64.tar.gz\`, \`$img\` | the control plane (optional) |
+          | \`taro-enterprise-$V-full.tar.gz\` | the full installation bundle |
 
-          SHA-256 checksums are attached next to each file.
+          TaroEnterpriseSetup.exe is not code-signed yet. Checksums: SHA256SUMS.
           EOF
           sed -i 's/^          //' notes.md
-          gh release create "$V" --target "$GITHUB_SHA" --title "Taro Enterprise $V" --notes-file notes.md --prerelease \
-            out/server/* out/setup/*
-      - name: The release and its files are there
+          gh release create "enterprise-v$V" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Taro Enterprise $V" --notes-file notes.md --prerelease --latest=false rel/*
+      - name: The release, its update package, and Taro's latest are as they should be
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           V: ${{ inputs.version }}
         run: |
-          n=$(gh release view "$V" --json assets --jq '.assets | length')
-          echo "assets: $n"; test "$n" -ge 4
+          set -euo pipefail
+          names=$(gh release view "enterprise-v$V" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          echo "$names"
+          for f in enterprise-update.zip enterprise-core-files.json taro-enterprise-components.json taro-enterprise-components.json.sig TaroEnterpriseSetup.exe SHA256SUMS "taro-enterprise-$V-full.tar.gz" "taro-relay-$V-linux-x86_64.tar.gz" "taro-relay-$V-linux-aarch64.tar.gz"; do
+            echo "$names" | grep -qx "$f" || { echo "missing $f"; exit 1; }
+          done
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          case "$latest" in enterprise-*) echo "an Enterprise release became latest: $latest"; exit 1 ;; esac
+          echo "Taro's latest stays $latest"

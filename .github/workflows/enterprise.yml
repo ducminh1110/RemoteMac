@@ -3,9 +3,9 @@ name: Enterprise
 # scripts, dependency and secret scanning, the container image and TaroEnterpriseSetup.exe.
 on:
   push:
-    paths: ["enterprise/**", ".github/workflows/enterprise.yml"]
+    paths: ["enterprise/**", "crates/rm-relay/**", "crates/rm-brand/**", ".github/workflows/enterprise.yml", ".github/workflows/enterprise-release.yml"]
   pull_request:
-    paths: ["enterprise/**", ".github/workflows/enterprise.yml"]
+    paths: ["enterprise/**", "crates/rm-relay/**", "crates/rm-brand/**", ".github/workflows/enterprise.yml", ".github/workflows/enterprise-release.yml"]
 permissions:
   contents: read
 defaults:
@@ -46,6 +46,27 @@ jobs:
           TARO_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
         run: |
           if cargo run -q --locked -p taro-enterprise -- check-config; then echo "production started without TARO_SECRET_KEY/https/SMTP"; exit 1; fi
+
+  relay-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release --locked -p taro-relay -p taro-update
+      - name: The relay package installs, refuses a second install, recovers
+        run: scripts/test-relay-package.sh target/release/taro-relay
+      - name: enterprise-update.zip is built from it, signed, and holds only approved core files
+        run: |
+          set -euo pipefail
+          k=$(target/release/taro-update keygen)
+          export TARO_ENTERPRISE_SIGNING_KEY=$(echo "$k" | sed -n 's/^secret.*: //p')
+          echo "$k" | sed -n 's/^public.*: //p' > test.pub
+          v=$(target/release/taro-relay version | awk '{print $2}')
+          p=$(scripts/package-relay.sh "$v" "$(uname -m)" target/release/taro-relay pk | tail -1)
+          scripts/build-enterprise-update.sh "$v" out "$p"
+          target/release/taro-update inspect out/enterprise-update.zip --keys test.pub > inspect.txt
+          head -3 inspect.txt
+          # the official key does not accept a package signed by another
+          if target/release/taro-update inspect out/enterprise-update.zip >/dev/null 2>&1; then echo "accepted a package not signed by the release key"; exit 1; fi
 
   web:
     runs-on: ubuntu-latest

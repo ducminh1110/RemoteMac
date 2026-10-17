@@ -250,7 +250,7 @@ const views = {
       form.update_mode === "auto" ? h("div", { class: "sub-fields" },
         h("label", { class: "field", for: "f-window" }, "Maintenance window (UTC)"),
         h("input", { id: "f-window", type: "text", placeholder: "Sun 03:00-05:00", value: form.window, oninput: (e) => { form.window = e.target.value; e.target.removeAttribute("aria-invalid"); } }),
-        h("p", { class: "err" }, "Like Sun 03:00-05:00 or daily 02:00-04:00.")) : null,
+        h("p", { class: "hint" }, "Like Sun 03:00-05:00 or daily 02:00-04:00.")) : null,
       errBox,
       h("div", { class: "btns" }, h("button", { class: "b primary", type: "button", onclick: async () => { if (await saveSettings(errBox)) { await refresh(); st.settingsSaved = true; toast("Saved"); next(); } } }, "Save and continue")));
   },
