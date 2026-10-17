@@ -31,7 +31,7 @@ export async function page(ctx) {
     holder.replaceChildren(table([
       { label: "Customer", cell: (a) => h("div", {}, h("strong", {}, a.email || "–"), a.organization && a.organization !== a.email ? h("div", { class: "muted small" }, a.organization) : null) },
       { label: "Plan", cell: (a) => a.plan },
-      { label: "Status", cell: (a) => st(a.status, stateLabel(a.status)) },
+      { label: "Status", cell: (a) => [st(a.status, stateLabel(a.status)), a.status === "failed" && a.status_reason ? h("div", { class: "muted" }, a.status_reason) : null] },
       { label: "Mac", cell: (a) => a.mac_name || h("span", { class: "muted" }, "–") },
       { label: "Assigned", cell: (a) => when(a.created_at, { rel: true }), class: "nowrap" },
       manage ? { label: "Actions", class: "actions", cell: (a) => ENDED.includes(a.status) || a.status === "cancel_pending" ? null :

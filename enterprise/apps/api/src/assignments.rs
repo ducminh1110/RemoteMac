@@ -29,6 +29,8 @@ struct Row {
     organization: String,
     plan: String,
     status: String,
+    /// why it failed or ended (provisioning's or the operator's words)
+    status_reason: Option<String>,
     mac_name: Option<String>,
     created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -104,7 +106,7 @@ async fn list(
 ) -> ApiResult<Json<serde_json::Value>> {
     by(&state, &mut parts, P::OpsOrgsRead).await?;
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT r.id AS rental_id, u.email, o.name AS organization, p.name AS plan, r.status, m.display_name AS mac_name, r.created_at
+        "SELECT r.id AS rental_id, u.email, o.name AS organization, p.name AS plan, r.status, r.status_reason, CASE WHEN r.status IN ('cancelled', 'expired', 'failed') THEN NULL ELSE m.display_name END AS mac_name, r.created_at
            FROM rentals r JOIN organizations o ON o.id = r.organization_id JOIN mac_plans p ON p.id = r.plan_id
            LEFT JOIN LATERAL (SELECT user_id FROM rental_assignments WHERE rental_id = r.id AND revoked_at IS NULL ORDER BY assigned_at DESC LIMIT 1) a ON true
            LEFT JOIN users u ON u.id = a.user_id
