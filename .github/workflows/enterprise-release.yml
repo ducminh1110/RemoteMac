@@ -207,7 +207,7 @@ jobs:
           mkdir -p $d/apps $d/packages
           cp target/release/taro-enterprise $d/
           for a in customer-portal provider-console; do [ -d apps/$a ] && cp -r apps/$a $d/apps/; done
-          cp -r packages/design-tokens $d/packages/
+          cp -r packages/design-tokens packages/console $d/packages/
           cp .env.example Dockerfile $d/
           cp -r infra $d/
           tar czf $d.tar.gz $d
