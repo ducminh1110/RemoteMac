@@ -4141,6 +4141,7 @@ dependencies = [
  "lettre",
  "rand 0.8.8",
  "reqwest",
+ "rm-brand",
  "rustls",
  "serde",
  "serde_json",

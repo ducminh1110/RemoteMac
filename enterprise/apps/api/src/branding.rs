@@ -190,14 +190,37 @@ async fn public(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let c = for_host(&state, &headers).await?;
+    Ok(Json(json!({ "branding": c })))
+}
+
+/// The look for the request's hostname: a custom domain's organization, or the provider's.
+async fn for_host(state: &AppState, headers: &HeaderMap) -> ApiResult<Config> {
     let host = headers
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
         .map(|h| h.split(':').next().unwrap_or(h).to_lowercase())
         .unwrap_or_default();
     let org: Option<(Uuid,)> = sqlx::query_as("SELECT organization_id FROM domain_assignments WHERE hostname = $1 AND state = 'active' AND organization_id IS NOT NULL").bind(&host).fetch_optional(&state.db).await?;
-    let c = current(&state.db, org.map(|o| o.0)).await?;
-    Ok(Json(json!({ "branding": c })))
+    Ok(current(&state.db, org.map(|o| o.0)).await?)
+}
+
+/// `GET /brand/tokens.css`: the console's colour tokens derived (by rm-brand, as for the relay
+/// and the clients) from the published primary colour. Loaded after console.css.
+pub async fn tokens_css(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let primary = for_host(&state, &headers)
+        .await
+        .ok()
+        .and_then(|c| rm_brand::Color::parse(&c.primary_color).ok())
+        .unwrap_or(rm_brand::TARO_PRIMARY);
+    (
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        rm_brand::Tokens::derive(primary).css(),
+    )
+        .into_response()
 }
 
 async fn versions(state: &AppState, org: Option<Uuid>) -> ApiResult<Json<serde_json::Value>> {

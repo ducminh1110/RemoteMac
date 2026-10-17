@@ -7,7 +7,7 @@ COPY . .
 WORKDIR /src/enterprise
 RUN cargo build --release --locked -p taro-enterprise
 # the web apps that exist in this checkout (each is optional)
-RUN mkdir -p /web/apps /web/packages && cp -r packages/design-tokens /web/packages/ \
+RUN mkdir -p /web/apps /web/packages && cp -r packages/design-tokens packages/console /web/packages/ \
     && for d in customer-portal provider-console; do if [ -d apps/$d ]; then cp -r apps/$d /web/apps/; fi; done
 
 FROM debian:bookworm-slim

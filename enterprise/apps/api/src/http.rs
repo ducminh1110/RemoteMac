@@ -293,6 +293,13 @@ fn common(state: &AppState, router: Router<AppState>, audience: Audience) -> Rou
             "/_shared",
             ServeDir::new(state.config.web_dir.join("packages/design-tokens")),
         )
+        // the Enterprise console look (as Wizard 1, Wizard 2 and the relay status page) and the
+        // provider's colour for it
+        .nest_service(
+            "/_console",
+            ServeDir::new(state.config.web_dir.join("packages/console")),
+        )
+        .route("/brand/tokens.css", get(crate::branding::tokens_css))
         .layer(middleware::from_fn_with_state(state.clone(), origin_check))
         .layer(middleware::from_fn_with_state(state.clone(), observe))
         .layer(Extension(audience))
