@@ -685,18 +685,10 @@ async fn relay_key_reveal(State(app): State<App>) -> Response {
     }
 }
 
-/// The release repository: the one signed in to in Step 5, else the default.
-fn release_endpoints(app: &App) -> crate::config::Endpoints {
-    let mut e = app.endpoints.clone();
-    if let Some(r) = &app.w().signing.repo {
-        e.repo = r.full_name.clone();
-    }
-    e
-}
-
 #[derive(Deserialize)]
 struct SigningConnectReq {
     token: String,
+    #[serde(default)]
     repo: String,
 }
 
@@ -705,12 +697,13 @@ async fn signing_connect(State(app): State<App>, body: Bytes) -> ApiResult {
     let token = Secret::new(r.token.trim().to_string());
     zeroize::Zeroize::zeroize(&mut r.token);
     let repo = r.repo.trim().trim_matches('/').to_string();
-    let valid = repo.split('/').count() == 2
-        && repo.split('/').all(|p| {
-            !p.is_empty()
-                && p.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
-        });
+    let valid = repo.is_empty()
+        || (repo.split('/').count() == 2
+            && repo.split('/').all(|p| {
+                !p.is_empty()
+                    && p.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+            }));
     let mut f = serde_json::Map::new();
     if token.is_empty() {
         f.insert("github.token".into(), json!("Paste a GitHub token."));
@@ -718,7 +711,7 @@ async fn signing_connect(State(app): State<App>, body: Bytes) -> ApiResult {
     if !valid {
         f.insert(
             "github.repo".into(),
-            json!("owner/repository, like ducminh1110/RemoteMac."),
+            json!("owner/repository, or empty for your own copy."),
         );
     }
     if !f.is_empty() {
@@ -749,11 +742,16 @@ async fn signing_disconnect(State(app): State<App>) -> ApiResult {
 
 #[derive(Deserialize)]
 struct SigningStartReq {
-    version: String,
     #[serde(default)]
     taro_version: Option<String>,
     #[serde(default)]
     new_key: bool,
+    #[serde(default = "yes")]
+    build: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 async fn signing_start(State(app): State<App>, body: Bytes) -> ApiResult {
@@ -761,9 +759,9 @@ async fn signing_start(State(app): State<App>, body: Bytes) -> ApiResult {
     crate::signing::start(
         &app,
         crate::signing::StartReq {
-            version: r.version.trim().to_string(),
             taro_version: r.taro_version.map(|t| t.trim().to_string()),
             new_key: r.new_key,
+            build: r.build,
         },
     )
     .map_err(ApiErr::bad)?;
@@ -772,7 +770,12 @@ async fn signing_start(State(app): State<App>, body: Bytes) -> ApiResult {
 
 async fn components_discover(State(app): State<App>) -> ApiResult {
     app.w().components.loading = true;
-    let r = crate::releases::discover(&app.http, &release_endpoints(&app), &app.timings).await;
+    let r = crate::releases::discover(
+        &app.http,
+        &crate::signing::release_endpoints(&app),
+        &app.timings,
+    )
+    .await;
     let mut w = app.w();
     w.components.loading = false;
     match r {
@@ -824,7 +827,7 @@ async fn components_select(State(app): State<App>, body: Bytes) -> ApiResult {
     let keys = crate::signing::repo_trust(&app);
     let res = crate::releases::fetch_verified(
         &app.http,
-        &release_endpoints(&app),
+        &crate::signing::release_endpoints(&app),
         &app.timings,
         &keys,
         &rel,

@@ -1,79 +1,40 @@
-//! Step 5 against the fake GitHub: Start makes the signing key, seals it into the Actions
-//! secret, commits its public half next to the keys relays already trust, backs it up, starts
-//! the release workflow and follows it to the end; a second session reuses the key; the private
-//! key is never in a response, the log, the summary, or any request body except sealed.
+//! Step 5 against the fake GitHub: one token, and Start does the rest. It makes the operator's
+//! copy of the repository (a fork, Actions turned on), the signing key (sealed into the Actions
+//! secret, public half committed, backed up), starts the release workflow and follows it (the
+//! fake Actions sign the release with the secret, as the real workflow does), checks the
+//! release's signature and builds and validates the packages. Run again it reuses all of it.
+//! The private key and the token are never in a response, the log, the state, the summary, or
+//! any request body except sealed.
 
 mod common;
 use common::*;
 use serde_json::{json, Value};
 use taro_update::sig;
 
-async fn connect(w: &Wiz) -> (axum::http::StatusCode, Value) {
+async fn connect(w: &Wiz, repo: &str) -> (axum::http::StatusCode, Value) {
     w.post(
         "/api/signing/connect",
-        json!({ "token": GH_TOKEN, "repo": REPO }),
+        json!({ "token": GH_TOKEN, "repo": repo }),
     )
     .await
 }
 
 async fn wait_signing(w: &Wiz) -> Value {
-    w.wait_for("signing to finish", |s| {
+    for _ in 0..3000 {
+        let s = w.state().await;
         let g = &s["signing"];
-        !g["running"].as_bool().unwrap_or(false)
+        if !g["running"].as_bool().unwrap_or(false)
             && (g["done"].as_bool().unwrap_or(false) || !g["error"].is_null())
-    })
-    .await
+        {
+            return s;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("Start did not finish: {}", w.state().await["signing"]);
 }
 
-fn opened_secret(f: &Fake) -> String {
-    let g = f.gh.lock().unwrap();
-    let sealed = &g.secrets["TARO_ENTERPRISE_SIGNING_KEY"];
-    let raw = taro_enterprise_setup::util::b64_decode(sealed).unwrap();
-    String::from_utf8(
-        g.secrets_key
-            .unseal(&raw)
-            .expect("sealed for the repository key"),
-    )
-    .unwrap()
-}
-
-#[tokio::test]
-async fn start_sets_up_signing_and_releases() {
-    let w = wizard("signing-start").await;
-
-    // a bad token is refused and not kept
-    let (s, v) = w
-        .post(
-            "/api/signing/connect",
-            json!({ "token": "nope-not-a-token", "repo": REPO }),
-        )
-        .await;
-    assert_eq!(s, 400, "{v}");
-    assert!(w.state().await["signing"]["login"].is_null());
-
-    let (s, v) = connect(&w).await;
-    assert_eq!(s, 200, "{v}");
-    let st = w.state().await;
-    assert_eq!(st["signing"]["login"], "octo");
-    assert_eq!(st["signing"]["has_secret"], false);
-    assert_eq!(st["signing"]["version"], "0.3.0");
-    assert_eq!(st["signing"]["repo_keys"], json!([OLD_KEY]));
-
-    // the workflow releases Cargo.toml's version; an existing tag is refused
-    let (s, v) = w
-        .post("/api/signing/start", json!({ "version": "0.4.0" }))
-        .await;
-    assert_eq!(s, 400);
-    assert!(v["error"].as_str().unwrap().contains("0.3.0"), "{v}");
-
-    let (s, v) = w
-        .post("/api/signing/start", json!({ "version": "0.3.0" }))
-        .await;
-    assert_eq!(s, 200, "{v}");
-    let st = wait_signing(&w).await;
-    let g = &st["signing"];
-    assert_eq!(g["done"], true, "{g}");
-    let statuses: Vec<(String, String)> = g["items"]
+fn statuses(st: &Value) -> Vec<(String, String)> {
+    st["signing"]["items"]
         .as_array()
         .unwrap()
         .iter()
@@ -83,163 +44,258 @@ async fn start_sets_up_signing_and_releases() {
                 i["status"].as_str().unwrap().into(),
             )
         })
-        .collect();
-    assert_eq!(
-        statuses,
-        ["key", "secret", "pub", "backup", "dispatch", "run"]
-            .iter()
-            .map(|i| (i.to_string(), "ok".to_string()))
-            .collect::<Vec<_>>()
-    );
+        .collect()
+}
 
-    // the secret opens (only with the repository's key) to a key whose public half was committed
-    let secret = opened_secret(&w.fake);
-    let k = sig::parse_secret(&secret).unwrap();
-    let public = sig::public_text(&k.verifying_key());
-    assert_eq!(g["key_public"], public);
-    let (keys_text, _) = w.fake.gh.lock().unwrap().files[KEYS_PATH].clone();
-    // releases exist, so the old key stays trusted next to the new one
-    assert_eq!(
-        taro_enterprise_setup::signing::keys_in(&keys_text),
-        vec![OLD_KEY.to_string(), public.clone()]
-    );
+fn all(ids: &[(&str, &str)]) -> Vec<(String, String)> {
+    ids.iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect()
+}
 
-    // the workflow was started with the version, and the run followed to its end
-    let d = w.fake.gh.lock().unwrap().dispatches.clone();
-    assert_eq!(d.len(), 1);
-    assert_eq!(d[0]["ref"], "main");
-    assert_eq!(d[0]["inputs"]["version"], "0.3.0");
-    assert_eq!(g["run"]["conclusion"], "success");
+fn opened_secret(f: &Fake, repo: &str) -> String {
+    let mut g = f.gh.lock().unwrap();
+    let r = g.repo(repo);
+    let raw =
+        taro_enterprise_setup::util::b64_decode(&r.secrets["TARO_ENTERPRISE_SIGNING_KEY"]).unwrap();
+    String::from_utf8(
+        r.secrets_key
+            .unseal(&raw)
+            .expect("sealed for the repository key"),
+    )
+    .unwrap()
+}
 
-    // the backup on this PC holds the same key
-    let backup = std::fs::read_to_string(g["backup_path"].as_str().unwrap()).unwrap();
-    assert_eq!(backup.trim(), secret);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let m = std::fs::metadata(g["backup_path"].as_str().unwrap())
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(m & 0o077, 0, "the backup is readable by its owner only");
-    }
-
-    // Step 6 trusts the repository's new key (and still the wizard's own)
-    let bytes = b"a component manifest";
-    let signature = sig::sign(&k, bytes);
-    assert!(taro_enterprise_setup::signing::repo_trust(&w.app)
-        .verify(bytes, &signature)
-        .is_ok());
-    assert!(w.app.keys.verify(bytes, &signature).is_err());
-
-    // the private key and the token appear nowhere they should not
+fn no_leaks(w: &Wiz, state: &Value, secret: &str) {
     let seed = secret.split(':').next_back().unwrap().to_string();
-    let state = w.state().await.to_string();
     let responses = w.responses.lock().unwrap().join("\n");
     let bodies = w.fake.gh.lock().unwrap().bodies.join("\n");
     for (what, text) in [
         ("responses", responses),
         ("log", w.app.log.export_text()),
-        ("state", state),
+        ("state", state.to_string()),
         ("fake request bodies", bodies),
     ] {
         assert!(!text.contains(&seed), "the private key is in the {what}");
         assert!(!text.contains(GH_TOKEN), "the token is in the {what}");
     }
-    let (_, summary) = w.call("GET", "/api/summary.json", None).await;
-    assert!(!summary.to_string().contains(&seed));
+}
 
-    // a second release of the same version is refused (the tag exists now)
-    let (s, _) = connect(&w).await;
-    assert_eq!(s, 200);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_token_does_everything_and_again_reuses_it() {
+    let w = wizard("signing-auto").await;
+    w.fill().await;
+
+    // a classic token without the workflow scope is refused, with the link that makes one
     let (s, v) = w
-        .post("/api/signing/start", json!({ "version": "0.3.0" }))
+        .post(
+            "/api/signing/connect",
+            json!({ "token": GH_TOKEN_NO_WORKFLOW, "repo": "" }),
+        )
         .await;
     assert_eq!(s, 400);
+    let e = v["error"].as_str().unwrap();
     assert!(
-        v["error"].as_str().unwrap().contains("exists already"),
-        "{v}"
+        e.contains("workflow") && e.contains("settings/tokens/new?scopes=repo,workflow"),
+        "{e}"
     );
-}
 
-#[tokio::test]
-async fn a_new_session_reuses_the_key() {
-    let w = wizard("signing-reuse").await;
-    assert_eq!(connect(&w).await.0, 200);
+    // the token alone: the copy does not exist yet, Start will make it
+    let (s, v) = connect(&w, "").await;
+    assert_eq!(s, 200, "{v}");
+    let st = w.state().await;
+    assert_eq!(st["signing"]["login"], "octo");
+    assert_eq!(st["signing"]["fork_to"], FORK);
+    assert_eq!(st["signing"]["version"], "0.3.0");
+    assert!(
+        !w.fake.gh.lock().unwrap().repos.contains_key(FORK),
+        "connect changes nothing"
+    );
+
+    let (s, v) = w.post("/api/signing/start", json!({})).await;
+    assert_eq!(s, 200, "{v}");
+    let st = wait_signing(&w).await;
+    assert_eq!(st["signing"]["done"], true, "{}", st["signing"]);
     assert_eq!(
-        w.post("/api/signing/start", json!({ "version": "0.3.0" }))
-            .await
-            .0,
-        200
+        statuses(&st),
+        all(&[
+            ("fork", "ok"),
+            ("actions", "ok"),
+            ("key", "ok"),
+            ("secret", "ok"),
+            ("pub", "ok"),
+            ("backup", "ok"),
+            ("release", "ok"),
+            ("verify", "ok"),
+            ("build", "ok"),
+        ])
     );
-    assert_eq!(wait_signing(&w).await["signing"]["done"], true);
-    let first = opened_secret(&w.fake);
 
-    // the next release, from a fresh wizard on the same PC (same backup folder)
+    // the copy: a fork of the Taro repository with Actions on, holding the new key
+    let secret = opened_secret(&w.fake, FORK);
+    let k = sig::parse_secret(&secret).unwrap();
+    let public = sig::public_text(&k.verifying_key());
     {
         let mut g = w.fake.gh.lock().unwrap();
-        g.files.insert(
-            "enterprise/Cargo.toml".into(),
-            (
-                "[workspace.package]\nversion = \"0.3.1\"\n".into(),
-                "sha-cargo-1".into(),
-            ),
+        let f = g.repo(FORK);
+        assert_eq!(f.parent.as_deref(), Some(REPO));
+        assert!(f.actions);
+        // the copy has no releases of its own: its relays trust only the operator's key
+        assert_eq!(
+            taro_enterprise_setup::signing::keys_in(&f.files[KEYS_PATH].0),
+            vec![public.clone()]
         );
+        assert_eq!(f.dispatches.len(), 1);
+        assert_eq!(f.dispatches[0]["ref"], "main");
+        assert_eq!(f.dispatches[0]["inputs"]["version"], "0.3.0");
+        // the Taro repository itself is untouched
+        let up = g.repo(REPO);
+        assert_eq!(up.secret_puts + up.file_puts, 0);
+        assert!(up.dispatches.is_empty());
     }
-    let w2 = wizard_sharing("signing-reuse", &w).await;
-    assert_eq!(connect(&w2).await.0, 200);
-    let st = w2.state().await;
-    assert_eq!(st["signing"]["has_secret"], true);
-    assert_eq!(st["signing"]["key_source"], "the backup on this PC");
-    assert_eq!(
-        w2.post("/api/signing/start", json!({ "version": "0.3.1" }))
-            .await
-            .0,
-        200
+    assert_eq!(st["signing"]["repo"]["full_name"], FORK);
+    assert_eq!(st["signing"]["key_public"], public);
+
+    // Steps 6-8 ran on the release of the copy: signature checked, packages built and valid
+    assert_eq!(st["components"]["selected"]["tag"], "enterprise-v0.3.0");
+    assert!(!st["build"]["result"].is_null(), "{}", st["build"]);
+    assert_eq!(st["validation"]["ok"], true);
+    assert!(
+        w.fake.reqs().iter().any(|r| r.starts_with(&format!(
+            "/gh-web/{FORK}/releases/download/enterprise-v0.3.0/taro-relay-"
+        ))),
+        "the relays come from the copy's release"
     );
+    let backup = std::fs::read_to_string(st["signing"]["backup_path"].as_str().unwrap()).unwrap();
+    assert_eq!(backup.trim(), secret);
+    no_leaks(&w, &st, &secret);
+    let (_, summary) = w.call("GET", "/api/summary.json", None).await;
+    assert!(!summary
+        .to_string()
+        .contains(secret.split(':').next_back().unwrap()));
+
+    // Start again: the copy is synced, the key kept, the release used as it is
+    assert_eq!(connect(&w, "").await.0, 200);
+    assert!(w.state().await["signing"]["fork_to"].is_null());
+    assert_eq!(w.post("/api/signing/start", json!({})).await.0, 200);
+    let st = wait_signing(&w).await;
+    assert_eq!(
+        statuses(&st),
+        all(&[
+            ("sync", "ok"),
+            ("key", "skipped"),
+            ("secret", "skipped"),
+            ("pub", "skipped"),
+            ("backup", "skipped"),
+            ("release", "skipped"),
+            ("verify", "ok"),
+            ("build", "ok"),
+        ])
+    );
+    {
+        let mut g = w.fake.gh.lock().unwrap();
+        assert_eq!(g.forks, 1);
+        let f = g.repo(FORK);
+        assert_eq!((f.secret_puts, f.dispatches.len(), f.syncs), (1, 1, 1));
+    }
+
+    // a new Taro version upstream; the next session on this PC (same backup) releases it
+    w.fake.gh.lock().unwrap().repo(REPO).files.insert(
+        "enterprise/Cargo.toml".into(),
+        (
+            "[workspace.package]\nversion = \"0.3.1\"\n".into(),
+            "sha-cargo-1".into(),
+        ),
+    );
+    let w2 = wizard_sharing("signing-auto", &w).await;
+    w2.fill().await;
+    assert_eq!(connect(&w2, "").await.0, 200);
+    let st = w2.state().await;
+    assert_eq!(st["signing"]["key_source"], "the backup on this PC");
+    assert_eq!(w2.post("/api/signing/start", json!({})).await.0, 200);
     let st = wait_signing(&w2).await;
-    let items = st["signing"]["items"].as_array().unwrap().clone();
-    assert_eq!(items[0]["id"], "key");
-    assert_eq!(items[0]["status"], "skipped", "{items:?}");
-    let g = w.fake.gh.lock().unwrap();
-    assert_eq!(g.secret_puts, 1, "the secret was not replaced");
-    assert_eq!(g.dispatches.len(), 2);
+    assert_eq!(st["signing"]["done"], true, "{}", st["signing"]);
+    let s = statuses(&st);
+    assert_eq!(s[1], ("key".into(), "skipped".into()), "{s:?}");
+    assert_eq!(s[5], ("release".into(), "ok".into()), "{s:?}");
+    assert_eq!(st["components"]["selected"]["tag"], "enterprise-v0.3.1");
+    assert_eq!(st["validation"]["ok"], true);
+    let mut g = w.fake.gh.lock().unwrap();
+    let f = g.repo(FORK);
+    assert_eq!(f.secret_puts, 1, "the secret was not replaced");
+    assert_eq!(f.dispatches.len(), 2);
     drop(g);
-    assert_eq!(opened_secret(&w.fake), first);
+    assert_eq!(opened_secret(&w.fake, FORK), secret);
 }
 
 #[tokio::test]
-async fn an_existing_unknown_secret_is_kept_unless_asked() {
+async fn the_owner_releases_from_the_repository_itself() {
+    let w = wizard("signing-owner").await;
+    let (s, v) = connect(&w, REPO).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(w.state().await["signing"]["repo_keys"], json!([OLD_KEY]));
+    let (s, v) = w
+        .post("/api/signing/start", json!({ "build": false }))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let st = wait_signing(&w).await;
+    assert_eq!(
+        statuses(&st),
+        all(&[
+            ("key", "ok"),
+            ("secret", "ok"),
+            ("pub", "ok"),
+            ("backup", "ok"),
+            ("release", "ok"),
+        ])
+    );
+    let secret = opened_secret(&w.fake, REPO);
+    let k = sig::parse_secret(&secret).unwrap();
+    let public = sig::public_text(&k.verifying_key());
+    // releases exist, so the old key stays trusted next to the new one
+    let keys = w.fake.gh.lock().unwrap().repo(REPO).files[KEYS_PATH]
+        .0
+        .clone();
+    assert_eq!(
+        taro_enterprise_setup::signing::keys_in(&keys),
+        vec![OLD_KEY.to_string(), public]
+    );
+    assert_eq!(w.fake.gh.lock().unwrap().forks, 0);
+    // Step 6 trusts the repository's new key (and still the wizard's own)
+    let signature = sig::sign(&k, b"m");
+    assert!(taro_enterprise_setup::signing::repo_trust(&w.app)
+        .verify(b"m", &signature)
+        .is_ok());
+    assert!(w.app.keys.verify(b"m", &signature).is_err());
+    no_leaks(&w, &w.state().await, &secret);
+}
+
+#[tokio::test]
+async fn an_unknown_secret_is_kept_and_a_failed_run_is_reported() {
     let w = wizard("signing-keep").await;
-    w.fake.gh.lock().unwrap().secrets.insert(
+    w.fake.gh.lock().unwrap().repo(REPO).secrets.insert(
         "TARO_ENTERPRISE_SIGNING_KEY".into(),
         "set-by-someone-else".into(),
     );
-    assert_eq!(connect(&w).await.0, 200);
+    assert_eq!(connect(&w, REPO).await.0, 200);
+
+    // building needs Steps 2-4 first
+    let (s, v) = w.post("/api/signing/start", json!({})).await;
+    assert_eq!(s, 400);
+    assert!(v["error"].as_str().unwrap().contains("untick"), "{v}");
+
     assert_eq!(
-        w.post("/api/signing/start", json!({ "version": "0.3.0" }))
+        w.post("/api/signing/start", json!({ "build": false }))
             .await
             .0,
         200
     );
     let st = wait_signing(&w).await;
-    assert_eq!(st["signing"]["items"][0]["status"], "skipped");
-    assert_eq!(w.fake.gh.lock().unwrap().secret_puts, 0);
-
-    // a failing run is reported with its link
-    let w = wizard("signing-fail").await;
-    w.fake.gh.lock().unwrap().run_conclusion = "failure".into();
-    assert_eq!(connect(&w).await.0, 200);
-    assert_eq!(
-        w.post(
-            "/api/signing/start",
-            json!({ "version": "0.3.0", "new_key": true })
-        )
-        .await
-        .0,
-        200
-    );
-    let st = wait_signing(&w).await;
+    let s = statuses(&st);
+    assert_eq!(s[0], ("key".into(), "skipped".into()));
+    assert_eq!(w.fake.gh.lock().unwrap().repo(REPO).secret_puts, 0);
+    // the workflow cannot sign with that secret: the run fails, with its link
     let e = st["signing"]["error"].as_str().unwrap();
     assert!(e.contains("failure") && e.contains("/actions/runs/"), "{e}");
+    assert_eq!(s[4], ("release".into(), "fail".into()));
 }

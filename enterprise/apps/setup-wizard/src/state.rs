@@ -487,7 +487,14 @@ impl Wizard {
                 "signing",
                 "Signing & release",
                 "ok",
-                "Release signed on GitHub",
+                "Released, packages built",
+            )
+        } else if let Some(t) = &g.fork_to {
+            step(
+                "signing",
+                "Signing & release",
+                "todo",
+                format!("Start makes {t}"),
             )
         } else if let Some(r) = &g.repo {
             step(
@@ -505,7 +512,7 @@ impl Wizard {
                 "signing",
                 "Signing & release",
                 "optional",
-                "Optional: your own releases",
+                "One token does it all",
             )
         });
         let c = &self.components;

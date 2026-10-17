@@ -30,6 +30,10 @@ on:
         description: "The Taro release whose Windows and Mac clients providers get (default: Cargo.toml's)"
         required: false
         default: ""
+      taro_repo:
+        description: "Where that Taro release is (default: the repository this one is a fork of, else this one)"
+        required: false
+        default: ""
 permissions:
   contents: read
 jobs:
@@ -37,6 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       taro: ${{ steps.v.outputs.taro }}
+      taro_repo: ${{ steps.v.outputs.taro_repo }}
     steps:
       - uses: actions/checkout@v4
       - id: v
@@ -44,18 +49,22 @@ jobs:
         env:
           V: ${{ inputs.version }}
           T: ${{ inputs.taro_version }}
+          R: ${{ inputs.taro_repo }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # a provider's copy (a fork) takes the Taro clients from the repository it was forked from
+          [ -z "$R" ] && R=$(gh api "repos/$GITHUB_REPOSITORY" --jq '.parent.full_name // .full_name')
           echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || { echo "bad version: $V"; exit 1; }
           have=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' enterprise/Cargo.toml)
           [ "$have" = "$V" ] || { echo "enterprise/Cargo.toml says $have, not $V"; exit 1; }
           [ -z "$T" ] && T=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
           for f in Taro-windows.zip Taro-macos.tar.gz; do
-            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$T" --jq ".assets[] | select(.name == \"$f\") | .name" | grep -qx "$f" || { echo "Taro $T has no $f"; exit 1; }
+            gh api "repos/$R/releases/tags/$T" --jq ".assets[] | select(.name == \"$f\") | .name" | grep -qx "$f" || { echo "Taro $T of $R has no $f"; exit 1; }
           done
           if gh api "repos/$GITHUB_REPOSITORY/releases/tags/enterprise-v$V" >/dev/null 2>&1; then echo "enterprise-v$V exists already"; exit 1; fi
           echo "taro=$T" >> "$GITHUB_OUTPUT"
+          echo "taro_repo=$R" >> "$GITHUB_OUTPUT"
       - name: The signing key is there
         env:
           K: ${{ secrets.TARO_ENTERPRISE_SIGNING_KEY }}
@@ -139,9 +148,10 @@ jobs:
           TARO_ENTERPRISE_SIGNING_KEY: ${{ secrets.TARO_ENTERPRISE_SIGNING_KEY }}
           V: ${{ inputs.version }}
           T: ${{ needs.check.outputs.taro }}
+          R: ${{ needs.check.outputs.taro_repo }}
         run: |
           set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$T" > taro-release.json
+          gh api "repos/$R/releases/tags/$T" > taro-release.json
           python3 - <<'PY'
           import hashlib, json, os, glob, datetime
           V, T, repo = os.environ["V"], os.environ["T"], os.environ["GITHUB_REPOSITORY"]
@@ -317,6 +327,7 @@ jobs:
           for f in enterprise-update.zip enterprise-core-files.json taro-enterprise-components.json taro-enterprise-components.json.sig TaroEnterpriseSetup.exe SHA256SUMS "taro-enterprise-$V-full.tar.gz" "taro-relay-$V-linux-x86_64.tar.gz" "taro-relay-$V-linux-aarch64.tar.gz"; do
             echo "$names" | grep -qx "$f" || { echo "missing $f"; exit 1; }
           done
-          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          # a provider's copy may have no "latest" release at all
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || echo none)
           case "$latest" in enterprise-*) echo "an Enterprise release became latest: $latest"; exit 1 ;; esac
           echo "Taro's latest stays $latest"

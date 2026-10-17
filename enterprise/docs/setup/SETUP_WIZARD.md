@@ -70,27 +70,39 @@ tables, status indicators, field descriptions and errors, and a Previous/Next fo
      rented or were given. Without it, the client works as standard Taro does, with ID and
      password;
    - client updates: notify or off.
-5. **Signing and release** (optional; for your own Enterprise releases):
-   - Connect with a GitHub token of the repository that holds the release workflow. A
-     fine-grained token needs Contents, Actions and Secrets (read and write). The token stays in
-     memory and is sent only to `api.github.com`.
-   - The wizard shows whether `TARO_ENTERPRISE_SIGNING_KEY` is set, the keys in
-     `enterprise/keys/release-signing.pub`, the existing `enterprise-v…` releases, and the
-     version of `enterprise/Cargo.toml`, which the workflow releases.
-   - **Start** (after a confirmation listing every action) does all of it, free on GitHub
-     Actions:
-     1. makes an ed25519 signing key on this PC;
-     2. stores its private half as the Actions secret, sealed with libsodium for the
-        repository (only Actions can read it);
-     3. commits its public half to `release-signing.pub`; next to the old keys when releases
-        exist, since relays installed from them trust only the keys they were built with;
-     4. backs the key up at `%LOCALAPPDATA%\Taro Enterprise\signing`, encrypted with DPAPI for
-        this Windows account;
-     5. starts `enterprise-release.yml` and follows its run to the end, linking to it.
-   - An existing secret is never replaced silently. With the backup of this PC the same key is
-     used again. Otherwise the secret is kept, unless **Make a new signing key** is ticked.
-     taro-update refuses to sign with a key that is not in `release-signing.pub`, so a
-     mismatch fails the run instead of publishing a release nobody trusts.
+5. **Signing and release**: one GitHub token, and **Start** does the rest.
+   - Paste a classic token (`ghp_…`) with the `repo` and `workflow` scopes; the page links to
+     GitHub's form with both ticked. A classic token without them is refused, naming the
+     missing scope. Fine-grained tokens work too (Administration, Contents, Actions and
+     Secrets: read and write). The token stays in memory and goes only to `api.github.com`.
+   - Leave **Repository** (under Advanced options) empty. The wizard uses your own copy of the
+     Taro repository: `<you>/RemoteMac`, made for you when it does not exist. The repository's
+     owner uses the repository itself.
+   - **Start** shows what it will do, then:
+     1. makes your copy (a fork) and turns on GitHub Actions in it, or brings an existing copy
+        up to date with the Taro repository (Sync fork);
+     2. makes an ed25519 signing key on this PC and stores it as the Actions secret
+        `TARO_ENTERPRISE_SIGNING_KEY`, sealed with libsodium for the repository so only
+        Actions can read it;
+     3. commits the key's public half to `enterprise/keys/release-signing.pub`. Relays built in
+        your copy trust only your key; in a repository that has releases already, the old
+        keys stay next to it;
+     4. keeps a backup of the key at `%LOCALAPPDATA%\Taro Enterprise\signing`, encrypted with
+        DPAPI for this Windows account;
+     5. starts `enterprise-release.yml` for the version in `enterprise/Cargo.toml` and follows
+        the run, linking to it. GitHub Actions builds and signs the release for free. The
+        Windows and Mac clients come from the Taro release of the repository your copy was
+        forked from;
+     6. when **Build the packages** is ticked (the default; it needs steps 2 to 4), checks the
+        release's signature and builds and validates your packages: steps 6 to 8 run by
+        themselves.
+   - Running Start again reuses everything: the copy is synced, the key in this PC's backup is
+     kept, and a version that is already released is used as it is. A new Taro version, once
+     synced in, is released the same way.
+   - An existing secret is never replaced silently. A secret this PC has no backup of is kept,
+     unless **Make a new signing key** is ticked. taro-update refuses to sign with a key that
+     is not in `release-signing.pub`, so a mismatch fails the run instead of publishing a
+     release nobody trusts.
    - The private key is never shown, logged, exported in the summary, put in a package or sent
      unsealed.
 6. **Components and versions**:
@@ -147,14 +159,20 @@ integration tests against a local fake of the GitHub releases API and the asset 
   and importing a provider.json.
 - `tests/preservation.rs`: an Enterprise update applied over a relay installed from a built
   package leaves its `provider.json` byte-identical.
-- `tests/signing_flow.rs`: step 5 against a fake GitHub:
-  - the sealed secret opens (only with the repository's key) to a key whose public half was
-    committed, next to the old key;
-  - the workflow is started with the version and followed to its end;
-  - the backup is the owner's only;
-  - a second session reuses the key without replacing the secret;
-  - an unknown existing secret is kept;
-  - a failed run is reported with its link;
+- `tests/signing_flow.rs`: step 5 against a fake GitHub, whose fake Actions sign the release
+  with the sealed secret only when its public half is in the keys file, as the real workflow
+  does:
+  - one token does everything:
+    - the fork is made and Actions are turned on;
+    - the key is sealed into the fork's secret and its public half committed;
+    - the release is published, its signature checked, and the packages built and validated;
+    - the relays come from the fork's release;
+    - the Taro repository itself is untouched;
+  - Start again syncs the fork, keeps the key and uses the existing release;
+  - a new upstream version is released by a fresh session from the same backup;
+  - a classic token without `workflow` is refused;
+  - the owner releases from the repository itself, with the old key kept;
+  - an unknown secret is kept and the failed run reported with its link;
   - neither the key nor the token appears in any response, the log, the state, the summary,
     or any request body except sealed.
 - `tests/guard.rs`: the request guard and the security headers.

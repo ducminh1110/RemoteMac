@@ -37,6 +37,17 @@ fn err(status: StatusCode, body: &Value) -> GhError {
     }
 }
 
+fn repo_of(v: &Value, full: &str) -> Repo {
+    Repo {
+        full_name: v["full_name"].as_str().unwrap_or(full).to_string(),
+        html_url: v["html_url"].as_str().unwrap_or_default().to_string(),
+        default_branch: v["default_branch"].as_str().unwrap_or("main").to_string(),
+        private: v["private"].as_bool().unwrap_or(false),
+        admin: v["permissions"]["admin"].as_bool().unwrap_or(false),
+        parent: v["parent"]["full_name"].as_str().map(str::to_string),
+    }
+}
+
 #[derive(Clone)]
 pub struct GitHub {
     base: String,
@@ -52,6 +63,15 @@ pub struct Repo {
     pub private: bool,
     /// the token may change the repository's settings and secrets
     pub admin: bool,
+    /// the repository it was forked from (`owner/name`)
+    pub parent: Option<String>,
+}
+
+/// What `GET /user` says about the token's account.
+pub struct User {
+    pub login: String,
+    /// `X-OAuth-Scopes` of a classic token (`ghp_…`); None for fine-grained tokens
+    pub scopes: Option<Vec<String>>,
 }
 
 /// A text file of the repository: its contents and the blob sha (needed to update it).
@@ -125,23 +145,99 @@ impl GitHub {
         }
     }
 
-    /// The signed-in account (proves the token works).
-    pub async fn login(&self) -> GhResult<String> {
-        let v = self.ok(Method::GET, "/user", None).await?;
-        Ok(v["login"].as_str().unwrap_or_default().to_string())
+    /// The signed-in account (proves the token works) and a classic token's scopes.
+    pub async fn user(&self) -> GhResult<User> {
+        let r = self
+            .http
+            .get(format!("{}/user", self.base))
+            .bearer_auth(self.token.expose())
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .map_err(|e| GhError {
+                status: None,
+                message: format!("could not reach GitHub ({})", e.without_url()),
+            })?;
+        let status = r.status();
+        let scopes = r
+            .headers()
+            .get("x-oauth-scopes")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| {
+                s.split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect()
+            });
+        let body: Value = r.json().await.unwrap_or(Value::Null);
+        if !status.is_success() {
+            return Err(err(status, &body));
+        }
+        Ok(User {
+            login: body["login"].as_str().unwrap_or_default().to_string(),
+            scopes,
+        })
+    }
+
+    /// The repository, or None when it does not exist (or the token cannot see it).
+    pub async fn find_repo(&self, full: &str) -> GhResult<Option<Repo>> {
+        match self.repo(full).await {
+            Ok(r) => Ok(Some(r)),
+            Err(GhError {
+                status: Some(404), ..
+            }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Fork `full` into the token's account (GitHub returns the existing fork if there is
+    /// one). The copy is made in the background: wait for its files with [`Self::file`].
+    pub async fn fork(&self, full: &str) -> GhResult<Repo> {
+        let v = self
+            .ok(
+                Method::POST,
+                &format!("/repos/{full}/forks"),
+                Some(json!({ "default_branch_only": true })),
+            )
+            .await?;
+        Ok(repo_of(&v, full))
+    }
+
+    /// Allow GitHub Actions to run, and the workflow (Actions start disabled in a fork).
+    pub async fn enable_actions(&self, full: &str, workflow: &str) -> GhResult<()> {
+        self.ok(
+            Method::PUT,
+            &format!("/repos/{full}/actions/permissions"),
+            Some(json!({ "enabled": true, "allowed_actions": "all" })),
+        )
+        .await?;
+        self.ok(
+            Method::PUT,
+            &format!("/repos/{full}/actions/workflows/{workflow}/enable"),
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Bring a fork's branch up to date with its parent. Returns GitHub's message.
+    pub async fn merge_upstream(&self, full: &str, branch: &str) -> GhResult<String> {
+        let v = self
+            .ok(
+                Method::POST,
+                &format!("/repos/{full}/merge-upstream"),
+                Some(json!({ "branch": branch })),
+            )
+            .await?;
+        Ok(v["message"].as_str().unwrap_or("up to date").to_string())
     }
 
     pub async fn repo(&self, full: &str) -> GhResult<Repo> {
         let v = self
             .ok(Method::GET, &format!("/repos/{full}"), None)
             .await?;
-        Ok(Repo {
-            full_name: v["full_name"].as_str().unwrap_or(full).to_string(),
-            html_url: v["html_url"].as_str().unwrap_or_default().to_string(),
-            default_branch: v["default_branch"].as_str().unwrap_or("main").to_string(),
-            private: v["private"].as_bool().unwrap_or(false),
-            admin: v["permissions"]["admin"].as_bool().unwrap_or(false),
-        })
+        Ok(repo_of(&v, full))
     }
 
     /// Whether an Actions secret of this name exists (its value can never be read).

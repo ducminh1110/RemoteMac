@@ -13,6 +13,10 @@ pub const COMPONENTS_FILE: &str = "taro-enterprise-components.json";
 pub const COMPONENTS_SIG: &str = "taro-enterprise-components.json.sig";
 /// Step 5: the release workflow, its signing secret and the trusted keys file of the repository.
 pub const RELEASE_WORKFLOW: &str = "enterprise-release.yml";
+pub const WORKFLOW_PATH: &str = ".github/workflows/enterprise-release.yml";
+/// A classic token with exactly the scopes Step 5 needs, made on GitHub's page.
+pub const NEW_TOKEN_URL: &str =
+    "https://github.com/settings/tokens/new?scopes=repo,workflow&description=TaroEnterpriseSetup";
 pub const SIGNING_SECRET: &str = "TARO_ENTERPRISE_SIGNING_KEY";
 pub const KEYS_FILE: &str = "enterprise/keys/release-signing.pub";
 pub const VERSION_FILE: &str = "enterprise/Cargo.toml";

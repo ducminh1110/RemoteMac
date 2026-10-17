@@ -262,42 +262,49 @@ check("relay saved", (await flashText(page, "ok")).includes("saved"));
 check("state never carries the key", !JSON.stringify(await apiState(page)).includes(key));
 await clearFlashes(page);
 
-// 5. signing and release on GitHub (the fake): connect, Start, follow the run
+// 5. one token: Start makes the copy, the key, the release, and builds the packages
 await step(page, 4);
 await page.fill("#f-github-token", "github-token-for-tests-0123456789");
 await page.click("#gh-connect");
 await page.waitForSelector("#gh-start");
-check("signed in to GitHub", (await flashText(page, "ok")).includes("octo"));
+check("signed in to GitHub; the copy will be made", (await flashText(page, "ok")).includes("octo/RemoteMac"));
+await shot(page, "light-05-signing-connected");
 await page.click("#gh-start");
 await page.waitForSelector(".modal:not(.picker)");
 check("Start asks first and lists what it will do", (await page.locator(".modal:not(.picker) li").count()) >= 4);
 await page.waitForTimeout(400);
 await shot(page, "light-05-signing-confirm");
 await page.click(".modal:not(.picker) .btn.primary");
-for (let i = 0; i < 400; i++) {
+await page.waitForFunction(() => [...document.querySelectorAll("tbody tr.ok")].length >= 3, null, { timeout: 30000 });
+await shot(page, "light-05-signing-running");
+for (let i = 0; i < 3000; i++) {
   const s = await apiState(page);
   if (!s.signing.running && (s.signing.done || s.signing.error)) break;
   await page.waitForTimeout(100);
 }
 const sg = await apiState(page);
-check("Start made the key, the secret, the commit and the release", sg.signing.done === true, sg.signing.error || "");
+check("Start did it all: copy, key, release, verified, built", sg.signing.done === true, sg.signing.error || "");
+check("every action done", sg.signing.items.every((i) => i.status === "ok"), sg.signing.items.map((i) => i.id + ":" + i.status).join(" "));
+check("the packages are valid", sg.validation && sg.validation.ok);
 check("the key never reaches the page", !JSON.stringify(sg).includes("ed25519-secret") && !JSON.stringify(sg.signing).includes("key_secret"));
-await page.waitForSelector(".alert.ok:has-text('Release signed')");
+await page.waitForSelector(".alert.ok:has-text('packages are built')");
 await shot(page, "light-05-signing-done");
 await clearFlashes(page);
 
-// 6. components
+// 6. components: the copy's release is the one chosen
 await step(page, 5);
+await page.waitForSelector(".alert.ok:has-text('Signature valid')");
 await page.click("#discover");
 await page.waitForSelector("input[name=release]");
-check("newest release preselected", await page.isChecked("input[name=release][value='enterprise-v0.2.0']"));
+check("the copy's release preselected", await page.isChecked("input[name=release][value='enterprise-v0.3.0']"));
 await page.click("#select");
 await page.waitForSelector(".alert.ok:has-text('Signature valid')");
 check("4 platforms offered", (await page.locator("input.plat").count()) === 4);
 await clearFlashes(page);
 
-// 7. build (the fake streams slowly: progress is visible)
+// 7. build again by hand (the fake streams slowly: progress is visible)
 await step(page, 6);
+await page.check("#replace");
 await page.click("#start-build");
 await page.waitForSelector("progress");
 await page.waitForFunction(() => [...document.querySelectorAll("progress")].some((p) => p.value > 0));

@@ -685,39 +685,64 @@ const views = {
     const g = S.signing;
     const st = "signing";
     const r = g.repo;
+    const signedIn = !!(r || g.fork_to);
+    const where = r ? r.full_name : g.fork_to;
+    const build = drafts.build !== false;
+    const ready = ["identity", "branding", "relay"].every((id) => ["ok", "warn"].includes(stepState(id).status));
     const statusOf = (it) => status(it.status === "running" ? "info" : it.status === "skipped" ? "skip" : it.status, { running: "In progress", pending: "Pending", ok: "Done", fail: "Failed", skipped: "Kept" }[it.status]);
-    const connectBtn = button(r ? "Connect again" : "Connect", { kind: r ? "" : "primary", id: "gh-connect",
+    const link = (url, text) => h("a", { href: url, target: "_blank", rel: "noreferrer" }, text);
+    const detail = (d) => {
+      if (!d) return "";
+      const m = d.match(/^(.*?)(https:\/\/\S+)$/);
+      return m ? [m[1], link(m[2], m[2].includes("/actions/runs/") ? "the run on GitHub" : m[2].replace("https://github.com/", ""))] : d;
+    };
+    const connectBtn = button(signedIn ? "Connect again" : "Connect", { kind: signedIn ? "" : "primary", id: "gh-connect",
       onclick: (ev) => run(ev.currentTarget, "Connecting…", st, async () => {
-        const x = await api("POST", "/api/signing/connect", { token: val("github.token"), repo: val("github.repo") });
+        const x = await api("POST", "/api/signing/connect", { token: val("github.token"), repo: drafts.adv ? val("github.repo") : "" });
         drafts[fid("github.token")] = ""; return x;
       }) });
-    const startBtn = r ? button(g.done ? "Start again" : "Start", { kind: "primary", id: "gh-start", disabled: g.running || !g.version,
+    const plan = () => {
+      const items = [];
+      if (g.fork_to) items.push("make your own copy of " + g.upstream + " (" + g.fork_to + ") and turn on GitHub Actions in it,");
+      else if (r && r.parent === g.upstream) items.push("bring your copy " + r.full_name + " up to date with " + g.upstream + ",");
+      if (!g.has_secret || drafts.new_key) items.push("make a release signing key on this PC, store it as the Actions secret TARO_ENTERPRISE_SIGNING_KEY (sealed: only GitHub Actions can read it), commit its public half and keep an encrypted backup on this PC,");
+      else items.push("keep the repository's signing key,");
+      items.push("release Taro Enterprise " + (g.version || "") + " with GitHub Actions (built and signed there, free), unless it is released already,");
+      if (build) items.push("check the release's signature, build your packages and validate them.");
+      return items;
+    };
+    const startBtn = signedIn ? button(g.done ? "Start again" : "Start", { kind: "primary", id: "gh-start", disabled: g.running || (build && !ready),
       onclick: async (ev) => {
         const btn = ev.currentTarget;
-        const newKey = !!drafts.new_key;
-        const what = !g.has_secret || newKey
-          ? h("ul", {}, h("li", {}, "make a release signing key on this PC,"), h("li", {}, "store it as the Actions secret TARO_ENTERPRISE_SIGNING_KEY of " + r.full_name + " (sealed: only GitHub Actions can read it),"),
-              h("li", {}, "commit its public half to enterprise/keys/release-signing.pub,"), h("li", {}, "keep an encrypted backup on this PC,"), h("li", {}, "start the Enterprise release workflow for enterprise-v" + val("signing.version") + "."))
-          : h("ul", {}, h("li", {}, "keep the repository's signing key,"), h("li", {}, "start the Enterprise release workflow for enterprise-v" + val("signing.version") + "."));
-        if (!(await confirmDialog({ title: "Start on " + r.full_name + "?", confirm: "Start", body: [h("p", {}, "This will:"), what,
-          newKey && g.releases.length ? alert("warn", "A new key next to the old one", "Relays installed from earlier releases trust only the keys they were built with; the old key stays in release-signing.pub.") : null] }))) return;
-        run(btn, "Starting…", st, () => api("POST", "/api/signing/start", { version: val("signing.version"), taro_version: val("signing.taro") || null, new_key: newKey }));
+        if (!(await confirmDialog({ title: "Start on " + where + "?", confirm: "Start", body: [h("p", {}, "This will:"), h("ul", {}, plan().map((x) => h("li", {}, x))),
+          drafts.new_key && g.releases.length ? alert("warn", "A new key next to the old one", "Relays installed from earlier releases trust only the keys they were built with; the old key stays in release-signing.pub.") : null] }))) return;
+        run(btn, "Starting…", st, () => api("POST", "/api/signing/start", { taro_version: drafts.adv ? val("signing.taro") || null : null, new_key: !!drafts.new_key, build }));
       } }) : null;
-    return page({ title: "Signing and release", desc: "Optional. Signs and publishes an Enterprise release on your own GitHub repository, with GitHub Actions (free). Skip it to build from Taro's official releases.", actions: startBtn },
-      g.error ? alert("err", "Not finished", g.error) : null,
-      g.done ? alert("ok", "Release signed and published", h("span", {}, "GitHub Actions built and signed it. Pick it in the next step. ", g.run ? h("a", { href: g.run.html_url, target: "_blank", rel: "noreferrer" }, "Open the run") : null)) : null,
-      container({ title: "GitHub", desc: "A token of the repository that holds the Enterprise release workflow. It stays in this program's memory and is sent only to api.github.com.", actions: connectBtn },
-        h("div", { class: "split" },
-          field(st, { name: "github.repo", label: "Repository", value: (r && r.full_name) || S.config.release_repo, mono: true, spellcheck: "false", desc: "owner/repository" }),
-          field(st, { name: "github.token", label: "Token", type: "password", value: "", mono: true, spellcheck: "false",
-            desc: "A fine-grained token of this repository with Contents, Actions and Secrets: read and write.", hint: r ? "Signed in as " + g.login + "." : "Not signed in." })),
-        r ? kv([["Repository", h("a", { href: r.html_url, target: "_blank", rel: "noreferrer" }, r.full_name)], ["Branch", r.default_branch],
-          ["Signing secret", g.has_secret ? status("ok", "Set") : status("pending", "Not set yet")],
-          ["Trusted keys", String(g.repo_keys.length)], ["This PC's key", g.key_public ? h("span", { class: "path" }, g.key_public) : "–"], ["Key from", g.key_source || "–"]], 3) : null),
-      r ? container({ title: "Release", desc: "The workflow releases the version written in enterprise/Cargo.toml of the repository." },
-        h("div", { class: "split" },
-          field(st, { name: "signing.version", label: "Enterprise version", value: g.version || "", mono: true, desc: "From enterprise/Cargo.toml.", hint: g.releases.length ? "Released already: " + g.releases.join(", ") : "No Enterprise release yet." }),
-          field(st, { name: "signing.taro", label: "Taro version for the clients", opt: true, value: "", mono: true, placeholder: "the one in Cargo.toml", desc: "The Taro release whose Windows and Mac clients your packages carry." })),
+    return page({ title: "Signing and release", desc: "One GitHub token does the rest: your own copy of the Taro repository, the signing key, the release (built and signed by GitHub Actions, free) and your packages, built and validated.", actions: startBtn },
+      g.error ? alert("err", "Stopped", detail(g.error)) : null,
+      g.done ? alert("ok", build ? "Done: your packages are built and valid" : "Released and signed",
+        h("span", {}, build ? "They are in " : "Pick the release in the next step. ", build && S.build.result ? h("span", { class: "path" }, S.build.result.dir) : null, " ",
+          g.run ? link(g.run.html_url, "Open the release run") : null)) : null,
+      signedIn && build && !ready ? alert("info", "Fill in Steps 2 to 4 first", "Your packages carry the product name, the branding and the relay. Or untick “Build the packages”.") : null,
+      container({ title: "GitHub", desc: "The token stays in this program's memory and is sent only to api.github.com.", actions: connectBtn },
+        field(st, { name: "github.token", label: "GitHub token", type: "password", value: "", mono: true, spellcheck: "false",
+          desc: h("span", {}, "A classic token (ghp_…) with the repo and workflow scopes. ", link(g.new_token_url || "https://github.com/settings/tokens/new?scopes=repo,workflow&description=TaroEnterpriseSetup", "Make one on GitHub"), " (the scopes are ticked for you)."),
+          hint: g.login ? "Signed in as " + g.login + "." : null }),
+        button(drafts.adv ? "Hide advanced options" : "Advanced options", { kind: "link", id: "gh-adv", onclick: () => { drafts.adv = !drafts.adv; render(); } }),
+        drafts.adv ? h("div", { class: "split" },
+          field(st, { name: "github.repo", label: "Repository", opt: true, value: r ? r.full_name : "", mono: true, spellcheck: "false", placeholder: "your own copy, made for you",
+            desc: "owner/repository with the Enterprise release workflow. Empty: your copy of " + (g.upstream || S.config.release_repo) + "." }),
+          field(st, { name: "signing.taro", label: "Taro version for the clients", opt: true, value: "", mono: true, placeholder: "the one in Cargo.toml", desc: "The Taro release whose Windows and Mac clients your packages carry." })) : null,
+        signedIn ? kv([
+          ["Account", g.login],
+          ["Your repository", r ? link(r.html_url, r.full_name) : h("span", {}, g.fork_to, h("span", { class: "muted" }, " (made by Start)"))],
+          ["Signing key", g.has_secret ? status("ok", "Set") : status("pending", "Made by Start")],
+          ["Version", g.version ? (g.releases.includes("enterprise-v" + g.version) ? g.version + " (released; used as it is)" : g.version) : "–"],
+          ["Releases", g.releases.length ? g.releases.join(", ") : "none yet"],
+          ["Key from", g.key_source || "–"]], 3) : null),
+      signedIn ? container({ title: "Options" },
+        h("label", { class: "check" }, h("input", { type: "checkbox", id: "do-build", checked: build, onchange: (e) => { drafts.build = e.target.checked; render(); } }),
+          h("span", {}, "Build the packages when the release is ready", h("span", { class: "d" }, "Checks the release's signature, then Steps 6 to 8 run by themselves."))),
         g.has_secret ? h("label", { class: "check" }, h("input", { type: "checkbox", id: "new-key", checked: !!drafts.new_key, onchange: (e) => { drafts.new_key = e.target.checked; render(); } }),
           h("span", {}, "Make a new signing key", h("span", { class: "d" }, "Only if the old one is lost or exposed. Its public half is added next to the old ones."))) : null) : null,
       g.items.length ? container({ title: g.running ? "Running" : g.error ? "Stopped" : "Done", flush: true },
@@ -725,8 +750,8 @@ const views = {
           h("thead", {}, h("tr", {}, h("th", {}, "Status"), h("th", {}, "Action"), h("th", {}, "Result"))),
           h("tbody", {}, g.items.map((it) => h("tr", { class: it.status },
             h("td", { class: "st" }, statusOf(it)), h("td", { class: "name" }, it.label),
-            h("td", { class: "muted" }, it.detail && /^https:\/\//.test(it.detail.split(": ").pop()) ? [it.detail.split(": ").slice(0, -1).join(": ") + ": ", h("a", { href: it.detail.split(": ").pop(), target: "_blank", rel: "noreferrer" }, "the run on GitHub")] : (it.detail || "")))))))) : null,
-      g.backup_path ? container({ title: "Key backup" }, alert("info", "Keep this file safe", h("span", {}, "The signing key is backed up, encrypted for your Windows account, at ", h("span", { class: "path" }, g.backup_path), ". Relays trust only this key and the ones before it: keep the backup if you change PC."))) : null);
+            h("td", { class: "muted" }, detail(it.detail)))))))) : null,
+      g.backup_path ? container({ title: "Key backup" }, alert("info", "Keep this file safe", h("span", {}, "The signing key is backed up, encrypted for your Windows account, at ", h("span", { class: "path" }, g.backup_path), ". Your relays trust only this key and the ones before it: keep the backup if you change PC."))) : null);
   },
 
   components() {

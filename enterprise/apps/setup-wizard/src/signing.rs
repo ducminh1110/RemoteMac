@@ -1,25 +1,31 @@
-//! Step 5: release signing and the release itself, on the operator's GitHub repository.
+//! Step 5: everything from one GitHub token, A to Z.
 //!
-//! With a GitHub token and the repository (the one holding the Enterprise release workflow),
-//! **Start** does everything a signed release needs, with no secret handled by hand:
+//! The operator pastes a token (a classic `ghp_…` with `repo` and `workflow`, or a
+//! fine-grained one) and presses **Start**. The wizard then, with no secret handled by hand:
 //!
-//! 1. a release signing key (ed25519) is made on this PC;
-//! 2. its private half is stored as the Actions secret `TARO_ENTERPRISE_SIGNING_KEY`, sealed
-//!    for the repository's public key (only GitHub Actions can read it back);
-//! 3. its public half is committed to `enterprise/keys/release-signing.pub`, so the relays and
-//!    the wizard built there trust it (taro-update refuses to sign with any other key);
-//! 4. a backup is written on this PC (DPAPI on Windows);
-//! 5. the release workflow is started for the version in the repository's Cargo.toml, and
-//!    followed until GitHub Actions has built and signed the release (free on GitHub).
+//! 1. makes the operator's own copy of the Taro repository (a fork in their account; Actions
+//!    turned on), or brings an existing copy up to date with it;
+//! 2. makes a release signing key (ed25519) on this PC, stores its private half as the Actions
+//!    secret `TARO_ENTERPRISE_SIGNING_KEY` (sealed for the repository: only Actions can read it
+//!    back), commits its public half to `enterprise/keys/release-signing.pub` (the relays built
+//!    there trust it; taro-update refuses to sign with any other key) and backs it up on this PC
+//!    (DPAPI on Windows);
+//! 3. starts the release workflow for the version of the copy's Cargo.toml and follows it
+//!    until GitHub Actions has built and signed the release (free on GitHub);
+//! 4. checks the release's signature (Step 6), builds the packages with the operator's
+//!    product, branding and relay (Steps 2-4) and validates them (Steps 7-8).
 //!
-//! A key is never replaced silently: when the secret exists already it is kept (or the backup
-//! of this PC is reused), unless the operator asks for a new key; then the new public key is
-//! added next to the old ones when releases signed by them exist (relays installed from those
-//! trust only the keys they were built with). The private key is never shown, logged, put in a
-//! package, or sent anywhere but sealed to GitHub.
+//! Run again, it reuses what exists: the copy is synced, the key of this PC's backup is kept,
+//! a version already released is used as it is. A key is never replaced silently: an unknown
+//! secret is kept unless the operator asks for a new key; then the new public key goes next to
+//! the old ones when releases signed by them exist. The private key is never shown, logged,
+//! put in a package, or sent anywhere but sealed to GitHub; the token only goes to GitHub's API.
 
-use crate::config::{KEYS_FILE, RELEASE_WORKFLOW, SIGNING_SECRET, TAG_PREFIX, VERSION_FILE};
-use crate::github::{GitHub, Repo, Run};
+use crate::config::{
+    Endpoints, KEYS_FILE, NEW_TOKEN_URL, RELEASE_WORKFLOW, SIGNING_SECRET, TAG_PREFIX,
+    VERSION_FILE, WORKFLOW_PATH,
+};
+use crate::github::{GhError, GitHub, Repo, Run};
 use crate::secret::Secret;
 use crate::state::{AppState, BuildItem};
 use serde::Serialize;
@@ -39,7 +45,12 @@ const KEYS_HEADER: &str = "\
 #[derive(Clone, Debug, Serialize, Default)]
 pub struct SigningState {
     pub login: Option<String>,
+    /// the Taro repository copies are made from
+    pub upstream: String,
+    /// the operator's repository, once it exists
     pub repo: Option<Repo>,
+    /// Start makes this copy of `upstream` first (it does not exist yet)
+    pub fork_to: Option<String>,
     /// TARO_ENTERPRISE_SIGNING_KEY exists in the repository
     pub has_secret: bool,
     /// the public keys in enterprise/keys/release-signing.pub
@@ -52,6 +63,7 @@ pub struct SigningState {
     pub key_public: Option<String>,
     pub key_source: Option<String>,
     pub backup_path: Option<String>,
+    pub new_token_url: String,
     pub items: Vec<BuildItem>,
     pub running: bool,
     pub run: Option<Run>,
@@ -125,146 +137,250 @@ fn gh(app: &AppState, token: &Secret) -> GitHub {
     GitHub::new(&app.endpoints.github_api, app.http.clone(), token.clone())
 }
 
-/// Sign in with a token and look at the repository: its secret, keys file, releases, version.
-pub async fn connect(app: &Arc<AppState>, token: Secret, repo: &str) -> Result<String, String> {
-    app.log.register_secret(&token);
-    let g = gh(app, &token);
-    let login = g
-        .login()
-        .await
-        .map_err(|e| format!("The token was not accepted: {e}"))?;
-    let r = g
-        .repo(repo)
-        .await
-        .map_err(|e| format!("{repo}: {e}. The token needs access to this repository."))?;
-    if !r.admin {
-        return Err(format!(
-            "The token cannot change {}'s secrets. Give it the Secrets (read and write), Contents (read and write) and Actions (read and write) permissions of this repository.",
-            r.full_name
-        ));
+fn e(x: GhError) -> String {
+    x.to_string()
+}
+
+/// The release repository: the operator's copy once Step 5 has one, else the default.
+pub fn release_endpoints(app: &AppState) -> Endpoints {
+    let mut e = app.endpoints.clone();
+    if let Some(r) = &app.w().signing.repo {
+        e.repo = r.full_name.clone();
     }
+    e
+}
+
+/// What a repository holds for Step 5.
+struct Inspection {
+    has_secret: bool,
+    keys: Vec<String>,
+    version: Option<String>,
+    releases: Vec<String>,
+    workflow: bool,
+}
+
+async fn inspect(g: &GitHub, r: &Repo) -> Result<Inspection, String> {
+    let full = &r.full_name;
+    let b = &r.default_branch;
     let has_secret = g
-        .has_secret(&r.full_name, SIGNING_SECRET)
+        .has_secret(full, SIGNING_SECRET)
         .await
-        .map_err(|e| format!("Could not look at the repository's secrets: {e}"))?;
+        .map_err(|x| format!("Could not look at {full}'s secrets: {x}"))?;
     let keys = g
-        .file(&r.full_name, KEYS_FILE, &r.default_branch)
+        .file(full, KEYS_FILE, b)
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(e)?
         .map(|f| keys_in(&f.text))
         .unwrap_or_default();
     let version = g
-        .file(&r.full_name, VERSION_FILE, &r.default_branch)
+        .file(full, VERSION_FILE, b)
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(e)?
         .and_then(|f| workspace_version(&f.text));
-    let releases: Vec<String> = g
-        .release_tags(&r.full_name)
+    let workflow = g.file(full, WORKFLOW_PATH, b).await.map_err(e)?.is_some();
+    let releases = g
+        .release_tags(full)
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(e)?
         .into_iter()
         .filter(|t| t.starts_with(TAG_PREFIX))
         .collect();
-    let backup = load_backup(&app.key_dir, &r.full_name);
-    let full = r.full_name.clone();
+    Ok(Inspection {
+        has_secret,
+        keys,
+        version,
+        releases,
+        workflow,
+    })
+}
+
+fn apply(app: &AppState, i: Inspection) {
+    let mut w = app.w();
+    let s = &mut w.signing;
+    s.has_secret = i.has_secret;
+    s.repo_keys = i.keys;
+    s.version = i.version;
+    s.releases = i.releases;
+    w.rev += 1;
+}
+
+/// Load this PC's backup of `full`'s key, unless a key is held already.
+fn take_backup(app: &AppState, full: &str) {
+    let mut w = app.w();
+    let s = &mut w.signing;
+    if s.key_secret.is_some() {
+        return;
+    }
+    if let Some(b) = load_backup(&app.key_dir, full) {
+        app.log.register_secret(&b);
+        s.key_public = public_of(&b);
+        s.key_source = Some("the backup on this PC".into());
+        s.backup_path = Some(backup_file(&app.key_dir, full).display().to_string());
+        s.key_secret = Some(b);
+    }
+}
+
+/// Sign in with a token and find the operator's repository. `repo` empty: their own copy of
+/// the Taro repository (the repository itself for its owner), made by Start when missing.
+pub async fn connect(app: &Arc<AppState>, token: Secret, repo: &str) -> Result<String, String> {
+    app.log.register_secret(&token);
+    let g = gh(app, &token);
+    let u = g
+        .user()
+        .await
+        .map_err(|x| format!("The token was not accepted: {x}"))?;
+    if let Some(sc) = &u.scopes {
+        let missing: Vec<&str> = ["repo", "workflow"]
+            .into_iter()
+            .filter(|n| !sc.iter().any(|x| x == n))
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "This token lacks the {} scope{}. Make a token with repo and workflow: {NEW_TOKEN_URL}",
+                missing.join(" and "),
+                if missing.len() > 1 { "s" } else { "" }
+            ));
+        }
+    }
+    let login = u.login;
+    let upstream = app.endpoints.repo.clone();
+    let (up_owner, up_name) = upstream.split_once('/').unwrap_or(("", &upstream));
+    let auto = repo.is_empty();
+    let target = if !auto {
+        repo.to_string()
+    } else if up_owner.eq_ignore_ascii_case(&login) {
+        upstream.clone()
+    } else {
+        format!("{login}/{up_name}")
+    };
+    let found = g.find_repo(&target).await.map_err(e)?;
+    let msg = match found {
+        Some(r) => {
+            if !r.admin {
+                return Err(format!(
+                    "The token cannot change {}'s settings and secrets. Use a token of its owner (classic: repo and workflow; fine-grained: Administration, Contents, Actions and Secrets, read and write).",
+                    r.full_name
+                ));
+            }
+            let fork = r.parent.as_deref() == Some(upstream.as_str());
+            let i = inspect(&g, &r).await?;
+            if !i.workflow && !fork {
+                return Err(format!(
+                    "{} has no {WORKFLOW_PATH} on {}. Leave Repository empty to use your own copy of {upstream}.",
+                    r.full_name, r.default_branch
+                ));
+            }
+            let full = r.full_name.clone();
+            apply(app, i);
+            {
+                let mut w = app.w();
+                w.signing.repo = Some(r);
+                w.signing.fork_to = None;
+            }
+            take_backup(app, &full);
+            if fork {
+                format!("Signed in as {login}. Start brings your copy {full} up to date with {upstream} and releases from it.")
+            } else {
+                format!("Signed in as {login}; {full} is ready.")
+            }
+        }
+        None if auto => {
+            let up = g
+                .repo(&upstream)
+                .await
+                .map_err(|x| format!("{upstream}: {x}"))?;
+            let version = g
+                .file(&upstream, VERSION_FILE, &up.default_branch)
+                .await
+                .map_err(e)?
+                .and_then(|f| workspace_version(&f.text));
+            let mut w = app.w();
+            let s = &mut w.signing;
+            s.repo = None;
+            s.fork_to = Some(target.clone());
+            s.has_secret = false;
+            s.repo_keys = vec![];
+            s.releases = vec![];
+            s.version = version;
+            format!("Signed in as {login}. Start makes your own copy of {upstream} ({target}) and does the rest.")
+        }
+        None => {
+            return Err(format!(
+                "{target} does not exist, or the token cannot see it. Leave Repository empty to make your own copy of {upstream}."
+            ))
+        }
+    };
     let mut w = app.w();
     let s = &mut w.signing;
     s.login = Some(login.clone());
-    s.has_secret = has_secret;
-    s.repo_keys = keys;
-    s.releases = releases;
-    s.version = version;
-    s.repo = Some(r);
+    s.upstream = upstream;
+    s.new_token_url = NEW_TOKEN_URL.into();
     s.token = Some(token);
     s.error = None;
-    if s.key_secret.is_none() {
-        if let Some(b) = backup {
-            app.log.register_secret(&b);
-            s.key_public = public_of(&b);
-            s.key_source = Some("the backup on this PC".into());
-            s.backup_path = Some(backup_file(&app.key_dir, &full).display().to_string());
-            s.key_secret = Some(b);
-        }
-    }
+    s.items.clear();
+    s.done = false;
     w.rev += 1;
-    app.log
-        .info(format!("GitHub: signed in as {login}, repository {full}"));
-    Ok(format!("Signed in as {login}; {full} is ready."))
+    app.log.info(format!("GitHub: signed in as {login}"));
+    Ok(msg)
 }
 
 pub struct StartReq {
-    pub version: String,
     pub taro_version: Option<String>,
     /// make a new key even though the repository already has the secret
     pub new_key: bool,
+    /// go on to Steps 6-8: check the release, build and validate the packages
+    pub build: bool,
 }
 
 /// Plan and run Start in the background; the items show its progress.
 pub fn start(app: &Arc<AppState>, req: StartReq) -> Result<(), String> {
-    let (token, repo) = {
+    let (token, repo, fork_to, upstream) = {
         let w = app.w();
         let s = &w.signing;
         if s.running {
             return Err("Start is already running.".into());
         }
-        match (&s.token, &s.repo) {
-            (Some(t), Some(r)) => (t.clone(), r.clone()),
-            _ => return Err("Sign in to GitHub first.".into()),
+        if w.build.running {
+            return Err("A build is running; wait for it or cancel it.".into());
         }
-    };
-    let tag = format!("{TAG_PREFIX}{}", req.version);
-    {
-        let w = app.w();
-        let s = &w.signing;
-        if s.releases.contains(&tag) {
-            return Err(format!(
-                "{tag} exists already. Raise the version in {VERSION_FILE} for a new release."
-            ));
+        let Some(t) = s.token.clone() else {
+            return Err("Sign in to GitHub first.".into());
+        };
+        if s.repo.is_none() && s.fork_to.is_none() {
+            return Err("Sign in to GitHub first.".into());
         }
-        match &s.version {
-            Some(v) if *v == req.version => {}
-            Some(v) => {
-                return Err(format!(
-                    "The release workflow releases the version of {VERSION_FILE}, which is {v} (not {}).",
-                    req.version
-                ))
-            }
-            None => return Err(format!("{VERSION_FILE} has no [workspace.package] version.")),
+        if req.build {
+            w.provider(None).map_err(|x| {
+                format!("{x} The packages carry them; or untick “Build the packages”.")
+            })?;
         }
-    }
-    let reuse = {
-        let w = app.w();
-        let s = &w.signing;
-        let held = s
-            .key_public
-            .as_ref()
-            .is_some_and(|p| s.repo_keys.contains(p));
-        if req.new_key {
-            Reuse::New
-        } else if s.has_secret && held {
-            Reuse::Held
-        } else if s.has_secret {
-            Reuse::Secret
-        } else {
-            Reuse::New
-        }
+        (t, s.repo.clone(), s.fork_to.clone(), s.upstream.clone())
     };
     let mut items = vec![];
-    match reuse {
-        Reuse::New => {
-            items.push(item("key", "Make a release signing key on this PC (ed25519)"));
-            items.push(item("secret", format!("Store it as the Actions secret {SIGNING_SECRET} (sealed for the repository)")));
-            items.push(item("pub", format!("Commit its public half to {KEYS_FILE}")));
-            items.push(item("backup", "Keep an encrypted backup of the key on this PC"));
-        }
-        Reuse::Held => items.push(skipped("key", "Signing key", "the repository's secret matches the key this PC holds; nothing to change")),
-        Reuse::Secret => items.push(skipped("key", "Signing key", &format!("{SIGNING_SECRET} is set already and is kept (the workflow refuses it unless it matches {KEYS_FILE})"))),
+    if let Some(t) = &fork_to {
+        items.push(item("fork", format!("Make your copy of {upstream} ({t})")));
+        items.push(item("actions", "Turn on GitHub Actions in your copy"));
+    } else if repo.as_ref().and_then(|r| r.parent.as_deref()) == Some(upstream.as_str()) {
+        items.push(item("sync", format!("Bring in the latest of {upstream}")));
     }
     items.push(item(
-        "dispatch",
-        format!("Start the Enterprise release workflow for {tag}"),
+        "key",
+        "Release signing key (ed25519, made on this PC)",
     ));
-    items.push(item("run", "GitHub Actions builds and signs the release"));
+    items.push(item(
+        "secret",
+        format!("Actions secret {SIGNING_SECRET} (sealed for the repository)"),
+    ));
+    items.push(item("pub", format!("Its public half in {KEYS_FILE}")));
+    items.push(item("backup", "Encrypted backup of the key on this PC"));
+    items.push(item(
+        "release",
+        "Release, built and signed by GitHub Actions",
+    ));
+    if req.build {
+        items.push(item("verify", "Check the release's signature"));
+        items.push(item("build", "Build and validate your packages"));
+    }
     {
         let mut w = app.w();
         let s = &mut w.signing;
@@ -277,19 +393,19 @@ pub fn start(app: &Arc<AppState>, req: StartReq) -> Result<(), String> {
     }
     let app2 = app.clone();
     tokio::spawn(async move {
-        let r = run(&app2, &token, &repo, &req, reuse, &tag).await;
+        let r = run(&app2, &token, repo, fork_to, &upstream, &req).await;
         let mut w = app2.w();
         let s = &mut w.signing;
         s.running = false;
         match r {
             Ok(()) => s.done = true,
-            Err(e) => {
+            Err(x) => {
                 for it in s.items.iter_mut().filter(|i| i.status == "running") {
                     it.status = "fail".into();
-                    it.detail = Some(e.clone());
+                    it.detail = Some(x.clone());
                 }
-                s.error = Some(e.clone());
-                app2.log.warn(format!("release signing: {e}"));
+                s.error = Some(x.clone());
+                app2.log.warn(format!("Step 5: {x}"));
             }
         }
         w.rev += 1;
@@ -297,19 +413,8 @@ pub fn start(app: &Arc<AppState>, req: StartReq) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-enum Reuse {
-    New,
-    Held,
-    Secret,
-}
-
-fn skipped(id: &str, label: &str, why: &str) -> BuildItem {
-    BuildItem {
-        status: "skipped".into(),
-        detail: Some(why.into()),
-        ..item(id, label)
-    }
+fn skipped(app: &AppState, id: &str, why: &str) {
+    set(app, id, "skipped", Some(why.into()));
 }
 
 fn set(app: &AppState, id: &str, status: &str, detail: Option<String>) {
@@ -324,118 +429,297 @@ fn set(app: &AppState, id: &str, status: &str, detail: Option<String>) {
 async fn run(
     app: &Arc<AppState>,
     token: &Secret,
-    repo: &Repo,
+    repo: Option<Repo>,
+    fork_to: Option<String>,
+    upstream: &str,
     req: &StartReq,
-    reuse: Reuse,
-    tag: &str,
 ) -> Result<(), String> {
     let g = gh(app, token);
-    let full = &repo.full_name;
-    if let Reuse::New = reuse {
-        // 1. the key
-        set(app, "key", "running", None);
-        let k = sig::generate();
-        let secret = Secret::new(sig::secret_text(&k));
-        app.log.register_secret(&secret);
-        let public = sig::public_text(&k.verifying_key());
-        drop(k);
-        set(app, "key", "ok", Some(public.clone()));
+    let poll = app.timings.actions_poll;
 
-        // 2. the secret, sealed for the repository
-        set(app, "secret", "running", None);
-        let (key_id, repo_key) = g.secrets_key(full).await.map_err(|e| e.to_string())?;
-        let sealed = crate::sealed::seal_for_github(&repo_key, &secret)?;
-        g.put_secret(full, SIGNING_SECRET, &sealed, &key_id)
-            .await
-            .map_err(|e| format!("could not store the secret: {e}"))?;
-        set(
-            app,
-            "secret",
-            "ok",
-            Some("stored; only GitHub Actions can read it".into()),
-        );
-        {
-            let mut w = app.w();
-            w.signing.has_secret = true;
-            w.signing.key_public = Some(public.clone());
-            w.signing.key_source = Some("made on this PC".into());
-            w.signing.key_secret = Some(secret.clone());
+    // 1. the operator's copy
+    let repo = match (repo, fork_to) {
+        (_, Some(_)) => {
+            set(app, "fork", "running", None);
+            let f = g
+                .fork(upstream)
+                .await
+                .map_err(|x| format!("could not make your copy: {x}"))?;
+            // GitHub copies in the background
+            let mut ready = false;
+            for _ in 0..120 {
+                if g.file(&f.full_name, VERSION_FILE, &f.default_branch)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some()
+                {
+                    ready = true;
+                    break;
+                }
+                tokio::time::sleep(poll).await;
+            }
+            if !ready {
+                return Err(format!(
+                    "GitHub has not finished copying {} yet; press Start again in a minute.",
+                    f.full_name
+                ));
+            }
+            let r = g.repo(&f.full_name).await.map_err(e)?;
+            set(app, "fork", "ok", Some(r.html_url.clone()));
+            set(app, "actions", "running", None);
+            g.enable_actions(&r.full_name, RELEASE_WORKFLOW)
+                .await
+                .map_err(|x| format!("could not turn on GitHub Actions: {x}"))?;
+            set(app, "actions", "ok", Some("on".into()));
+            app.log
+                .info(format!("Step 5: made {} from {upstream}", r.full_name));
+            r
         }
+        (Some(r), None) => {
+            if r.parent.as_deref() == Some(upstream) {
+                set(app, "sync", "running", None);
+                match g.merge_upstream(&r.full_name, &r.default_branch).await {
+                    Ok(m) => set(app, "sync", "ok", Some(m)),
+                    Err(GhError {
+                        status: Some(409), ..
+                    }) => {
+                        return Err(format!(
+                            "your copy {} has changes that conflict with {upstream}: open {} and choose Sync fork",
+                            r.full_name, r.html_url
+                        ))
+                    }
+                    Err(x) => return Err(format!("could not update your copy: {x}")),
+                }
+            }
+            r
+        }
+        (None, None) => return Err("Sign in to GitHub first.".into()),
+    };
+    let full = repo.full_name.clone();
+    {
+        let mut w = app.w();
+        w.signing.repo = Some(repo.clone());
+        w.signing.fork_to = None;
+        w.rev += 1;
+    }
+    let i = inspect(&g, &repo).await?;
+    if !i.workflow {
+        return Err(format!(
+            "{full} has no {WORKFLOW_PATH} on {}",
+            repo.default_branch
+        ));
+    }
+    apply(app, i);
+    take_backup(app, &full);
 
-        // 3. the public half in the repository (next to the old keys when releases exist)
-        set(app, "pub", "running", None);
-        let current = g
-            .file(full, KEYS_FILE, &repo.default_branch)
-            .await
-            .map_err(|e| e.to_string())?;
-        let has_releases = !app.w().signing.releases.is_empty();
-        let text = match (&current, has_releases) {
-            (Some(f), true) => format!("{}\n{public}\n", f.text.trim_end()),
-            _ => format!("{KEYS_HEADER}{public}\n"),
+    // 2. the signing key
+    let (has_secret, held) = {
+        let w = app.w();
+        let s = &w.signing;
+        let held = s
+            .key_public
+            .as_ref()
+            .is_some_and(|p| s.repo_keys.contains(p));
+        (s.has_secret, held)
+    };
+    if req.new_key || !has_secret {
+        new_key(app, &g, &repo).await?;
+    } else {
+        let why = if held {
+            "the repository has the key this PC holds; nothing to change".to_string()
+        } else {
+            format!("{SIGNING_SECRET} is set already and is kept (the workflow refuses it unless it matches {KEYS_FILE})")
         };
-        let commit = g
-            .put_file(
-                full,
-                KEYS_FILE,
-                &repo.default_branch,
-                &text,
-                current.as_ref().map(|f| f.sha.as_str()),
-                "Release signing key made by TaroEnterpriseSetup",
-            )
-            .await
-            .map_err(|e| format!("could not commit {KEYS_FILE}: {e}"))?;
-        let keys = keys_in(&text);
-        app.w().signing.repo_keys = keys;
-        set(
-            app,
-            "pub",
-            "ok",
-            Some(format!("commit {}", commit.get(..7).unwrap_or(&commit))),
-        );
-
-        // 4. the backup
-        set(app, "backup", "running", None);
-        let path = backup_file(&app.key_dir, full);
-        let protected = crate::platform::protect(secret.expose().as_bytes())?;
-        crate::platform::write_private(&path, &protected)?;
-        app.w().signing.backup_path = Some(path.display().to_string());
-        set(app, "backup", "ok", Some(path.display().to_string()));
-        app.log
-            .info(format!("release signing key made for {full}: {public}"));
+        for id in ["key", "secret", "pub", "backup"] {
+            skipped(app, id, &why);
+        }
     }
 
-    // 5. the workflow
-    set(app, "dispatch", "running", None);
+    // 3. the release
+    let version =
+        app.w().signing.version.clone().ok_or_else(|| {
+            format!("{VERSION_FILE} of {full} has no [workspace.package] version")
+        })?;
+    let tag = format!("{TAG_PREFIX}{version}");
+    if app.w().signing.releases.contains(&tag) {
+        skipped(
+            app,
+            "release",
+            &format!("{tag} exists in {full}; it is used as it is"),
+        );
+    } else {
+        release(app, &g, &repo, &version, &tag, req).await?;
+    }
+    if !req.build {
+        return Ok(());
+    }
+
+    // 4. Steps 6-8
+    set(app, "verify", "running", None);
+    let ep = release_endpoints(app);
+    let list = crate::releases::discover(&app.http, &ep, &app.timings).await?;
+    let rel = list
+        .iter()
+        .find(|r| r.tag == tag)
+        .cloned()
+        .ok_or_else(|| format!("{tag} is not among {full}'s releases yet"))?;
+    let keys = repo_trust(app);
+    let sel = crate::releases::fetch_verified(&app.http, &ep, &app.timings, &keys, &rel).await?;
+    set(
+        app,
+        "verify",
+        "ok",
+        Some(format!(
+            "signed by {}; Taro {}",
+            sel.signed_by, sel.taro_version
+        )),
+    );
+    let out = {
+        let mut w = app.w();
+        w.components.releases = Some(list);
+        w.components.error = None;
+        w.components.selected = Some(sel);
+        w.rev += 1;
+        w.build.output_dir.clone()
+    };
+    set(app, "build", "running", Some("downloading".into()));
+    crate::build::start(app, &out, true)?;
+    loop {
+        tokio::time::sleep(poll).await;
+        let w = app.w();
+        if w.build.running {
+            let phase = w.build.phase.clone();
+            drop(w);
+            set(app, "build", "running", Some(phase));
+            continue;
+        }
+        let (result, err, val) = (
+            w.build.result.clone(),
+            w.build.error.clone(),
+            w.validation.clone(),
+        );
+        drop(w);
+        return match (result, val) {
+            (Some(r), Some(v)) if v.ok => {
+                set(
+                    app,
+                    "build",
+                    "ok",
+                    Some(format!("{}: {} checks passed", r.name, v.checks.len())),
+                );
+                Ok(())
+            }
+            (Some(_), _) => {
+                Err("the packages were built but did not pass validation (Step 8)".into())
+            }
+            (None, _) => Err(err.unwrap_or_else(|| "the build stopped".into())),
+        };
+    }
+}
+
+async fn new_key(app: &Arc<AppState>, g: &GitHub, repo: &Repo) -> Result<(), String> {
+    let full = &repo.full_name;
+    set(app, "key", "running", None);
+    let k = sig::generate();
+    let secret = Secret::new(sig::secret_text(&k));
+    app.log.register_secret(&secret);
+    let public = sig::public_text(&k.verifying_key());
+    drop(k);
+    set(app, "key", "ok", Some(public.clone()));
+
+    set(app, "secret", "running", None);
+    let (key_id, repo_key) = g.secrets_key(full).await.map_err(e)?;
+    let sealed = crate::sealed::seal_for_github(&repo_key, &secret)?;
+    g.put_secret(full, SIGNING_SECRET, &sealed, &key_id)
+        .await
+        .map_err(|x| format!("could not store the secret: {x}"))?;
+    set(
+        app,
+        "secret",
+        "ok",
+        Some("stored; only GitHub Actions can read it".into()),
+    );
+    {
+        let mut w = app.w();
+        w.signing.has_secret = true;
+        w.signing.key_public = Some(public.clone());
+        w.signing.key_source = Some("made on this PC".into());
+        w.signing.key_secret = Some(secret.clone());
+    }
+
+    // next to the old keys when releases signed by them exist
+    set(app, "pub", "running", None);
+    let current = g
+        .file(full, KEYS_FILE, &repo.default_branch)
+        .await
+        .map_err(e)?;
+    let has_releases = !app.w().signing.releases.is_empty();
+    let text = match (&current, has_releases) {
+        (Some(f), true) => format!("{}\n{public}\n", f.text.trim_end()),
+        _ => format!("{KEYS_HEADER}{public}\n"),
+    };
+    let commit = g
+        .put_file(
+            full,
+            KEYS_FILE,
+            &repo.default_branch,
+            &text,
+            current.as_ref().map(|f| f.sha.as_str()),
+            "Release signing key made by TaroEnterpriseSetup",
+        )
+        .await
+        .map_err(|x| format!("could not commit {KEYS_FILE}: {x}"))?;
+    app.w().signing.repo_keys = keys_in(&text);
+    set(
+        app,
+        "pub",
+        "ok",
+        Some(format!("commit {}", commit.get(..7).unwrap_or(&commit))),
+    );
+
+    set(app, "backup", "running", None);
+    let path = backup_file(&app.key_dir, full);
+    let protected = crate::platform::protect(secret.expose().as_bytes())?;
+    crate::platform::write_private(&path, &protected)?;
+    app.w().signing.backup_path = Some(path.display().to_string());
+    set(app, "backup", "ok", Some(path.display().to_string()));
+    app.log
+        .info(format!("release signing key made for {full}: {public}"));
+    Ok(())
+}
+
+async fn release(
+    app: &Arc<AppState>,
+    g: &GitHub,
+    repo: &Repo,
+    version: &str,
+    tag: &str,
+    req: &StartReq,
+) -> Result<(), String> {
+    let full = &repo.full_name;
+    set(
+        app,
+        "release",
+        "running",
+        Some(format!("starting {RELEASE_WORKFLOW} for {tag}")),
+    );
     let started = crate::util::rfc3339(crate::util::now_secs().saturating_sub(5));
-    let mut inputs = json!({ "version": req.version });
+    let mut inputs = json!({ "version": version });
     if let Some(t) = req.taro_version.as_deref().filter(|t| !t.is_empty()) {
         inputs["taro_version"] = json!(t);
     }
     g.dispatch(full, RELEASE_WORKFLOW, &repo.default_branch, inputs)
         .await
-        .map_err(|e| format!("could not start {RELEASE_WORKFLOW}: {e}"))?;
-    set(
-        app,
-        "dispatch",
-        "ok",
-        Some(format!("{RELEASE_WORKFLOW} on {}", repo.default_branch)),
-    );
-
-    // 6. follow the run it started (the newest manual run created after the dispatch)
-    set(
-        app,
-        "run",
-        "running",
-        Some("waiting for GitHub to start the run".into()),
-    );
+        .map_err(|x| format!("could not start {RELEASE_WORKFLOW}: {x}"))?;
     let poll = app.timings.actions_poll;
     let mut found: Option<Run> = None;
     loop {
         tokio::time::sleep(poll).await;
         let runs = match g.runs(full, RELEASE_WORKFLOW).await {
             Ok(r) => r,
-            Err(e) => {
-                app.log.warn(format!("looking at the run: {e}"));
+            Err(x) => {
+                app.log.warn(format!("looking at the run: {x}"));
                 continue;
             }
         };
@@ -449,9 +733,13 @@ async fn run(
         if run.status != "completed" {
             set(
                 app,
-                "run",
+                "release",
                 "running",
-                Some(format!("{}: {}", run.status, run.html_url)),
+                Some(format!(
+                    "{tag} {}: {}",
+                    run.status.replace('_', " "),
+                    run.html_url
+                )),
             );
             continue;
         }
@@ -459,7 +747,7 @@ async fn run(
             Some("success") => {
                 set(
                     app,
-                    "run",
+                    "release",
                     "ok",
                     Some(format!("{tag} is published and signed: {}", run.html_url)),
                 );
@@ -475,8 +763,8 @@ async fn run(
     }
 }
 
-/// The release keys of the connected repository, which Step 6 trusts in addition to the
-/// wizard's own (it read them itself, over HTTPS, with the operator's token).
+/// The release keys of the operator's repository, which Step 6 trusts in addition to the
+/// wizard's own (read over HTTPS with the operator's token).
 pub fn repo_trust(app: &AppState) -> sig::TrustedKeys {
     let w = app.w();
     let text = w.signing.repo_keys.join("\n");

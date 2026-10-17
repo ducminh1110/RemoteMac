@@ -146,7 +146,7 @@ pub fn relay_tgz(arch: &str) -> Vec<u8> {
     tgz(&refs)
 }
 
-/// The repository side of Step 5 (release signing) in the fake GitHub.
+/// One repository of the fake GitHub (Step 5).
 pub struct GhRepo {
     /// the X25519 key Actions secrets are sealed for (the test opens them with it)
     pub secrets_key: crypto_box::SecretKey,
@@ -156,20 +156,66 @@ pub struct GhRepo {
     pub secret_puts: u32,
     pub file_puts: u32,
     pub dispatches: Vec<Value>,
-    /// workflow runs; each look advances one: queued -> in_progress -> completed
+    /// workflow runs; each look advances the newest: queued -> in_progress -> completed
     pub runs: Vec<Value>,
+    /// releases published by the fake Actions
+    pub releases: Vec<Value>,
+    pub parent: Option<String>,
+    /// GitHub Actions allowed to run (off in a new fork)
+    pub actions: bool,
+    pub syncs: u32,
+}
+
+impl GhRepo {
+    fn new(
+        files: HashMap<String, (String, String)>,
+        parent: Option<String>,
+        actions: bool,
+    ) -> Self {
+        GhRepo {
+            secrets_key: crypto_box::SecretKey::generate(&mut crypto_box::aead::OsRng),
+            secrets: HashMap::new(),
+            files,
+            secret_puts: 0,
+            file_puts: 0,
+            dispatches: vec![],
+            runs: vec![],
+            releases: vec![],
+            parent,
+            actions,
+            syncs: 0,
+        }
+    }
+}
+
+/// The fake GitHub API: repositories by `owner/name`.
+pub struct Gh {
+    pub repos: HashMap<String, GhRepo>,
+    /// how the fake release workflow ends
     pub run_conclusion: String,
     /// every request body the fake GitHub API received
     pub bodies: Vec<String>,
-    pub extra_tags: Vec<String>,
+    pub forks: u32,
 }
 
+impl Gh {
+    pub fn repo(&mut self, full: &str) -> &mut GhRepo {
+        self.repos
+            .get_mut(full)
+            .unwrap_or_else(|| panic!("no fake repository {full}"))
+    }
+}
+
+/// A classic token with repo and workflow, and one without workflow.
 pub const GH_TOKEN: &str = "github-token-for-tests-0123456789";
+pub const GH_TOKEN_NO_WORKFLOW: &str = "github-token-noworkflow-0123456789";
 pub const KEYS_PATH: &str = "enterprise/keys/release-signing.pub";
 pub const OLD_KEY: &str = "ed25519:VBCM7iMltXcKPW7U05JsFlpOzPdy1bO/BPWJmWR1kio=";
+/// the operator's own copy, made by Start
+pub const FORK: &str = "octo/RemoteMac";
 
 pub struct Fake {
-    pub gh: Mutex<GhRepo>,
+    pub gh: Mutex<Gh>,
     pub base: Mutex<String>,
     /// served files by URL path below the fake (`/objects/…`, `/gh-web/…`)
     pub files: Mutex<HashMap<String, Vec<u8>>>,
@@ -204,7 +250,7 @@ async fn record(State(f): State<F>, req: Request, next: axum::middleware::Next) 
     next.run(req).await
 }
 
-async fn releases(State(f): State<F>) -> Response {
+fn upstream_releases() -> Vec<Value> {
     let asset = |tag: &str, n: &str| json!({"name": n, "size": 1, "browser_download_url": format!("https://github.com/{REPO}/releases/download/{tag}/{n}")});
     let rel = |tag: &str, draft: bool| {
         json!({
@@ -213,15 +259,26 @@ async fn releases(State(f): State<F>) -> Response {
             "assets": [asset(tag, "taro-enterprise-components.json"), asset(tag, "taro-enterprise-components.json.sig"), asset(tag, "enterprise-update.zip")]
         })
     };
-    let mut v = vec![
+    vec![
         json!({"tag_name": TARO, "draft": false, "assets": [asset(TARO, "Taro-windows.zip")]}),
         rel("enterprise-v0.1.0", false),
         rel("enterprise-v0.2.0", false),
         rel("enterprise-v0.9.0", true),
-    ];
-    for t in f.gh.lock().unwrap().extra_tags.clone() {
-        v.push(json!({"tag_name": t, "draft": false, "assets": []}));
-    }
+    ]
+}
+
+async fn releases(State(f): State<F>, Path((o, r)): Path<(String, String)>) -> Response {
+    let full = format!("{o}/{r}");
+    let g = f.gh.lock().unwrap();
+    let Some(repo) = g.repos.get(&full) else {
+        return not_found();
+    };
+    let mut v = if full == REPO {
+        upstream_releases()
+    } else {
+        vec![]
+    };
+    v.extend(repo.releases.iter().cloned());
     Json(Value::Array(v)).into_response()
 }
 
@@ -306,18 +363,21 @@ pub async fn start_fake(key: &ed25519_dalek::SigningKey) -> (Arc<Fake>, HashMap<
             "sha-cargo-0".to_string(),
         ),
     );
+    gh_files.insert(
+        ".github/workflows/enterprise-release.yml".to_string(),
+        (
+            "name: Enterprise release\n".to_string(),
+            "sha-wf-0".to_string(),
+        ),
+    );
+    let mut repos = HashMap::new();
+    repos.insert(REPO.to_string(), GhRepo::new(gh_files, None, true));
     let f = Arc::new(Fake {
-        gh: Mutex::new(GhRepo {
-            secrets_key: crypto_box::SecretKey::generate(&mut crypto_box::aead::OsRng),
-            secrets: HashMap::new(),
-            files: gh_files,
-            secret_puts: 0,
-            file_puts: 0,
-            dispatches: vec![],
-            runs: vec![],
+        gh: Mutex::new(Gh {
+            repos,
             run_conclusion: "success".into(),
             bodies: vec![],
-            extra_tags: vec![],
+            forks: 0,
         }),
         base: Mutex::new(String::new()),
         files: Mutex::new(HashMap::new()),
@@ -398,10 +458,23 @@ pub async fn start_fake(key: &ed25519_dalek::SigningKey) -> (Arc<Fake>, HashMap<
             files.insert(format!("/objects/assets/{name}"), bytes.clone());
         }
     }
-    let api = format!("/gh-api/repos/{REPO}");
+    let api = "/gh-api/repos/{o}/{r}";
     let app = Router::new()
         .route("/gh-api/user", get(gh_user))
-        .route(&api, get(gh_repo))
+        .route(api, get(gh_repo))
+        .route(&format!("{api}/forks"), axum::routing::post(gh_fork))
+        .route(
+            &format!("{api}/merge-upstream"),
+            axum::routing::post(gh_merge_upstream),
+        )
+        .route(
+            &format!("{api}/actions/permissions"),
+            axum::routing::put(gh_actions_on),
+        )
+        .route(
+            &format!("{api}/actions/workflows/{{wf}}/enable"),
+            axum::routing::put(gh_workflow_on),
+        )
         .route(
             &format!("{api}/actions/secrets/public-key"),
             get(gh_secrets_key),
@@ -422,7 +495,7 @@ pub async fn start_fake(key: &ed25519_dalek::SigningKey) -> (Arc<Fake>, HashMap<
             &format!("{api}/actions/workflows/{{wf}}/runs"),
             get(gh_runs),
         )
-        .route(&format!("/gh-api/repos/{REPO}/releases"), get(releases))
+        .route(&format!("{api}/releases"), get(releases))
         .route("/gh-web/", get(|| async { "github.com" }))
         .route("/gh-web/{*rest}", get(gh_web))
         .route(
@@ -438,8 +511,15 @@ pub async fn start_fake(key: &ed25519_dalek::SigningKey) -> (Arc<Fake>, HashMap<
     (f, sources)
 }
 
-fn authed(req: &axum::http::HeaderMap) -> bool {
-    req.get("authorization").and_then(|v| v.to_str().ok()) == Some(&format!("Bearer {GH_TOKEN}"))
+type H = axum::http::HeaderMap;
+type P2 = Path<(String, String)>;
+
+/// The token of a request, if it is one of the fake's.
+fn token(h: &H) -> Option<&'static str> {
+    let v = h.get("authorization").and_then(|v| v.to_str().ok())?;
+    [GH_TOKEN, GH_TOKEN_NO_WORKFLOW]
+        .into_iter()
+        .find(|t| v == format!("Bearer {t}"))
 }
 
 fn unauthorized() -> Response {
@@ -450,95 +530,196 @@ fn unauthorized() -> Response {
         .into_response()
 }
 
-async fn gh_user(h: axum::http::HeaderMap) -> Response {
-    if !authed(&h) {
-        return unauthorized();
-    }
-    Json(json!({"login": "octo"})).into_response()
+fn not_found() -> Response {
+    (StatusCode::NOT_FOUND, Json(json!({"message": "Not Found"}))).into_response()
 }
 
-async fn gh_repo(h: axum::http::HeaderMap) -> Response {
-    if !authed(&h) {
-        return unauthorized();
-    }
-    Json(json!({"full_name": REPO, "html_url": format!("https://github.com/{REPO}"), "default_branch": "main", "private": false, "permissions": {"admin": true, "push": true}})).into_response()
+macro_rules! authed {
+    ($h:expr) => {
+        if token(&$h).is_none() {
+            return unauthorized();
+        }
+    };
 }
 
-async fn gh_secrets_key(State(f): State<F>, h: axum::http::HeaderMap) -> Response {
-    if !authed(&h) {
+async fn gh_user(h: H) -> Response {
+    let Some(t) = token(&h) else {
         return unauthorized();
+    };
+    let scopes = if t == GH_TOKEN {
+        "repo, workflow, read:org"
+    } else {
+        "repo"
+    };
+    ([("x-oauth-scopes", scopes)], Json(json!({"login": "octo"}))).into_response()
+}
+
+fn repo_json(full: &str, r: &GhRepo) -> Value {
+    json!({"full_name": full, "html_url": format!("https://github.com/{full}"), "default_branch": "main",
+        "private": false, "fork": r.parent.is_some(),
+        "parent": r.parent.as_ref().map(|p| json!({"full_name": p})),
+        "permissions": {"admin": true, "push": true}})
+}
+
+async fn gh_repo(State(f): State<F>, h: H, Path((o, r)): P2) -> Response {
+    authed!(h);
+    let full = format!("{o}/{r}");
+    match f.gh.lock().unwrap().repos.get(&full) {
+        Some(x) => Json(repo_json(&full, x)).into_response(),
+        None => not_found(),
     }
-    let pk = f.gh.lock().unwrap().secrets_key.public_key();
+}
+
+async fn gh_fork(State(f): State<F>, h: H, Path((o, r)): P2, body: String) -> Response {
+    authed!(h);
+    let up = format!("{o}/{r}");
+    let mut g = f.gh.lock().unwrap();
+    g.bodies.push(body);
+    // one fork per account: an existing one is returned
+    if let Some((full, x)) = g
+        .repos
+        .iter()
+        .find(|(_, x)| x.parent.as_deref() == Some(&up))
+    {
+        return (StatusCode::ACCEPTED, Json(repo_json(full, x))).into_response();
+    }
+    let files = g.repo(&up).files.clone();
+    let full = format!("octo/{r}");
+    g.repos
+        .insert(full.clone(), GhRepo::new(files, Some(up), false));
+    g.forks += 1;
+    let v = repo_json(&full, &g.repos[&full]);
+    (StatusCode::ACCEPTED, Json(v)).into_response()
+}
+
+async fn gh_merge_upstream(State(f): State<F>, h: H, Path((o, r)): P2) -> Response {
+    authed!(h);
+    let full = format!("{o}/{r}");
+    let mut g = f.gh.lock().unwrap();
+    let Some(up) = g.repos.get(&full).and_then(|x| x.parent.clone()) else {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"message": "not a fork"})),
+        )
+            .into_response();
+    };
+    let ups = g.repo(&up).files.clone();
+    let me = g.repo(&full);
+    me.syncs += 1;
+    let mut changed = false;
+    for (path, v) in ups {
+        // the operator's own commit (the keys file) stays theirs
+        if path == KEYS_PATH && me.files.contains_key(&path) {
+            continue;
+        }
+        if me.files.get(&path) != Some(&v) {
+            me.files.insert(path, v);
+            changed = true;
+        }
+    }
+    let msg = if changed {
+        "Successfully fetched and fast-forwarded from upstream ducminh1110:main."
+    } else {
+        "This branch is not behind the upstream ducminh1110:main."
+    };
+    Json(json!({"message": msg})).into_response()
+}
+
+async fn gh_actions_on(State(f): State<F>, h: H, Path((o, r)): P2, body: String) -> Response {
+    authed!(h);
+    let mut g = f.gh.lock().unwrap();
+    let v: Value = serde_json::from_str(&body).unwrap_or_default();
+    g.repo(&format!("{o}/{r}")).actions = v["enabled"] == true;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn gh_workflow_on(h: H) -> Response {
+    authed!(h);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn gh_secrets_key(State(f): State<F>, h: H, Path((o, r)): P2) -> Response {
+    authed!(h);
+    let pk =
+        f.gh.lock()
+            .unwrap()
+            .repo(&format!("{o}/{r}"))
+            .secrets_key
+            .public_key();
     Json(json!({"key_id": "kid-1", "key": taro_enterprise_setup::util::b64(pk.as_bytes())}))
         .into_response()
 }
 
 async fn gh_secret_get(
     State(f): State<F>,
-    h: axum::http::HeaderMap,
-    Path(name): Path<String>,
+    h: H,
+    Path((o, r, name)): Path<(String, String, String)>,
 ) -> Response {
-    if !authed(&h) {
-        return unauthorized();
-    }
-    if f.gh.lock().unwrap().secrets.contains_key(&name) {
+    authed!(h);
+    if f.gh
+        .lock()
+        .unwrap()
+        .repo(&format!("{o}/{r}"))
+        .secrets
+        .contains_key(&name)
+    {
         Json(json!({"name": name})).into_response()
     } else {
-        (StatusCode::NOT_FOUND, Json(json!({"message": "Not Found"}))).into_response()
+        not_found()
     }
 }
 
 async fn gh_secret_put(
     State(f): State<F>,
-    h: axum::http::HeaderMap,
-    Path(name): Path<String>,
+    h: H,
+    Path((o, r, name)): Path<(String, String, String)>,
     body: String,
 ) -> Response {
-    if !authed(&h) {
-        return unauthorized();
-    }
+    authed!(h);
     let mut g = f.gh.lock().unwrap();
     g.bodies.push(body.clone());
     let v: Value = serde_json::from_str(&body).unwrap_or_default();
     assert_eq!(v["key_id"], "kid-1");
-    g.secrets.insert(
+    let repo = g.repo(&format!("{o}/{r}"));
+    repo.secrets.insert(
         name,
         v["encrypted_value"]
             .as_str()
             .unwrap_or_default()
             .to_string(),
     );
-    g.secret_puts += 1;
+    repo.secret_puts += 1;
     StatusCode::CREATED.into_response()
 }
 
 async fn gh_file_get(
     State(f): State<F>,
-    h: axum::http::HeaderMap,
-    Path(path): Path<String>,
+    h: H,
+    Path((o, r, path)): Path<(String, String, String)>,
 ) -> Response {
-    if !authed(&h) {
-        return unauthorized();
-    }
-    match f.gh.lock().unwrap().files.get(&path) {
+    authed!(h);
+    let mut g = f.gh.lock().unwrap();
+    let Some(repo) = g.repos.get_mut(&format!("{o}/{r}")) else {
+        return not_found();
+    };
+    match repo.files.get(&path) {
         Some((text, sha)) => Json(json!({"content": taro_enterprise_setup::util::b64(text.as_bytes()), "sha": sha, "encoding": "base64"})).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(json!({"message": "Not Found"}))).into_response(),
+        None => not_found(),
     }
 }
 
 async fn gh_file_put(
     State(f): State<F>,
-    h: axum::http::HeaderMap,
-    Path(path): Path<String>,
+    h: H,
+    Path((o, r, path)): Path<(String, String, String)>,
     body: String,
 ) -> Response {
-    if !authed(&h) {
-        return unauthorized();
-    }
+    authed!(h);
     let mut g = f.gh.lock().unwrap();
     g.bodies.push(body.clone());
     let v: Value = serde_json::from_str(&body).unwrap_or_default();
-    let current = g.files.get(&path).map(|x| x.1.clone());
+    let repo = g.repo(&format!("{o}/{r}"));
+    let current = repo.files.get(&path).map(|x| x.1.clone());
     if v["sha"].as_str().map(str::to_string) != current {
         return (
             StatusCode::CONFLICT,
@@ -550,62 +731,125 @@ async fn gh_file_put(
         taro_enterprise_setup::util::b64_decode(v["content"].as_str().unwrap_or_default()).unwrap(),
     )
     .unwrap();
-    g.file_puts += 1;
-    let sha = format!("sha-{}-{}", path.len(), g.file_puts);
-    g.files.insert(path, (text, sha));
+    repo.file_puts += 1;
+    let sha = format!("sha-{}-{}", path.len(), repo.file_puts);
+    repo.files.insert(path, (text, sha));
     Json(json!({"commit": {"sha": "c0ffee0123456789"}})).into_response()
 }
 
 async fn gh_dispatch(
     State(f): State<F>,
-    h: axum::http::HeaderMap,
-    Path(wf): Path<String>,
+    h: H,
+    Path((o, r, wf)): Path<(String, String, String)>,
     body: String,
 ) -> Response {
-    if !authed(&h) {
-        return unauthorized();
-    }
+    authed!(h);
     assert_eq!(wf, "enterprise-release.yml");
+    let full = format!("{o}/{r}");
     let mut g = f.gh.lock().unwrap();
     g.bodies.push(body.clone());
-    g.dispatches
+    let repo = g.repo(&full);
+    if !repo.actions {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"message": "Actions are disabled for this repository."})),
+        )
+            .into_response();
+    }
+    repo.dispatches
         .push(serde_json::from_str(&body).unwrap_or_default());
-    let id = 100 + g.runs.len() as u64;
+    let id = 100 + repo.runs.len() as u64;
     let now = taro_enterprise_setup::util::rfc3339(taro_enterprise_setup::util::now_secs());
-    g.runs.insert(0, json!({"id": id, "status": "queued", "conclusion": null, "html_url": format!("https://github.com/{REPO}/actions/runs/{id}"), "created_at": now}));
+    repo.runs.insert(0, json!({"id": id, "status": "queued", "conclusion": null, "html_url": format!("https://github.com/{full}/actions/runs/{id}"), "created_at": now}));
     StatusCode::NO_CONTENT.into_response()
 }
 
-async fn gh_runs(State(f): State<F>, h: axum::http::HeaderMap) -> Response {
-    if !authed(&h) {
-        return unauthorized();
+/// What the real release workflow checks before it signs: the secret is a signing key whose
+/// public half is in the repository's keys file. Returns that key.
+fn workflow_key(repo: &GhRepo) -> Option<ed25519_dalek::SigningKey> {
+    let sealed = repo.secrets.get("TARO_ENTERPRISE_SIGNING_KEY")?;
+    let raw = taro_enterprise_setup::util::b64_decode(sealed)?;
+    let text = String::from_utf8(repo.secrets_key.unseal(&raw).ok()?).ok()?;
+    let k = sig::parse_secret(text.trim()).ok()?;
+    let public = sig::public_text(&k.verifying_key());
+    repo.files
+        .get(KEYS_PATH)
+        .is_some_and(|(t, _)| t.lines().any(|l| l.trim() == public))
+        .then_some(k)
+}
+
+/// The fake release workflow's result: a release of `full`, its component manifest (the Taro
+/// clients of upstream's release, the relays of this one) signed with the repository's secret.
+fn publish(f: &Fake, g: &mut Gh, full: &str, version: &str) -> bool {
+    let Some(key) = workflow_key(g.repo(full)) else {
+        return false;
+    };
+    let tag = format!("enterprise-v{version}");
+    let up = format!(
+        "/gh-web/{REPO}/releases/download/enterprise-v0.2.0/taro-enterprise-components.json"
+    );
+    let mut files = f.files.lock().unwrap();
+    let mut m: Components = serde_json::from_slice(&files[&up]).unwrap();
+    m.enterprise_version = version.into();
+    for c in &mut m.components {
+        if c.id.starts_with("linux-relay-") {
+            c.url = format!(
+                "https://github.com/{full}/releases/download/{tag}/{}",
+                c.file
+            );
+        }
     }
+    let bytes = serde_json::to_vec_pretty(&m).unwrap();
+    let signature = sig::sign(&key, &bytes);
+    let dir = format!("/gh-web/{full}/releases/download/{tag}");
+    files.insert(format!("{dir}/taro-enterprise-components.json"), bytes);
+    files.insert(
+        format!("{dir}/taro-enterprise-components.json.sig"),
+        signature.into_bytes(),
+    );
+    let asset = |n: &str| json!({"name": n, "size": 1, "browser_download_url": format!("https://github.com/{full}/releases/download/{tag}/{n}")});
+    g.repo(full).releases.push(json!({
+        "tag_name": tag, "name": format!("Taro Enterprise {version}"), "draft": false, "prerelease": true,
+        "published_at": "2026-10-17T10:00:00Z", "html_url": format!("https://github.com/{full}/releases/tag/{tag}"),
+        "assets": [asset("taro-enterprise-components.json"), asset("taro-enterprise-components.json.sig")]
+    }));
+    true
+}
+
+async fn gh_runs(
+    State(f): State<F>,
+    h: H,
+    Path((o, r, _wf)): Path<(String, String, String)>,
+) -> Response {
+    authed!(h);
+    let full = format!("{o}/{r}");
     let mut g = f.gh.lock().unwrap();
     let conclusion = g.run_conclusion.clone();
-    let version = g.dispatches.last().map(|d| {
+    let repo = g.repo(&full);
+    let version = repo.dispatches.last().map(|d| {
         d["inputs"]["version"]
             .as_str()
             .unwrap_or_default()
             .to_string()
     });
-    let mut finished = false;
-    if let Some(r) = g.runs.first_mut() {
-        let next = match r["status"].as_str() {
-            Some("queued") => "in_progress",
-            _ => "completed",
-        };
-        if next == "completed" && r["status"] != "completed" {
-            r["conclusion"] = json!(conclusion);
-            finished = conclusion == "success";
-        }
-        r["status"] = json!(next);
-    }
-    if finished {
-        if let Some(v) = version {
-            g.extra_tags.push(format!("enterprise-v{v}"));
+    let mut finishing = false;
+    if let Some(run) = repo.runs.first_mut() {
+        match run["status"].as_str() {
+            Some("queued") => run["status"] = json!("in_progress"),
+            Some("in_progress") => finishing = true,
+            _ => {}
         }
     }
-    Json(json!({"workflow_runs": g.runs})).into_response()
+    if finishing {
+        let ok = conclusion == "success"
+            && version
+                .as_deref()
+                .is_some_and(|v| publish(&f, &mut g, &full, v));
+        let run = g.repo(&full).runs.first_mut().unwrap();
+        run["status"] = json!("completed");
+        run["conclusion"] = json!(if ok { "success" } else { "failure" });
+    }
+    Json(json!({"workflow_runs": g.repo(&full).runs})).into_response()
 }
 
 /// Replace one release's signature with a signature by another key.
