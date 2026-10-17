@@ -1,0 +1,11 @@
+.git
+.claude
+target
+enterprise/target
+enterprise/target-*
+**/node_modules
+screenshots
+out
+**/*.png.tmp
+.env
+**/.env

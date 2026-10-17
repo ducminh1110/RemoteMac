@@ -219,7 +219,7 @@ jobs:
         run: |
           img=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/taro-enterprise
           echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker build -t $img:$V -f enterprise/Dockerfile enterprise
+          docker build -t $img:$V -f enterprise/Dockerfile .
           docker push $img:$V
           echo "$img:$V" > image.txt
       - uses: actions/upload-artifact@v4

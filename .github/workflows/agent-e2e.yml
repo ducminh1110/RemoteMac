@@ -35,7 +35,7 @@ jobs:
           # a provider's package: the same binary, unmodified, with provider/ next to it
           P="$RUNNER_TEMP/Acme"; rm -rf "$P"; mkdir -p "$P/provider"
           cp out/remote-agent-mac "$P/taro"; install -m 0755 agent/macos/taro.sh agent/macos/taro-update.sh "$P/"
-          KEY=acme-ci-key-0123456789abcdef
+          KEY=test-key-aaaaaaaaaaaaaaaa
           write() {
             printf '{"schema":"taro.provider/v1","provider_id":"acme-cloud","product":{"name":"Acme Connect","short_name":"Acme","vendor":"Acme Cloud Ltd"},"branding":{"primary_color":"#0F766E"},"relay":{"host":"relay.acme.example","port":7471,"key":"%s"},"updates":{"clients":"%s"}}\n' "$KEY" "$1" > "$P/provider/provider.json"
           }

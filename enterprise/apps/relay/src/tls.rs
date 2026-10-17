@@ -28,8 +28,8 @@ pub fn now_unix() -> i64 {
 
 /// The leaf certificate of a PEM chain.
 pub fn cert_info(chain_pem: &[u8]) -> Result<CertInfo, String> {
-    let mut rd = std::io::BufReader::new(chain_pem);
-    let first = rustls_pemfile::certs(&mut rd)
+    use rustls_pki_types::{pem::PemObject, CertificateDer};
+    let first = CertificateDer::pem_slice_iter(chain_pem)
         .next()
         .ok_or("no certificate in the file")?
         .map_err(|e| e.to_string())?;
@@ -67,15 +67,14 @@ fn certified_key(
     chain_pem: &[u8],
     key_pem: &[u8],
 ) -> Result<Arc<rustls::sign::CertifiedKey>, String> {
-    let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::BufReader::new(chain_pem))
+    use rustls_pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
+    let certs: Vec<_> = CertificateDer::pem_slice_iter(chain_pem)
         .collect::<Result<_, _>>()
         .map_err(|e| format!("certificate: {e}"))?;
     if certs.is_empty() {
         return Err("no certificate".into());
     }
-    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_pem))
-        .map_err(|e| format!("key: {e}"))?
-        .ok_or("no private key")?;
+    let key = PrivateKeyDer::from_pem_slice(key_pem).map_err(|e| format!("key: {e}"))?;
     let provider = rustls::crypto::ring::default_provider();
     let signing = provider
         .key_provider

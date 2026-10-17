@@ -22,8 +22,8 @@ services:
   api:
     image: ${TARO_IMAGE:-taro-enterprise:latest}
     build:
-      context: ../..
-      dockerfile: Dockerfile
+      context: ../../..
+      dockerfile: enterprise/Dockerfile
     restart: unless-stopped
     env_file: .env
     environment:
