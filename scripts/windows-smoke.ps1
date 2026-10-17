@@ -61,7 +61,7 @@ public struct RECT { public int Left, Top, Right, Bottom; }
 "@
   $cv = Start-Process -PassThru -NoNewWindow -FilePath target\release\remote-mac-viewer.exe -RedirectStandardError "out\viewer-connect.log"
   $h = [IntPtr]::Zero
-  for ($i = 0; $i -lt 120 -and $h -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 250; $h = [W.U]::FindWindow("RmConnect", $null) }
+  for ($i = 0; $i -lt 120 -and $h -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 250; $h = [W.U]::FindWindow("RmConnect", [NullString]::Value) }
   if ($h -ne [IntPtr]::Zero) {
     [W.U]::SetForegroundWindow($h) | Out-Null
     Start-Sleep -Seconds 2

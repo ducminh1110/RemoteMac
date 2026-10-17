@@ -947,6 +947,8 @@ func handle(_ m: [String: Any]) {
             let bundle = d.executable.components(separatedBy: "/Contents/MacOS/").first ?? d.executable
             if let rgba = appIconRGBA(path: bundle, size: 64) {
                 try? sender.sendBulk(["type": "app_icon", "application_id": id, "size": 64, "rgba_base64": rgba.base64EncodedString()])
+            } else {
+                send(["type": "error", "code": "app_icon_unavailable", "message": id])
             }
         }
     case "file_upload_begin", "file_upload_chunk", "file_upload_end":

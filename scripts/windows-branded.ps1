@@ -96,7 +96,7 @@ public static string Windows(uint want) {
 "@
   $cv = Start-Process -PassThru -NoNewWindow -FilePath out\Acme\Acme.exe -RedirectStandardError "$out\viewer-connect.log"
   $h = [IntPtr]::Zero
-  for ($i = 0; $i -lt 120 -and $h -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 250; $h = [WB.U]::FindWindow("RmConnect", $null) }
+  for ($i = 0; $i -lt 120 -and $h -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 250; $h = [WB.U]::FindWindow("RmConnect", [NullString]::Value) }
   if ($h -ne [IntPtr]::Zero) {
     [WB.U]::SetForegroundWindow($h) | Out-Null
     Start-Sleep -Seconds 3
