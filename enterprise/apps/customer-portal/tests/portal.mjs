@@ -79,7 +79,6 @@ await step("operator assigns a Mac", async () => {
 });
 
 const P = await newPage();
-const wanted = [];
 await P.addInitScript(() => { window.addEventListener("securitypolicyviolation", (e) => console.error("CSP violation: " + e.violatedDirective)); });
 
 await step("sign in page", async () => {
@@ -115,17 +114,21 @@ await step("the assigned Mac", async () => {
   await shot(P, "macs-light");
   await P.emulateMedia({ colorScheme: "dark" }); await shot(P, "macs-dark"); await P.emulateMedia({ colorScheme: "light" });
   // Connect: the page asks the browser to open a taro:// link
-  const cdp = await P.context().newCDPSession(P);
+  // (on a throw-away tab: headless Chromium swallows later clicks after a custom-scheme navigation)
+  const Q = await P.context().newPage();
+  await Q.goto(BASE + "/"); await Q.waitForSelector(`${connectSel}:not([disabled])`);
+  const cdp = await Q.context().newCDPSession(Q);
   await cdp.send("Page.enable");
   const nav = [];
   cdp.on("Page.frameRequestedNavigation", (e) => nav.push(e.url));
-  const grant = P.waitForResponse((r) => r.url().includes("/connect-grant"));
-  await P.click(connectSel);
+  const grant = Q.waitForResponse((r) => r.url().includes("/connect-grant"));
+  await Q.click(connectSel);
   const g = await (await grant).json();
-  await P.waitForTimeout(500);
+  await Q.waitForTimeout(500);
   check("Connect: grant returns a taro link", /^taro:\/\//.test(g.taro_link), g.taro_link);
   check("Connect: browser navigates to the taro:// link", nav.some((u) => u.startsWith("taro://")), nav.join());
-  check("Connect: 'Taro did not open? Download the app' hint shown", await P.locator("#connect-hint").isVisible() && (await P.locator("#connect-hint").innerText()).includes("Download the app"));
+  check("Connect: 'Taro did not open? Download the app' hint shown", await Q.locator("#connect-hint").isVisible() && (await Q.locator("#connect-hint").innerText()).includes("Download the app"));
+  await Q.close();
 });
 
 await step("device approval", async () => {
@@ -138,7 +141,7 @@ await step("device approval", async () => {
   await shot(P, "device-light");
   await P.emulateMedia({ colorScheme: "dark" }); await shot(P, "device-dark"); await P.emulateMedia({ colorScheme: "light" });
   await P.click("#device-approve");
-  await P.waitForSelector("#device-request .alert.ok", { timeout: 8000 }).catch(async () => { console.log("DEBUG", await P.locator("body").innerText()); });
+  await P.waitForSelector("#device-request .alert.ok", { timeout: 8000 });
   check("approved: 'You can go back to the app.'", (await P.locator("#device-request").innerText()).includes("You can go back to the app."));
   const tok = await app.call("POST", "/api/v1/devices/token", { device_code: a.body.device_code });
   check("app: token issued after approval", tok.status === 200 && !!tok.body.access_token, JSON.stringify(tok.body));
@@ -193,7 +196,6 @@ await step("phone layout", async () => {
 await step("sign out", async () => {
   await P.goto(BASE + "/"); await settle(P);
   await P.click("#sign-out"); await P.waitForURL(/\/sign-in/);
-  const me = await fetch(BASE + "/api/v1/me");
   check("sign out: back at sign-in", true);
   await P.goto(BASE + "/"); await settle(P);
   check("signed out: / redirects to sign-in", new URL(P.url()).pathname === "/sign-in");
