@@ -1,531 +1,840 @@
-// Taro Enterprise Setup - wizard UI (vanilla JS, no build step).
-// All DOM is built with createElement/textContent: no innerHTML with data, so nothing the
-// server or a remote API returns can inject markup.
-"use strict";
+// Taro Enterprise Setup (Wizard 1, the package builder): the console UI.
+// Built with the shared console helpers; all DOM through createElement/textContent (no
+// innerHTML with data). Colours are set through the CSSOM (element.style.setProperty), which the
+// strict CSP allows; there are no inline styles or scripts.
+import { h, icon, status, container, kv, alert, pageHeader, breadcrumbs, button, busy, flash, confirmDialog, download } from "/common/console.js";
 
-(function () {
-  const TOKEN = new URL(location.href).searchParams.get("t") || "";
-  let S = null; // last state from the server
-  let current = "preflight";
-  let busy = {}; // action key -> true while a request runs
-  const drafts = {}; // non-secret input drafts by id, survive re-renders
-  const errors = {}; // field errors by step
-  let flash = null; // { kind, text } shown at top of the panel
-  let pollTimer = null;
-  const objectUrls = { logo: null, favicon: null };
+const TOKEN = new URL(location.href).searchParams.get("t") || "";
+// in TaroEnterpriseSetup's own window (not a browser tab): its title bar closes it
+const APP_WINDOW = new URL(location.href).searchParams.get("shell") === "app";
+if (APP_WINDOW) document.documentElement.classList.add("app-window");
+let S = null; // last state from the server
+let current = "preflight";
+const drafts = {}; // input drafts by element id, survive re-renders
+const errors = {}; // field errors by step
+let pollTimer = null;
+const images = { logo: { sha: null, url: null }, icon: { sha: null, url: null } };
+const $ = (id) => document.getElementById(id);
+function announce(t) { const l = $("live"); l.textContent = ""; setTimeout(() => { l.textContent = t; }, 30); }
+const kb = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + " MB" : n >= 1e3 ? Math.round(n / 1e3) + " KB" : n + " bytes";
 
-  // ---------------------------------------------------------------- helpers
-  function h(tag, attrs, ...kids) {
-    const el = document.createElement(tag);
-    for (const [k, v] of Object.entries(attrs || {})) {
-      if (v === null || v === undefined || v === false) continue;
-      if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2), v);
-      else if (k === "class") el.className = v;
-      else if (k === "text") el.textContent = v;
-      else if (k === "value") el.value = v;
-      else if (k === "checked") el.checked = !!v;
-      else if (k === "disabled") el.disabled = !!v;
-      else el.setAttribute(k, v === true ? "" : String(v));
-    }
-    for (const k of kids.flat()) {
-      if (k === null || k === undefined || k === false) continue;
-      el.append(k instanceof Node ? k : document.createTextNode(String(k)));
-    }
-    return el;
-  }
-  const $ = (id) => document.getElementById(id);
-  function announce(t) { const l = $("live"); l.textContent = ""; setTimeout(() => { l.textContent = t; }, 30); }
+async function api(method, path, body, raw) {
+  const opts = { method, headers: { "X-Setup-Token": TOKEN } };
+  if (raw !== undefined) { opts.body = raw; opts.headers["Content-Type"] = "application/octet-stream"; }
+  else if (body !== undefined) { opts.body = JSON.stringify(body); opts.headers["Content-Type"] = "application/json"; }
+  let res;
+  try { res = await fetch(path, opts); }
+  catch (e) { throw { error: "The wizard is not reachable. Is TaroEnterpriseSetup still running?" }; }
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch (_) { data = { ok: res.ok, error: text }; }
+  if (data && data.state) S = data.state;
+  if (!res.ok || data.ok === false) throw data;
+  return data;
+}
 
-  async function api(method, path, body, raw) {
-    const opts = { method, headers: { "X-Setup-Token": TOKEN } };
-    if (raw !== undefined) { opts.body = raw; opts.headers["Content-Type"] = "application/octet-stream"; }
-    else if (body !== undefined) { opts.body = JSON.stringify(body); opts.headers["Content-Type"] = "application/json"; }
-    let res;
-    try { res = await fetch(path, opts); }
-    catch (e) { throw { error: "The wizard is not reachable. Is TaroEnterpriseSetup still running?" }; }
-    const text = await res.text();
-    let data;
-    try { data = JSON.parse(text); } catch (_) { data = { ok: res.ok, error: text }; }
-    if (data && data.state) { S = data.state; }
-    if (!res.ok || data.ok === false) throw data;
-    return data;
-  }
-
-  async function act(key, step, fn) {
-    if (busy[key]) return;
-    // Start the request first: fn reads the form fields synchronously, before the
-    // re-render below replaces them (and clears password fields).
-    let pending;
-    try { pending = Promise.resolve(fn()); } catch (e) { pending = Promise.reject(e); }
-    busy[key] = true; errors[step] = {}; flash = null; render();
+/** Run a request from a button: spinner, field errors, a flash with the result, re-render. */
+async function run(btn, label, step, fn) {
+  const go = async () => {
+    errors[step] = {};
     try {
-      const r = await pending;
-      if (r && r.message) { flash = { kind: "ok", text: r.message }; announce(r.message); }
+      const r = await fn();
+      if (r && r.message) { flash("ok", r.message); announce(r.message); }
+      return r;
     } catch (e) {
       const msg = (e && e.error) || "Something went wrong.";
       errors[step] = (e && e.fields) || {};
-      flash = { kind: "fail", text: msg };
+      flash("err", msg);
       announce(msg);
     } finally {
-      busy[key] = false; render(); schedulePoll();
+      render(); schedulePoll();
     }
-  }
-
-  function download(path, name) {
-    act("dl:" + path, current, async () => {
-      const res = await fetch(path, { headers: { "X-Setup-Token": TOKEN } });
-      if (!res.ok) throw { error: "Download failed (" + res.status + ")" };
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = h("a", { href: url, download: name });
-      document.body.append(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
-    });
-  }
-
-  function draft(id, fallback) { return id in drafts ? drafts[id] : (fallback == null ? "" : fallback); }
-
-  function field(step, o) {
-    // o: { id, label, type, value, help, placeholder, secret, autocomplete }
-    const err = (errors[step] || {})[o.name || o.id];
-    const helpId = o.id + "-help", errId = o.id + "-err";
-    const input = h("input", {
-      id: o.id, name: o.name || o.id, type: o.type || "text",
-      value: o.secret ? "" : draft(o.id, o.value),
-      placeholder: o.placeholder, autocomplete: o.autocomplete || (o.secret ? "off" : null),
-      spellcheck: o.secret ? "false" : null, inputmode: o.inputmode,
-      "aria-describedby": [o.help ? helpId : null, err ? errId : null].filter(Boolean).join(" ") || null,
-      "aria-invalid": err ? "true" : null,
-      oninput: (e) => { if (!o.secret) drafts[o.id] = e.target.value; if (o.oninput) o.oninput(e); },
-    });
-    return h("div", { class: "field" },
-      h("label", { for: o.id, text: o.label }),
-      input,
-      o.help ? h("div", { class: "help", id: helpId, text: o.help }) : null,
-      err ? h("div", { class: "err", id: errId, text: err }) : null);
-  }
-
-  function btn(label, key, onclick, cls, extra) {
-    const b = busy[key];
-    return h("button", Object.assign({ type: "button", class: "btn " + (cls || ""), disabled: b, onclick, "aria-busy": b ? "true" : null }, extra || {}),
-      b ? h("span", { class: "spin", "aria-hidden": "true" }) : null, label);
-  }
-
-  function badge(status) {
-    const labels = { ok: "OK", warn: "Warning", fail: "Failed", skipped: "Skipped", pending: "Pending", running: "Running", todo: "To do", needs_config: "Needs config" };
-    return h("span", { class: "badge " + status, text: labels[status] || status });
-  }
-
-  function checkList(items) {
-    return h("ul", { class: "checks" }, items.map((c) =>
-      h("li", {}, badge(c.status || (c.ok ? "ok" : "fail")),
-        h("div", {},
-          h("div", { class: "check-name", text: c.name || c.label }),
-          c.detail ? h("div", { class: "check-detail", text: c.detail }) : null,
-          c.hint ? h("div", { class: "check-hint", text: "How to fix: " + c.hint }) : null))));
-  }
-
-  function card(title, lead, ...kids) {
-    return h("section", { class: "card" }, h("h2", { text: title }), lead ? h("p", { class: "lead", text: lead }) : null, ...kids);
-  }
-
-  function banner(kind, text) { return h("div", { class: "banner " + kind, role: kind === "fail" ? "alert" : "status" }, text); }
-
-  function radioGroup(name, legend, options, value, onchange) {
-    return h("fieldset", {}, h("legend", { text: legend }),
-      options.map((o) => h("label", { class: "choice" + (o.disabled ? " disabled" : "") },
-        h("input", { type: "radio", name, value: o.value, checked: value === o.value, disabled: o.disabled,
-          onchange: () => { drafts[name] = o.value; if (onchange) onchange(o.value); } }),
-        h("span", {}, o.label, o.note ? h("small", { text: o.note }) : null))));
-  }
-
-  // ---------------------------------------------------------------- steps
-  const STEPS = {
-    preflight: { title: "Preflight", lead: "Checks this PC can reach the services the setup needs.", render: renderPreflight },
-    deployment: { title: "Deployment mode", lead: "Where and how Taro Enterprise will run.", render: renderDeployment },
-    identity: { title: "Product identity", lead: "Names and modules shown to your users.", render: renderIdentity },
-    branding: { title: "Branding", lead: "Logo, favicon, colour and look of the portal.", render: renderBranding },
-    domain: { title: "Domain & TLS", lead: "Point a domain at your server and prove you control it.", render: renderDomain },
-    billing: { title: "Billing", lead: "Connect Stripe. Test mode is the default.", render: renderBilling },
-    github: { title: "GitHub bootstrap", lead: "Create the private deployment repository and store its secrets.", render: renderGithub },
-    release: { title: "Build & release", lead: "Run the release workflow in your new repository.", render: renderRelease },
-    verify: { title: "Verification", lead: "Check the deployed portal end to end and export a summary.", render: renderVerify },
   };
+  return btn ? busy(btn, label, go) : go();
+}
 
-  function renderPreflight() {
+async function fetchDownload(path, name) {
+  const res = await fetch(path, { headers: { "X-Setup-Token": TOKEN } });
+  if (!res.ok) { flash("err", "Download failed (" + res.status + ")"); return; }
+  download(await res.blob(), name);
+}
+
+const draft = (id, fallback) => id in drafts ? drafts[id] : (fallback == null ? "" : fallback);
+const fid = (name) => "f-" + name.replace(/[^a-z0-9]+/gi, "-");
+const val = (name) => { const e = $(fid(name)); return e ? e.value : ""; };
+
+/** A console form field: label, description, input, hint, error (from the server's field errors). */
+function field(step, o) {
+  const id = o.id || fid(o.name);
+  const err = (errors[step] || {})[o.name];
+  const input = h("input", {
+    id, name: o.name, type: o.type || "text", class: o.mono ? "mono" : null, value: draft(id, o.value),
+    placeholder: o.placeholder, autocomplete: "off", spellcheck: o.spellcheck || null, inputmode: o.inputmode, maxlength: o.maxlength,
+    "aria-describedby": [o.desc ? id + "-desc" : null, o.hint ? id + "-hint" : null, err ? id + "-err" : null].filter(Boolean).join(" ") || null,
+    "aria-invalid": err ? "true" : null,
+    oninput: (e) => { drafts[id] = e.target.value; if (o.oninput) o.oninput(e); },
+  });
+  return h("div", { class: "field" },
+    h("div", { class: "label-row" }, h("label", { for: id }, o.label), o.opt ? h("span", { class: "opt" }, "– optional") : null),
+    o.desc ? h("p", { class: "desc", id: id + "-desc" }, o.desc) : null,
+    input,
+    o.hint ? h("p", { class: "hint", id: id + "-hint" }, o.hint) : null,
+    err ? h("p", { class: "error", id: id + "-err" }, icon("err"), err) : null);
+}
+
+/** Radio choices as tiles. */
+function tiles(name, label, value, items, onpick) {
+  return h("div", { class: "tiles", role: "radiogroup", "aria-label": label },
+    items.map((it) => h("label", { class: "tile" + (it.disabled ? " disabled" : "") },
+      h("input", { type: "radio", name, value: it.value, checked: value === it.value, disabled: it.disabled, onchange: () => { drafts[name] = it.value; if (onpick) onpick(it.value); } }),
+      h("span", { class: "t" }, it.label), it.note ? h("span", { class: "d" }, it.note) : null)));
+}
+
+function checkTable(list, empty) {
+  if (!list || !list.length) return h("div", { class: "table-empty" }, h("strong", {}, "Not run yet"), empty);
+  return h("div", { class: "table-wrap" }, h("table", { class: "table" },
+    h("thead", {}, h("tr", {}, h("th", {}, "Status"), h("th", {}, "Check"), h("th", {}, "Result"))),
+    h("tbody", {}, list.map((c) => h("tr", { class: c.status },
+      h("td", { class: "st" }, status(c.status)),
+      h("td", { class: "name" }, c.name || c.label),
+      h("td", {}, c.detail, c.hint && c.status !== "ok" ? h("div", { class: "action" }, icon(c.status === "fail" ? "err" : "warn"), h("span", {}, h("strong", {}, "Recommended action: "), c.hint)) : null))))));
+}
+
+const counts = (list) => {
+  const n = (s) => (list || []).filter((c) => c.status === s).length;
+  return h("span", { class: "counts" }, [n("ok") && status("ok", `${n("ok")} passed`), n("warn") && status("warn", `${n("warn")} warnings`), n("fail") && status("fail", `${n("fail")} failed`)].filter(Boolean));
+};
+
+// ---------------------------------------------------------------- colour maths (picker only)
+// The authoritative tokens come from rm-brand on the server (/api/branding/tokens).
+const PRESETS = [
+  ["Blue", "#2563EB"], ["Indigo", "#4F46E5"], ["Purple", "#9333EA"], ["Violet", "#7C3AED"],
+  ["Teal", "#0D9488"], ["Cyan", "#0891B2"], ["Green", "#16A34A"], ["Emerald", "#059669"],
+  ["Orange", "#EA580C"], ["Amber", "#D97706"], ["Red", "#DC2626"], ["Rose", "#E11D48"],
+  ["Pink", "#DB2777"], ["Slate", "#475569"],
+];
+
+// The same rules as rm_brand::Color::parse (the server enforces them again).
+function parseHex(s) {
+  const t = String(s).trim();
+  const x = t.startsWith("#") ? t.slice(1) : t;
+  if (!x) return { error: "Enter a colour code such as #7C3AED." };
+  if (x.length !== 6) return { error: "“" + t + "” is not a 6-digit hex colour (like #7C3AED). Three-digit codes are not accepted." };
+  if (!/^[0-9a-fA-F]{6}$/.test(x)) return { error: "“" + t + "” has characters other than 0-9 and A-F." };
+  return { hex: "#" + x.toUpperCase() };
+}
+const rgbOf = (hex) => { const n = parseInt(hex.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+const hexOf = (r, g, b) => "#" + [r, g, b].map((v) => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, "0")).join("").toUpperCase();
+function hsvToHex(hh, s, v) {
+  const f = (n) => { const k = (n + hh / 60) % 6; return v - v * s * Math.max(0, Math.min(k, 4 - k, 1)); };
+  return hexOf(f(5) * 255, f(3) * 255, f(1) * 255);
+}
+function hexToHsv(hex, keepHue) {
+  const [r, g, b] = rgbOf(hex).map((x) => x / 255);
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  let hh = keepHue || 0;
+  if (d > 0) {
+    if (max === r) hh = 60 * (((g - b) / d) % 6);
+    else if (max === g) hh = 60 * ((b - r) / d + 2);
+    else hh = 60 * ((r - g) / d + 4);
+    if (hh < 0) hh += 360;
+  }
+  return { h: hh, s: max === 0 ? 0 : d / max, v: max };
+}
+function hslToHex(hh, s, l) {
+  s /= 100; l /= 100;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n) => { const k = (n + hh / 30) % 12; return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)); };
+  return hexOf(f(0) * 255, f(8) * 255, f(4) * 255);
+}
+
+// ---------------------------------------------------------------- tokens from the server
+const tokenCache = new Map();
+function tokensFor(hex) {
+  if (tokenCache.has(hex)) return tokenCache.get(hex);
+  const p = api("POST", "/api/branding/tokens", { color: hex }).then((r) => ({ tokens: r.tokens, contrast: r.contrast }));
+  p.catch(() => tokenCache.delete(hex));
+  tokenCache.set(hex, p);
+  return p;
+}
+/** The accent variables of an element, from rm-brand's tokens (light or dark variant). */
+function paint(el, t, dark) {
+  const set = (k, v) => el.style.setProperty(k, v);
+  if (dark) {
+    set("--primary", t.primary_dark); set("--primary-hover", t.primary_dark_hover); set("--primary-active", t.primary_dark_hover);
+    set("--primary-border", t.primary_dark_hover); set("--on-primary", t.on_primary_dark); set("--primary-soft", t.primary_soft);
+  } else {
+    set("--primary", t.primary); set("--primary-hover", t.primary_hover); set("--primary-active", t.primary_active);
+    set("--primary-border", t.primary_border); set("--on-primary", t.on_primary); set("--primary-soft", t.primary_soft);
+  }
+}
+
+// ---------------------------------------------------------------- the colour component
+// Built once and kept across renders, so typing, focus and the picker are never interrupted.
+const B = { applied: null, typed: null, theme: null, dirty: false, saveTimer: null, els: null };
+
+function brandInit() {
+  if (B.els) return;
+  const els = {};
+  els.swatches = PRESETS.map(([name, hex], i) => {
+    const b = h("button", { type: "button", role: "radio", class: "swatch-btn", id: "sw-" + name.toLowerCase(),
+      "aria-checked": "false", "aria-label": name + " " + hex, title: name + " " + hex, tabindex: i === 0 ? "0" : "-1", "data-hex": hex,
+      onclick: () => setColor(hex, "preset"), onkeydown: (e) => swatchKey(e, i) },
+    h("span", { class: "sw-chip", "aria-hidden": "true" }), h("span", { class: "sw-name" }, name), h("span", { class: "sw-hex" }, hex));
+    b.firstChild.style.setProperty("--sw", hex);
+    return b;
+  });
+  els.palette = h("div", { class: "palette", role: "radiogroup", "aria-labelledby": "palette-label", id: "palette" }, els.swatches);
+  els.chip = h("span", { class: "hex-chip", "aria-hidden": "true" });
+  els.hex = h("input", { id: "hex", type: "text", class: "mono hex", maxlength: "12", autocomplete: "off", spellcheck: "false",
+    "aria-describedby": "hex-hint hex-msg", "aria-invalid": "false",
+    oninput: (e) => onHexInput(e.target.value),
+    onblur: () => { if (!parseHex(els.hex.value).error) { els.hex.value = B.applied; B.typed = B.applied; } } });
+  els.custom = button("Customize…", { id: "customize", onclick: openPanel });
+  els.custom.setAttribute("aria-haspopup", "dialog");
+  els.custom.setAttribute("aria-expanded", "false");
+  els.msg = h("p", { id: "hex-msg", class: "hex-msg", role: "status", "aria-live": "polite" });
+  els.contrast = h("p", { class: "hint", id: "contrast" });
+  els.warn = h("div", { id: "contrast-warn", hidden: true });
+  els.colorRoot = h("div", { class: "color-ui" },
+    h("div", { class: "field wide" }, h("span", { class: "label", id: "palette-label" }, "Presets"),
+      h("p", { class: "desc" }, "Common brand colours. A colour you type or customize is kept exactly, even when it is close to a preset."),
+      els.palette),
+    h("div", { class: "field" },
+      h("div", { class: "label-row" }, h("label", { for: "hex" }, "Hex colour")),
+      h("p", { class: "desc" }, "6 digits, with or without #, any case."),
+      h("div", { class: "hex-row" }, h("span", { class: "hex-wrap" }, els.chip, els.hex), els.custom),
+      h("p", { class: "hint", id: "hex-hint" }, "Saved as branding.primary_color in provider.json, upper case, with the tokens derived from it."),
+      els.msg),
+    els.contrast, els.warn);
+  els.mocks = [mock(false), mock(true)];
+  els.preview = h("div", { class: "previews", id: "preview" }, els.mocks.map((m) => m.root));
+  B.els = els;
+  buildPanel();
+}
+
+/** A small mock of the client window and of the console top bar, accents from --primary* only. */
+function mock(dark) {
+  const m = { dark };
+  m.name = h("span", { class: "m-name" });
+  m.name2 = h("span", { class: "m-h" });
+  m.icon = h("span", { class: "m-icon", "aria-hidden": "true" });
+  m.used = h("span", { class: "m-used" });
+  m.root = h("figure", { class: "mock " + (dark ? "dark" : "light"), "data-variant": dark ? "dark" : "light", role: "img" },
+    h("figcaption", { class: "m-cap" }, h("strong", {}, dark ? "Dark mode" : "Light mode"), m.used),
+    h("div", { class: "m-frame", "aria-hidden": "true" },
+      h("div", { class: "m-win" },
+        h("div", { class: "m-title" }, m.icon, m.name, h("span", { class: "m-dots" }, h("i"), h("i"), h("i"))),
+        h("div", { class: "m-toolbar" },
+          h("span", { class: "m-btn m-primary" }, "Connect"),
+          h("span", { class: "m-btn m-outline" }, "Share"),
+          h("span", { class: "m-badge" }, "2 online")),
+        h("div", { class: "m-wbody" },
+          h("div", { class: "m-side" },
+            h("span", { class: "m-item sel" }, "Macs"), h("span", { class: "m-item" }, "Recent"), h("span", { class: "m-item" }, "Settings")),
+          h("div", { class: "m-main" },
+            m.name2,
+            h("span", { class: "m-input" }, "ID 123 456 789"),
+            h("span", { class: "m-line" }, "Trouble connecting? ", h("span", { class: "m-link" }, "Connection help")),
+            h("span", { class: "m-line" }, h("span", { class: "m-toggle on" }, h("i")), "Start with Windows"),
+            h("span", { class: "m-states" },
+              h("span", { class: "m-btn m-primary sm" }, "Normal"),
+              h("span", { class: "m-btn m-primary sm hover" }, "Hover"),
+              h("span", { class: "m-btn m-primary sm active" }, "Pressed"))))),
+      h("div", { class: "m-console" },
+        h("div", { class: "m-topnav" }, h("span", { class: "m-brand" }, "Relay"), h("span", { class: "m-svc" }, "Relay setup"), h("span", { class: "m-badge2" }, "First run")),
+        h("div", { class: "m-cbody" },
+          h("span", { class: "m-step" }, h("i"), "Certificate"),
+          h("span", { class: "m-cbtn" }, "Next")))));
+  return m;
+}
+
+function swatchKey(e, i) {
+  const n = PRESETS.length;
+  let j = null;
+  if (e.key === "ArrowRight" || e.key === "ArrowDown") j = (i + 1) % n;
+  else if (e.key === "ArrowLeft" || e.key === "ArrowUp") j = (i - 1 + n) % n;
+  else if (e.key === "Home") j = 0;
+  else if (e.key === "End") j = n - 1;
+  if (j === null) return;
+  e.preventDefault();
+  setColor(PRESETS[j][1], "preset");
+  B.els.swatches[j].focus();
+}
+
+function onHexInput(text) {
+  B.typed = text;
+  const r = parseHex(text);
+  const e = B.els;
+  if (r.error) {
+    e.hex.setAttribute("aria-invalid", "true");
+    e.msg.replaceChildren(icon("err"), " " + r.error + " The colour stays " + B.applied + ".");
+    e.msg.className = "hex-msg error";
+    return; // the last valid colour stays applied; what was typed is left alone
+  }
+  e.hex.setAttribute("aria-invalid", "false");
+  e.msg.replaceChildren();
+  e.msg.className = "hex-msg";
+  setColor(r.hex, "input");
+}
+
+function setColor(hex, source) {
+  B.applied = hex;
+  B.dirty = true;
+  syncColor(source);
+  scheduleSave();
+}
+
+/** Field, swatches and preview follow B.applied. */
+function syncColor(source) {
+  const e = B.els, hex = B.applied;
+  if (source !== "input") {
+    e.hex.value = hex; B.typed = hex;
+    e.hex.setAttribute("aria-invalid", "false"); e.msg.replaceChildren(); e.msg.className = "hex-msg";
+  }
+  e.chip.style.setProperty("--sw", hex);
+  let sel = -1;
+  e.swatches.forEach((b, i) => {
+    const on = b.dataset.hex === hex; // exact matches only: a custom colour selects no preset
+    if (on) sel = i;
+    b.setAttribute("aria-checked", on ? "true" : "false");
+  });
+  e.swatches.forEach((b, i) => b.setAttribute("tabindex", i === (sel < 0 ? 0 : sel) ? "0" : "-1"));
+  updatePreview();
+}
+
+function updatePreview() {
+  const e = B.els, hex = B.applied;
+  const name = (S.identity && S.identity.name) || "Your product";
+  for (const m of e.mocks) {
+    m.name.textContent = name; m.name2.textContent = name;
+    m.root.setAttribute("aria-label", name + " preview, " + (m.dark ? "dark" : "light") + " mode, primary colour " + hex);
+    m.icon.replaceChildren(images.icon.url ? h("img", { src: images.icon.url, alt: "" }) : name.slice(0, 1).toUpperCase());
+    m.icon.classList.toggle("has-img", !!images.icon.url);
+    const variant = m.dark ? "dark" : "light";
+    const used = B.theme === "system" ? "when the system is " + variant : B.theme === variant ? "used (theme: " + B.theme + ")" : "not used (theme: " + B.theme + ")";
+    m.used.textContent = used;
+    m.root.classList.toggle("unused", used.startsWith("not"));
+  }
+  tokensFor(hex).then((r) => {
+    if (B.applied !== hex) return; // a newer colour is on its way
+    for (const m of e.mocks) paint(m.root, r.tokens, m.dark);
+    const c = r.contrast;
+    e.contrast.textContent = "Text on the primary colour: " + c.on_primary.toFixed(2) + ":1 in light mode (" + r.tokens.on_primary + " on " + r.tokens.primary + "), " +
+      c.on_primary_dark.toFixed(2) + ":1 in dark mode (" + r.tokens.on_primary_dark + " on " + r.tokens.primary_dark + "). Tokens derived by rm-brand.";
+    const low = !c.light_ok || !c.dark_ok;
+    e.warn.hidden = !low;
+    e.warn.replaceChildren(low ? alert("warn", "Low contrast", "Below 4.5:1 (WCAG AA for text): labels on this colour are hard to read. You can still use it; a darker or lighter shade reads better.") : "");
+  }).catch(() => {});
+}
+
+function scheduleSave() {
+  clearTimeout(B.saveTimer);
+  B.saveTimer = setTimeout(saveBranding, 250);
+}
+
+async function saveBranding() {
+  const hex = B.applied, theme = B.theme;
+  try {
+    await api("POST", "/api/branding", { primary_color: hex, theme });
+    if (B.applied === hex && B.theme === theme) B.dirty = false;
+    renderNav();
+  } catch (e) {
+    B.els.msg.replaceChildren(icon("err"), " " + ((e && e.error) || "Could not save the colour."));
+    B.els.msg.className = "hex-msg error";
+  }
+}
+
+// ---------------------------------------------------------------- the Customize picker (.modal)
+const P = { before: null, hex: null, hsv: { h: 0, s: 0, v: 0 }, dragging: false, prevFocus: null };
+
+function buildPanel() {
+  const e = B.els;
+  const hues = [0, 25, 45, 60, 90, 140, 165, 190, 210, 230, 260, 290, 320];
+  const lights = [92, 84, 74, 62, 50, 40, 31, 22];
+  const cols = hues.length;
+  const cells = [];
+  for (const l of lights) for (const hu of hues) cells.push(hslToHex(hu, hu === 60 ? 85 : 75, l));
+  for (let i = 0; i < cols; i++) { const v = 255 - Math.round(i * 255 / (cols - 1)); cells.push(hexOf(v, v, v)); }
+  e.gridCells = cells.map((hex, i) => {
+    const b = h("button", { type: "button", class: "g-cell", "aria-label": hex, title: hex, tabindex: i === 0 ? "0" : "-1", "data-hex": hex, "aria-pressed": "false",
+      onclick: () => panelSet(hex, "grid"),
+      onkeydown: (ev) => {
+        let j = null;
+        if (ev.key === "ArrowRight") j = i + 1; else if (ev.key === "ArrowLeft") j = i - 1;
+        else if (ev.key === "ArrowDown") j = i + cols; else if (ev.key === "ArrowUp") j = i - cols;
+        else if (ev.key === "Home") j = i - (i % cols); else if (ev.key === "End") j = i - (i % cols) + cols - 1;
+        if (j === null || j < 0 || j >= cells.length) return;
+        ev.preventDefault();
+        e.gridCells.forEach((c) => c.setAttribute("tabindex", "-1"));
+        e.gridCells[j].setAttribute("tabindex", "0"); e.gridCells[j].focus();
+      } });
+    b.style.setProperty("--sw", hex);
+    return b;
+  });
+  e.grid = h("div", { class: "g-grid", role: "group", "aria-label": "Colour grid (arrow keys move, Enter picks)" }, e.gridCells);
+  e.grid.style.setProperty("--cols", String(cols));
+  e.svThumb = h("span", { class: "sv-thumb", "aria-hidden": "true" });
+  e.sv = h("div", { class: "sv", id: "sv", role: "slider", tabindex: "0", "aria-label": "Saturation and brightness",
+    "aria-valuemin": "0", "aria-valuemax": "100", "aria-describedby": "sv-help",
+    onpointerdown: svDown, onpointermove: svMove, onpointerup: svUp, onpointercancel: svUp, onkeydown: svKey }, e.svThumb);
+  e.hue = h("input", { type: "range", class: "hue", id: "hue", min: "0", max: "359", step: "1", "aria-label": "Hue",
+    oninput: (ev) => { P.hsv.h = Number(ev.target.value); panelSet(hsvToHex(P.hsv.h, P.hsv.s, P.hsv.v), "hue"); } });
+  e.pHex = h("input", { type: "text", class: "mono hex", id: "p-hex", maxlength: "12", autocomplete: "off", spellcheck: "false", "aria-describedby": "p-msg",
+    oninput: (ev) => {
+      const r = parseHex(ev.target.value);
+      e.pMsg.replaceChildren(r.error ? icon("err") : "", r.error ? " " + r.error : "");
+      e.pHex.setAttribute("aria-invalid", r.error ? "true" : "false");
+      if (!r.error) panelSet(r.hex, "hex");
+    } });
+  e.pMsg = h("p", { class: "hex-msg error", id: "p-msg", role: "status", "aria-live": "polite" });
+  e.native = h("input", { type: "color", id: "p-native", "aria-label": "System colour picker", oninput: (ev) => panelSet(ev.target.value.toUpperCase(), "native") });
+  e.before = h("span", { class: "ba-chip", "aria-hidden": "true" }, "Aa");
+  e.after = h("span", { class: "ba-chip", "aria-hidden": "true" }, "Aa");
+  e.beforeHex = h("span", { class: "mono" }); e.afterHex = h("span", { class: "mono" });
+  e.afterInfo = h("span", { class: "muted" });
+  e.apply = button("Apply", { kind: "primary", id: "p-apply", onclick: applyPanel });
+  e.cancel = button("Cancel", { kind: "link", id: "p-cancel", onclick: cancelPanel });
+  e.modal = h("div", { class: "modal picker", role: "dialog", "aria-modal": "true", "aria-labelledby": "cz-title", id: "customize-panel", onkeydown: trapKeys },
+    h("div", { class: "m-head" }, h("h2", { id: "cz-title" }, "Customize the primary colour"),
+      h("button", { class: "btn link sm", type: "button", "aria-label": "Cancel", onclick: cancelPanel }, icon("close"))),
+    h("div", { class: "m-body" },
+      h("div", { class: "cz-cols" },
+        h("div", {}, h("p", { class: "label" }, "Colour grid"), e.grid),
+        h("div", {},
+          h("p", { class: "label" }, "Shade (saturation and brightness)"), e.sv,
+          h("p", { class: "hint", id: "sv-help" }, "Drag, or use the arrow keys (Shift for bigger steps)."),
+          h("label", { class: "label", for: "hue" }, "Hue"), e.hue,
+          h("div", { class: "cz-inputs" },
+            h("div", { class: "field" }, h("label", { for: "p-hex" }, "Hex"), e.pHex),
+            h("div", { class: "field" }, h("label", { for: "p-native" }, "System picker"), e.native)),
+          e.pMsg)),
+      h("div", { class: "ba", "aria-live": "polite" },
+        h("span", { class: "ba-item" }, e.before, h("span", {}, h("span", { class: "muted" }, "Before "), e.beforeHex)),
+        h("span", { class: "ba-arrow", "aria-hidden": "true" }, "→"),
+        h("span", { class: "ba-item" }, e.after, h("span", {}, h("span", { class: "muted" }, "After "), e.afterHex)),
+        e.afterInfo)),
+    h("div", { class: "m-foot" }, e.cancel, e.apply));
+  e.back = h("div", { class: "modal-back", hidden: true, onclick: (ev) => { if (ev.target === e.back) cancelPanel(); } }, e.modal);
+  document.body.append(e.back);
+}
+
+function trapKeys(ev) {
+  if (ev.key === "Escape") { ev.preventDefault(); cancelPanel(); return; }
+  if (ev.key !== "Tab") return;
+  const f = [...B.els.modal.querySelectorAll("button, input, [tabindex='0']")].filter((x) => !x.disabled && x.offsetParent !== null && x.getAttribute("tabindex") !== "-1");
+  if (!f.length) return;
+  const first = f[0], last = f[f.length - 1];
+  if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+  else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+}
+
+const panelOpen = () => B.els && !B.els.back.hidden;
+
+function openPanel() {
+  const e = B.els;
+  P.prevFocus = document.activeElement;
+  P.before = B.applied; P.hsv = hexToHsv(B.applied);
+  e.before.style.setProperty("--sw", P.before); e.beforeHex.textContent = P.before;
+  tokensFor(P.before).then((r) => paint(e.before, r.tokens, false)).catch(() => {});
+  panelSet(B.applied, "open");
+  e.pMsg.replaceChildren();
+  e.custom.setAttribute("aria-expanded", "true");
+  e.back.hidden = false;
+  $("layout").inert = true; $("topnav").inert = true;
+  const cell = e.gridCells.find((c) => c.dataset.hex === B.applied);
+  (cell || e.sv).focus();
+}
+
+function closePanel() {
+  const e = B.els;
+  e.back.hidden = true;
+  $("layout").inert = false; $("topnav").inert = false;
+  e.custom.setAttribute("aria-expanded", "false");
+  (e.custom.isConnected ? e.custom : P.prevFocus || document.body).focus();
+}
+
+function cancelPanel() { closePanel(); announce("Cancelled. The colour stays " + B.applied + "."); }
+function applyPanel() { const hex = P.hex; closePanel(); if (hex !== B.applied) setColor(hex, "panel"); flash("ok", "Primary colour " + hex + " applied."); }
+
+function panelSet(hex, source) {
+  const e = B.els;
+  P.hex = hex;
+  if (source !== "sv" && source !== "hue") P.hsv = hexToHsv(hex, P.hsv.h);
+  if (source !== "hex") { e.pHex.value = hex; e.pHex.setAttribute("aria-invalid", "false"); e.pMsg.replaceChildren(); }
+  if (source !== "native") e.native.value = hex.toLowerCase();
+  if (source !== "hue") e.hue.value = String(Math.round(P.hsv.h) % 360);
+  e.sv.style.setProperty("--hue-color", hsvToHex(P.hsv.h, 1, 1));
+  e.svThumb.style.setProperty("left", (P.hsv.s * 100).toFixed(2) + "%");
+  e.svThumb.style.setProperty("top", ((1 - P.hsv.v) * 100).toFixed(2) + "%");
+  e.svThumb.style.setProperty("--sw", hex);
+  e.sv.setAttribute("aria-valuenow", String(Math.round(P.hsv.s * 100)));
+  e.sv.setAttribute("aria-valuetext", "saturation " + Math.round(P.hsv.s * 100) + "%, brightness " + Math.round(P.hsv.v * 100) + "%, " + hex);
+  e.gridCells.forEach((c) => c.setAttribute("aria-pressed", c.dataset.hex === hex ? "true" : "false"));
+  e.after.style.setProperty("--sw", hex); e.afterHex.textContent = hex;
+  tokensFor(hex).then((r) => {
+    if (P.hex !== hex) return;
+    paint(e.after, r.tokens, false);
+    e.afterInfo.textContent = "Text on it: " + r.contrast.on_primary.toFixed(2) + ":1" + (r.contrast.light_ok ? "" : " (below 4.5:1)");
+  }).catch(() => {});
+}
+
+function svAt(ev) {
+  const r = B.els.sv.getBoundingClientRect();
+  P.hsv.s = Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width));
+  P.hsv.v = Math.max(0, Math.min(1, 1 - (ev.clientY - r.top) / r.height));
+  panelSet(hsvToHex(P.hsv.h, P.hsv.s, P.hsv.v), "sv");
+}
+function svDown(ev) { P.dragging = true; B.els.sv.setPointerCapture(ev.pointerId); B.els.sv.focus(); svAt(ev); ev.preventDefault(); }
+function svMove(ev) { if (P.dragging) svAt(ev); }
+function svUp(ev) { P.dragging = false; try { B.els.sv.releasePointerCapture(ev.pointerId); } catch (_) {} }
+function svKey(ev) {
+  const step = ev.shiftKey ? 0.1 : 0.01;
+  let { s, v } = P.hsv;
+  if (ev.key === "ArrowRight") s += step; else if (ev.key === "ArrowLeft") s -= step;
+  else if (ev.key === "ArrowUp") v += step; else if (ev.key === "ArrowDown") v -= step;
+  else return;
+  ev.preventDefault();
+  P.hsv.s = Math.max(0, Math.min(1, s)); P.hsv.v = Math.max(0, Math.min(1, v));
+  panelSet(hsvToHex(P.hsv.h, P.hsv.s, P.hsv.v), "sv");
+}
+
+// ---------------------------------------------------------------- images
+async function refreshImages() {
+  for (const slot of ["logo", "icon"]) {
+    const up = S && S.branding[slot];
+    const sha = up ? up.sha256 : null;
+    if (images[slot].sha === sha) continue;
+    if (images[slot].url) URL.revokeObjectURL(images[slot].url);
+    images[slot] = { sha, url: null };
+    if (!sha) continue;
+    try {
+      const res = await fetch("/api/branding/" + slot + "/image", { headers: { "X-Setup-Token": TOKEN } });
+      if (res.ok) images[slot] = { sha, url: URL.createObjectURL(await res.blob()) };
+    } catch (_) {}
+  }
+}
+
+// ---------------------------------------------------------------- steps
+const STEPS = [
+  { id: "preflight", name: "Preflight" },
+  { id: "identity", name: "Product identity" },
+  { id: "branding", name: "Branding" },
+  { id: "relay", name: "Relay endpoint" },
+  { id: "components", name: "Components and versions" },
+  { id: "build", name: "Build" },
+  { id: "validate", name: "Validate and export" },
+];
+const idx = () => STEPS.findIndex((s) => s.id === current);
+const next = () => idx() < STEPS.length - 1 && go(STEPS[idx() + 1].id);
+const prev = () => idx() > 0 && go(STEPS[idx() - 1].id);
+const stepState = (id) => (S.steps.find((s) => s.id === id) || {});
+
+/** One step's page: breadcrumbs, header, content and the wizard footer (Previous, actions, Next). */
+function page({ title, desc, actions, nextLabel, nextDisabled }, ...body) {
+  const i = idx();
+  return h("div", { class: "inner" },
+    breadcrumbs(["Taro Enterprise", "Package builder", STEPS[i].name]),
+    pageHeader({ step: `Step ${i + 1} of ${STEPS.length}`, title, desc }),
+    body,
+    h("div", { class: "form-actions" },
+      h("div", { class: "left" }, button("Diagnostic log", { kind: "link", icon: "download", onclick: () => fetchDownload("/api/diagnostics.txt", "taro-setup-diagnostics.txt") })),
+      i > 0 ? button("Previous", { onclick: prev, id: "prev" }) : null,
+      actions,
+      i < STEPS.length - 1 ? button(nextLabel || "Next", { kind: "primary", onclick: next, id: "next", disabled: nextDisabled }) : null));
+}
+
+const views = {
+  preflight() {
     const p = S.preflight;
-    return [
-      card("System checks", "Operating system, HTTPS reachability of GitHub and Stripe, free disk space, and that this wizard is reachable only from this PC.",
-        p ? checkList(p.checks) : h("p", { text: "Not run yet." }),
-        h("div", { class: "actions" }, btn(p ? "Run again" : "Run checks", "preflight", () => act("preflight", "preflight", () => api("POST", "/api/preflight/run", {}))))),
-    ];
-  }
+    const fails = p ? p.checks.filter((c) => c.status === "fail").length : 0;
+    return page({ title: "Preflight", desc: "Checks that this PC can reach the GitHub hosts the release files come from and has room for the packages." },
+      p && fails ? alert("err", `${fails} check${fails > 1 ? "s" : ""} failed`, "Each row says what to do. The build needs the download hosts and free space.") : null,
+      container({ title: "System checks", count: p ? p.checks.length : null, desc: p ? counts(p.checks) : "Operating system, HTTPS to github.com and objects.githubusercontent.com, free space in the output folder, loopback-only listener.",
+        actions: button(p ? "Run again" : "Run checks", { kind: p ? "" : "primary", icon: p ? "refresh" : null, id: "run-preflight", onclick: (ev) => run(ev.currentTarget, "Checking…", "preflight", () => api("POST", "/api/preflight/run", {})) }), flush: true },
+      checkTable(p && p.checks, "Run the checks to inspect this PC.")),
+      p && p.os ? container({ title: "This PC" }, kv([["System", p.os.name + " " + p.os.version], ["Build", p.os.build], ["Architecture", p.os.arch]])) : null);
+  },
 
-  function renderDeployment() {
-    const d = S.deployment || {};
-    const env = draft("environment", d.environment || "production");
-    const e = errors.deployment || {};
-    return [card("Environment and profile", null,
-      radioGroup("environment", "Environment", [
-        { value: "development", label: "Development", note: "http:// URLs allowed. For trying things out." },
-        { value: "staging", label: "Staging", note: "https:// required." },
-        { value: "production", label: "Production", note: "https:// required." },
-      ], env, () => render()),
-      h("fieldset", {}, h("legend", { text: "Profile" }),
-        h("label", { class: "choice" }, h("input", { type: "radio", name: "profile", value: "single_server_compose", checked: true }),
-          h("span", {}, "Single server with Docker Compose", h("small", { text: "Portal, ops console, database and Caddy (TLS) on one Linux server. Other profiles: Planned." }))),
-        e.profile ? h("div", { class: "err", text: e.profile }) : null),
-      h("div", { class: "grid2" },
-        field("deployment", { id: "portal_url", label: "Public portal URL", type: "url", value: d.portal_url, placeholder: "https://portal.example.com", help: env === "development" ? "http:// is allowed in development." : "Must start with https://." }),
-        field("deployment", { id: "ops_url", label: "Ops console URL", type: "url", value: d.ops_url, placeholder: "https://ops.example.com" })),
-      h("div", { class: "field" }, h("label", { for: "provider_adapter", text: "Provider adapter" }),
-        h("select", { id: "provider_adapter", "aria-describedby": "provider-help" }, h("option", { value: "mock", text: "mock - simulated Mac provider (the only adapter available today)" })),
-        h("div", { class: "help", id: "provider-help", text: "Adapters for real Mac hosting providers are Planned. The mock adapter lets you run the full flow without renting hardware." }),
-        e.provider_adapter ? h("div", { class: "err", text: e.provider_adapter }) : null),
-      field("deployment", { id: "admin_email", label: "Bootstrap admin email", type: "email", value: d.admin_email, placeholder: "admin@example.com", autocomplete: "email", help: "The first administrator account of the portal." }),
-      h("div", { class: "actions" }, btn("Save", "deployment", () => act("deployment", "deployment", () => api("POST", "/api/deployment", {
-        environment: draft("environment", d.environment || "production"), profile: "single_server_compose",
-        portal_url: $("portal_url").value, ops_url: $("ops_url").value, provider_adapter: $("provider_adapter").value, admin_email: $("admin_email").value,
-      })))))];
-  }
-
-  function renderIdentity() {
+  identity() {
     const i = S.identity || {};
-    const mods = drafts.modules || i.modules || ["my_macs", "rentals", "billing", "team"];
-    const desc = { my_macs: "My Macs - customers connect their own Macs", rentals: "Rentals - rent hosted Macs by the hour", billing: "Billing - Stripe checkout, invoices, subscriptions", team: "Team - organisations, roles and invitations" };
-    const e = errors.identity || {};
-    return [card("Identity", null,
-      field("identity", { id: "deployment_name", label: "Deployment name", value: i.deployment_name, placeholder: "Acme Remote Macs" }),
-      field("identity", { id: "operator_name", label: "Owner / operator name", value: i.operator_name, placeholder: "Acme Ltd." }),
-      field("identity", { id: "support_contact", label: "Support contact", value: i.support_contact, placeholder: "support@example.com or https://help.example.com", help: "An email address or an https:// link." }),
-      h("fieldset", {}, h("legend", { text: "Modules to enable" }),
-        S.config.modules.map((m) => h("label", { class: "choice" },
-          h("input", { type: "checkbox", value: m, checked: mods.includes(m), onchange: (ev) => {
-            const cur = new Set(drafts.modules || i.modules || ["my_macs", "rentals", "billing", "team"]);
-            if (ev.target.checked) cur.add(m); else cur.delete(m);
-            drafts.modules = [...cur];
-          } }), h("span", { text: desc[m] || m }))),
-        e.modules ? h("div", { class: "err", text: e.modules }) : null),
-      h("div", { class: "actions" }, btn("Save", "identity", () => act("identity", "identity", () => api("POST", "/api/identity", {
-        deployment_name: $("deployment_name").value, operator_name: $("operator_name").value, support_contact: $("support_contact").value,
-        modules: drafts.modules || i.modules || ["my_macs", "rentals", "billing", "team"],
-      })))))];
-  }
-
-  function contrastWhite(hex) {
-    const m = /^#([0-9a-f]{6})$/i.exec(hex || ""); if (!m) return null;
-    const n = parseInt(m[1], 16), c = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); });
-    const L = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-    return 1.05 / (L + 0.05);
-  }
-
-  function renderBranding() {
-    const b = S.branding;
-    const color = draft("primary_color", b.primary_color);
-    const theme = draft("theme", b.theme), density = draft("density", b.density);
-    const ratio = contrastWhite(color);
-    function uploader(kind, label) {
-      const up = b[kind];
-      const id = "file-" + kind;
-      return h("div", { class: "field" },
-        h("label", { for: id, text: label }),
-        h("input", { id, type: "file", accept: "image/png,image/jpeg,image/webp", "aria-describedby": id + "-help",
-          onchange: (ev) => {
+    const st = "identity";
+    const save = button("Save", { kind: "primary", id: "save-identity", onclick: (ev) => run(ev.currentTarget, "Saving…", st, () => api("POST", "/api/identity", {
+      provider_id: val("provider_id"), name: val("product.name"), short_name: val("product.short_name"), vendor: val("product.vendor"),
+      support_url: val("product.support_url"), support_email: val("product.support_email"),
+    })) });
+    return page({ title: "Product identity", desc: "Your product's names, written into provider.json for every client and the relay.", nextDisabled: !S.identity },
+      Object.keys(errors[st] || {}).length ? alert("err", "Some fields need attention", "Each field below says what is wrong.") : null,
+      container({ title: "Identity", foot: h("div", { class: "foot-actions" }, save) },
+        h("div", { class: "split" },
+          field(st, { name: "product.name", label: "Product name", value: i.name, placeholder: "Acme Connect", desc: "Window titles, About, the Mac's messages (up to 40 characters).",
+            oninput: (e) => {
+              if (drafts.idTouched || i.provider_id) return; // suggest an ID until it is edited by hand
+              const v = e.target.value.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+              const el = $("f-provider-id"); if (el) { el.value = v; drafts["f-provider-id"] = v; }
+            } }),
+          field(st, { name: "provider_id", label: "Provider ID", value: i.provider_id, placeholder: "acme-cloud", mono: true, spellcheck: "false", desc: "Lower-case letters, digits and dashes.", hint: "Names the output folder and the relay package.", oninput: () => { drafts.idTouched = true; } }),
+          field(st, { name: "product.short_name", label: "Short name", value: i.short_name, placeholder: "Acme", spellcheck: "false", desc: "Used in file names: Acme.exe, Acme-1.4.1-windows-x64.zip.", hint: "Letters, digits, spaces, dots, dashes, underscores; up to 16." }),
+          field(st, { name: "product.vendor", label: "Vendor", value: i.vendor, placeholder: "Acme Cloud Ltd", desc: "Your company." }),
+          field(st, { name: "product.support_url", label: "Support URL", opt: true, type: "url", value: i.support_url, placeholder: "https://acme.example/help", inputmode: "url" }),
+          field(st, { name: "product.support_email", label: "Support email", opt: true, type: "email", value: i.support_email, placeholder: "help@acme.example", inputmode: "email" }))),
+      container({ title: "Rebuilding for a newer release?", desc: "Load the provider.json of an earlier build: identity, colour, relay endpoint and the same admission key are filled in (clients and relay must share it)." },
+        h("div", { class: "field" }, h("label", { for: "import-file" }, "provider.json"),
+          h("input", { id: "import-file", type: "file", accept: ".json,application/json", onchange: (ev) => {
             const f = ev.target.files[0]; if (!f) return;
-            act("up:" + kind, "branding", async () => {
-              const r = await api("POST", "/api/branding/" + kind, undefined, f);
-              if (objectUrls[kind]) URL.revokeObjectURL(objectUrls[kind]);
-              objectUrls[kind] = URL.createObjectURL(f);
+            run(null, "", st, async () => {
+              if (f.size > 60000) throw { error: "That file is too large to be a provider.json." };
+              const r = await api("POST", "/api/provider/import", { json: await f.text() });
+              for (const k of Object.keys(drafts)) delete drafts[k];
+              B.applied = null; B.dirty = false; B.typed = null;
               return r;
             });
-          } }),
-        h("div", { class: "help", id: id + "-help", text: "PNG, JPEG or WebP; max 1 MB and 1024x1024 px. SVG is not accepted." }),
-        up ? h("div", { class: "row help" }, "Accepted: " + up.info.kind.toUpperCase() + " " + up.info.width + "x" + up.info.height + ", " + Math.round(up.info.bytes / 1024) + " KB",
-          h("button", { type: "button", class: "btn ghost", onclick: () => act("rm:" + kind, "branding", () => api("DELETE", "/api/branding/" + kind)) }, "Remove")) : null);
-    }
-    const pv = h("div", { class: "preview " + theme + " " + density, "aria-label": "Live preview" },
-      h("div", { class: "pv-bar" },
-        objectUrls.logo && b.logo ? h("img", { class: "pv-logo", src: objectUrls.logo, alt: "Logo preview" }) : h("span", { class: "pv-logo", "aria-hidden": "true" }),
-        h("strong", { text: (S.identity && S.identity.deployment_name) || "Your deployment" })),
-      h("div", { class: "pv-body" }, h("p", {}, "Welcome back. ", h("span", { class: "pv-link", text: "View your Macs" })), h("span", { class: "pv-btn", text: "Rent a Mac" })));
-    if (/^#[0-9a-f]{6}$/i.test(color)) pv.style.setProperty("--p", color);
-    return [
-      card("Logo and favicon", "Files are checked by their content (magic bytes), not their name.", uploader("logo", "Logo"), uploader("favicon", "Favicon")),
-      card("Look", null,
-        h("div", { class: "field" }, h("label", { for: "primary_color", text: "Primary colour" }),
-          h("div", { class: "row" },
-            h("input", { type: "color", "aria-label": "Pick primary colour", value: /^#[0-9a-f]{6}$/i.test(color) ? color : "#0a66c2", oninput: (e) => { drafts.primary_color = e.target.value.toUpperCase(); render(); } }),
-            h("input", { id: "primary_color", class: "hex", type: "text", value: color, maxlength: 7, oninput: (e) => { drafts.primary_color = e.target.value; }, onchange: () => render(), "aria-describedby": "pc-help" })),
-          h("div", { class: "help", id: "pc-help", text: "Format #RRGGBB." + (ratio ? " Contrast against white: " + ratio.toFixed(2) + ":1." : "") }),
-          ratio && ratio < 4.5 ? h("div", { class: "banner warn", text: "Below 4.5:1 - not readable as text or button labels on white. Choose a darker colour for text use." }) : null,
-          (errors.branding || {}).primary_color ? h("div", { class: "err", text: errors.branding.primary_color }) : null),
-        h("div", { class: "grid2" },
-          radioGroup("theme", "Theme", [{ value: "light", label: "Light" }, { value: "dark", label: "Dark" }], theme, () => render()),
-          radioGroup("density", "Density", [{ value: "comfortable", label: "Comfortable" }, { value: "compact", label: "Compact" }], density, () => render())),
-        h("div", { class: "field" }, h("div", { class: "label", text: "Preview" }), pv),
-        b.contrast_warning && !(ratio && ratio < 4.5) ? banner("warn", b.contrast_warning) : null,
-        h("div", { class: "actions" }, btn("Save branding", "branding", () => act("branding", "branding", () => api("POST", "/api/branding", { primary_color: draft("primary_color", b.primary_color), theme, density }))))),
-    ];
-  }
+          } }))));
+  },
 
-  function renderDomain() {
-    const d = S.domain;
-    const zone = S.config.managed_zone;
-    const strat = draft("strategy", d.strategy || "custom");
-    const out = [card("Domain strategy", null,
-      radioGroup("strategy", "Strategy", [
-        { value: "managed", label: "Taro-managed subdomain", note: zone ? "A subdomain of " + zone + "." : "Needs config: no Taro-managed DNS zone is configured (TARO_SETUP_MANAGED_ZONE).", disabled: !zone },
-        { value: "custom", label: "Your own domain", note: "e.g. portal.example.com - you create the DNS records at your DNS provider." },
-      ], strat, () => render()),
-      strat === "managed" && zone
-        ? field("domain", { id: "label", label: "Subdomain label", value: d.domain && zone && d.domain.endsWith("." + zone) ? d.domain.slice(0, -zone.length - 1) : "", placeholder: "acme", help: "Becomes <label>." + zone })
-        : field("domain", { id: "domain", label: "Domain", value: d.domain, placeholder: "portal.example.com" }),
-      field("domain", { id: "target", label: "Server target", value: d.target, placeholder: "203.0.113.10 or server.example.net", help: "Your server's public IP address (A/AAAA record) or host name (CNAME record)." }),
-      h("div", { class: "actions" }, btn("Generate DNS records", "domain", () => act("domain", "domain", () => api("POST", "/api/domain", {
-        strategy: strat, domain: $("domain") ? $("domain").value : "", label: $("label") ? $("label").value : "", target: $("target").value,
-      })))))];
-    if (d.records && d.records.length) {
-      out.push(card("DNS records to create", "TLS is handled on the server by Caddy (on-demand certificates). The wizard only verifies the result.",
-        h("table", { class: "records" }, h("thead", {}, h("tr", {}, h("th", { text: "Type" }), h("th", { text: "Name" }), h("th", { text: "Value" }), h("th", { text: "Purpose" }))),
-          h("tbody", {}, d.records.map((r) => h("tr", {}, h("td", { text: r.kind }), h("td", {}, h("code", { text: r.name })), h("td", {}, h("code", { text: r.value }),
-            " ", h("button", { type: "button", class: "btn ghost", "aria-label": "Copy value of " + r.kind + " record", onclick: () => { navigator.clipboard && navigator.clipboard.writeText(r.value).then(() => announce("Copied")); } }, "Copy")), h("td", { text: r.purpose }))))),
-        d.verification ? h("div", {},
-          banner(d.verification.dns_ok && d.verification.https_ok ? "ok" : "fail",
-            d.verification.dns_ok && d.verification.https_ok ? "DNS and HTTPS verified." : "Not verified yet: complete is shown only when both DNS and HTTPS pass."),
-          checkList(d.verification.checks)) : null,
-        h("div", { class: "actions" }, btn("Verify", "domain-verify", () => act("domain-verify", "domain", () => api("POST", "/api/domain/verify", {}))))));
-    }
-    return out;
-  }
-
-  function renderBilling() {
-    const b = S.billing;
-    if (!S.billing_enabled) return [card("Billing is not enabled", "The billing module is switched off in Product identity, so this step is skipped.")];
-    const live = !!drafts.live_confirmed;
-    const portal = S.deployment ? S.deployment.portal_url + "/webhooks/stripe" : null;
-    const out = [card("Stripe secret key", "Paste a test-mode secret key (sk_test_...) or restricted key (rk_test_...). It is checked with Stripe (GET /v1/account) and then kept in memory only.",
-      b.account ? banner(b.mode === "live" ? "warn" : "ok", "Key valid for Stripe account " + b.account.id + (b.account.display_name ? " (" + b.account.display_name + ")" : "") + (b.mode === "live" ? " - LIVE MODE" : " - test mode")) : null,
-      b.key_error ? banner("fail", b.key_error) : null,
-      field("billing", { id: "key", label: b.key_present ? "Replace secret key" : "Secret key", type: "password", secret: true, placeholder: "sk_test_...", help: "Never shown again, never written to disk." }),
-      h("label", { class: "choice" }, h("input", { type: "checkbox", checked: live, onchange: (e) => { drafts.live_confirmed = e.target.checked; render(); } }),
-        h("span", {}, "Use live mode", h("small", { text: "Real charges. Only for a production go-live." }))),
-      live ? field("billing", { id: "live_typed", label: "Type LIVE to confirm live mode", value: "", autocomplete: "off" }) : null,
-      h("div", { class: "actions" }, btn("Validate key", "key", () => act("key", "billing", async () => {
-        const k = $("key").value; $("key").value = "";
-        return api("POST", "/api/billing/key", { key: k, live_confirmed: live, live_typed: $("live_typed") ? $("live_typed").value : "" });
-      }))))];
-    out.push(card("Webhook", portal ? "Endpoint URL: " + portal : "Save the Deployment mode step first.",
-      b.webhook_secret_present ? banner("ok", "Webhook signing secret stored in memory (" + (b.webhook_secret_source === "created" ? "captured when the endpoint was created" : "entered") + ").") : null,
-      field("billing", { id: "webhook_secret", label: "Webhook signing secret", type: "password", secret: true, placeholder: "whsec_...", help: "Stripe dashboard > Developers > Webhooks > your endpoint > Signing secret. Not needed if the wizard creates the endpoint." }),
-      h("div", { class: "actions" }, btn("Store secret", "whsec", () => act("whsec", "billing", async () => {
-        const v = $("webhook_secret").value; $("webhook_secret").value = "";
-        return api("POST", "/api/billing/webhook-secret", { secret: v });
-      }), "secondary"), btn("Check existing endpoint", "wh-check", () => act("wh-check", "billing", () => api("POST", "/api/billing/webhook/check", {})), "secondary", { disabled: !b.account || busy["wh-check"] })),
-      b.webhook_note ? banner(b.webhook_missing_events.length ? "warn" : "info", b.webhook_note) : null,
-      b.webhook_missing_events.length ? h("p", { class: "help", text: "Missing events: " + b.webhook_missing_events.join(", ") }) : null,
-      h("details", { open: !!drafts.wh_open, ontoggle: (e) => { drafts.wh_open = e.target.open; } }, h("summary", { text: "Create the endpoint in Stripe" }),
-        h("p", { class: "help", text: "Creates POST /v1/webhook_endpoints with url " + (portal || "<portal>/webhooks/stripe") + " and events: " + S.config.webhook_events.join(", ") + "." }),
-        h("label", { class: "choice" }, h("input", { type: "checkbox", id: "wh-confirm", onchange: (e) => { drafts.wh_confirm = e.target.checked; render(); }, checked: !!drafts.wh_confirm }), h("span", { text: "Yes, create this webhook endpoint in my Stripe account." })),
-        h("div", { class: "actions" }, btn("Create endpoint", "wh-create", () => act("wh-create", "billing", () => api("POST", "/api/billing/webhook/create", { confirm: !!drafts.wh_confirm })), "", { disabled: !drafts.wh_confirm || !b.account || busy["wh-create"] })))));
-    out.push(card("Billing smoke test", "Creates a test-mode Checkout Session for 1 x 1.00 USD (100 minor units), shows what Stripe returned, then expires it. Test mode only.",
-      b.smoke ? h("div", {}, banner(b.smoke.ok ? "ok" : "fail", b.smoke.detail),
-        b.smoke.session_id ? h("dl", { class: "kv" }, h("dt", { text: "Session id" }), h("dd", {}, h("code", { text: b.smoke.session_id })), h("dt", { text: "Checkout URL" }), h("dd", {}, b.smoke.session_url ? h("a", { href: b.smoke.session_url, target: "_blank", rel: "noopener noreferrer", text: "open (now expired)" }) : "-"), h("dt", { text: "Expired" }), h("dd", { text: b.smoke.expired ? "yes" : "no" })) : null) : null,
-      h("label", { class: "choice" }, h("input", { type: "checkbox", checked: !!drafts.smoke_confirm, onchange: (e) => { drafts.smoke_confirm = e.target.checked; render(); } }), h("span", { text: "Run the smoke test against my Stripe test account." })),
-      h("div", { class: "actions" }, btn("Run smoke test", "smoke", () => act("smoke", "billing", () => api("POST", "/api/billing/smoke", { confirm: !!drafts.smoke_confirm })), "secondary", { disabled: !drafts.smoke_confirm || b.mode !== "test" || busy.smoke }))));
-    return out;
-  }
-
-  const PERMS = [
-    ["Administration", "Read and write", "create the repository from the template, set workflow permissions"],
-    ["Contents", "Read and write", "commit deploy/deployment.json and branding files"],
-    ["Actions", "Read and write", "start the release workflow and read its logs"],
-    ["Secrets", "Read and write", "store Stripe and Taro secrets as Actions secrets"],
-    ["Workflows", "Read and write", "the template contains workflow files"],
-    ["Metadata", "Read-only", "required by GitHub for every fine-grained token"],
-  ];
-
-  function renderGithub() {
-    const g = S.github;
-    const out = [];
-    if (g.user) {
-      out.push(card("GitHub account", null, banner("ok", "Authenticated as " + g.user.login + " (" + ({ pat: "fine-grained token", device: "device flow", remembered: "remembered token" }[g.auth_method] || g.auth_method) + ")."),
-        g.user.scopes ? h("p", { class: "help", text: "Token scopes: " + (g.user.scopes.join(", ") || "none") }) : null,
-        h("div", { class: "actions" }, btn("Sign out", "logout", () => act("logout", "github", () => api("POST", "/api/github/logout", {})), "secondary"))));
-    } else {
-      const d = g.device;
-      out.push(card("Sign in with GitHub (device flow)", S.config.device_flow_available ? "An OAuth client id is configured." : "Needs config: set TARO_SETUP_GITHUB_CLIENT_ID or enter the client id of your OAuth/GitHub App (device flow enabled).",
-        d.phase === "waiting" ? h("div", {},
-          h("p", {}, "Open ", h("a", { href: d.verification_uri, target: "_blank", rel: "noopener noreferrer", text: d.verification_uri }), " and enter this code:"),
-          h("div", { class: "code-box", text: d.user_code }),
-          h("p", { class: "help", text: "Waiting for you to approve on GitHub (checking every " + d.interval + " s)..." }),
-          h("div", { class: "actions" }, btn("Cancel", "dev-cancel", () => act("dev-cancel", "github", () => api("POST", "/api/github/device/cancel", {})), "secondary"))) :
-          h("div", {},
-            S.config.device_flow_available ? null : field("github", { id: "client_id", label: "OAuth client id", value: "", placeholder: "Iv1.0123456789abcdef" }),
-            d.error ? banner("fail", d.error) : null,
-            g.remember_supported ? h("label", { class: "choice" }, h("input", { type: "checkbox", id: "dev-remember" }), h("span", {}, "Remember on this PC", h("small", { text: "Encrypted with Windows DPAPI for your Windows account." }))) : null,
-            h("div", { class: "actions" }, btn("Start device flow", "dev-start", () => act("dev-start", "github", () => api("POST", "/api/github/device/start", { client_id: $("client_id") ? $("client_id").value : null, remember: !!($("dev-remember") && $("dev-remember").checked) })))))));
-      out.push(card("Or paste a fine-grained personal access token", "Create one at github.com > Settings > Developer settings > Fine-grained tokens, with the resource owner that will own the new repository and these repository permissions:",
-        h("ul", { class: "perm-list" }, PERMS.map(([n, l, why]) => h("li", {}, h("strong", { text: n + ": " + l }), " - " + why))),
-        h("p", { class: "help", text: "Deleting a repository from this wizard additionally needs delete_repo (classic) or Administration write. The token is checked with GET /user; its prefix is not trusted." }),
-        field("github", { id: "token", label: "Token", type: "password", secret: true, placeholder: "github_pat_...", help: "Kept in memory only and sent only to api.github.com." }),
-        g.remember_supported ? h("label", { class: "choice" }, h("input", { type: "checkbox", id: "pat-remember" }), h("span", {}, "Remember on this PC", h("small", { text: "Encrypted with Windows DPAPI in %APPDATA%\\TaroEnterpriseSetup." }))) : null,
-        g.auth_error ? banner("fail", g.auth_error) : null,
-        h("div", { class: "actions" }, btn("Validate token", "pat", () => act("pat", "github", async () => {
-          const t = $("token").value; $("token").value = "";
-          return api("POST", "/api/github/pat", { token: t, remember: !!($("pat-remember") && $("pat-remember").checked) });
-        })))));
-      if (g.remembered_available) out.push(card("Remembered token", "A token remembered on this PC (DPAPI) is available.",
-        h("div", { class: "actions" }, btn("Use remembered token", "rem-use", () => act("rem-use", "github", () => api("POST", "/api/github/remembered/use", {}))),
-          btn("Forget it", "rem-forget", () => act("rem-forget", "github", () => api("POST", "/api/github/remembered/forget", {})), "secondary"))));
-      return out;
-    }
-
-    const owners = [g.user.login].concat((g.orgs || []).map((o) => o.login));
-    const owner = draft("owner", g.owner || g.user.login);
-    const locked = g.bootstrap_running || g.bootstrap_done;
-    out.push(card("Repository", "A private repository is generated from the template and configured. Nothing happens until you confirm.",
-      h("div", { class: "grid2" },
-        h("div", { class: "field" }, h("label", { for: "owner", text: "Owner" }),
-          h("select", { id: "owner", disabled: locked, onchange: (e) => { drafts.owner = e.target.value; } },
-            owners.map((o) => {
-              const org = (g.orgs || []).find((x) => x.login === o);
-              const note = org ? (org.can_create_repos === true ? " (org, " + org.role + ")" : org.can_create_repos === false ? " (org - you cannot create repositories)" : " (org - permission unknown)") : " (you)";
-              return h("option", { value: o, selected: o === owner ? "selected" : null, text: o + note });
-            })),
-          h("div", { class: "help" }, btn(g.orgs ? "Reload organisations" : "Load my organisations", "orgs", () => act("orgs", "github", () => api("POST", "/api/github/orgs", {})), "ghost"))),
-        field("github", { id: "repo", label: "Repository name", value: g.repo_name || "taro-enterprise-deploy" })),
-      field("github", { id: "template", label: "Template repository", value: g.template, help: "Must be a template repository the token can read." }),
-      h("div", { class: "actions" }, btn("Review plan", "plan", () => act("plan", "github", () => api("POST", "/api/github/plan", { owner: $("owner").value, repo: $("repo").value, template: $("template").value })), "secondary", { disabled: locked || busy.plan }))));
-    if (g.plan) {
-      const running = g.bootstrap_running;
-      out.push(card(g.bootstrap_done ? "Bootstrap complete" : running ? "Bootstrap running" : "What will happen", g.bootstrap_done || running ? null : "Exactly these actions, in this order. Secrets are encrypted on this PC with the repository's public key before upload and are never committed.",
-        checkList(g.plan),
-        g.bootstrap_error ? banner("fail", g.bootstrap_error) : null,
-        !running && !g.bootstrap_done ? h("div", {},
-          h("label", { class: "choice" }, h("input", { type: "checkbox", checked: !!drafts.gh_confirm, onchange: (e) => { drafts.gh_confirm = e.target.checked; render(); } }),
-            h("span", { text: "I confirm: create the private repository " + (g.owner || owner) + "/" + (g.repo_name || "") + " and perform the actions above." })),
-          h("div", { class: "actions" }, btn(g.created_by_wizard ? "Retry remaining actions" : "Create repository", "boot", () => act("boot", "github", () => api("POST", "/api/github/bootstrap", { owner: g.owner, repo: g.repo_name, template: g.template, confirm: !!drafts.gh_confirm })), "", { disabled: !drafts.gh_confirm || busy.boot }))) : null,
-        g.repo ? h("p", {}, "Repository: ", h("a", { href: g.repo.html_url, target: "_blank", rel: "noopener noreferrer", text: g.repo.full_name }), g.repo.private ? " (private)" : " (PUBLIC!)") : null));
-    }
-    if (g.repo && g.created_by_wizard && !g.bootstrap_running && (g.bootstrap_error || S.release.error)) {
-      out.push(card("Clean up / roll back", "A step failed after the repository was created. You can fix the cause and retry, or remove what was created:",
-        h("ul", { class: "perm-list" },
-          h("li", { text: "Retry: fix the issue (permissions, inputs) and press \"Retry remaining actions\" - creation is not repeated." }),
-          h("li", { text: "Stripe: delete the webhook endpoint in the Stripe dashboard if the wizard created one." }),
-          h("li", { text: "GitHub: delete the repository below, or on github.com under Settings > General > Danger Zone." })),
-        field("github", { id: "confirm_name", label: "Type " + g.repo.full_name + " to delete it", value: "", autocomplete: "off" }),
-        h("div", { class: "actions" }, btn("Delete the repository I just created", "del", () => act("del", "github", () => api("POST", "/api/github/delete-repo", { confirm_name: $("confirm_name").value })), "danger"))));
-    }
-    return out;
-  }
-
-  function renderRelease() {
-    const r = S.release, g = S.github;
-    if (!g.bootstrap_done) return [card("Not ready", "Finish the GitHub bootstrap first.")];
-    const out = [card("Release workflow", "Runs .github/workflows/enterprise-release.yml in " + g.repo.full_name + " via workflow_dispatch.",
-      field("release", { id: "version", label: "Version", value: r.version || "0.1.0", help: "The release must be tagged with exactly this version." }),
-      h("div", { class: "actions" }, btn(r.attempts ? "Retry (dispatch again)" : "Start release", "release", () => act("release", "release", () => api("POST", "/api/release/start", { version: $("version").value })), "", { disabled: r.running || busy.release })),
-      r.running ? banner("info", r.phase + "...") : null,
-      r.error ? banner("fail", r.error) : null)];
-    if (r.run) {
-      out.push(card("Run", null,
-        h("p", {}, h("a", { href: r.run.html_url, target: "_blank", rel: "noopener noreferrer", text: "Run #" + r.run.id }), " - " + (r.run.status || "") + (r.run.conclusion ? " / " + r.run.conclusion : "")),
-        r.jobs.map((j) => h("div", {}, h("h3", { text: j.name + " - " + (j.conclusion || j.status || "") }),
-          checkList(j.steps.map((s) => ({ name: s.name, status: s.conclusion === "success" ? "ok" : s.conclusion === "skipped" ? "skipped" : s.conclusion ? "fail" : s.status === "in_progress" ? "running" : "pending" }))))),
-        r.log_tail ? h("div", {}, h("h3", { text: "Log tail (redacted)" }), h("pre", { class: "log", text: r.log_tail })) : null));
-    }
-    if (r.release) {
-      out.push(card("Release " + r.release.tag_name, "Verified: the release exists and has assets.",
-        h("p", {}, h("a", { href: r.release.html_url, target: "_blank", rel: "noopener noreferrer", text: r.release.html_url })),
-        h("ul", {}, r.release.assets.map((a) => h("li", { text: a.name + " (" + Math.round(a.size / 1024) + " KB)" })))));
-    }
-    return out;
-  }
-
-  function renderVerify() {
-    const v = S.verification;
-    return [card("Deployed portal", S.deployment ? "Portal: " + S.deployment.portal_url : "Save the Deployment mode step first.",
-      v ? checkList(v.checks) : h("p", { text: "Not run yet." }),
-      h("div", { class: "actions" }, btn(v ? "Run again" : "Run verification", "verify", () => act("verify", "verify", () => api("POST", "/api/verify/run", {}))))),
-    card("Export", "Deployment summary without any secrets.",
-      h("div", { class: "actions" },
-        btn("Download JSON", "dl:/api/summary.json", () => download("/api/summary.json", "taro-deployment-summary.json"), "secondary"),
-        btn("Download Markdown", "dl:/api/summary.md", () => download("/api/summary.md", "taro-deployment-summary.md"), "secondary")))];
-  }
-
-  // ---------------------------------------------------------------- shell
-  function render() {
-    if (!S) return;
-    const icons = { ok: "✓", warn: "!", fail: "×", running: "…", skipped: "–", needs_config: "?", todo: "" };
-    const statusText = { ok: "complete", warn: "complete with warnings", fail: "failed", running: "in progress", skipped: "skipped", needs_config: "needs configuration", todo: "not done" };
-    const list = $("step-list");
-    list.replaceChildren(...S.steps.map((s, i) => h("li", {},
-      h("button", { type: "button", class: "step-btn", "aria-current": s.id === current ? "step" : null, onclick: () => go(s.id) },
-        h("span", { class: "dot " + s.status, "aria-hidden": "true", text: icons[s.status] || String(i + 1) }),
-        h("span", {}, h("span", { class: "step-title", text: (i + 1) + ". " + s.title }),
-          h("span", { class: "step-sum", text: s.summary }),
-          h("span", { class: "sr-only", text: " (" + (statusText[s.status] || s.status) + ")" }))))));
-    const st = STEPS[current];
-    const active = document.activeElement && document.activeElement.id;
-    const panel = $("panel");
-    const idx = S.steps.findIndex((s) => s.id === current);
-    const nav = h("div", { class: "actions" },
-      idx > 0 ? h("button", { type: "button", class: "btn secondary", onclick: () => go(S.steps[idx - 1].id) }, "Back") : null,
-      idx < S.steps.length - 1 ? h("button", { type: "button", class: "btn secondary", onclick: () => go(S.steps[idx + 1].id) }, "Next step") : null);
-    panel.replaceChildren(...[
-      h("div", { class: "panel-head" }, h("h1", { text: st.title }), h("p", { text: st.lead })),
-      flash ? banner(flash.kind, flash.text) : null,
-      ...st.render(),
-      nav].filter(Boolean));
-    if (active && $(active)) $(active).focus();
-    $("app-version").textContent = "Version " + S.version + " - local wizard on this PC";
-  }
-
-  function go(id) {
-    current = id; flash = null;
-    try { sessionStorage.setItem("taroStep", id); } catch (_) {}
-    render();
-    const p = $("panel"); p.focus(); window.scrollTo({ top: 0 });
-  }
-
-  function needsPoll() {
-    return S && (S.github.device.phase === "waiting" || S.github.bootstrap_running || S.release.running);
-  }
-
-  function schedulePoll() {
-    if (pollTimer || !needsPoll()) return;
-    pollTimer = setTimeout(async () => {
-      pollTimer = null;
-      const before = JSON.stringify(S);
-      try { await api("GET", "/api/state"); } catch (_) {}
-      if (JSON.stringify(S) !== before) render();
-      schedulePoll();
-    }, 2000);
-  }
-
-  function initTheme() {
-    let t = "light";
-    try { t = localStorage.getItem("taroTheme") || "light"; } catch (_) {}
-    const apply = () => {
-      document.documentElement.dataset.theme = t;
-      const b = $("theme-toggle");
-      b.setAttribute("aria-pressed", t === "dark" ? "true" : "false");
-      b.textContent = t === "dark" ? "Light mode" : "Dark mode";
+  branding() {
+    brandInit();
+    const b = S.branding;
+    if (!B.dirty || !B.applied) { B.applied = b.primary_color; B.theme = b.theme; }
+    if (!B.theme) B.theme = b.theme;
+    const typing = B.typed !== null && (document.activeElement === B.els.hex || parseHex(B.typed).error);
+    syncColor(typing ? "input" : "load");
+    const uploader = (slot, label, desc) => {
+      const up = b[slot];
+      const id = "file-" + slot;
+      return h("div", { class: "field" },
+        h("label", { for: id }, label), h("p", { class: "desc", id: id + "-desc" }, desc),
+        h("input", { id, type: "file", accept: "image/png", "aria-describedby": id + "-desc", onchange: (ev) => {
+          const f = ev.target.files[0]; if (!f) return;
+          run(null, "", "branding", async () => { const r = await api("POST", "/api/branding/" + slot, undefined, f); await refreshImages(); return r; });
+        } }),
+        up ? h("div", { class: "upload-row" },
+          images[slot].url ? h("img", { class: "thumb", src: images[slot].url, alt: label + " preview" }) : null,
+          status("ok", slot + ".png " + up.info.width + "×" + up.info.height + ", " + kb(up.info.bytes)),
+          button("Remove", { kind: "link", onclick: (ev) => run(ev.currentTarget, "Removing…", "branding", async () => { const r = await api("DELETE", "/api/branding/" + slot); await refreshImages(); return r; }) })) : null);
     };
-    apply();
-    $("theme-toggle").addEventListener("click", () => { t = t === "dark" ? "light" : "dark"; try { localStorage.setItem("taroTheme", t); } catch (_) {} apply(); });
-  }
+    return page({ title: "Branding", desc: "One primary colour (hover, pressed, border, soft and dark-mode variants are derived from it), the theme, a logo and an icon." },
+      h("div", { class: "cols brand-cols" },
+        h("div", {},
+          container({ title: "Primary colour", desc: "Pick a preset, type a hex code, or open Customize for any colour." }, B.els.colorRoot),
+          container({ title: "Theme", desc: "How your clients start." },
+            tiles("theme", "Theme", B.theme, [
+              { value: "system", label: "System", note: "Follow Windows or macOS." },
+              { value: "light", label: "Light" },
+              { value: "dark", label: "Dark" }], (v) => { B.theme = v; B.dirty = true; updatePreview(); scheduleSave(); })),
+          container({ title: "Logo and icon", desc: "PNG only: copied unchanged into provider/ as logo.png and icon.png, which every client reads. JPEG and WebP are refused, not converted." },
+            uploader("logo", "Logo (logo.png)", "PNG, up to 1 MB and 1024×1024 px, any shape."),
+            uploader("icon", "Icon (icon.png)", "Square PNG, up to 1 MB and 1024×1024 px (256×256 or 512×512 works well)."))),
+        h("div", { class: "preview-col" },
+          container({ title: "Live preview", desc: "Your client and the relay's console with this colour, as provider.json makes them look." }, B.els.preview))));
+  },
 
-  document.addEventListener("DOMContentLoaded", async () => {
-    initTheme();
-    $("dl-log").addEventListener("click", () => download("/api/diagnostics.txt", "taro-setup-diagnostics.txt"));
-    $("quit").addEventListener("click", async () => {
-      if (!confirm("Quit the wizard? Secrets held in memory (tokens, keys) are discarded.")) return;
-      try { await api("POST", "/api/shutdown", {}); } catch (_) {}
-      $("panel").replaceChildren(h("div", { class: "card" }, h("h2", { text: "The wizard has stopped." }), h("p", { text: "You can close this tab." })));
-    });
-    try { const s = sessionStorage.getItem("taroStep"); if (s && STEPS[s]) current = s; } catch (_) {}
-    try { await api("GET", "/api/state"); render(); schedulePoll(); }
-    catch (e) { $("panel").replaceChildren(h("div", { class: "card" }, h("h2", { text: "Cannot load the wizard" }), h("p", { text: (e && e.error) || "Unknown error" }))); }
-  });
+  relay() {
+    const r = S.relay;
+    const st = "relay";
+    const shown = drafts.key_shown;
+    const keyErr = (errors[st] || {})["relay.key"];
+    const save = button("Save", { kind: "primary", id: "save-relay", onclick: (ev) => run(ev.currentTarget, "Saving…", st, () => api("POST", "/api/relay", {
+      host: val("relay.host"), port: val("relay.port"), key: ($("key-entry") || {}).value || null, client_updates: draft("client_updates", r.client_updates),
+      portal: val("account.portal") || null,
+    })) });
+    return page({ title: "Relay endpoint", desc: "Where your clients connect, and the key they send.", nextDisabled: !r.saved, actions: save },
+      container({ title: "Relay server", desc: "Nothing is checked here: the relay's own setup (Wizard 2, on the server) verifies DNS and gets the TLS certificate." },
+        h("div", { class: "split" },
+          field(st, { name: "relay.host", label: "Relay DNS name", value: r.host, placeholder: "relay.acme.example", mono: true, spellcheck: "false", inputmode: "url", desc: "The host name your relay server will have." }),
+          field(st, { name: "relay.port", label: "Port", value: String(r.port || S.config.default_port), inputmode: "numeric", desc: "TCP and UDP.", hint: "Default " + S.config.default_port + "." }))),
+      container({ title: "Admission key", desc: "The shared client admission key, not a server administration credential." },
+        alert("info", "Every client of yours sends this key", "Your relay admits only clients that do, like the key built into standard Taro. It is in provider.json in every package, so it is not secret from your users. Server administration credentials, TLS keys and passwords are never part of the packages."),
+        h("div", { class: "field wide" },
+          h("label", { for: "key-view" }, "Current key"),
+          h("div", { class: "key-row" },
+            h("input", { id: "key-view", type: "text", class: "mono", readonly: true, value: shown || r.key_masked || "(none yet)", "aria-describedby": "key-hint", spellcheck: "false" }),
+            button(shown ? "Hide" : "Reveal", { id: "reveal", disabled: !r.key_masked, onclick: (ev) => {
+              if (shown) { delete drafts.key_shown; render(); return; }
+              run(ev.currentTarget, "…", st, async () => { const x = await api("POST", "/api/relay/key/reveal", {}); drafts.key_shown = x.key; });
+            } }),
+            button("Copy", { id: "copy", disabled: !r.key_masked, onclick: (ev) => run(ev.currentTarget, "…", st, async () => {
+              const x = await api("POST", "/api/relay/key/reveal", {});
+              try { await navigator.clipboard.writeText(x.key); } catch (_) { drafts.key_shown = x.key; throw { error: "The browser did not allow copying; the key is shown so you can select it." }; }
+              return { message: "Key copied to the clipboard." };
+            }) }),
+            button("Generate new", { id: "generate", kind: r.key_masked ? "" : "primary", onclick: async (ev) => {
+              const btn = ev.currentTarget;
+              if (r.key_masked && !(await confirmDialog({ title: "Generate a new admission key?", confirm: "Generate new key", danger: true,
+                body: h("p", {}, "Clients built with the current key will not be admitted by a relay that uses the new one.") }))) return;
+              delete drafts.key_shown;
+              run(btn, "Generating…", st, () => api("POST", "/api/relay/key/generate", {}));
+            } })),
+          h("p", { class: "hint", id: "key-hint" }, r.key_source ? "Source: " + r.key_source + ". Generated keys are " + S.config.key_len + " random characters [A-Za-z0-9_-]." : "Generate one, or enter the key your relay already uses below."),
+          keyErr ? h("p", { class: "error" }, icon("err"), keyErr) : null),
+        h("details", { open: !!drafts.key_open, ontoggle: (ev) => { drafts.key_open = ev.target.open; } },
+          h("summary", {}, "Use an existing key"),
+          field(st, { name: "relay.key.entry", id: "key-entry", label: "Existing key", value: "", mono: true, placeholder: "16-128 letters, digits, - or _", spellcheck: "false", hint: "For a rebuild: the key your relay and earlier clients use." }))),
+      container({ title: "Sign-in and machine management", desc: "Optional. Written as account.portal in provider.json." },
+        field(st, { name: "account.portal", label: "Portal address", opt: true, value: r.portal || "", placeholder: "https://portal.acme.example", mono: true, spellcheck: "false", inputmode: "url",
+          desc: "Your Taro Enterprise portal. Your users sign in there from the client and see the Macs they rented or were given; the client connects to them through your relay.",
+          hint: "Without it the client works as standard Taro does: the user enters a Mac's ID and password." })),
+      container({ title: "Client updates", desc: "Written as updates.clients in provider.json." },
+        tiles("client_updates", "Client updates", draft("client_updates", r.client_updates), [
+          { value: "notify", label: "Look for new Taro releases", note: "Offered to the user and installed in place; the provider folder stays." },
+          { value: "off", label: "Never look", note: "You ship new packages built with this wizard." }])));
+  },
+
+  components() {
+    const c = S.components;
+    const rels = c.releases || [];
+    const firstUsable = rels.find((r) => r.usable);
+    const pick = draft("release", (c.selected && c.selected.tag) || (firstUsable && firstUsable.tag));
+    const s = c.selected;
+    const discover = button(c.releases ? "Look again" : "Look for releases", { kind: c.releases ? "" : "primary", icon: c.releases ? "refresh" : null, id: "discover",
+      onclick: (ev) => run(ev.currentTarget, "Looking…", "components", () => api("POST", "/api/components/discover", {})) });
+    const select = c.releases && rels.length ? button("Verify and use " + (pick || ""), { kind: s && s.tag === pick ? "" : "primary", id: "select", disabled: !pick,
+      onclick: (ev) => run(ev.currentTarget, "Verifying signature…", "components", () => api("POST", "/api/components/select", { tag: pick })) }) : null;
+    return page({ title: "Components and versions", desc: "The signed Taro Enterprise release your packages are built from.", nextDisabled: !s },
+      c.error ? alert("err", "Not usable", c.error) : null,
+      container({ title: "Enterprise release", desc: "Releases tagged enterprise-v… of ducminh1110/RemoteMac on GitHub, newest first. Each lists the exact client and relay files it was tested with, signed with the Taro release key.", actions: [discover, select] },
+        c.releases ? (rels.length ? tiles("release", "Release", pick, rels.map((r) => ({
+          value: r.tag, disabled: !r.usable,
+          label: r.tag + (r.prerelease ? " (pre-release)" : "") + (r === firstUsable ? " · newest" : ""),
+          note: (r.published_at ? "Published " + r.published_at.slice(0, 10) + ". " : "") + (r.note || ""),
+        })), () => render()) : h("div", { class: "table-empty" }, h("strong", {}, "No Enterprise release yet"), "None is published on GitHub."))
+          : h("div", { class: "table-empty" }, h("strong", {}, "Not looked up yet"), "Look for releases to list them.")),
+      s ? [
+        alert("ok", "Signature valid", h("span", {}, s.tag + "'s component manifest is signed by ", h("code", {}, s.signed_by), ".")),
+        s.warnings.length ? alert("warn", "Warnings", h("ul", {}, s.warnings.map((w) => h("li", {}, w)))) : null,
+        container({ title: "Pinned versions" }, kv([["Enterprise", s.enterprise_version], ["Taro (clients)", s.taro_version], ["Relay", s.relay_version || "–"], ["Released", s.released_at]], 4)),
+        container({ title: "Platforms", count: c.platforms.length, desc: "Each selected package is downloaded, verified (size and sha256) and assembled.", flush: true },
+          h("div", { class: "table-wrap" }, h("table", { class: "table" },
+            h("thead", {}, h("tr", {}, h("th", {}, "Build"), h("th", {}, "Component"), h("th", {}, "File"), h("th", {}, "Size"), h("th", {}, "Source"))),
+            h("tbody", {}, S.config.component_ids.map((id) => {
+              const comp = s.components.find((x) => x.id === id);
+              const on = c.platforms.includes(id) && !!comp;
+              return h("tr", { class: comp && !comp.url_ok ? "fail" : "" },
+                h("td", { class: "st" }, h("input", { type: "checkbox", class: "plat", id: "plat-" + id, "aria-label": "Build " + (comp ? comp.label : id), checked: on, disabled: !comp || S.build.running,
+                  onchange: (ev) => {
+                    const set = new Set(c.platforms);
+                    if (ev.target.checked) set.add(id); else set.delete(id);
+                    run(null, "", "components", () => api("POST", "/api/components/platforms", { platforms: [...set] }));
+                  } })),
+                h("td", { class: "name" }, comp ? comp.label + " " + comp.version : id),
+                h("td", {}, comp ? h("code", {}, comp.file) : h("span", { class: "muted" }, "Not in this release")),
+                h("td", {}, comp ? kb(comp.size) : "–"),
+                h("td", {}, comp ? (comp.url_ok ? status("ok", new URL(comp.url).host) : [status("fail", "Refused"), h("div", { class: "action" }, icon("err"), h("span", {}, comp.url_error))]) : "–"));
+            })))))] : null);
+  },
+
+  build() {
+    const b = S.build;
+    const s = S.components.selected;
+    const start = button("Build packages", { kind: "primary", id: "start-build", disabled: b.running || !s,
+      onclick: (ev) => run(ev.currentTarget, "Starting…", "build", () => api("POST", "/api/build/start", { output_dir: val("output_dir"), replace: !!drafts.replace })) });
+    const cancel = b.running ? button("Cancel build", { kind: "danger", id: "cancel-build", onclick: (ev) => run(ev.currentTarget, "Cancelling…", "build", () => api("POST", "/api/build/cancel", {})) }) : null;
+    return page({ title: "Build", desc: "Downloads the official files, verifies them against the signed manifest and assembles your packages.", nextDisabled: !b.result, actions: [cancel, start] },
+      S.stale ? alert("warn", "Inputs changed since the last build", "Build again with “Replace an existing build” so the packages match.") : null,
+      !s ? alert("info", "Choose a release first", "Components and versions picks the signed release to build from.") : null,
+      container({ title: "Output", desc: s ? `Builds ${(S.identity && S.identity.provider_id) || "<provider>"}-${s.taro_version} in this folder: first as a .partial folder, renamed only when everything is written.` : null },
+        field("build", { name: "output_dir", label: "Output folder", value: b.output_dir, mono: true, spellcheck: "false", hint: "A full path. It is created if needed." }),
+        h("label", { class: "check" }, h("input", { type: "checkbox", id: "replace", checked: !!drafts.replace, onchange: (e) => { drafts.replace = e.target.checked; } }),
+          h("span", {}, "Replace an existing build of the same version", h("span", { class: "d" }, "The old folder is removed only after the new one is complete.")))),
+      b.items.length ? container({ title: b.running ? "Building: " + b.phase : b.cancelled ? "Cancelled" : b.error ? "Build failed" : "Built", flush: true },
+        b.error ? h("div", { class: "pad" }, alert("err", "The build was stopped", b.error, h("div", {}, "Nothing was left in the output folder."))) : null,
+        b.cancelled ? h("div", { class: "pad" }, alert("info", "Cancelled", "Nothing was left in the output folder.")) : null,
+        h("div", { class: "table-wrap" }, h("table", { class: "table" },
+          h("thead", {}, h("tr", {}, h("th", {}, "Status"), h("th", {}, "Part"), h("th", {}, "Progress"))),
+          h("tbody", {}, b.items.map((it) => h("tr", { class: it.status },
+            h("td", { class: "st" }, status(it.status === "running" ? "info" : it.status === "skipped" ? "skip" : it.status, { running: "In progress", pending: "Pending", ok: "Done", fail: "Failed", skipped: "Skipped" }[it.status])),
+            h("td", { class: "name" }, it.label),
+            h("td", {}, it.total ? h("progress", { max: String(it.total), value: String(Math.min(it.done, it.total)), "aria-label": it.label + " download" }) : null,
+              h("div", { class: "muted" }, it.total ? kb(it.done) + " of " + kb(it.total) + (it.detail ? " · " + it.detail : "") : it.detail || "")))))))) : null,
+      container({ title: "About the macOS package" },
+        alert("warn", "Not signed with your Apple Developer ID", "The macOS package is a tar.gz with Taro's official, ad-hoc signed program, unchanged. This builder has no Apple Developer ID credentials or notarization service, and changing the program would break its signature. Users remove the download quarantine once (INSTALL.md shows how).")));
+  },
+
+  validate() {
+    const v = S.validation;
+    const r = S.build.result;
+    if (!r) return page({ title: "Validate and export", desc: "Every package is opened again and checked; then export a summary." },
+      container({ title: "Nothing built yet" }, h("div", { class: "table-empty" }, h("strong", {}, "No packages"), "Build them in the previous step.")));
+    const fails = v ? v.checks.filter((c) => c.status === "fail").length : 0;
+    return page({ title: "Validate and export", desc: "Each archive was opened again: provider.json byte-identical and valid, the official programs unchanged, the layout as expected, SHA256SUMS right.",
+      actions: [
+        button("Open folder", { icon: "ext", id: "open-folder", onclick: (ev) => run(ev.currentTarget, "Opening…", "validate", () => api("POST", "/api/output/open", {})) }),
+        button("Validate again", { icon: "refresh", id: "revalidate", onclick: (ev) => run(ev.currentTarget, "Validating…", "validate", () => api("POST", "/api/validate/run", {})) })] },
+      v ? (v.ok ? alert("ok", `All ${v.checks.length} checks passed`, "These packages are ready to ship.") : alert("err", `${fails} check(s) failed`, "Do not ship these packages.")) : null,
+      container({ title: "Validation", count: v ? v.checks.length : null, desc: v ? counts(v.checks) : null, flush: true }, checkTable(v && v.checks, "Validate the output.")),
+      container({ title: "Output", desc: h("span", { class: "path" }, r.dir), flush: true },
+        h("div", { class: "table-wrap" }, h("table", { class: "table" },
+          h("thead", {}, h("tr", {}, h("th", {}, "File"), h("th", {}, "Size"), h("th", {}, "sha256"))),
+          h("tbody", {}, r.artifacts.map((a) => h("tr", {}, h("td", { class: "name" }, h("code", {}, a.path)), h("td", {}, kb(a.size)), h("td", {}, h("code", { title: a.sha256 }, a.sha256.slice(0, 16) + "…")))))))),
+      container({ title: "Export", desc: "A summary of this build without secrets (the admission key appears masked)." },
+        h("div", { class: "row" },
+          button("Download JSON", { icon: "download", id: "dl-json", onclick: () => fetchDownload("/api/summary.json", "taro-provider-build-summary.json") }),
+          button("Download Markdown", { icon: "download", id: "dl-md", onclick: () => fetchDownload("/api/summary.md", "taro-provider-build-summary.md") }))));
+  },
+};
+
+// ---------------------------------------------------------------- shell
+function renderNav() {
+  if (!S) return;
+  $("steps").replaceChildren(...STEPS.map((s, i) => {
+    const st = stepState(s.id).status;
+    const cls = { ok: "done", warn: "warn", fail: "bad" }[st] || "";
+    const mark = cls === "bad" || cls === "warn" ? "!" : String(i + 1);
+    return h("li", { class: [cls, s.id === current ? "current" : ""].join(" ").trim() },
+      h("span", { class: "marker", "aria-hidden": "true" }, cls === "done" ? h("span", { class: "i i-ok" }) : st === "running" ? h("span", { class: "spinner" }) : mark),
+      h("button", { type: "button", "aria-current": s.id === current ? "step" : false, onclick: () => go(s.id) },
+        h("span", { class: "n" }, `Step ${i + 1}`), h("span", { class: "name" }, s.name),
+        h("span", { class: "sum" }, stepState(s.id).summary || "")));
+  }));
+  const done = S.steps.filter((x) => x.status === "ok" || x.status === "warn").length;
+  $("side-foot").replaceChildren(h("dl", {},
+    h("dt", {}, "Progress"), h("dd", {}, `${done} of ${STEPS.length} steps complete`),
+    h("dt", {}, "Release"), h("dd", {}, S.components.selected ? S.components.selected.tag : "–"),
+    h("dt", {}, "Output"), h("dd", { class: "path" }, S.build.output_dir)));
+  $("version").textContent = "TaroEnterpriseSetup " + S.version;
+}
+
+function render() {
+  if (!S) return;
+  renderNav();
+  const active = document.activeElement && document.activeElement.id;
+  $("main").replaceChildren(views[current]());
+  if (active && $(active) && !panelOpen()) $(active).focus();
+}
+
+function go(id) {
+  current = id;
+  try { sessionStorage.setItem("taroStep", id); } catch (_) {}
+  render();
+  scrollTo(0, 0);
+  $("main").focus();
+}
+
+const needsPoll = () => S && (S.build.running || S.components.loading || S.components.verifying);
+
+function schedulePoll() {
+  if (pollTimer || !needsPoll()) return;
+  pollTimer = setTimeout(async () => {
+    pollTimer = null;
+    const before = JSON.stringify(S);
+    try { await api("GET", "/api/state"); } catch (_) {}
+    if (JSON.stringify(S) !== before && !panelOpen()) render();
+    schedulePoll();
+  }, 400);
+}
+
+$("quit").addEventListener("click", async () => {
+  if (!(await confirmDialog({ title: "Quit the wizard?", confirm: "Quit", danger: true,
+    body: h("p", {}, "Unsaved inputs are lost. The packages you built stay in the output folder.") }))) return;
+  try { await api("POST", "/api/shutdown", {}); } catch (_) {}
+  $("main").replaceChildren(h("div", { class: "inner" }, pageHeader({ title: "The wizard has stopped", desc: "You can close this tab." })));
+});
+
+(async () => {
+  try { const s = sessionStorage.getItem("taroStep"); if (s && STEPS.some((x) => x.id === s)) current = s; } catch (_) {}
+  try { await api("GET", "/api/state"); await refreshImages(); render(); schedulePoll(); }
+  catch (e) {
+    $("main").replaceChildren(h("div", { class: "inner" }, pageHeader({ title: "Cannot load the wizard" }),
+      alert("err", (e && e.error) || "Unknown error", "Open the link printed in the TaroEnterpriseSetup window, including its token.")));
+  }
 })();

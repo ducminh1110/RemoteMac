@@ -1,8 +1,11 @@
-//! Step 1: preflight checks.
+//! Step 1: preflight checks: the OS, HTTPS reachability of the download hosts, free disk
+//! space where the packages will be written, and that the wizard listens on loopback only.
 
+use crate::config::Endpoints;
 use crate::platform;
 use serde::Serialize;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::time::Duration;
 
 #[derive(Clone, Debug, Serialize)]
@@ -32,8 +35,8 @@ fn check(id: &str, name: &str, status: &str, detail: String, hint: Option<&str>)
     }
 }
 
-/// HTTPS reachability: any HTTP response over a verified TLS connection counts (the API
-/// answering 401/404 without credentials still proves the network path works).
+/// HTTPS reachability: any HTTP response over a verified TLS connection counts (a 404 or a redirect
+/// still proves the network path works).
 pub async fn reachability(
     http: &reqwest::Client,
     id: &str,
@@ -74,11 +77,14 @@ pub async fn reachability(
     }
 }
 
+/// Free space needed for a typical build (downloads plus packages of all four components).
+pub const DISK_WARN: u64 = 1_000_000_000;
+
 pub async fn run(
     http: &reqwest::Client,
-    github_api: &str,
-    stripe_api: &str,
+    ep: &Endpoints,
     listener: SocketAddr,
+    output_dir: &Path,
 ) -> PreflightReport {
     let mut checks = Vec::new();
     let os = match platform::os_info() {
@@ -111,42 +117,52 @@ pub async fn run(
         }
     };
 
-    let gh_url = format!("{}/", github_api.trim_end_matches('/'));
-    let st_url = format!("{}/v1/", stripe_api.trim_end_matches('/'));
-    let (gh, st) = tokio::join!(
-        reachability(http, "github", "GitHub API reachable", &gh_url),
-        reachability(http, "stripe", "Stripe API reachable", &st_url),
-    );
-    checks.push(gh);
-    let mut st = st;
-    if st.status == "fail" {
-        // Stripe is only needed when billing is enabled.
-        st.status = "warn".into();
-        st.hint = Some(format!(
-            "{} Stripe is only required if the billing module is enabled.",
-            st.hint.unwrap_or_default()
-        ));
-    }
-    checks.push(st);
-
-    let dir = std::env::temp_dir();
-    match platform::free_disk_bytes(&dir) {
-        Ok(b) => {
-            let gb = b as f64 / 1e9;
-            let (s, h) = if b < 200_000_000 {
-                ("warn", Some("Less than 200 MB free. The wizard itself needs little space, but downloads of the release may fail."))
-            } else {
-                ("ok", None)
-            };
-            checks.push(check(
-                "disk",
-                "Free disk space",
-                s,
-                format!("{gb:.1} GB free on the volume holding {}", dir.display()),
-                h,
-            ));
+    let probes: Vec<_> = ep
+        .reachability
+        .iter()
+        .map(|(id, name, url)| {
+            let (http, id, name, url) = (http.clone(), id.clone(), name.clone(), ep.fetch_url(url));
+            tokio::spawn(async move { reachability(&http, &id, &name, &url).await })
+        })
+        .collect();
+    for p in probes {
+        if let Ok(c) = p.await {
+            checks.push(c);
         }
-        Err(e) => checks.push(check("disk", "Free disk space", "warn", e, None)),
+    }
+
+    match platform::existing_ancestor(output_dir) {
+        None => checks.push(check(
+            "disk",
+            "Free disk space in the output folder",
+            "fail",
+            format!("No existing folder at or above {}", output_dir.display()),
+            Some("Choose an output folder on an existing drive in the Build step."),
+        )),
+        Some(dir) => match platform::free_disk_bytes(&dir) {
+            Ok(b) => {
+                let gb = b as f64 / 1e9;
+                let (s, h) = if b < DISK_WARN {
+                    ("warn", Some("Less than 1 GB free. A build of all four packages downloads and writes a few hundred MB; free some space or pick another output folder."))
+                } else {
+                    ("ok", None)
+                };
+                checks.push(check(
+                    "disk",
+                    "Free disk space in the output folder",
+                    s,
+                    format!("{gb:.1} GB free on the volume holding {}", dir.display()),
+                    h,
+                ));
+            }
+            Err(e) => checks.push(check(
+                "disk",
+                "Free disk space in the output folder",
+                "warn",
+                e,
+                None,
+            )),
+        },
     }
 
     checks.push(if listener.ip().is_loopback() {

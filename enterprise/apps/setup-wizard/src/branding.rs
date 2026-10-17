@@ -1,8 +1,9 @@
-//! Logo / favicon validation.
+//! Logo / icon validation.
 //!
 //! The file type is decided by magic bytes, never by the file name or the browser-supplied
-//! content type. Only PNG, JPEG and WebP are accepted; SVG (and therefore embedded script/CSS)
-//! is always rejected. Dimensions are read from the image headers:
+//! content type. PNG, JPEG and WebP are recognised; SVG (and therefore embedded script/CSS)
+//! is always rejected. The provider folder takes PNG only ([`validate_provider_png`]): the
+//! files are copied unchanged as `logo.png` / `icon.png`, and every client reads PNG. Dimensions are read from the image headers:
 //! PNG `IHDR`, JPEG `SOFn` markers, WebP `VP8 `/`VP8L`/`VP8X` chunks.
 
 use serde::Serialize;
@@ -86,6 +87,58 @@ pub fn validate_image(data: &[u8]) -> Result<ImageInfo, String> {
         height,
         bytes: data.len(),
     })
+}
+
+/// The two images of a provider folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot {
+    /// `logo.png`: any aspect ratio
+    Logo,
+    /// `icon.png`: square (window and app icon)
+    Icon,
+}
+
+impl Slot {
+    pub fn parse(s: &str) -> Option<Slot> {
+        match s {
+            "logo" => Some(Slot::Logo),
+            "icon" => Some(Slot::Icon),
+            _ => None,
+        }
+    }
+    pub fn file(self) -> &'static str {
+        match self {
+            Slot::Logo => "logo.png",
+            Slot::Icon => "icon.png",
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Slot::Logo => "logo",
+            Slot::Icon => "icon",
+        }
+    }
+}
+
+/// An image for the provider folder: a valid PNG (see [`validate_image`]); the icon square.
+/// JPEG and WebP are refused rather than converted, so the bytes shipped are exactly the bytes
+/// the provider chose.
+pub fn validate_provider_png(data: &[u8], slot: Slot) -> Result<ImageInfo, String> {
+    let info = validate_image(data)?;
+    if info.kind != ImageKind::Png {
+        return Err(format!(
+            "{} is not accepted here: the provider folder takes PNG only ({} is copied as is and read by every client). Export it as PNG.",
+            info.kind.ext().to_uppercase(),
+            slot.file()
+        ));
+    }
+    if slot == Slot::Icon && info.width != info.height {
+        return Err(format!(
+            "The icon must be square; this one is {}x{} pixels (256x256 or 512x512 works well).",
+            info.width, info.height
+        ));
+    }
+    Ok(info)
 }
 
 fn looks_like_markup(data: &[u8]) -> bool {
@@ -306,6 +359,19 @@ mod tests {
         assert!(validate_image(&p[..14]).is_err());
         let j = jpeg(100, 100);
         assert!(validate_image(&j[..8]).is_err());
+    }
+
+    #[test]
+    fn provider_images_are_png_and_the_icon_square() {
+        assert!(validate_provider_png(&png(400, 120), Slot::Logo).is_ok());
+        assert!(validate_provider_png(&png(256, 256), Slot::Icon).is_ok());
+        let e = validate_provider_png(&png(400, 120), Slot::Icon).unwrap_err();
+        assert!(e.contains("square"), "{e}");
+        let e = validate_provider_png(&jpeg(64, 64), Slot::Logo).unwrap_err();
+        assert!(e.contains("PNG only"), "{e}");
+        assert!(validate_provider_png(&webp_vp8x(64, 64), Slot::Icon).is_err());
+        assert_eq!(Slot::parse("icon"), Some(Slot::Icon));
+        assert_eq!(Slot::parse("favicon"), None);
     }
 
     #[test]

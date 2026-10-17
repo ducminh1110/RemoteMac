@@ -1,212 +1,132 @@
-# Taro Enterprise Setup Wizard (`TaroEnterpriseSetup.exe`)
+# Taro Enterprise Setup (`TaroEnterpriseSetup.exe`): the package builder (Wizard 1)
 
 Source: `enterprise/apps/setup-wizard/` (Rust package and binary `taro-enterprise-setup`; the
-Windows release renames the binary to `TaroEnterpriseSetup.exe`).
+Windows release renames it `TaroEnterpriseSetup.exe`).
 
-This page describes what is implemented today. Anything marked **Planned** does not exist yet.
+It builds a provider's own Taro: the standard Taro client for Windows and the Mac agent, plus
+the Linux relay package, each with the provider's `provider/` folder added (name, colour, logo,
+icon, relay, admission key, optional sign-in portal). It compiles nothing and changes no
+binary: the programs are the signed, version-pinned official files of a Taro Enterprise
+release.
 
-## Running it
+## A Windows app
 
-```sh
-cargo run --manifest-path enterprise/apps/setup-wizard/Cargo.toml --release
-# options: --no-browser, --port <PORT>, --help, --version
-```
+On Windows it is an app with its own window: the wizard's pages are shown in a WebView2 control
+(the Microsoft Edge WebView2 Runtime, part of Windows 11 and current Windows 10). There is no
+browser tab and no console window.
 
-The wizard:
+- The pages come from a server inside the program, on `127.0.0.1` and a random port, with a
+  one-time 32-byte access token. The window loads only that origin. Links anywhere else (a
+  release on GitHub, a support page) open in the default browser, and the page cannot open
+  new windows.
+- Closing the window ends the program. The packages already built stay in the output folder,
+  and nothing else is saved.
+- Without WebView2, a message says so, with the download address, and the wizard opens in the
+  default browser instead. A second message box keeps it running; closing that box quits.
+- `--browser` opens the default browser on purpose. `--no-browser` only prints the link. Both
+  print to the terminal they were started from. `--port`, `--output`, `--help` and `--version`
+  work as their names say.
 
-1. binds `127.0.0.1` on a random free port (or `--port`), never another interface;
-2. generates a one-time 32-byte random access token;
-3. prints `http://127.0.0.1:PORT/?t=TOKEN` and opens it in the default browser
-   (Windows: `ShellExecuteW`; macOS: `open`; Linux: `xdg-open`);
-4. serves an embedded single-page UI (HTML/CSS/vanilla JS, embedded with `include_str!`,
-   no npm build).
+On macOS and Linux (development) it opens the browser.
 
-Quit with **Quit wizard** in the UI or Ctrl+C in the console window. Everything the wizard
-holds (tokens, keys, uploaded images, the log) lives in memory and is gone when it exits,
-except the optional DPAPI-protected GitHub token described in
-[GITHUB_BOOTSTRAP.md](GITHUB_BOOTSTRAP.md).
-
-Environment variables:
-
-| Variable | Purpose |
-|---|---|
-| `TARO_SETUP_GITHUB_CLIENT_ID` | OAuth/GitHub App client id for the device flow (can also be typed in the UI) |
-| `TARO_SETUP_TEMPLATE` | Template repository, default `ducminh1110/taro-enterprise-template` |
-| `TARO_SETUP_MANAGED_ZONE` | DNS zone for Taro-managed subdomains; without it that option shows "Needs config" |
-
-Release builds always talk to `https://api.github.com`, `https://github.com` (device flow
-only) and `https://api.stripe.com`; base URLs can only be changed by code (the tests do this).
-
-## Local server security
-
-Every request passes a guard (`src/server.rs`):
-
-- `Host` must be exactly `127.0.0.1:PORT` (DNS-rebinding guard); otherwise `421`.
-- `Origin`, if present, must be `http://127.0.0.1:PORT`; for non-GET API calls it is required.
-- `Sec-Fetch-Site`, if present, must be `same-origin` or `none`.
-- API calls (`/api/*`) need the access token in `X-Setup-Token` (constant-time compare);
-  the page `/` needs it as `?t=`. Static assets carry no data and need only the Host check.
-- Responses carry `Content-Security-Policy` (`script-src 'self'`, no inline script,
-  `frame-ancestors 'none'`), `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`,
-  `Cache-Control: no-store`, `nosniff`, COOP/CORP same-origin.
-- Request bodies are limited to 64 KiB (2 MiB for image uploads).
-- A response middleware scrubs any secret the wizard holds from every API response body as a
-  safety net; the tests assert it never has to act.
-
-The UI builds all DOM with `createElement`/`textContent` (no `innerHTML` with data).
-
-## Secrets
-
-- Held in a `Secret` type (`src/secret.rs`): no `Display`, no `Serialize`, `Debug` prints
-  `[REDACTED]`, the buffer is zeroed on drop. State structs mark secret fields
-  `#[serde(skip)]`; the compiler rejects a `Serialize` derive that forgets one.
-- Never logged, never written to disk (except the opt-in DPAPI token), never put in a URL or a
-  command line, never echoed to the UI. The UI only learns facts ("authenticated as octo",
-  "key valid for acct_...", "webhook secret stored").
-- Each credential is sent only to its own service: the GitHub token only to the GitHub API
-  base, the Stripe key only to the Stripe API base. The API client does not follow redirects,
-  so a credential cannot be forwarded by a redirect; job-log redirects are followed manually
-  without credentials.
-- Best effort: request bodies that carried a secret are freed by the HTTP stack without
-  zeroing; the copies the wizard makes are zeroed.
-
-## Diagnostic log
-
-An in-memory log (max 2000 entries, `src/redact.rs`), downloadable from the UI
-(**Diagnostic log**). Every entry is scrubbed twice: exact matches of every secret the wizard
-has seen, and pattern redaction of anything token-shaped (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`,
-`github_pat_`, `sk_live_`, `sk_test_`, `rk_live_`, `rk_test_`, `whsec_`, `Bearer ...`,
-`Authorization: ...`, `access_token=`/`device_code=`/`client_secret=` fields).
+CI (`.github/workflows/enterprise.yml`, job `setup-wizard`, on `windows-latest`) builds the
+exe and runs `enterprise/scripts/windows-setup-app.ps1`. That script checks four things:
+- the "Taro Enterprise Setup" window appears;
+- the page is drawn in it (it saves `setup-app-window.png`, kept as the
+  `TaroEnterpriseSetup-window` artifact);
+- closing the window ends the program;
+- it ends within 15 seconds.
 
 ## The steps
 
-Each step shows only real results. A step whose dependency is missing shows **Needs config**
-or **Skipped**, never success.
+The steps are shown in the shared console look of `enterprise/packages/console` (see its
+README): wizard steps with their state in the side navigation, page headers, containers,
+tables, status indicators, field descriptions and errors, and a Previous/Next footer.
 
-### 1. Preflight
+1. **Preflight**: the OS, HTTPS reachability of the download hosts, free disk space for the
+   output, and that the server listens on loopback only.
+2. **Product identity**: provider id (`acme-cloud`), product name, short name (file names),
+   vendor, and optional support address and email. rm-brand validates each field. An existing
+   `provider.json` can be imported for a rebuild; this keeps the same admission key.
+3. **Branding**:
+   - Primary colour: 14 presets (Blue, Indigo, Purple, Violet, Teal, Cyan, Green, Emerald,
+     Orange, Amber, Red, Rose, Pink, Slate) or a hex code (6 digits, with or without `#`, any
+     case). A typed colour is kept exactly and never snapped to a preset.
+   - **Customize…** opens a picker: a colour grid, a shade area (saturation and brightness,
+     by mouse or arrow keys), hue, hex and the system picker, with a before/after view.
+     **Apply** commits the colour; **Cancel** or Escape restores the previous one.
+   - The live preview shows the client window and the relay console in light and dark mode.
+     It uses rm-brand's derived tokens (hover, pressed, border, soft, dark-mode variants, text
+     on the colour), and the contrast is reported against WCAG AA.
+   - Also on this step: the theme, and logo/icon PNG uploads (type, size and dimensions are
+     checked).
+   - The colour is written as `branding.primary_color`, with the tokens derived from it.
+4. **Relay endpoint**:
+   - the relay's DNS name and port (TCP and UDP);
+   - the client admission key: generated (32 characters) or an existing one entered for a
+     rebuild. It is masked, with Reveal and Copy;
+   - **Sign-in and machine management** (optional): the provider's Taro Enterprise portal,
+     written as `account.portal`. With it, users sign in from the client and see the Macs they
+     rented or were given. Without it, the client works as standard Taro does, with ID and
+     password;
+   - client updates: notify or off.
+5. **Components and versions**:
+   - lists the `enterprise-v…` releases on GitHub;
+   - verifies the chosen one's `taro-enterprise-components.json` signature with the release
+     key compiled into the wizard;
+   - shows the pinned Enterprise, Taro and relay versions;
+   - lets you choose the platforms to build.
+6. **Build**:
+   1. Every download URL is checked against the download policy (https, allowed hosts, no
+      redirect elsewhere).
+   2. Each file is streamed with its size and sha256 enforced.
+   3. The packages are assembled in `<name>.partial/` with `provider/`,
+      `provider-manifest.json`, `SHA256SUMS` and `INSTALL.md`.
+   4. Only a complete build is renamed to its final name.
 
-- OS name/version/build: `RtlGetVersion` on Windows (warns below build 17763), `uname` elsewhere.
-- HTTPS reachability of `https://api.github.com/` and `https://api.stripe.com/v1/` with a
-  10 s timeout. Any HTTP response over verified TLS counts (Stripe answers 401/404 without a
-  key). Failures get hints (proxy/TLS interception, timeout, DNS). A Stripe failure is a
-  warning because Stripe is only needed for billing.
-- Free disk space on the temp-dir volume (`GetDiskFreeSpaceExW` / `statvfs`); warns below 200 MB.
-- The listener address is loopback.
+   Cancel or a failure leaves no output.
+7. **Validate and export**:
+   - Every produced file is opened again and compared with what the build meant to write
+     (26 checks for four platforms): the provider folder byte for byte, each archive's
+     layout, the programs against the verified official files, the manifest and checksums.
+   - Exports: a JSON or Markdown summary (the key masked), opening the output folder, and the
+     diagnostic log.
 
-### 2. Deployment mode
+## Security
 
-Environment (development / staging / production), profile (only
-"Single server with Docker Compose"; other profiles **Planned**), public portal URL, ops
-console URL, provider adapter (only `mock` exists and is shown as such; real adapters
-**Planned**), bootstrap admin email. URLs must be absolute http(s) without credentials, query
-or fragment; `https://` is required for staging and production. Per-field errors are shown.
-
-### 3. Product identity
-
-Deployment name, owner/operator name, support contact (email or `https://` URL), modules
-(`my_macs`, `rentals`, `billing`, `team`; at least one). Disabling `billing` makes step 6
-"Skipped" and the Stripe secrets are not set.
-
-### 4. Branding
-
-- Logo and favicon upload: type decided by magic bytes only; PNG, JPEG, WebP accepted; SVG,
-  any text/markup, CSS, JS, GIF rejected; max 1 MB; dimensions parsed from the headers
-  (PNG IHDR, JPEG SOFn, WebP VP8/VP8L/VP8X), 16x16 to 1024x1024.
-- Primary colour `#RRGGBB`; WCAG contrast against white computed; below 4.5:1 a warning says
-  it must not be used for text (the step is shown as "warning", not failed).
-- Theme light/dark, density comfortable/compact, live preview card.
-
-### 5. Domain & TLS
-
-- Strategy: Taro-managed subdomain (needs `TARO_SETUP_MANAGED_ZONE`; the managed DNS API that
-  would create the records automatically is **Planned**) or customer-owned domain.
-- Server target: IPv4 (A), IPv6 (AAAA) or host name (CNAME). Loopback is refused.
-- Records shown: the A/AAAA/CNAME and `TXT _taro-verify.<domain>` = `taro-verify=<random 16-byte hex>`.
-- **Verify** resolves DNS for real with `hickory-resolver` (system resolver config, Cloudflare
-  fallback; a fresh resolver per check): the TXT value must match; the A/AAAA must contain the
-  IP; a CNAME must point at the host (a flattened CNAME whose addresses equal the target's is
-  accepted). Only then `GET https://<domain>/healthz` must return 200 over a trusted
-  certificate. TLS itself is done on the server by Caddy (on-demand TLS); the wizard only
-  verifies. The step is complete only when both DNS and HTTPS pass.
-
-### 6. Billing (Stripe)
-
-- Secret key: `sk_test_`/`rk_test_` accepted; `sk_live_`/`rk_live_` only when "Use live mode"
-  is ticked **and** `LIVE` is typed; publishable keys and malformed keys rejected locally
-  (they are never sent to Stripe). Validated with `GET /v1/account`.
-- Webhook signing secret: must be `whsec_` + at least 16 characters.
-- Webhook endpoint (`<portal>/webhooks/stripe`): **Check existing endpoint** lists
-  `GET /v1/webhook_endpoints` and reports missing events; **Create endpoint** (explicit
-  confirmation) calls `POST /v1/webhook_endpoints` with the events
-  `checkout.session.completed, checkout.session.expired, invoice.paid, invoice.payment_failed,
-  customer.subscription.updated, customer.subscription.deleted, charge.refunded`, and never
-  creates a duplicate. The signing secret Stripe returns on creation is captured in memory.
-- Smoke test (test mode only, explicit confirmation): creates a Checkout Session for 1 x
-  100 minor units (`price_data`, USD), shows the returned id and URL, then expires it with
-  `POST /v1/checkout/sessions/{id}/expire`. Passes only if the id is `cs_test_...`, a URL is
-  returned, `livemode` is false, and the session is expired.
-
-### 7. GitHub bootstrap
-
-See [GITHUB_BOOTSTRAP.md](GITHUB_BOOTSTRAP.md).
-
-### 8. Build & release
-
-- Requires a completed bootstrap. If a release for the version already exists with assets, it
-  is shown and nothing is dispatched.
-- Snapshots existing run ids, then `POST /repos/{o}/{r}/actions/workflows/enterprise-release.yml/dispatches`
-  with `ref` = default branch and `inputs.version` (default `0.1.0`).
-- Finds the new run (not in the snapshot, `created_at` no older than 2 minutes before
-  dispatch), polls it every 5 s (job and step status), fetches the tail (60 lines) of each
-  completed job's log and redacts it.
-- Shows the release only after `GET /repos/{o}/{r}/releases/tags/{version}` returns a
-  non-draft release with at least one asset (waits up to 3 minutes after the run succeeds).
-- **Retry** re-dispatches; refused while a run is being followed.
-- Release asset download/installation on the server: **Planned**.
-
-### 9. Verification
-
-Against the saved portal URL: `GET /healthz` (200), `GET /readyz` (200 = database migrated),
-`GET /api/v1/auth/providers` (must list at least one login method; accepts a list or
-`{ "providers": [...] }`), Stripe key re-check (`GET /v1/account`, or "skipped" without a
-key), domain TLS (`GET https://<domain>/healthz`, or "skipped" without a domain).
-
-Exports: **Download JSON** / **Download Markdown** deployment summary (settings, step
-statuses, repository, release, check results; no secrets).
-
-## UI
-
-Left step list with honest status icons (and screen-reader text), main panel per step,
-Back/Next. Light mode by default with a dark-mode toggle. Translucent ("glass") surfaces only
-for the top bar and step list (with solid fallbacks when `backdrop-filter` is unsupported or
-`prefers-reduced-transparency` is set); forms and results on solid high-contrast cards.
-Keyboard accessible (native buttons/inputs, visible focus ring, skip link, `aria-live`
-announcements, `aria-invalid`/`aria-describedby` on fields), `prefers-reduced-motion`
-respected, responsive down to phone width.
+- The guard on every request (`src/server.rs`):
+  - `Host` must be `127.0.0.1:PORT`;
+  - `Origin`, when present (and always for writes), must be the same origin;
+  - `Sec-Fetch-Site` must be same-origin or none;
+  - API calls carry the token in `X-Setup-Token` (constant-time compare);
+  - responses get a strict CSP (scripts and styles from the page's own origin only),
+    `no-referrer`, `DENY` framing, `no-store` and `nosniff`.
+- Secrets (the admission key) are a `Secret` type. It cannot be serialized, is redacted in
+  `Debug` and is zeroed on drop. The UI only ever sees the masked key, unless the operator
+  presses Reveal or Copy. A response filter scrubs held secrets as a last line of defence, and
+  the tests assert it never has to act.
+- No server administration credential, TLS private key, database password or signing key is
+  ever part of a package.
 
 ## Tests
 
-`cargo test --manifest-path enterprise/apps/setup-wizard/Cargo.toml` runs unit tests plus
-integration tests against a local axum fake of GitHub, Stripe and the portal
+`cargo test -p taro-enterprise-setup` (from `enterprise/`) runs the unit tests and the
+integration tests against a local fake of the GitHub releases API and the asset hosts
 (`tests/common/mod.rs`):
 
-- `tests/flow.rs`: all nine steps end to end; sealed secrets decrypt to the right values;
-  committed files contain no secrets; release shown only after it has an asset; log tail
-  redacted; no credential in any response, the diagnostic log or the summary; each credential
-  sent only to its own service; log download fetched without credentials; non-template
-  template fails before any repository is created; bad tokens are rejected and not kept.
-- `tests/guard.rs`: Host/Origin/token/Sec-Fetch-Site rejections, security headers.
-- `tests/validation_api.rs`: SVG/CSS/JS/oversize uploads, colours, live-key rules (a rejected
-  live key never leaves the PC), webhook secret format, deployment/identity/domain validation.
-- `tests/device_flow.rs`: `authorization_pending`, `slow_down` (interval grows by 5 / to
-  GitHub's value), success, expiry, denial, cancel, and the API path.
-- `tests/ui_demo.rs` (ignored): serves the real UI against the fake for manual clicking:
-  `cargo test --manifest-path enterprise/apps/setup-wizard/Cargo.toml --test ui_demo -- --ignored --nocapture`.
-
-## Planned
-
-- Code signing, version resource and icon for `TaroEnterpriseSetup.exe`; release workflow for it.
-- Deployment profiles other than single-server Docker Compose; real provider adapters.
-- Taro-managed DNS API (automatic records for managed subdomains).
-- Installing the release on the server (the wizard verifies a deployed portal but does not deploy).
-- Resuming a wizard session after it is closed (state is in memory only).
+- `tests/build_flow.rs`: the whole flow through the API. Every expected file is produced, the
+  provider folder is byte-identical everywhere, and the official programs are unchanged. It
+  also checks the refusals: a tampered download, a bad signature, a host outside the policy,
+  a redirect outside it, and cancel.
+- `tests/inputs_api.rs`: rm-brand's validation per field, the colour rules, images, the key,
+  and importing a provider.json.
+- `tests/preservation.rs`: an Enterprise update applied over a relay installed from a built
+  package leaves its `provider.json` byte-identical.
+- `tests/guard.rs`: the request guard and the security headers.
+- `tests/ui_demo.rs` (ignored) serves the real UI against the fake. `tests/ui/wizard1.mjs`
+  drives it in headless Chromium and photographs every step:
+  - presets, valid and invalid hex input;
+  - Customize (grid, shade drag, Cancel restores, Apply commits);
+  - the preview uses the server's tokens;
+  - the build and validation;
+  - no console errors, no CSP violations, no horizontal scroll at 390 px.

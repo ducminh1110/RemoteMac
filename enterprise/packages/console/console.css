@@ -338,12 +338,14 @@ table.table { width: 100%; border-collapse: collapse; }
   .wizard-steps li { flex: none; padding-bottom: 6px; }
   .wizard-steps li::before { display: none; }
   .content { padding: 18px 16px 40px; }
-  .kv { --cols: 2; }
+  .kv, .kv.cols-4 { --cols: 2; }
   .cols, .split { grid-template-columns: minmax(0, 1fr); }
   .topnav .item.hide-sm { display: none; }
 }
 @media (max-width: 560px) {
-  .kv { --cols: 1; }
+  .kv, .kv.cols-2, .kv.cols-4 { --cols: 1; }
+  .container > .c-head { flex-wrap: wrap; }
+  .container > .c-head .actions, .page-header .actions { flex-wrap: wrap; flex: 1 1 100%; }
   .page-header { flex-direction: column; align-items: stretch; }
   .form-actions { flex-wrap: wrap; }
 }

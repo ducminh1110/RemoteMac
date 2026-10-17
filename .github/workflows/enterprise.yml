@@ -136,6 +136,14 @@ jobs:
       - run: cargo build --release --locked -p taro-enterprise-setup
       - run: Copy-Item target/release/taro-enterprise-setup.exe TaroEnterpriseSetup.exe
         shell: pwsh
+      - name: It is a Windows app (own window with the wizard; closing it quits)
+        run: pwsh scripts/windows-setup-app.ps1 TaroEnterpriseSetup.exe out-app
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: TaroEnterpriseSetup-window
+          path: enterprise/out-app/*.png
       - uses: actions/upload-artifact@v4
         with:
           name: TaroEnterpriseSetup

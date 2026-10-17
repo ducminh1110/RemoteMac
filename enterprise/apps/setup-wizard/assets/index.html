@@ -1,36 +1,36 @@
 <!doctype html>
-<html lang="en" data-theme="light">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Taro Enterprise Setup</title>
+<link rel="stylesheet" href="/common/console.css">
 <link rel="stylesheet" href="/assets/app.css">
-<script src="/assets/app.js" defer></script>
+<script type="module" src="/assets/app.js"></script>
 </head>
 <body>
-<a class="skip" href="#panel">Skip to the current step</a>
-<header class="topbar glass">
-  <div class="brand">
-    <span class="mark" aria-hidden="true">T</span>
-    <div>
-      <div class="brand-title">Taro Enterprise Setup</div>
-      <div class="brand-sub" id="app-version">Local setup wizard</div>
-    </div>
-  </div>
-  <div class="top-actions">
-    <button type="button" class="btn ghost" id="theme-toggle" aria-pressed="false">Dark mode</button>
-    <button type="button" class="btn ghost" id="dl-log">Diagnostic log</button>
-    <button type="button" class="btn ghost danger-text" id="quit">Quit wizard</button>
-  </div>
+<a class="skip" href="#main">Skip to the current step</a>
+<header class="topnav" id="topnav">
+  <span class="brand"><span class="mark" aria-hidden="true">T</span><span>Taro Enterprise</span></span>
+  <span class="service">Package builder</span>
+  <span class="spacer"></span>
+  <span class="item hide-sm local-only"><span class="i i-server" aria-hidden="true"></span><strong>127.0.0.1</strong>&nbsp;only</span>
+  <span class="divider hide-sm local-only"></span>
+  <span class="item hide-sm" id="version"></span>
+  <button type="button" class="item linkish" id="quit">Quit</button>
 </header>
-<div class="layout">
-  <nav class="steps glass" aria-label="Setup steps">
-    <ol id="step-list"></ol>
-    <p class="nav-note">Runs only on this PC (127.0.0.1). Secrets stay in memory and are never shown again after you enter them.</p>
+<div class="layout" id="layout">
+  <nav class="sidenav" aria-label="Setup steps">
+    <div class="head">
+      <p class="title">Build provider packages</p>
+      <p class="sub">Wizard 1 · TaroEnterpriseSetup</p>
+    </div>
+    <ol class="wizard-steps" id="steps"></ol>
+    <div class="foot" id="side-foot"></div>
   </nav>
-  <main id="panel" tabindex="-1">
-    <noscript><div class="card">This wizard needs JavaScript.</div></noscript>
+  <main class="content" id="main" tabindex="-1">
+    <div class="inner"><p class="loading"><span class="spinner" aria-hidden="true"></span>Loading…</p></div>
   </main>
 </div>
 <div id="live" class="sr-only" aria-live="polite" aria-atomic="true"></div>

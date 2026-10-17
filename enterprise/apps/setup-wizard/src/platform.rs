@@ -1,7 +1,8 @@
-//! Operating-system specifics: OS version, free disk space, opening the browser.
+//! Operating-system specifics: OS version, free disk space, the default output folder, opening
+//! the browser and a folder.
 
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct OsInfo {
@@ -103,6 +104,98 @@ pub fn free_disk_bytes(_path: &Path) -> Result<u64, String> {
     Err("not available on this platform".into())
 }
 
+/// The nearest existing folder at or above `path` (an output folder may not exist yet).
+pub fn existing_ancestor(path: &Path) -> Option<PathBuf> {
+    path.ancestors().find(|p| p.is_dir()).map(Path::to_path_buf)
+}
+
+/// The user's Documents folder (the known folder, so a folder redirected to OneDrive is found).
+#[cfg(windows)]
+pub fn documents_dir() -> Option<PathBuf> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{FOLDERID_Documents, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+    // SAFETY: SHGetKnownFolderPath returns a CoTaskMem-allocated NUL-terminated string that is
+    // read once and freed.
+    unsafe {
+        let p = SHGetKnownFolderPath(&FOLDERID_Documents, KF_FLAG_DEFAULT, None).ok()?;
+        let s = p.to_string().ok();
+        CoTaskMemFree(Some(p.0 as *const core::ffi::c_void));
+        s.map(PathBuf::from)
+    }
+    .or_else(|| std::env::var_os("USERPROFILE").map(|u| PathBuf::from(u).join("Documents")))
+}
+
+/// Where packages go unless the provider picks another folder: `Documents\Taro Enterprise`
+/// on Windows, `./dist` elsewhere.
+pub fn default_output_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(d) = documents_dir() {
+            return d.join("Taro Enterprise");
+        }
+    }
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("dist")
+}
+
+/// Show a folder in the file manager (Explorer on Windows).
+#[cfg(windows)]
+pub fn open_folder(path: &Path) -> Result<(), String> {
+    use windows::core::{w, HSTRING};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let p = HSTRING::from(path.as_os_str());
+    // SAFETY: all strings are valid NUL-terminated wide strings for the duration of the call.
+    let r = unsafe { ShellExecuteW(None, w!("explore"), &p, None, None, SW_SHOWNORMAL) };
+    if r.0 as isize > 32 {
+        Ok(())
+    } else {
+        Err(format!("ShellExecuteW returned {}", r.0 as isize))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn open_folder(path: &Path) -> Result<(), String> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(opener)
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("{opener}: {e}"))
+}
+
+/// Print to the console of the program that started this one (a GUI app has none of its own),
+/// so `--help` and `--browser` still print in a terminal.
+#[cfg(windows)]
+pub fn attach_parent_console() {
+    use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    // SAFETY: no arguments besides the constant; failing (no parent console) is harmless.
+    let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+}
+
+/// A plain message box (errors before or without the window).
+#[cfg(windows)]
+pub fn message_box(title: &str, text: &str) {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
+    // SAFETY: both strings live for the duration of the call; no owner window.
+    unsafe {
+        MessageBoxW(
+            None,
+            &HSTRING::from(text),
+            &HSTRING::from(title),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+}
+
 /// Open `url` in the default browser. Returns an error message if it could not be started
 /// (the URL is printed to the console in any case).
 #[cfg(windows)]
@@ -153,6 +246,16 @@ mod tests {
         let i = super::os_info().unwrap();
         assert!(!i.name.is_empty());
         assert!(!i.arch.is_empty());
+    }
+
+    #[test]
+    fn ancestors_and_default_dir() {
+        let t = std::env::temp_dir();
+        assert_eq!(
+            super::existing_ancestor(&t.join("does/not/exist/yet")).unwrap(),
+            t
+        );
+        assert!(super::default_output_dir().is_absolute());
     }
 
     #[test]
