@@ -217,7 +217,10 @@ pub fn open(path: &Path, keys: &TrustedKeys) -> Result<Package, Error> {
     let mut total = 0u64;
     for i in 0..zip.len() {
         let e = zip.by_index_raw(i).map_err(|e| inv(e.to_string()))?;
-        let name = e.name().to_string();
+        let name = e
+            .name()
+            .map_err(|_| inv("an entry name is not valid UTF-8".into()))?
+            .to_string();
         if e.is_dir() || name.ends_with('/') {
             return Err(inv(format!("{name}: folders are not entries of an update")));
         }

@@ -4,33 +4,34 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Relay setup</title>
-<link rel="stylesheet" href="/common/taro-glass.css">
+<link rel="stylesheet" href="/common/console.css">
 <link rel="stylesheet" href="/assets/app.css">
 <link rel="stylesheet" href="/brand/tokens.css">
 <link rel="stylesheet" href="/brand/theme.css">
 <script type="module" src="/assets/app.js"></script>
 </head>
 <body>
-<div class="stage" id="stage">
-  <canvas class="wallpaper" aria-hidden="true"></canvas>
-  <header class="glass bar" data-glass="bar">
-    <img class="logo" src="/brand/logo.png" alt="" width="38" height="38">
-    <div>
-      <h1 id="title">Relay setup</h1>
-      <p class="sub" id="subtitle">Wizard 2 · first-run setup of this server</p>
+<header class="topnav">
+  <span class="brand"><img src="/brand/logo.png" alt="" width="28" height="28"><span id="product">Taro</span></span>
+  <span class="service">Relay setup</span>
+  <span class="spacer"></span>
+  <span class="item hide-sm" id="host" hidden><span class="i i-server" aria-hidden="true"></span><strong id="host-name"></strong></span>
+  <span class="badge" id="mode" hidden></span>
+  <span class="divider hide-sm"></span>
+  <span class="item hide-sm" id="version"></span>
+</header>
+<div class="layout">
+  <nav class="sidenav" aria-label="Setup steps">
+    <div class="head">
+      <p class="title">Configure relay</p>
+      <p class="sub">Wizard 2 · first-run setup</p>
     </div>
-    <span class="spacer"></span>
-    <span class="pill" id="mode-pill" hidden></span>
-  </header>
-  <nav class="glass side steps" data-glass="side" aria-label="Setup steps">
-    <div class="frost"></div>
-    <ol id="steps"></ol>
+    <ol class="wizard-steps" id="steps"></ol>
+    <div class="foot" id="side-foot"></div>
   </nav>
-  <main class="glass panel" data-glass="panel">
-    <div class="frost"></div>
-    <div class="scroll" id="main" tabindex="-1"><p class="loading">Loading…</p></div>
+  <main class="content" id="main" tabindex="-1">
+    <div class="inner"><p class="loading"><span class="spinner" aria-hidden="true"></span>Loading…</p></div>
   </main>
 </div>
-<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 </body>
 </html>

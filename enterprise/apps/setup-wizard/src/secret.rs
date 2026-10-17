@@ -1,7 +1,8 @@
 //! In-memory secret handling.
 //!
-//! [`Secret`] holds a credential (GitHub token, Stripe key, webhook secret, generated keys).
-//! It deliberately implements neither `Display` nor `Serialize`, its `Debug` output is a fixed
+//! [`Secret`] holds a value that must not leak into logs, responses or summaries: the wizard's
+//! access token and the provider's relay admission key (which belongs in provider.json and
+//! nowhere else). It deliberately implements neither `Display` nor `Serialize`, its `Debug` output is a fixed
 //! placeholder, and its buffer is zeroed when dropped. The only way to read the value is
 //! [`Secret::expose`], which keeps every use site greppable.
 
@@ -16,8 +17,8 @@ impl Secret {
         Secret(Zeroizing::new(value.into()))
     }
 
-    /// The raw value. Only for building an outgoing request to the one service the secret
-    /// belongs to, or for encrypting it.
+    /// The raw value. Only for writing provider.json, comparing, or the explicit "reveal"
+    /// request of the UI.
     pub fn expose(&self) -> &str {
         self.0.as_str()
     }
@@ -42,6 +43,31 @@ pub fn random_hex(n: usize) -> String {
     let mut buf = Zeroizing::new(vec![0u8; n]);
     getrandom::fill(&mut buf).expect("operating system random number generator unavailable");
     hex(&buf)
+}
+
+/// The alphabet of generated relay keys (64 symbols: one per 6 bits, no modulo bias).
+const KEY_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// A new relay admission key: `len` characters of `[A-Za-z0-9_-]` from the OS CSPRNG.
+pub fn relay_key(len: usize) -> Secret {
+    let mut buf = Zeroizing::new(vec![0u8; len]);
+    getrandom::fill(&mut buf).expect("operating system random number generator unavailable");
+    let s: String = buf
+        .iter()
+        .map(|b| KEY_ALPHABET[(b & 63) as usize] as char)
+        .collect();
+    Secret::new(s)
+}
+
+/// `••••…` plus the last four characters, for showing that a key is set without showing it.
+pub fn mask(s: &Secret) -> String {
+    let v = s.expose();
+    let n = v.chars().count();
+    if n <= 8 {
+        return "•".repeat(n.max(8));
+    }
+    let tail: String = v.chars().skip(n - 4).collect();
+    format!("{}{tail}", "•".repeat(n - 4))
 }
 
 pub fn hex(bytes: &[u8]) -> String {
@@ -78,6 +104,22 @@ mod tests {
         assert_eq!(a.len(), 64);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn relay_keys_are_valid_and_distinct() {
+        let a = relay_key(32);
+        let b = relay_key(32);
+        assert_eq!(a.len(), 32);
+        assert!(rm_brand::valid_relay_key(a.expose()));
+        assert!(a
+            .expose()
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'));
+        assert_ne!(a.expose(), b.expose());
+        let m = mask(&a);
+        assert!(!m.contains(&a.expose()[..28]));
+        assert!(m.ends_with(&a.expose()[28..]));
     }
 
     #[test]

@@ -5,19 +5,17 @@
 //! calls; `Sec-Fetch-Site`, when present, must be `same-origin` or `none`. API calls need the
 //! one-time access token in `X-Setup-Token`; the page itself needs it as `?t=`.
 
-use crate::domain::{self, Strategy};
+use crate::branding::Slot;
 use crate::secret::{ct_eq, Secret};
-use crate::state::{
-    AppState, Deployment, Identity, Upload, MODULES, PROFILE_SINGLE, PROVIDER_MOCK,
-};
-use crate::validate::{self, Environment, StripeMode};
+use crate::state::{field_errors, placeholder, AppState, Identity, Upload};
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Request, State};
 use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
+use rm_brand::{ClientUpdates, Color, Theme, Tokens};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -25,6 +23,21 @@ use std::sync::Arc;
 const INDEX_HTML: &str = include_str!("../assets/index.html");
 const APP_JS: &str = include_str!("../assets/app.js");
 const APP_CSS: &str = include_str!("../assets/app.css");
+
+/// The shared console look of the Enterprise pages (the relay serves the same files).
+fn common_file(name: &str) -> Option<(&'static str, &'static str)> {
+    Some(match name {
+        "console.css" => (
+            include_str!("../../../packages/console/console.css"),
+            "text/css; charset=utf-8",
+        ),
+        "console.js" => (
+            include_str!("../../../packages/console/console.js"),
+            "text/javascript; charset=utf-8",
+        ),
+        _ => return None,
+    })
+}
 
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
@@ -86,7 +99,7 @@ type ApiResult = Result<Json<Value>, ApiErr>;
 fn ok(app: &AppState, message: Option<String>) -> ApiResult {
     let w = app.w();
     Ok(Json(
-        json!({ "ok": true, "message": message, "state": w.view(app) }),
+        json!({ "ok": true, "message": message, "state": w.view() }),
     ))
 }
 
@@ -100,37 +113,30 @@ fn parse<T: for<'de> Deserialize<'de>>(body: &Bytes) -> Result<T, ApiErr> {
 
 pub fn router(app: App) -> Router {
     let uploads = Router::new()
-        .route("/api/branding/{kind}", post(branding_upload))
+        .route(
+            "/api/branding/{slot}",
+            post(image_upload).delete(image_delete),
+        )
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024));
     let api = Router::new()
         .route("/api/state", get(get_state))
         .route("/api/preflight/run", post(preflight_run))
-        .route("/api/deployment", post(deployment_save))
         .route("/api/identity", post(identity_save))
+        .route("/api/provider/import", post(provider_import))
         .route("/api/branding", post(branding_save))
-        .route("/api/branding/{kind}", delete(branding_delete))
-        .route("/api/domain", post(domain_save))
-        .route("/api/domain/verify", post(domain_verify))
-        .route("/api/billing/key", post(billing_key))
-        .route("/api/billing/webhook-secret", post(billing_webhook_secret))
-        .route("/api/billing/webhook/check", post(billing_webhook_check))
-        .route("/api/billing/webhook/create", post(billing_webhook_create))
-        .route("/api/billing/smoke", post(billing_smoke))
-        .route("/api/github/pat", post(github_pat))
-        .route("/api/github/device/start", post(github_device_start))
-        .route("/api/github/device/cancel", post(github_device_cancel))
-        .route("/api/github/remembered/use", post(github_remembered_use))
-        .route(
-            "/api/github/remembered/forget",
-            post(github_remembered_forget),
-        )
-        .route("/api/github/logout", post(github_logout))
-        .route("/api/github/orgs", post(github_orgs))
-        .route("/api/github/plan", post(github_plan))
-        .route("/api/github/bootstrap", post(github_bootstrap))
-        .route("/api/github/delete-repo", post(github_delete_repo))
-        .route("/api/release/start", post(release_start))
-        .route("/api/verify/run", post(verify_run))
+        .route("/api/branding/tokens", post(branding_tokens))
+        .route("/api/relay", post(relay_save))
+        .route("/api/relay/key/generate", post(relay_key_generate))
+        .route("/api/signing/connect", post(signing_connect))
+        .route("/api/signing/disconnect", post(signing_disconnect))
+        .route("/api/signing/start", post(signing_start))
+        .route("/api/components/discover", post(components_discover))
+        .route("/api/components/select", post(components_select))
+        .route("/api/components/platforms", post(components_platforms))
+        .route("/api/build/start", post(build_start))
+        .route("/api/build/cancel", post(build_cancel))
+        .route("/api/validate/run", post(validate_run))
+        .route("/api/output/open", post(output_open))
         .route("/api/summary.json", get(summary_json))
         .route("/api/summary.md", get(summary_md))
         .route("/api/diagnostics.txt", get(diagnostics))
@@ -138,12 +144,22 @@ pub fn router(app: App) -> Router {
         .layer(DefaultBodyLimit::max(64 * 1024))
         .merge(uploads)
         .layer(middleware::from_fn_with_state(app.clone(), scrub_responses));
+    // Not scrubbed: the explicit "reveal" of the relay key (the only response that may carry
+    // it), the signing key for adding the secret by hand (only after GitHub refused it) and the
+    // uploaded images (binary, no secrets).
+    let unscrubbed = Router::new()
+        .route("/api/relay/key/reveal", post(relay_key_reveal))
+        .route("/api/signing/manual-key", post(signing_manual_key))
+        .route("/api/branding/{slot}/image", get(image_get))
+        .layer(DefaultBodyLimit::max(1024));
     Router::new()
         .route("/", get(index))
         .route("/assets/app.js", get(app_js))
         .route("/assets/app.css", get(app_css))
+        .route("/common/{file}", get(common))
         .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
         .merge(api)
+        .merge(unscrubbed)
         .fallback(not_found)
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app)
@@ -273,6 +289,18 @@ async fn app_js() -> Response {
     r
 }
 
+async fn common(Path(file): Path<String>) -> Response {
+    match common_file(&file) {
+        None => deny(StatusCode::NOT_FOUND, "Not found."),
+        Some((body, ctype)) => {
+            let mut r = body.into_response();
+            r.headers_mut()
+                .insert(header::CONTENT_TYPE, HeaderValue::from_static(ctype));
+            r
+        }
+    }
+}
+
 async fn app_css() -> Response {
     let mut r = APP_CSS.into_response();
     r.headers_mut().insert(
@@ -287,23 +315,31 @@ async fn not_found() -> Response {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Steps 1-4
+// Steps
 // ---------------------------------------------------------------------------------------------
 
 async fn get_state(State(app): State<App>) -> ApiResult {
     ok(&app, None)
 }
 
+/// Inputs cannot change while a build reads them.
+fn not_building(app: &AppState) -> Result<(), ApiErr> {
+    if app.w().build.running {
+        return Err(ApiErr::conflict(
+            "A build is running. Wait for it to finish or cancel it first.",
+        ));
+    }
+    Ok(())
+}
+
 async fn preflight_run(State(app): State<App>) -> ApiResult {
-    app.w().preflight_running = true;
+    let out = {
+        let mut w = app.w();
+        w.preflight_running = true;
+        std::path::PathBuf::from(&w.build.output_dir)
+    };
     app.log.info("preflight: running");
-    let rep = crate::preflight::run(
-        &app.http.plain,
-        &app.endpoints.github_api,
-        &app.endpoints.stripe_api,
-        app.addr,
-    )
-    .await;
+    let rep = crate::preflight::run(&app.http, &app.endpoints, app.addr, &out).await;
     for c in &rep.checks {
         app.log
             .info(format!("preflight {}: {} - {}", c.id, c.status, c.detail));
@@ -316,1092 +352,641 @@ async fn preflight_run(State(app): State<App>) -> ApiResult {
     ok(&app, None)
 }
 
-#[derive(Deserialize)]
-struct DeploymentReq {
-    environment: Environment,
-    profile: String,
-    portal_url: String,
-    ops_url: String,
-    provider_adapter: String,
-    admin_email: String,
-}
-
-async fn deployment_save(State(app): State<App>, body: Bytes) -> ApiResult {
-    let r: DeploymentReq = parse(&body)?;
-    let mut f = serde_json::Map::new();
-    if r.profile != PROFILE_SINGLE {
-        f.insert(
-            "profile".into(),
-            json!("Only \"Single server with Docker Compose\" is available today."),
-        );
-    }
-    if r.provider_adapter != PROVIDER_MOCK {
-        f.insert(
-            "provider_adapter".into(),
-            json!("Only the mock provider adapter exists today."),
-        );
-    }
-    let portal = validate::base_url(&r.portal_url, r.environment, "Portal URL");
-    let ops = validate::base_url(&r.ops_url, r.environment, "Ops console URL");
-    let email = validate::email(&r.admin_email);
-    if let Err(e) = &portal {
-        f.insert("portal_url".into(), json!(e));
-    }
-    if let Err(e) = &ops {
-        f.insert("ops_url".into(), json!(e));
-    }
-    if let Err(e) = &email {
-        f.insert("admin_email".into(), json!(e));
-    }
-    if !f.is_empty() {
-        return Err(ApiErr::fields(Value::Object(f)));
-    }
-    let d = Deployment {
-        environment: r.environment,
-        profile: r.profile,
-        portal_url: portal.unwrap_or_default(),
-        ops_url: ops.unwrap_or_default(),
-        provider_adapter: r.provider_adapter,
-        admin_email: email.unwrap_or_default(),
-    };
-    app.log.info(format!(
-        "deployment saved: {} portal={} ops={}",
-        d.environment.as_str(),
-        d.portal_url,
-        d.ops_url
-    ));
-    app.w().deployment = Some(d);
-    ok(&app, Some("Deployment mode saved.".into()))
+fn opt(s: &Option<String>) -> Option<String> {
+    s.as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 #[derive(Deserialize)]
 struct IdentityReq {
-    deployment_name: String,
-    operator_name: String,
-    support_contact: String,
-    modules: Vec<String>,
+    provider_id: String,
+    name: String,
+    short_name: String,
+    vendor: String,
+    #[serde(default)]
+    support_url: Option<String>,
+    #[serde(default)]
+    support_email: Option<String>,
 }
 
 async fn identity_save(State(app): State<App>, body: Bytes) -> ApiResult {
+    not_building(&app)?;
     let r: IdentityReq = parse(&body)?;
-    let mut f = serde_json::Map::new();
-    let name = validate::text(&r.deployment_name, "Deployment name", 80);
-    let op = validate::text(&r.operator_name, "Owner/operator name", 120);
-    let sc = r.support_contact.trim();
-    let support = if sc.contains('@') && !sc.contains("://") {
-        validate::email(sc)
-    } else {
-        validate::base_url(sc, Environment::Production, "Support contact")
-            .map_err(|_| "Support contact must be an email address or an https:// URL.".to_string())
+    let i = Identity {
+        provider_id: r.provider_id.trim().to_string(),
+        name: r.name.trim().to_string(),
+        short_name: r.short_name.trim().to_string(),
+        vendor: r.vendor.trim().to_string(),
+        support_url: opt(&r.support_url),
+        support_email: opt(&r.support_email),
     };
-    for (k, v) in [
-        ("deployment_name", &name),
-        ("operator_name", &op),
-        ("support_contact", &support),
-    ] {
-        if let Err(e) = v {
-            f.insert(k.into(), json!(e));
-        }
-    }
-    let mut modules: Vec<String> = Vec::new();
-    for m in &r.modules {
-        if !MODULES.contains(&m.as_str()) {
-            f.insert("modules".into(), json!(format!("Unknown module {m:?}.")));
-        } else if !modules.contains(m) {
-            modules.push(m.clone());
-        }
-    }
-    if modules.is_empty() && !f.contains_key("modules") {
-        f.insert("modules".into(), json!("Enable at least one module."));
+    let mut p = placeholder();
+    p.provider_id = i.provider_id.clone();
+    p.product.name = i.name.clone();
+    p.product.short_name = i.short_name.clone();
+    p.product.vendor = i.vendor.clone();
+    p.product.support_url = i.support_url.clone();
+    p.product.support_email = i.support_email.clone();
+    let mut f = field_errors(&p, &["provider_id", "product."]);
+    if !f.contains_key("product.short_name") && crate::build::windows_reserved(&i.short_name) {
+        f.insert(
+            "product.short_name".into(),
+            json!("Windows reserves this name (CON, NUL, COM1 …) or it ends with a dot."),
+        );
     }
     if !f.is_empty() {
         return Err(ApiErr::fields(Value::Object(f)));
     }
-    modules.sort_by_key(|m| MODULES.iter().position(|x| x == m));
-    app.log
-        .info(format!("identity saved, modules: {}", modules.join(",")));
-    app.w().identity = Some(Identity {
-        deployment_name: name.unwrap_or_default(),
-        operator_name: op.unwrap_or_default(),
-        support_contact: support.unwrap_or_default(),
-        modules,
-    });
+    app.log.info(format!(
+        "identity saved: {} ({}), short name {}",
+        i.name, i.provider_id, i.short_name
+    ));
+    let mut w = app.w();
+    w.identity = Some(i);
+    w.rev += 1;
+    drop(w);
     ok(&app, Some("Product identity saved.".into()))
+}
+
+#[derive(Deserialize)]
+struct ImportReq {
+    json: String,
+}
+
+/// Fill the steps from an existing provider.json (a rebuild for a newer release keeps the
+/// same identity, colour and, above all, the same relay key).
+async fn provider_import(State(app): State<App>, body: Bytes) -> ApiResult {
+    not_building(&app)?;
+    let r: ImportReq = parse(&body)?;
+    let p = rm_brand::Provider::from_json(&r.json).map_err(ApiErr::bad)?;
+    let key = Secret::new(p.relay.key.clone());
+    zeroize::Zeroize::zeroize(&mut { r.json });
+    app.set_relay_key(key, "imported");
+    let c = Color::parse(&p.branding.primary_color).map_err(ApiErr::bad)?;
+    {
+        let mut w = app.w();
+        w.identity = Some(Identity {
+            provider_id: p.provider_id.clone(),
+            name: p.product.name.clone(),
+            short_name: p.product.short_name.clone(),
+            vendor: p.product.vendor.clone(),
+            support_url: p.product.support_url.clone(),
+            support_email: p.product.support_email.clone(),
+        });
+        w.branding.primary_color = c.hex();
+        w.branding.theme = p.branding.theme;
+        w.branding.saved = true;
+        w.relay.host = p.relay.host.clone();
+        w.relay.port = p.relay.port;
+        w.relay.client_updates = p.updates.clients;
+        w.relay.portal = p.account.as_ref().map(|a| a.portal.clone());
+        w.relay.saved = true;
+        w.rev += 1;
+    }
+    app.log.info(format!(
+        "provider.json of {} imported (relay key kept)",
+        p.provider_id
+    ));
+    let imgs = [p.branding.logo.is_some(), p.branding.icon.is_some()];
+    ok(
+        &app,
+        Some(format!(
+            "Imported {}: identity, colour, relay endpoint and the same admission key.{}",
+            p.provider_id,
+            if imgs.iter().any(|x| *x) {
+                " Upload logo.png / icon.png again (they are separate files)."
+            } else {
+                ""
+            }
+        )),
+    )
+}
+
+#[derive(Deserialize)]
+struct TokensReq {
+    color: String,
+}
+
+/// rm-brand's derived tokens for a colour (the live preview uses exactly these).
+async fn branding_tokens(body: Bytes) -> ApiResult {
+    let r: TokensReq = parse(&body)?;
+    let c = Color::parse(&r.color).map_err(|e| ApiErr::fields(json!({ "primary_color": e })))?;
+    let t = Tokens::derive(c);
+    Ok(Json(json!({
+        "ok": true,
+        "color": c.hex(),
+        "contrast": crate::state::contrast(&t),
+        "tokens": t,
+    })))
 }
 
 #[derive(Deserialize)]
 struct BrandingReq {
     primary_color: String,
-    theme: String,
-    density: String,
+    theme: Theme,
 }
 
 async fn branding_save(State(app): State<App>, body: Bytes) -> ApiResult {
+    not_building(&app)?;
     let r: BrandingReq = parse(&body)?;
-    let mut f = serde_json::Map::new();
-    let rgb = validate::hex_color(&r.primary_color);
-    if let Err(e) = &rgb {
-        f.insert("primary_color".into(), json!(e));
-    }
-    if r.theme != "light" && r.theme != "dark" {
-        f.insert("theme".into(), json!("Theme must be light or dark."));
-    }
-    if r.density != "comfortable" && r.density != "compact" {
-        f.insert(
-            "density".into(),
-            json!("Density must be comfortable or compact."),
-        );
-    }
-    let Ok(rgb) = rgb else {
-        return Err(ApiErr::fields(Value::Object(f)));
-    };
+    let c = Color::parse(&r.primary_color)
+        .map_err(|e| ApiErr::fields(json!({ "primary_color": e })))?;
+    let mut p = placeholder();
+    p.branding.primary_color = c.hex();
+    p.branding.theme = r.theme;
+    let f = field_errors(&p.normalized(), &["branding."]);
     if !f.is_empty() {
         return Err(ApiErr::fields(Value::Object(f)));
     }
-    let c = validate::contrast(rgb, (255, 255, 255));
-    let mut w = app.w();
-    let b = &mut w.branding;
-    b.primary_color = format!("#{:02X}{:02X}{:02X}", rgb.0, rgb.1, rgb.2);
-    b.contrast_vs_white = Some((c * 100.0).round() / 100.0);
-    b.contrast_warning = (c < 4.5).then(|| {
-        format!("Contrast against white is {c:.2}:1, below the 4.5:1 WCAG AA minimum for text. Fine for large shapes, but don't use it for text or button labels on white.")
-    });
-    b.theme = r.theme;
-    b.density = r.density;
-    b.saved = true;
-    drop(w);
-    ok(&app, Some("Branding saved.".into()))
+    {
+        let mut w = app.w();
+        if w.branding.primary_color != c.hex() || w.branding.theme != r.theme || !w.branding.saved {
+            w.rev += 1;
+        }
+        w.branding.primary_color = c.hex();
+        w.branding.theme = r.theme;
+        w.branding.saved = true;
+    }
+    app.log.info(format!("branding saved: {}", c.hex()));
+    ok(&app, None)
 }
 
-async fn branding_upload(
-    State(app): State<App>,
-    Path(kind): Path<String>,
-    body: Bytes,
-) -> ApiResult {
-    if kind != "logo" && kind != "favicon" {
-        return Err(ApiErr::bad("Unknown image slot."));
-    }
-    let info = crate::branding::validate_image(&body).map_err(|e| {
-        app.log.warn(format!("{kind} upload rejected: {e}"));
+async fn image_upload(State(app): State<App>, Path(slot): Path<String>, body: Bytes) -> ApiResult {
+    not_building(&app)?;
+    let slot = Slot::parse(&slot).ok_or_else(|| ApiErr::bad("Unknown image slot."))?;
+    let info = crate::branding::validate_provider_png(&body, slot).map_err(|e| {
+        app.log
+            .warn(format!("{} upload rejected: {e}", slot.name()));
         ApiErr::bad(e)
     })?;
     app.log.info(format!(
-        "{kind} accepted: {} {}x{} {} bytes",
-        info.kind.mime(),
+        "{} accepted: {}x{} {} bytes",
+        slot.file(),
         info.width,
         info.height,
         info.bytes
     ));
     let up = Upload {
         info,
+        sha256: taro_update::sha256_hex(&body),
         bytes: body.to_vec(),
     };
     let mut w = app.w();
-    if kind == "logo" {
-        w.branding.logo = Some(up);
-    } else {
-        w.branding.favicon = Some(up);
+    match slot {
+        Slot::Logo => w.branding.logo = Some(up),
+        Slot::Icon => w.branding.icon = Some(up),
     }
+    w.rev += 1;
     drop(w);
-    ok(&app, Some(format!("{kind} accepted.")))
+    ok(&app, Some(format!("{} accepted.", slot.file())))
 }
 
-async fn branding_delete(State(app): State<App>, Path(kind): Path<String>) -> ApiResult {
+async fn image_delete(State(app): State<App>, Path(slot): Path<String>) -> ApiResult {
+    not_building(&app)?;
+    let slot = Slot::parse(&slot).ok_or_else(|| ApiErr::bad("Unknown image slot."))?;
     let mut w = app.w();
-    match kind.as_str() {
-        "logo" => w.branding.logo = None,
-        "favicon" => w.branding.favicon = None,
-        _ => return Err(ApiErr::bad("Unknown image slot.")),
+    match slot {
+        Slot::Logo => w.branding.logo = None,
+        Slot::Icon => w.branding.icon = None,
     }
+    w.rev += 1;
     drop(w);
     ok(&app, None)
 }
 
-// ---------------------------------------------------------------------------------------------
-// Step 5: domain
-// ---------------------------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-struct DomainReq {
-    strategy: Strategy,
-    #[serde(default)]
-    domain: String,
-    #[serde(default)]
-    label: String,
-    target: String,
+async fn image_get(State(app): State<App>, Path(slot): Path<String>) -> Response {
+    let Some(slot) = Slot::parse(&slot) else {
+        return not_found().await;
+    };
+    let bytes = {
+        let w = app.w();
+        match slot {
+            Slot::Logo => w.branding.logo.as_ref().map(|u| u.bytes.clone()),
+            Slot::Icon => w.branding.icon.as_ref().map(|u| u.bytes.clone()),
+        }
+    };
+    match bytes {
+        None => not_found().await,
+        Some(b) => {
+            let mut r = b.into_response();
+            r.headers_mut()
+                .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+            r
+        }
+    }
 }
 
-async fn domain_save(State(app): State<App>, body: Bytes) -> ApiResult {
-    let r: DomainReq = parse(&body)?;
-    let mut f = serde_json::Map::new();
-    let domain = match r.strategy {
-        Strategy::Managed => match &app.managed_zone {
-            None => {
-                return Err(ApiErr {
-                    status: StatusCode::BAD_REQUEST,
-                    error: "Needs config: no Taro-managed DNS zone is configured for this wizard (TARO_SETUP_MANAGED_ZONE). Use your own domain instead.".into(),
-                    fields: None,
-                })
-            }
-            Some(zone) => validate::fqdn(&format!("{}.{zone}", r.label.trim())),
-        },
-        Strategy::Custom => validate::fqdn(&r.domain),
+#[derive(Deserialize)]
+struct RelayReq {
+    host: String,
+    port: Value,
+    /// a key the provider already uses (a rebuild); none: keep the current one
+    #[serde(default)]
+    key: Option<String>,
+    client_updates: ClientUpdates,
+    /// the provider's portal (sign-in and machine management); empty: none
+    #[serde(default)]
+    portal: Option<String>,
+}
+
+async fn relay_save(State(app): State<App>, body: Bytes) -> ApiResult {
+    not_building(&app)?;
+    let r: RelayReq = parse(&body)?;
+    let host = r.host.trim().trim_end_matches('.').to_ascii_lowercase();
+    let port = match &r.port {
+        Value::Number(n) => n.as_u64(),
+        Value::String(s) => s.trim().parse::<u64>().ok(),
+        _ => None,
     };
-    if let Err(e) = &domain {
+    let mut f = serde_json::Map::new();
+    let port = match port {
+        Some(p) if (1..=65535).contains(&p) => p as u16,
+        _ => {
+            f.insert("relay.port".into(), json!("1-65535"));
+            0
+        }
+    };
+    let entered = r
+        .key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(Secret::new);
+    zeroize::Zeroize::zeroize(&mut { r.key });
+    let portal = r
+        .portal
+        .as_deref()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty());
+    let mut p = placeholder();
+    p.relay.host = host.clone();
+    p.account = portal.clone().map(|portal| rm_brand::Account { portal });
+    if port != 0 {
+        p.relay.port = port;
+    }
+    if let Some(k) = &entered {
+        app.log.register_secret(k);
+        p.relay.key = k.expose().to_string();
+    }
+    for (k, v) in field_errors(&p, &["relay.", "account."]) {
+        f.entry(k).or_insert(v);
+    }
+    let has_key = entered.is_some() || app.w().relay.key.is_some();
+    if !has_key && !f.contains_key("relay.key") {
         f.insert(
-            if r.strategy == Strategy::Managed {
-                "label"
-            } else {
-                "domain"
-            }
-            .into(),
-            json!(e),
+            "relay.key".into(),
+            json!("Generate a key, or enter the one your relay already uses."),
         );
     }
-    let target = domain::parse_target(&r.target);
-    if let Err(e) = &target {
-        f.insert("target".into(), json!(e));
-    }
-    let (Ok(domain), Ok(target)) = (domain, target) else {
+    if !f.is_empty() {
         return Err(ApiErr::fields(Value::Object(f)));
-    };
-    let mut w = app.w();
-    let d = &mut w.domain;
-    if d.domain.as_deref() != Some(domain.as_str()) || d.verify_token.is_none() {
-        d.verify_token = Some(crate::secret::random_hex(16));
     }
-    d.strategy = Some(r.strategy);
-    d.domain = Some(domain.clone());
-    d.target = Some(r.target.trim().to_ascii_lowercase());
-    d.records = domain::records(
-        &domain,
-        &target,
-        d.verify_token.as_deref().unwrap_or_default(),
-    );
-    d.target_parsed = Some(target);
-    d.verification = None;
-    drop(w);
-    app.log.info(format!("domain set: {domain}"));
-    ok(
-        &app,
-        Some("DNS records generated. Create them at your DNS provider, then verify.".into()),
-    )
-}
-
-async fn domain_verify(State(app): State<App>) -> ApiResult {
-    let (domain, target, token) = {
-        let mut w = app.w();
-        let d = &mut w.domain;
-        match (&d.domain, &d.target_parsed, &d.verify_token) {
-            (Some(a), Some(b), Some(c)) => {
-                d.verifying = true;
-                (a.clone(), b.clone(), c.clone())
-            }
-            _ => return Err(ApiErr::bad("Save a domain first.")),
+    if let Some(k) = entered {
+        let same = app
+            .w()
+            .relay
+            .key
+            .as_ref()
+            .is_some_and(|old| ct_eq(old.expose(), k.expose()));
+        if !same {
+            app.set_relay_key(k, "entered");
         }
-    };
-    let mut checks = domain::verify_dns(&app.dns, &domain, &target, &token).await;
-    let dns_ok = checks.iter().all(|c| c.ok);
-    let https_ok = if dns_ok {
-        let url = app.endpoints.domain_health_url(&domain);
-        let c = domain::check_health(&app.http.plain, &url, "HTTPS health (/healthz)").await;
-        let okk = c.ok;
-        checks.push(c);
-        okk
-    } else {
-        checks.push(domain::Check {
-            name: "HTTPS health (/healthz)".into(),
-            ok: false,
-            detail: "not checked until DNS verifies".into(),
-            hint: None,
-        });
-        false
-    };
-    for c in &checks {
-        app.log.info(format!(
-            "domain check {}: {} {}",
-            c.name,
-            if c.ok { "ok" } else { "FAIL" },
-            c.detail
-        ));
     }
     {
         let mut w = app.w();
-        w.domain.verifying = false;
-        w.domain.verification = Some(domain::DomainVerification {
-            dns_ok,
-            https_ok,
-            checks,
-            at: crate::util::now_secs(),
-        });
+        w.relay.host = host.clone();
+        w.relay.port = port;
+        w.relay.client_updates = r.client_updates;
+        w.relay.portal = portal;
+        w.relay.saved = true;
+        w.rev += 1;
     }
-    ok(&app, None)
+    app.log.info(format!("relay endpoint saved: {host}:{port}"));
+    ok(&app, Some("Relay endpoint saved.".into()))
 }
 
-// ---------------------------------------------------------------------------------------------
-// Step 6: billing
-// ---------------------------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-struct KeyReq {
-    key: String,
-    #[serde(default)]
-    live_confirmed: bool,
-    #[serde(default)]
-    live_typed: String,
-}
-
-async fn billing_key(State(app): State<App>, body: Bytes) -> ApiResult {
-    let r: KeyReq = parse(&body)?;
-    let key = Secret::new(r.key.trim());
-    zeroize::Zeroize::zeroize(&mut { r.key });
-    app.log.register_secret(&key);
-    let mode = validate::stripe_key_mode(key.expose(), r.live_confirmed, &r.live_typed)
-        .map_err(|e| ApiErr::fields(json!({ "key": e })))?;
-    let client =
-        crate::stripe::Stripe::new(&app.endpoints.stripe_api, app.http.api.clone(), key.clone());
-    app.log.info(format!(
-        "stripe: validating {mode:?} key with GET /v1/account"
-    ));
-    match client.account().await {
-        Ok(acct) => {
-            app.log
-                .info(format!("stripe: key valid for account {}", acct.id));
-            let mut w = app.w();
-            let b = &mut w.billing;
-            b.key = Some(key);
-            b.key_present = true;
-            b.mode = Some(mode);
-            b.account = Some(acct);
-            b.key_error = None;
-            b.smoke = None;
-            drop(w);
-            ok(&app, Some("Stripe key validated.".into()))
-        }
-        Err(e) => {
-            app.log.warn(format!("stripe: key validation failed: {e}"));
-            let mut w = app.w();
-            w.billing.key = None;
-            w.billing.key_present = false;
-            w.billing.account = None;
-            w.billing.key_error = Some(e.to_string());
-            drop(w);
-            Err(ApiErr::upstream(e.to_string()))
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct SecretReq {
-    secret: String,
-}
-
-async fn billing_webhook_secret(State(app): State<App>, body: Bytes) -> ApiResult {
-    let r: SecretReq = parse(&body)?;
-    let s = Secret::new(r.secret.trim());
-    zeroize::Zeroize::zeroize(&mut { r.secret });
-    app.log.register_secret(&s);
-    validate::webhook_secret(s.expose())
-        .map_err(|e| ApiErr::fields(json!({ "webhook_secret": e })))?;
-    let mut w = app.w();
-    w.billing.webhook_secret = Some(s);
-    w.billing.webhook_secret_present = true;
-    w.billing.webhook_secret_source = Some("entered".into());
-    drop(w);
-    app.log
-        .info("stripe: webhook signing secret stored in memory");
+async fn relay_key_generate(State(app): State<App>) -> ApiResult {
+    not_building(&app)?;
+    let k = crate::secret::relay_key(crate::state::KEY_LEN);
+    app.set_relay_key(k, "generated");
+    app.w().rev += 1;
+    app.log.info("relay key: a new one was generated");
     ok(
         &app,
-        Some("Webhook signing secret stored (in memory only).".into()),
+        Some("A new admission key was generated. Clients built with an older key can no longer use this relay once it runs with the new one.".into()),
     )
 }
 
-fn webhook_url(app: &AppState) -> Result<String, ApiErr> {
-    app.w()
-        .deployment
-        .as_ref()
-        .map(|d| format!("{}/webhooks/stripe", d.portal_url))
-        .ok_or_else(|| ApiErr::bad("Save the Deployment mode step first (the webhook URL is <portal>/webhooks/stripe)."))
+async fn relay_key_reveal(State(app): State<App>) -> Response {
+    let k = app.w().relay.key.as_ref().map(|k| k.expose().to_string());
+    match k {
+        None => ApiErr::bad("No admission key yet.").into_response(),
+        Some(k) => Json(json!({ "ok": true, "key": k })).into_response(),
+    }
 }
 
-async fn billing_webhook_check(State(app): State<App>) -> ApiResult {
-    let url = webhook_url(&app)?;
-    let client = app
-        .stripe_client()
-        .ok_or_else(|| ApiErr::bad("Validate the Stripe key first."))?;
-    let list = client
-        .list_webhooks()
-        .await
-        .map_err(|e| ApiErr::upstream(e.to_string()))?;
-    let found = list.into_iter().find(|h| h.url == url);
-    let mut w = app.w();
-    match found {
-        Some(h) => {
-            w.billing.webhook_missing_events =
-                h.missing_events().iter().map(|s| s.to_string()).collect();
-            w.billing.webhook_note = Some(if w.billing.webhook_missing_events.is_empty() {
-                format!(
-                    "Endpoint {} exists with all required events ({}).",
-                    h.id, h.status
-                )
-            } else {
-                format!(
-                    "Endpoint {} exists but is missing events; add them in the Stripe dashboard.",
-                    h.id
-                )
-            });
-            w.billing.webhook = Some(h);
-        }
-        None => {
-            w.billing.webhook = None;
-            w.billing.webhook_missing_events = vec![];
-            w.billing.webhook_note = Some(format!("No webhook endpoint for {url} exists yet."));
-        }
-    }
-    drop(w);
-    ok(&app, None)
-}
-
-#[derive(Deserialize)]
-struct ConfirmReq {
-    #[serde(default)]
-    confirm: bool,
-}
-
-async fn billing_webhook_create(State(app): State<App>, body: Bytes) -> ApiResult {
-    let r: ConfirmReq = parse(&body)?;
-    if !r.confirm {
-        return Err(ApiErr::bad(
-            "Creating the webhook endpoint needs explicit confirmation.",
-        ));
-    }
-    let url = webhook_url(&app)?;
-    let client = app
-        .stripe_client()
-        .ok_or_else(|| ApiErr::bad("Validate the Stripe key first."))?;
-    let list = client
-        .list_webhooks()
-        .await
-        .map_err(|e| ApiErr::upstream(e.to_string()))?;
-    if let Some(h) = list.into_iter().find(|h| h.url == url) {
-        let mut w = app.w();
-        w.billing.webhook_missing_events =
-            h.missing_events().iter().map(|s| s.to_string()).collect();
-        w.billing.webhook_note = Some(format!(
-            "Endpoint {} already exists; not creating a duplicate. Stripe only reveals its signing secret in the dashboard: paste it above.",
-            h.id
-        ));
-        w.billing.webhook = Some(h);
-        drop(w);
-        return ok(&app, None);
-    }
-    app.log
-        .info(format!("stripe: creating webhook endpoint for {url}"));
-    let (h, secret) = client
-        .create_webhook(&url)
-        .await
-        .map_err(|e| ApiErr::upstream(e.to_string()))?;
-    let mut w = app.w();
-    w.billing.webhook_missing_events = h.missing_events().iter().map(|s| s.to_string()).collect();
-    if let Some(s) = secret {
-        app.log.register_secret(&s);
-        w.billing.webhook_secret = Some(s);
-        w.billing.webhook_secret_present = true;
-        w.billing.webhook_secret_source = Some("created".into());
-    }
-    w.billing.webhook_note = Some(format!(
-        "Created endpoint {}. Its signing secret was captured in memory and will be stored as a GitHub Actions secret.",
-        h.id
-    ));
-    w.billing.webhook = Some(h);
-    drop(w);
-    ok(&app, Some("Webhook endpoint created.".into()))
-}
-
-async fn billing_smoke(State(app): State<App>, body: Bytes) -> ApiResult {
-    let r: ConfirmReq = parse(&body)?;
-    if !r.confirm {
-        return Err(ApiErr::bad("The smoke test needs explicit confirmation."));
-    }
-    let (mode, portal) = {
+/// The signing key, for the operator to add the secret by hand: only while GitHub's refusal of
+/// it is being worked around, never otherwise.
+async fn signing_manual_key(State(app): State<App>) -> Response {
+    let k = {
         let w = app.w();
-        (
-            w.billing.mode,
-            w.deployment.as_ref().map(|d| d.portal_url.clone()),
-        )
+        let s = &w.signing;
+        s.pending_key
+            .as_ref()
+            .filter(|_| s.manual_secret)
+            .map(|(r, k, _)| (r.clone(), k.expose().to_string()))
     };
-    if mode != Some(StripeMode::Test) {
-        return Err(ApiErr::bad(
-            "The billing smoke test runs only with a test-mode key.",
-        ));
-    }
-    let portal = portal.ok_or_else(|| ApiErr::bad("Save the Deployment mode step first."))?;
-    let client = app
-        .stripe_client()
-        .ok_or_else(|| ApiErr::bad("Validate the Stripe key first."))?;
-    let now = crate::util::now_secs();
-    let result = match client.create_smoke_session(&portal).await {
-        Err(e) => crate::state::SmokeResult {
-            ok: false,
-            session_id: None,
-            session_url: None,
-            expired: false,
-            detail: format!("Creating the Checkout Session failed: {e}"),
-            at: now,
-        },
-        Ok(s) => {
-            let exp = client.expire_session(&s.id).await;
-            let expired = matches!(&exp, Ok(x) if x.status.as_deref() == Some("expired"));
-            let valid = s.id.starts_with("cs_test_") && s.url.is_some() && !s.livemode;
-            let detail = match (&exp, valid) {
-                (_, false) if s.livemode => "Stripe returned a LIVE session; it was expired immediately.".to_string(),
-                (_, false) => "Stripe's response was missing the session id or URL.".to_string(),
-                (Ok(_), true) if expired => "Stripe created a test Checkout Session (1 x 100 minor units) and it was expired again.".to_string(),
-                (Ok(x), true) => format!("Session created; expire returned status {:?}.", x.status),
-                (Err(e), true) => format!("Session created, but expiring it failed: {e}. It will expire by itself after 24 h."),
-            };
-            crate::state::SmokeResult {
-                ok: valid && expired,
-                session_id: Some(s.id),
-                session_url: s.url,
-                expired,
-                detail,
-                at: now,
-            }
-        }
-    };
-    app.log.info(format!(
-        "stripe smoke test: ok={} {}",
-        result.ok, result.detail
-    ));
-    app.w().billing.smoke = Some(result);
-    ok(&app, None)
-}
-
-// ---------------------------------------------------------------------------------------------
-// Step 7: GitHub
-// ---------------------------------------------------------------------------------------------
-
-async fn adopt_token(app: &AppState, token: Secret, method: &str) -> Result<String, ApiErr> {
-    app.log.register_secret(&token);
-    let gh = crate::github::GitHub::new(
-        &app.endpoints.github_api,
-        app.http.api.clone(),
-        app.http.plain.clone(),
-        token.clone(),
-    );
-    match gh.user().await {
-        Ok(u) => {
-            let login = u.login.clone();
-            app.log
-                .info(format!("github: authenticated as {login} via {method}"));
-            let mut w = app.w();
-            w.github.token = Some(token);
-            w.github.user = Some(u);
-            w.github.auth_method = Some(method.into());
-            w.github.auth_error = None;
-            w.github.orgs = None;
-            Ok(login)
-        }
-        Err(e) => {
-            app.log.warn(format!("github: token rejected: {e}"));
-            app.w().github.auth_error = Some(e.to_string());
-            Err(ApiErr::upstream(match e.status {
-                Some(401) => {
-                    "GitHub rejected the token (401). It may be mistyped, expired or revoked."
-                        .into()
-                }
-                _ => e.to_string(),
-            }))
+    match k {
+        None => ApiErr::bad("No key is waiting to be added by hand.").into_response(),
+        Some((repo, key)) => {
+            app.log.info(format!(
+                "Step 5: the signing key was copied to add {} to {repo} by hand",
+                crate::config::SIGNING_SECRET
+            ));
+            Json(json!({ "ok": true, "repo": repo, "name": crate::config::SIGNING_SECRET, "key": key }))
+                .into_response()
         }
     }
 }
 
 #[derive(Deserialize)]
-struct PatReq {
+struct SigningConnectReq {
     token: String,
     #[serde(default)]
-    remember: bool,
-}
-
-async fn github_pat(State(app): State<App>, body: Bytes) -> ApiResult {
-    let r: PatReq = parse(&body)?;
-    let token = Secret::new(r.token.trim());
-    zeroize::Zeroize::zeroize(&mut { r.token });
-    app.log.register_secret(&token);
-    if token.is_empty()
-        || token
-            .expose()
-            .chars()
-            .any(|c| c.is_whitespace() || c.is_control())
-    {
-        return Err(ApiErr::fields(
-            json!({ "token": "Paste the token exactly as GitHub showed it." }),
-        ));
-    }
-    let login = adopt_token(&app, token.clone(), "pat").await?;
-    let mut msg = format!("Authenticated as {login}.");
-    if r.remember {
-        msg.push(' ');
-        msg.push_str(&remember(&app, &token));
-    }
-    ok(&app, Some(msg))
-}
-
-fn remember(app: &AppState, token: &Secret) -> String {
-    match &app.remember_dir {
-        Some(dir) if crate::remember::supported() => match crate::remember::save(dir, token) {
-            Ok(()) => {
-                app.w().github.remembered_available = true;
-                app.log.info("github: token stored with DPAPI");
-                "The token is remembered on this PC (DPAPI, current Windows user).".into()
-            }
-            Err(e) => {
-                app.log.warn(format!("github: remembering failed: {e}"));
-                format!("It could not be remembered: {e}")
-            }
-        },
-        _ => "Remembering is not available on this OS; the token stays in memory only.".into(),
-    }
-}
-
-#[derive(Deserialize)]
-struct DeviceReq {
-    #[serde(default)]
-    client_id: Option<String>,
-    #[serde(default)]
-    remember: bool,
-}
-
-async fn github_device_start(State(app): State<App>, body: Bytes) -> ApiResult {
-    let r: DeviceReq = parse(&body)?;
-    let client_id = r
-        .client_id
-        .map(|c| c.trim().to_string())
-        .filter(|c| !c.is_empty())
-        .or_else(|| app.github_client_id.clone())
-        .ok_or_else(|| ApiErr::bad("Needs config: no OAuth client id. Set TARO_SETUP_GITHUB_CLIENT_ID or enter one, or use a fine-grained token instead."))?;
-    if client_id.len() > 64
-        || !client_id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
-    {
-        return Err(ApiErr::fields(
-            json!({ "client_id": "That does not look like a GitHub OAuth client id." }),
-        ));
-    }
-    let flow =
-        crate::github::DeviceFlow::new(&app.endpoints.github_web, app.http.api.clone(), &client_id);
-    let code = flow.start().await.map_err(ApiErr::upstream)?;
-    app.log.register_secret(&code.device_code);
-    let cancel = Arc::new(tokio::sync::Notify::new());
-    let generation = {
-        let mut w = app.w();
-        let d = &mut w.github.device;
-        if let Some(c) = d.cancel.take() {
-            c.notify_one();
-        }
-        d.generation += 1;
-        d.phase = "waiting".into();
-        d.user_code = Some(code.user_code.clone());
-        d.verification_uri = Some(code.verification_uri.clone());
-        d.interval = Some(code.interval);
-        d.expires_at = Some(crate::util::now_secs() + code.expires_in);
-        d.error = None;
-        d.cancel = Some(cancel.clone());
-        d.generation
-    };
-    app.log.info(format!(
-        "github: device flow started, code {}",
-        code.user_code
-    ));
-    let app2 = app.clone();
-    let remember_it = r.remember;
-    tokio::spawn(async move {
-        let unit = app2.timings.device_unit;
-        let a3 = app2.clone();
-        let res = tokio::select! {
-            r = flow.poll_until(&code, unit, move |i| {
-                let mut w = a3.w();
-                if w.github.device.generation == generation { w.github.device.interval = Some(i); }
-            }) => r,
-            _ = cancel.notified() => return,
-        };
-        let current = app2.w().github.device.generation == generation;
-        if !current {
-            return;
-        }
-        match res {
-            Ok(out) => match adopt_token(&app2, out.token.clone(), "device").await {
-                Ok(_) => {
-                    let mut w = app2.w();
-                    w.github.device.phase = "done".into();
-                    w.github.device.user_code = None;
-                    drop(w);
-                    if remember_it {
-                        let m = remember(&app2, &out.token);
-                        app2.log.info(m);
-                    }
-                }
-                Err(e) => {
-                    let mut w = app2.w();
-                    w.github.device.phase = "error".into();
-                    w.github.device.error = Some(e.error);
-                }
-            },
-            Err(e) => {
-                app2.log.warn(format!("github: device flow ended: {e}"));
-                let mut w = app2.w();
-                w.github.device.phase = "error".into();
-                w.github.device.error = Some(e);
-            }
-        }
-    });
-    ok(&app, None)
-}
-
-async fn github_device_cancel(State(app): State<App>) -> ApiResult {
-    {
-        let mut w = app.w();
-        let d = &mut w.github.device;
-        if let Some(c) = d.cancel.take() {
-            c.notify_one();
-        }
-        d.generation += 1;
-        d.phase = "idle".into();
-        d.user_code = None;
-        d.verification_uri = None;
-        d.error = None;
-    }
-    ok(&app, None)
-}
-
-async fn github_remembered_use(State(app): State<App>) -> ApiResult {
-    let dir = app
-        .remember_dir
-        .clone()
-        .ok_or_else(|| ApiErr::bad("Not available on this OS."))?;
-    let token = crate::remember::load(&dir).map_err(ApiErr::bad)?;
-    let login = adopt_token(&app, token, "remembered").await?;
-    ok(
-        &app,
-        Some(format!(
-            "Authenticated as {login} with the remembered token."
-        )),
-    )
-}
-
-async fn github_remembered_forget(State(app): State<App>) -> ApiResult {
-    if let Some(dir) = &app.remember_dir {
-        crate::remember::forget(dir).map_err(ApiErr::bad)?;
-    }
-    app.w().github.remembered_available = false;
-    app.log.info("github: remembered token deleted");
-    ok(
-        &app,
-        Some("The remembered token was deleted from this PC.".into()),
-    )
-}
-
-async fn github_logout(State(app): State<App>) -> ApiResult {
-    {
-        let mut w = app.w();
-        w.github.token = None; // zeroized on drop
-        w.github.user = None;
-        w.github.auth_method = None;
-        w.github.orgs = None;
-    }
-    app.log
-        .info("github: signed out (token dropped from memory)");
-    ok(
-        &app,
-        Some("Signed out. The token was removed from memory.".into()),
-    )
-}
-
-async fn github_orgs(State(app): State<App>) -> ApiResult {
-    let gh = app
-        .github_client()
-        .ok_or_else(|| ApiErr::bad("Sign in to GitHub first."))?;
-    let orgs = gh
-        .orgs()
-        .await
-        .map_err(|e| ApiErr::upstream(e.to_string()))?;
-    app.w().github.orgs = Some(orgs);
-    ok(&app, None)
-}
-
-#[derive(Deserialize)]
-struct PlanReq {
-    owner: String,
     repo: String,
-    template: String,
-    #[serde(default)]
-    confirm: bool,
 }
 
-async fn github_plan(State(app): State<App>, body: Bytes) -> ApiResult {
-    let r: PlanReq = parse(&body)?;
-    let mut w = app.w();
-    if w.github.bootstrap_running {
-        return Err(ApiErr::conflict("The bootstrap is already running."));
+async fn signing_connect(State(app): State<App>, body: Bytes) -> ApiResult {
+    let mut r: SigningConnectReq = parse(&body)?;
+    let token = Secret::new(r.token.trim().to_string());
+    zeroize::Zeroize::zeroize(&mut r.token);
+    let repo = r.repo.trim().trim_matches('/').to_string();
+    let valid = repo.is_empty()
+        || (repo.split('/').count() == 2
+            && repo.split('/').all(|p| {
+                !p.is_empty()
+                    && p.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+            }));
+    let mut f = serde_json::Map::new();
+    if token.is_empty() {
+        f.insert("github.token".into(), json!("Paste a GitHub token."));
     }
-    let input =
-        crate::bootstrap::gather(&mut w, &r.owner, &r.repo, &r.template).map_err(ApiErr::bad)?;
-    w.github.plan = Some(crate::bootstrap::plan(&input));
-    w.github.owner = Some(input.owner.clone());
-    w.github.repo_name = Some(input.name.clone());
-    w.github.template = format!("{}/{}", input.template_owner, input.template_repo);
-    w.github.bootstrap_error = None;
+    if !valid {
+        f.insert(
+            "github.repo".into(),
+            json!("owner/repository, or empty for your own copy."),
+        );
+    }
+    if !f.is_empty() {
+        return Err(ApiErr::fields(Value::Object(f)));
+    }
+    match crate::signing::connect(&app, token, &repo).await {
+        Ok(msg) => ok(&app, Some(msg)),
+        Err(e) => {
+            app.log.warn(format!("GitHub: {e}"));
+            app.w().signing.error = None;
+            Err(ApiErr::bad(e))
+        }
+    }
+}
+
+async fn signing_disconnect(State(app): State<App>) -> ApiResult {
+    {
+        let mut w = app.w();
+        if w.signing.running {
+            return Err(ApiErr::bad("Wait for Start to finish."));
+        }
+        // the key this session made stays usable from its backup
+        w.signing = Default::default();
+        w.rev += 1;
+    }
+    ok(&app, Some("Signed out of GitHub.".into()))
+}
+
+#[derive(Deserialize)]
+struct SigningStartReq {
+    #[serde(default)]
+    taro_version: Option<String>,
+    #[serde(default)]
+    new_key: bool,
+    #[serde(default = "yes")]
+    build: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+async fn signing_start(State(app): State<App>, body: Bytes) -> ApiResult {
+    let r: SigningStartReq = parse(&body)?;
+    crate::signing::start(
+        &app,
+        crate::signing::StartReq {
+            taro_version: r.taro_version.map(|t| t.trim().to_string()),
+            new_key: r.new_key,
+            build: r.build,
+        },
+    )
+    .map_err(ApiErr::bad)?;
+    ok(&app, Some("Started.".into()))
+}
+
+async fn components_discover(State(app): State<App>) -> ApiResult {
+    app.w().components.loading = true;
+    let r = crate::releases::discover(
+        &app.http,
+        &crate::signing::release_endpoints(&app),
+        &app.timings,
+    )
+    .await;
+    let mut w = app.w();
+    w.components.loading = false;
+    match r {
+        Ok(list) => {
+            app.log.info(format!(
+                "releases: {} Enterprise release(s) found",
+                list.len()
+            ));
+            w.components.error = None;
+            let n = list.len();
+            w.components.releases = Some(list);
+            drop(w);
+            ok(
+                &app,
+                Some(if n == 0 {
+                    "No Enterprise release is published yet.".into()
+                } else {
+                    format!("{n} Enterprise release(s) found.")
+                }),
+            )
+        }
+        Err(e) => {
+            app.log.warn(format!("releases: {e}"));
+            w.components.error = Some(e.clone());
+            Err(ApiErr::upstream(e))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SelectReq {
+    tag: String,
+}
+
+async fn components_select(State(app): State<App>, body: Bytes) -> ApiResult {
+    not_building(&app)?;
+    let r: SelectReq = parse(&body)?;
+    let rel = {
+        let mut w = app.w();
+        let rel = w
+            .components
+            .releases
+            .as_ref()
+            .and_then(|l| l.iter().find(|x| x.tag == r.tag).cloned())
+            .ok_or_else(|| ApiErr::bad("Unknown release: look for releases first."))?;
+        w.components.verifying = Some(rel.tag.clone());
+        rel
+    };
+    let keys = crate::signing::repo_trust(&app);
+    let res = crate::releases::fetch_verified(
+        &app.http,
+        &crate::signing::release_endpoints(&app),
+        &app.timings,
+        &keys,
+        &rel,
+    )
+    .await;
+    let mut w = app.w();
+    w.components.verifying = None;
+    match res {
+        Ok(sel) => {
+            app.log.info(format!(
+                "{}: component manifest verified (signed by {}), Taro {}",
+                sel.tag, sel.signed_by, sel.taro_version
+            ));
+            for x in &sel.warnings {
+                app.log.warn(format!("{}: {x}", sel.tag));
+            }
+            let msg = format!(
+                "{}: the component manifest's signature is valid (Taro {}).",
+                sel.tag, sel.taro_version
+            );
+            w.components.error = None;
+            w.components.selected = Some(sel);
+            w.rev += 1;
+            drop(w);
+            ok(&app, Some(msg))
+        }
+        Err(e) => {
+            app.log.warn(format!("{}: {e}", rel.tag));
+            w.components.selected = None;
+            w.components.error = Some(e.clone());
+            drop(w);
+            Err(ApiErr::bad(e))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct PlatformsReq {
+    platforms: Vec<String>,
+}
+
+async fn components_platforms(State(app): State<App>, body: Bytes) -> ApiResult {
+    not_building(&app)?;
+    let r: PlatformsReq = parse(&body)?;
+    let mut v = Vec::new();
+    for p in &r.platforms {
+        if !taro_update::manifest::COMPONENT_IDS.contains(&p.as_str()) {
+            return Err(ApiErr::bad(format!("Unknown platform {p:?}.")));
+        }
+        if !v.contains(p) {
+            v.push(p.clone());
+        }
+    }
+    v.sort_by_key(|x| {
+        taro_update::manifest::COMPONENT_IDS
+            .iter()
+            .position(|y| y == x)
+    });
+    let mut w = app.w();
+    w.components.platforms = v;
+    w.rev += 1;
     drop(w);
     ok(&app, None)
 }
 
-async fn github_bootstrap(State(app): State<App>, body: Bytes) -> ApiResult {
-    let r: PlanReq = parse(&body)?;
-    if !r.confirm {
-        return Err(ApiErr::bad(
-            "Creating the repository needs explicit confirmation.",
-        ));
-    }
-    let gh = app
-        .github_client()
-        .ok_or_else(|| ApiErr::bad("Sign in to GitHub first."))?;
-    let input = {
-        let mut w = app.w();
-        if w.github.bootstrap_running {
-            return Err(ApiErr::conflict("The bootstrap is already running."));
-        }
-        let input = crate::bootstrap::gather(&mut w, &r.owner, &r.repo, &r.template)
-            .map_err(ApiErr::bad)?;
-        let plan = crate::bootstrap::plan(&input);
-        let shown: Option<Vec<String>> = w
-            .github
-            .plan
-            .as_ref()
-            .map(|p| p.iter().map(|a| a.label.clone()).collect());
-        let now: Vec<String> = plan.iter().map(|a| a.label.clone()).collect();
-        if shown.as_ref() != Some(&now) {
-            w.github.plan = Some(plan);
-            return Err(ApiErr::conflict("The plan changed since it was shown (inputs were edited). Review the updated plan and confirm again."));
-        }
-        w.github.plan = Some(plan);
-        w.github.bootstrap_running = true;
-        w.github.bootstrap_done = false;
-        w.github.bootstrap_error = None;
-        input
-    };
-    app.log.info(format!(
-        "github: bootstrap confirmed for {}/{}",
-        input.owner, input.name
-    ));
-    tokio::spawn(crate::bootstrap::run(app.clone(), gh, input));
-    ok(&app, Some("Bootstrap started.".into()))
-}
-
 #[derive(Deserialize)]
-struct DeleteReq {
-    confirm_name: String,
+struct BuildReq {
+    output_dir: String,
+    #[serde(default)]
+    replace: bool,
 }
 
-async fn github_delete_repo(State(app): State<App>, body: Bytes) -> ApiResult {
-    let r: DeleteReq = parse(&body)?;
-    let gh = app
-        .github_client()
-        .ok_or_else(|| ApiErr::bad("Sign in to GitHub first."))?;
-    let (o, n, full) = {
-        let w = app.w();
-        let g = &w.github;
-        if g.bootstrap_running || w.release.running {
-            return Err(ApiErr::conflict(
-                "Wait until the running task has finished.",
-            ));
+async fn build_start(State(app): State<App>, body: Bytes) -> ApiResult {
+    let r: BuildReq = parse(&body)?;
+    crate::build::start(&app, &r.output_dir, r.replace).map_err(|e| {
+        if e.contains("already") && e.contains("running") {
+            ApiErr::conflict(e)
+        } else {
+            ApiErr::bad(e)
         }
-        let repo = match (&g.repo, g.created_by_wizard, g.deleted) {
-            (Some(r), true, false) => r.clone(),
-            _ => {
-                return Err(ApiErr::bad(
-                    "Only a repository created by this wizard session can be deleted here.",
-                ))
-            }
-        };
-        if r.confirm_name.trim() != repo.full_name {
-            return Err(ApiErr::fields(
-                json!({ "confirm_name": format!("Type {} exactly to confirm.", repo.full_name) }),
-            ));
+    })?;
+    ok(&app, Some("Build started.".into()))
+}
+
+async fn build_cancel(State(app): State<App>) -> ApiResult {
+    let c = app.w().build.cancel.clone();
+    match c {
+        Some(c) => {
+            c.store(true, std::sync::atomic::Ordering::SeqCst);
+            app.log.info("build: cancel requested");
+            ok(&app, Some("Cancelling…".into()))
         }
-        let (o, n) = repo
-            .full_name
-            .split_once('/')
-            .map(|(a, b)| (a.to_string(), b.to_string()))
-            .unwrap_or_default();
-        (o, n, repo.full_name)
-    };
-    app.log.warn(format!(
-        "github: deleting repository {full} on operator request"
-    ));
-    match gh.delete_repo(&o, &n).await {
-        Ok(()) => {
-            let mut w = app.w();
-            w.github.deleted = true;
-            w.github.repo = None;
-            w.github.created_by_wizard = false;
-            w.github.bootstrap_done = false;
-            w.github.plan = None;
-            w.release = crate::state::ReleaseState { phase: "idle".into(), ..Default::default() };
-            drop(w);
-            ok(&app, Some(format!("Deleted {full}.")))
-        }
-        Err(e) if matches!(e.status, Some(403) | Some(404)) => Err(ApiErr {
-            status: StatusCode::FORBIDDEN,
-            error: format!(
-                "GitHub refused to delete {full} ({e}). Deleting needs the delete_repo scope (classic token / OAuth) or Administration: read and write (fine-grained). Delete it yourself under Settings > General > Danger Zone on github.com."
-            ),
-            fields: None,
-        }),
-        Err(e) => Err(ApiErr::upstream(e.to_string())),
+        None => Err(ApiErr::bad("No build is running.")),
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Step 8-9
-// ---------------------------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-struct ReleaseReq {
-    version: String,
-}
-
-async fn release_start(State(app): State<App>, body: Bytes) -> ApiResult {
-    let r: ReleaseReq = parse(&body)?;
-    let version =
-        validate::version(&r.version).map_err(|e| ApiErr::fields(json!({ "version": e })))?;
-    let gh = app
-        .github_client()
-        .ok_or_else(|| ApiErr::bad("Sign in to GitHub first."))?;
-    let input = {
+async fn validate_run(State(app): State<App>) -> ApiResult {
+    let result = {
         let mut w = app.w();
-        if w.release.running {
-            return Err(ApiErr::conflict(
-                "A release run is already being followed; wait for it to finish.",
-            ));
-        }
-        if !w.github.bootstrap_done {
-            return Err(ApiErr::bad("Finish the GitHub bootstrap first."));
-        }
-        let repo = w
-            .github
-            .repo
+        let r = w
+            .build
+            .result
             .clone()
-            .ok_or_else(|| ApiErr::bad("No repository."))?;
-        let (o, n) = repo
-            .full_name
-            .split_once('/')
-            .map(|(a, b)| (a.to_string(), b.to_string()))
-            .unwrap_or_default();
-        let rel = &mut w.release;
-        rel.running = true;
-        rel.version = Some(version.clone());
-        rel.phase = "Starting".into();
-        rel.run = None;
-        rel.jobs.clear();
-        rel.log_tail = None;
-        rel.release = None;
-        rel.error = None;
-        rel.dispatched_at = None;
-        rel.attempts += 1;
-        crate::release::Input {
-            owner: o,
-            repo: n,
-            git_ref: repo.default_branch.clone().unwrap_or_else(|| "main".into()),
-            version,
-        }
+            .ok_or_else(|| ApiErr::bad("Build the packages first."))?;
+        w.validation_running = true;
+        r
     };
-    tokio::spawn(crate::release::run(app.clone(), gh, input));
-    ok(&app, Some("Release started.".into()))
-}
-
-async fn verify_run(State(app): State<App>) -> ApiResult {
-    use crate::verify::vcheck;
-    let (portal, domain) = {
-        let mut w = app.w();
-        w.verification_running = true;
-        (
-            w.deployment.as_ref().map(|d| d.portal_url.clone()),
-            w.domain.domain.clone(),
-        )
-    };
-    let mut checks = match &portal {
-        Some(p) => crate::verify::portal_checks(&app.http.plain, p).await,
-        None => vec![vcheck(
-            "healthz",
-            "Portal checks",
-            "skipped",
-            "No portal URL saved (Deployment mode step).",
-            None,
-        )],
-    };
-    checks.push(match app.stripe_client() {
-        Some(s) => match s.account().await {
-            Ok(a) => vcheck(
-                "stripe",
-                "Stripe key re-check",
-                "ok",
-                format!("Key valid for {}", a.id),
-                None,
-            ),
-            Err(e) => vcheck(
-                "stripe",
-                "Stripe key re-check",
-                "fail",
-                e.to_string(),
-                Some("Re-enter the key in the Billing step."),
-            ),
-        },
-        None => vcheck(
-            "stripe",
-            "Stripe key re-check",
-            "skipped",
-            "No Stripe key in this session.",
-            None,
-        ),
-    });
-    checks.push(match &domain {
-        Some(d) => {
-            let c = domain::check_health(
-                &app.http.plain,
-                &app.endpoints.domain_health_url(d),
-                "Domain TLS",
-            )
-            .await;
-            vcheck(
-                "tls",
-                "Domain TLS",
-                if c.ok { "ok" } else { "fail" },
-                if c.ok {
-                    format!("{d}: certificate trusted, /healthz 200")
-                } else {
-                    c.detail
-                },
-                c.hint.as_deref(),
-            )
-        }
-        None => vcheck("tls", "Domain TLS", "skipped", "No domain saved.", None),
-    });
-    for c in &checks {
-        app.log
-            .info(format!("verify {}: {} {}", c.id, c.status, c.detail));
-    }
+    let report = tokio::task::spawn_blocking(move || crate::check::run(&result))
+        .await
+        .map_err(|e| ApiErr::bad(e.to_string()))?;
+    app.log.info(format!(
+        "validation: {} ({} checks)",
+        if report.ok { "ok" } else { "FAILED" },
+        report.checks.len()
+    ));
     {
         let mut w = app.w();
-        w.verification_running = false;
-        w.verification = Some(crate::verify::VerificationReport {
-            portal_url: portal,
-            checks,
-            at: crate::util::now_secs(),
-        });
+        w.validation_running = false;
+        w.validation = Some(report);
     }
     ok(&app, None)
+}
+
+async fn output_open(State(app): State<App>) -> ApiResult {
+    let dir = app
+        .w()
+        .build
+        .result
+        .as_ref()
+        .map(|r| std::path::PathBuf::from(&r.dir))
+        .ok_or_else(|| ApiErr::bad("Nothing has been built yet."))?;
+    (app.open_folder)(&dir).map_err(|e| ApiErr::bad(format!("Could not open the folder: {e}")))?;
+    ok(&app, Some(format!("Opened {}.", dir.display())))
 }
 
 fn download(body: String, ctype: &'static str, name: &'static str) -> Response {
@@ -1421,7 +1006,7 @@ async fn summary_json(State(app): State<App>) -> Response {
     download(
         serde_json::to_string_pretty(&v).unwrap_or_default(),
         "application/json",
-        "taro-deployment-summary.json",
+        "taro-provider-build-summary.json",
     )
 }
 
@@ -1430,7 +1015,7 @@ async fn summary_md(State(app): State<App>) -> Response {
     download(
         md,
         "text/markdown; charset=utf-8",
-        "taro-deployment-summary.md",
+        "taro-provider-build-summary.md",
     )
 }
 

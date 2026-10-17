@@ -1,5 +1,6 @@
 # Secret scanning for the enterprise code: the default rules, minus test fixtures that only look
-# like credentials (a throwaway RSA key used to sign test ID tokens).
+# like credentials (a throwaway RSA key used to sign test ID tokens, the shared crypto test vectors,
+# placeholder relay keys in tests and docs) and lockfile checksums.
 [extend]
 useDefault = true
 
@@ -7,4 +8,21 @@ useDefault = true
 description = "test fixtures"
 paths = [
   '''enterprise/apps/api/tests/fixtures/test-rsa\.pem''',
+  '''(^|/)Cargo\.lock$''',
+]
+regexes = [
+  # placeholder keys and tokens used by tests, CI and the setup docs
+  '''test-key-[a-z0-9]+''',
+  '''k3y-0123456789abcdef''',
+  '''acme-admission-key-0123456789''',
+  '''placeholder-key-0123456789''',
+  '''globex-key-0123456789abcdef''',
+  '''0123456789abcdef-_XYZ''',
+  '''github-token-for-tests-0123456789''',
+  '''github-token-noworkflow-0123456789''',
+  '''0123456789abcdef0''',
+  # the PAKE test vector shared by Secure.swift and rm-protocol's shared_vectors test
+  '''3a6365467c85f122da38bf3b7192b081049bbf94ace2a9e0''',
+  # redaction tests: the input must look like a secret
+  '''_test_abc123XYZ''',
 ]

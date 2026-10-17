@@ -4,4 +4,8 @@ ignore = [
   # rsa (Marvin attack): only in Cargo.lock through sqlx's MySQL driver, which is never built
   # (Postgres only); `cargo tree -e all -i rsa --target all` is empty.
   "RUSTSEC-2023-0071",
+  # glib 0.18 (unsound VariantStrIter): only in the Linux (GTK) backend of tao/wry, which
+  # TaroEnterpriseSetup depends on for Windows only ([target.'cfg(windows)']); the lockfile lists
+  # it, nothing here compiles it.
+  "RUSTSEC-2024-0429",
 ]

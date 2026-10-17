@@ -9,18 +9,25 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Format unix seconds as `YYYY-MM-DDTHH:MM:SSZ` (UTC). Strings in this format sort
-/// lexicographically in time order, which is how GitHub's `created_at` values are compared.
-pub fn rfc3339(secs: u64) -> String {
+/// Unix seconds as (year, month, day, hour, minute, second), UTC.
+pub fn civil(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
     let (y, m, d) = civil_from_days(days);
-    format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
-        rem / 3600,
-        (rem % 3600) / 60,
-        rem % 60
+    (
+        y,
+        m,
+        d,
+        (rem / 3600) as u32,
+        ((rem % 3600) / 60) as u32,
+        (rem % 60) as u32,
     )
+}
+
+/// Format unix seconds as `YYYY-MM-DDTHH:MM:SSZ` (UTC).
+pub fn rfc3339(secs: u64) -> String {
+    let (y, m, d, hh, mm, ss) = civil(secs);
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
 }
 
 /// Howard Hinnant's days-to-civil algorithm.
@@ -49,11 +56,15 @@ pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
         .ok()
 }
 
-/// Take the last `n` lines of `text`.
-pub fn tail_lines(text: &str, n: usize) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let start = lines.len().saturating_sub(n);
-    lines[start..].join("\n")
+/// Bytes as "1.2 MB".
+pub fn human_size(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1} MB", n as f64 / 1e6)
+    } else if n >= 1_000 {
+        format!("{:.0} KB", n as f64 / 1e3)
+    } else {
+        format!("{n} bytes")
+    }
 }
 
 #[cfg(test)]
@@ -69,8 +80,9 @@ mod tests {
     }
 
     #[test]
-    fn tail() {
-        assert_eq!(tail_lines("a\nb\nc\nd", 2), "c\nd");
-        assert_eq!(tail_lines("a", 5), "a");
+    fn sizes() {
+        assert_eq!(human_size(12), "12 bytes");
+        assert_eq!(human_size(12_345), "12 KB");
+        assert_eq!(human_size(12_345_678), "12.3 MB");
     }
 }

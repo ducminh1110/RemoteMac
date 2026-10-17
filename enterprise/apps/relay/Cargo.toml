@@ -29,7 +29,7 @@ rand = "0.8"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-pemfile = "2"
+rustls-pki-types = { version = "1", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 subtle = "2"

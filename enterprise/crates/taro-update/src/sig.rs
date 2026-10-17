@@ -25,6 +25,22 @@ impl TrustedKeys {
         Ok(TrustedKeys(keys))
     }
 
+    /// These keys and `other`'s.
+    pub fn merged(&self, other: &TrustedKeys) -> TrustedKeys {
+        let mut v = self.0.clone();
+        for k in &other.0 {
+            if !v.contains(k) {
+                v.push(*k);
+            }
+        }
+        TrustedKeys(v)
+    }
+
+    /// Whether `k` is one of these keys.
+    pub fn contains(&self, k: &VerifyingKey) -> bool {
+        self.0.contains(k)
+    }
+
     pub fn from_keys(keys: Vec<VerifyingKey>) -> TrustedKeys {
         TrustedKeys(keys)
     }

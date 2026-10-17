@@ -249,7 +249,7 @@ fn assert_preserved(before: &[(PathBuf, Vec<u8>)]) {
 
 fn zip_names(p: &Path) -> BTreeSet<String> {
     let z = zip::ZipArchive::new(std::fs::File::open(p).unwrap()).unwrap();
-    z.file_names().map(String::from).collect()
+    z.file_names().map(|n| n.unwrap().to_string()).collect()
 }
 
 #[test]

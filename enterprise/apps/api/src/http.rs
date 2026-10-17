@@ -133,7 +133,11 @@ async fn origin_check(
     }
     let path = req.uri().path();
     // machine endpoints authenticate by what they carry (a Stripe signature, a grant), not a cookie
-    if path.starts_with("/webhooks/") || path == "/api/v1/connect/redeem" {
+    if path.starts_with("/webhooks/")
+        || path == "/api/v1/connect/redeem"
+        || crate::devices::is_app_path(path)
+        || crate::assignments::is_key_request(&req)
+    {
         return next.run(req).await;
     }
     let origin = req
@@ -293,6 +297,13 @@ fn common(state: &AppState, router: Router<AppState>, audience: Audience) -> Rou
             "/_shared",
             ServeDir::new(state.config.web_dir.join("packages/design-tokens")),
         )
+        // the Enterprise console look (as Wizard 1, Wizard 2 and the relay status page) and the
+        // provider's colour for it
+        .nest_service(
+            "/_console",
+            ServeDir::new(state.config.web_dir.join("packages/console")),
+        )
+        .route("/brand/tokens.css", get(crate::branding::tokens_css))
         .layer(middleware::from_fn_with_state(state.clone(), origin_check))
         .layer(middleware::from_fn_with_state(state.clone(), observe))
         .layer(Extension(audience))
@@ -315,11 +326,16 @@ pub fn customer(state: &AppState) -> Router {
         .merge(crate::rentals::routes())
         .merge(crate::connectivity::routes())
         .merge(crate::connectivity::redeem_routes())
+        .merge(crate::devices::routes())
+        .merge(crate::devices::app_routes())
         .merge(crate::billing::routes())
         .merge(crate::billing::webhook_routes())
         .merge(crate::notifications::routes())
         .merge(crate::branding::routes())
         .merge(crate::domains::routes())
+        // the console's machine endpoints are not here (not even as the portal's page)
+        .route("/metrics", axum::routing::any(api_not_found))
+        .route("/internal/{*rest}", axum::routing::any(api_not_found))
         .fallback_service(web(state, "customer-portal"));
     common(state, api, Audience::Customer)
         .layer(middleware::from_fn_with_state(state.clone(), host_check))
@@ -331,6 +347,7 @@ pub fn ops(state: &AppState) -> Router {
     let api = Router::new()
         .merge(crate::identity::routes())
         .merge(crate::ops::routes())
+        .merge(crate::assignments::routes())
         .merge(crate::branding::ops_routes())
         .route("/metrics", get(metrics))
         .route("/internal/tls/ask", get(crate::domains::tls_ask))

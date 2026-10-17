@@ -4,6 +4,7 @@
 // sqlx rows read as tuples are clearer here than a struct per query
 #![allow(clippy::type_complexity)]
 
+pub mod assignments;
 pub mod audit;
 pub mod authz;
 pub mod billing;
@@ -12,6 +13,7 @@ pub mod config;
 pub mod connectivity;
 pub mod crypto;
 pub mod db;
+pub mod devices;
 pub mod domains;
 pub mod error;
 pub mod http;

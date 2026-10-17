@@ -567,6 +567,20 @@ pub(crate) mod http {
         Ok((status as u16, body))
     }
 
+    /// A JSON API call with an optional bearer token; the status and the body, whatever the
+    /// status (the caller reads errors).
+    pub fn call(method: &str, url: &str, bearer: Option<&str>, json: Option<&str>) -> Result<(u16, Vec<u8>), String> {
+        let mut headers = String::from("Accept: application/json\r\n");
+        if json.is_some() {
+            headers.push_str("Content-Type: application/json\r\n");
+        }
+        if let Some(t) = bearer {
+            headers.push_str(&format!("Authorization: Bearer {t}\r\n"));
+        }
+        let (status, body) = request(method, url, &headers, json.map(str::as_bytes), |_, _| {})?;
+        Ok((status as u16, body))
+    }
+
     /// `https://host[:port]/path`, or plain http to this computer only (development).
     fn split(url: &str) -> Result<(bool, String, u16, String), String> {
         let (secure, rest) = match (url.strip_prefix("https://"), url.strip_prefix("http://")) {

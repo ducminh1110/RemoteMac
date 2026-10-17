@@ -4,29 +4,49 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Relay status</title>
-<link rel="stylesheet" href="/common/taro-glass.css">
+<link rel="stylesheet" href="/common/console.css">
 <link rel="stylesheet" href="/assets/app.css">
 <link rel="stylesheet" href="/brand/tokens.css">
 <link rel="stylesheet" href="/brand/theme.css">
 <script type="module" src="/assets/app.js"></script>
 </head>
 <body>
-<div class="stage single" id="stage">
-  <canvas class="wallpaper" aria-hidden="true"></canvas>
-  <section class="glass status" data-glass="card" aria-live="polite">
-    <div class="frost"></div>
+<header class="topnav">
+  <span class="brand"><img src="/brand/logo.png" alt="" width="28" height="28"><span id="product">Relay</span></span>
+  <span class="service">Relay status</span>
+  <span class="spacer"></span>
+  <a class="item" id="support" hidden target="_blank" rel="noreferrer"><span class="i i-help" aria-hidden="true"></span>Support</a>
+</header>
+<div class="layout no-nav">
+  <main class="content" id="main">
     <div class="inner">
-      <img class="logo" src="/brand/logo.png" alt="" width="64" height="64">
-      <h1 id="product">Relay</h1>
-      <p class="state" id="state"><span class="dot" aria-hidden="true"></span><span id="state-text">Checking…</span></p>
-      <dl class="kv">
-        <dt>Address</dt><dd id="addr">–</dd>
-        <dt>Version</dt><dd id="version">–</dd>
-        <dt>Operated by</dt><dd id="vendor">–</dd>
-      </dl>
-      <p class="hint">Use this address in the app your provider gave you. Sessions are end-to-end encrypted between your computer and your Mac.</p>
+      <ol class="breadcrumbs" aria-label="Breadcrumbs"><li id="crumb">Relay</li><li>Status</li></ol>
+      <div class="page-header">
+        <div class="text">
+          <h1 id="host">Relay</h1>
+          <p class="desc">Public status of this relay. Sessions are end-to-end encrypted between your computer and your Mac; the relay never sees their content.</p>
+        </div>
+        <div class="actions"><button class="btn" type="button" id="refresh"><span class="i i-refresh" aria-hidden="true"></span>Refresh</button></div>
+      </div>
+      <section class="container" aria-live="polite">
+        <div class="c-head"><div class="text"><h2>Service health</h2><p class="desc" id="checked">Checking…</p></div></div>
+        <div class="c-body">
+          <dl class="kv cols-4">
+            <div><dt>Status</dt><dd id="state"><span class="status pending"><span class="i i-pending" aria-hidden="true"></span>Checking…</span></dd></div>
+            <div><dt>Endpoint</dt><dd><code id="addr">–</code></dd></div>
+            <div><dt>Version</dt><dd id="version">–</dd></div>
+            <div><dt>Operated by</dt><dd id="vendor">–</dd></div>
+          </dl>
+        </div>
+      </section>
+      <section class="container">
+        <div class="c-head"><div class="text"><h2>Connecting</h2></div></div>
+        <div class="c-body">
+          <p>Use the app your provider gave you: it is already set up for this relay. No account or address needs to be entered by hand.</p>
+        </div>
+      </section>
     </div>
-  </section>
+  </main>
 </div>
 </body>
 </html>

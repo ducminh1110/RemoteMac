@@ -24,7 +24,7 @@ fn req(
     }
     let body = if method == "POST" {
         b = b.header("content-type", "application/json");
-        Body::from("{}")
+        Body::from(r##"{"color":"#123456"}"##)
     } else {
         Body::empty()
     };
@@ -33,7 +33,7 @@ fn req(
 
 #[tokio::test]
 async fn guard_accepts_good_and_rejects_bad_requests() {
-    let w = wizard().await;
+    let w = wizard("guard").await;
     let host = format!("127.0.0.1:{WIZ_PORT}");
     let origin = format!("http://127.0.0.1:{WIZ_PORT}");
 
@@ -45,7 +45,7 @@ async fn guard_accepts_good_and_rejects_bad_requests() {
     let (s, _) = w
         .raw(req(
             "POST",
-            "/api/github/logout",
+            "/api/branding/tokens",
             Some(&host),
             Some(&origin),
             Some(ACCESS),
@@ -63,10 +63,33 @@ async fn guard_accepts_good_and_rejects_bad_requests() {
         .await;
     assert_eq!(s, 200);
     assert!(page.contains("Taro Enterprise Setup"));
+    assert!(!page.contains(ACCESS), "the page must not embed the token");
     let (s, _) = w
         .raw(req("GET", "/assets/app.js", Some(&host), None, None))
         .await;
     assert_eq!(s, 200);
+    // the shared console look, embedded
+    for f in ["console.css", "console.js"] {
+        let (s, body) = w
+            .raw(req("GET", &format!("/common/{f}"), Some(&host), None, None))
+            .await;
+        assert_eq!(s, 200, "{f}");
+        assert!(body.len() > 100, "{f}");
+    }
+    let (s, _) = w
+        .raw(req("GET", "/common/../Cargo.toml", Some(&host), None, None))
+        .await;
+    assert_eq!(s, 404);
+    let (s, _) = w
+        .raw(req(
+            "GET",
+            "/common/console.js",
+            Some("evil.example:1"),
+            None,
+            None,
+        ))
+        .await;
+    assert_eq!(s, 421);
 
     // DNS rebinding: wrong Host values.
     for bad_host in [
@@ -137,7 +160,7 @@ async fn guard_accepts_good_and_rejects_bad_requests() {
         let (s, _) = w
             .raw(req(
                 "POST",
-                "/api/github/logout",
+                "/api/branding/tokens",
                 Some(&host),
                 Some(bad_origin),
                 Some(ACCESS),
@@ -159,7 +182,7 @@ async fn guard_accepts_good_and_rejects_bad_requests() {
     let (s, _) = w
         .raw(req(
             "POST",
-            "/api/github/logout",
+            "/api/branding/tokens",
             Some(&host),
             None,
             Some(ACCESS),
@@ -179,6 +202,38 @@ async fn guard_accepts_good_and_rejects_bad_requests() {
     let (s, _) = w.raw(r).await;
     assert_eq!(s, 403);
 
+    // The reveal endpoint is guarded like every other API call.
+    let (s, _) = w
+        .raw(req(
+            "POST",
+            "/api/relay/key/reveal",
+            Some(&host),
+            Some("http://evil.example.com"),
+            Some(ACCESS),
+        ))
+        .await;
+    assert_eq!(s, 403);
+    let (s, _) = w
+        .raw(req(
+            "POST",
+            "/api/relay/key/reveal",
+            Some(&host),
+            Some(&origin),
+            None,
+        ))
+        .await;
+    assert_eq!(s, 401);
+    let (s, _) = w
+        .raw(req(
+            "GET",
+            "/api/branding/logo/image",
+            Some(&host),
+            None,
+            None,
+        ))
+        .await;
+    assert_eq!(s, 401);
+
     // Rejected responses never echo the token.
     for body in w.responses.lock().unwrap().iter() {
         assert!(!body.contains(ACCESS), "token echoed");
@@ -187,7 +242,7 @@ async fn guard_accepts_good_and_rejects_bad_requests() {
 
 #[tokio::test]
 async fn security_headers_present() {
-    let w = wizard().await;
+    let w = wizard("guard").await;
     let host = format!("127.0.0.1:{WIZ_PORT}");
     let resp = tower::ServiceExt::oneshot(
         w.router.clone(),

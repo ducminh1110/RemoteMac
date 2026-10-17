@@ -50,10 +50,15 @@ func validRelayKey(_ s: String) -> Bool {
     (16...128).contains(s.count) && s.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }
 }
 
+/// What is wrong with a provider.json.
+struct ProviderProblem: Error {
+    let message: String
+}
+
 /// provider.json's fields, or what is wrong with it.
-func parseProvider(_ data: Data) -> Result<ProviderInfo, String> {
-    guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return .failure("provider.json is not valid JSON") }
-    guard root["schema"] as? String == "taro.provider/v1" else { return .failure("schema: must be taro.provider/v1") }
+func parseProvider(_ data: Data) -> Result<ProviderInfo, ProviderProblem> {
+    guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return .failure(ProviderProblem(message: "provider.json is not valid JSON")) }
+    guard root["schema"] as? String == "taro.provider/v1" else { return .failure(ProviderProblem(message: "schema: must be taro.provider/v1")) }
     let product = root["product"] as? [String: Any] ?? [:]
     let relay = root["relay"] as? [String: Any] ?? [:]
     let updates = root["updates"] as? [String: Any] ?? [:]
@@ -62,22 +67,22 @@ func parseProvider(_ data: Data) -> Result<ProviderInfo, String> {
               !s.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
         return s
     }
-    guard let name = plain(product["name"], 40) else { return .failure("product.name: 1-40 characters, no line breaks") }
-    guard let short = plain(product["short_name"], 16) else { return .failure("product.short_name: 1-16 characters") }
-    guard let vendor = plain(product["vendor"], 80) else { return .failure("product.vendor: 1-80 characters, no line breaks") }
-    guard let host = relay["host"] as? String, validRelayHost(host) else { return .failure("relay.host: a DNS name (relay.example.com) or an IP address") }
+    guard let name = plain(product["name"], 40) else { return .failure(ProviderProblem(message: "product.name: 1-40 characters, no line breaks")) }
+    guard let short = plain(product["short_name"], 16) else { return .failure(ProviderProblem(message: "product.short_name: 1-16 characters")) }
+    guard let vendor = plain(product["vendor"], 80) else { return .failure(ProviderProblem(message: "product.vendor: 1-80 characters, no line breaks")) }
+    guard let host = relay["host"] as? String, validRelayHost(host) else { return .failure(ProviderProblem(message: "relay.host: a DNS name (relay.example.com) or an IP address")) }
     // a whole number 1-65535 (not 7470.5, not "7470", not true)
     guard let n = relay["port"] as? NSNumber, CFGetTypeID(n) == CFNumberGetTypeID(), n.doubleValue == Double(n.intValue),
-          (1...65535).contains(n.intValue) else { return .failure("relay.port: 1-65535") }
-    guard let key = relay["key"] as? String, validRelayKey(key) else { return .failure("relay.key: 16-128 letters, digits, dashes or underscores") }
+          (1...65535).contains(n.intValue) else { return .failure(ProviderProblem(message: "relay.port: 1-65535")) }
+    guard let key = relay["key"] as? String, validRelayKey(key) else { return .failure(ProviderProblem(message: "relay.key: 16-128 letters, digits, dashes or underscores")) }
     let clients = updates["clients"] as? String ?? "notify"
-    guard clients == "notify" || clients == "off" else { return .failure("updates.clients: notify or off") }
+    guard clients == "notify" || clients == "off" else { return .failure(ProviderProblem(message: "updates.clients: notify or off")) }
     return .success(ProviderInfo(name: name, shortName: short, vendor: vendor, relayHost: host, relayPort: n.intValue, relayKey: key, updatesOff: clients == "off"))
 }
 
 /// The provider next to this program: nil without a provider/ folder; the program ends with a
 /// clear message when the folder is there but its provider.json is missing or wrong.
-let provider: ProviderInfo? = {
+let provider: ProviderInfo? = { () -> ProviderInfo? in
     let dir = URL(fileURLWithPath: realExecutablePath()).deletingLastPathComponent().appendingPathComponent("provider", isDirectory: true)
     var isDir: ObjCBool = false
     guard FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { return nil }
@@ -86,7 +91,7 @@ let provider: ProviderInfo? = {
     if let data = FileManager.default.contents(atPath: file.path) {
         switch parseProvider(data) {
         case .success(let p): return p
-        case .failure(let e): why = e
+        case .failure(let e): why = e.message
         }
     } else {
         why = "provider.json is missing"

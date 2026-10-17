@@ -10,7 +10,7 @@ rm -rf "$d" && mkdir -p "$d/core/bin" "$d/core/web/relay" "$d/core/share" "$d/pr
 install -m 0755 "$B" "$d/core/bin/taro-relay"
 cp -r apps/relay/web/setup apps/relay/web/status "$d/core/web/relay/"
 mkdir -p "$d/core/web/relay/common"
-cp packages/liquid-glass/liquidglass.js packages/liquid-glass/taro-glass.js packages/liquid-glass/taro-glass.css packages/liquid-glass/LICENSE.md "$d/core/web/relay/common/"
+cp packages/console/console.css packages/console/console.js "$d/core/web/relay/common/"
 cp ../LICENSE "$d/core/share/LICENSE"
 cp ../NOTICE.md "$d/core/share/NOTICE.md"
 install -m 0755 apps/relay/package/install.sh "$d/install.sh"

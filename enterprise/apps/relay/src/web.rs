@@ -23,10 +23,8 @@ pub fn embedded(rel: &str) -> Option<&'static str> {
         "status/index.html" => include_str!("../web/status/index.html"),
         "status/app.css" => include_str!("../web/status/app.css"),
         "status/app.js" => include_str!("../web/status/app.js"),
-        "common/liquidglass.js" => include_str!("../../../packages/liquid-glass/liquidglass.js"),
-        "common/taro-glass.js" => include_str!("../../../packages/liquid-glass/taro-glass.js"),
-        "common/taro-glass.css" => include_str!("../../../packages/liquid-glass/taro-glass.css"),
-        "common/LICENSE.md" => include_str!("../../../packages/liquid-glass/LICENSE.md"),
+        "common/console.css" => include_str!("../../../packages/console/console.css"),
+        "common/console.js" => include_str!("../../../packages/console/console.js"),
         _ => return None,
     })
 }

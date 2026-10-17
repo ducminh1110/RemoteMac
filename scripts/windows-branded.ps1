@@ -16,7 +16,7 @@ $out = "out\branded-client"
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $out, "out\Acme", "out\Broken"
 New-Item -ItemType Directory -Force -Path $out, "out\Acme\provider", "out\Broken\provider" | Out-Null
 $port = 47950
-$key = "acme-ci-key-0123456789abcdef"
+$key = "test-key-aaaaaaaaaaaaaaaa"
 
 # the package, as the provider's wizard builds it
 Copy-Item target\release\remote-mac-viewer.exe out\Acme\Acme.exe
@@ -82,10 +82,21 @@ try {
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
 public struct RECT { public int Left, Top, Right, Bottom; }
+public delegate bool EnumProc(IntPtr h, IntPtr l);
+[DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc f, IntPtr l);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n);
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+public static string Windows(uint want) {
+  var sb = new System.Text.StringBuilder();
+  EnumWindows((h, l) => { uint pid; GetWindowThreadProcessId(h, out pid); if (pid == want) { var c = new System.Text.StringBuilder(256); var t = new System.Text.StringBuilder(256); GetClassName(h, c, 256); GetWindowText(h, t, 256); sb.AppendLine("  " + c + " '" + t + "' visible=" + IsWindowVisible(h)); } return true; }, IntPtr.Zero);
+  return sb.ToString();
+}
 "@
   $cv = Start-Process -PassThru -NoNewWindow -FilePath out\Acme\Acme.exe -RedirectStandardError "$out\viewer-connect.log"
   $h = [IntPtr]::Zero
-  for ($i = 0; $i -lt 120 -and $h -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 250; $h = [WB.U]::FindWindow("RmConnect", $null) }
+  for ($i = 0; $i -lt 120 -and $h -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 250; $h = [WB.U]::FindWindow("RmConnect", [NullString]::Value) }
   if ($h -ne [IntPtr]::Zero) {
     [WB.U]::SetForegroundWindow($h) | Out-Null
     Start-Sleep -Seconds 3
@@ -99,7 +110,8 @@ public struct RECT { public int Left, Top, Right, Bottom; }
     $g.Dispose(); $bmp.Dispose()
     Write-Host "connect window: $out\connect-window.png"
   } else {
-    Write-Host "the connect window did not show (viewer exited: $($cv.HasExited))"; $failed++
+    Write-Host "the connect window did not show (viewer exited: $($cv.HasExited)); its windows:"; $failed++
+    if (-not $cv.HasExited) { Write-Host ([WB.U]::Windows([uint32]$cv.Id)) }
     Get-Content "$out\viewer-connect.log" -ErrorAction SilentlyContinue | Select-Object -First 40
   }
   if (-not $cv.HasExited) { $cv.Kill() }

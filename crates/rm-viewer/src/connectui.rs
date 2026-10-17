@@ -8,6 +8,10 @@
 //! paste, a secure password field (cleared when focused, so a password left from before is not
 //! sent again by mistake).
 //!
+//! A provider's Taro (provider.json names its portal) also has the account bar at the top: Sign
+//! in shows a code and opens the portal, where the user approves it; signed in, the Macs the
+//! user rents from the provider are listed above the ones kept on this PC, each a click away.
+//!
 //! Portable: it draws into a Canvas and takes plain input; connect.rs puts it in a window and
 //! keeps the list (the password and the relay key protected by Windows).
 
@@ -42,6 +46,8 @@ const ROW_GAP: f32 = 8.0;
 const LIST_BOTTOM: f32 = H - 70.0;
 const ADD: (f32, f32, f32, f32) = (W - 52.0, 8.0, 32.0, 28.0);
 const EMPTY_ADD: (f32, f32, f32, f32) = ((W - 160.0) / 2.0, 372.0, 160.0, 36.0);
+/// the provider's account bar
+const ACCT_H: f32 = 56.0;
 /// a password dot's step (DIPs)
 const BULLET: f32 = 10.0;
 
@@ -109,8 +115,41 @@ impl Computer {
     }
 }
 
+pub use crate::enterprise::Rented;
+
+/// The provider's account in Taro (only when provider.json names its portal).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Account {
+    Off,
+    SignedOut,
+    /// this code is waiting for approval in the portal
+    Waiting(String),
+    /// signed in as this address
+    SignedIn(String),
+}
+
+/// Where the provider's sign-in page is (a provider's own app: no Mac without signing in).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Login {
+    /// Continue with Google / Continue with email
+    Choose,
+    /// typing the address
+    Email,
+    /// typing the code mailed to this address
+    Code(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Act {
+    /// a provider's app: mail a sign-in code / check the code typed
+    EmailStart(String),
+    EmailVerify { email: String, code: String },
+    /// sign in to the provider's portal / give up waiting / sign out
+    SignIn,
+    CancelSignIn,
+    SignOut,
+    /// connect to this rented Mac (its rental, from the portal)
+    ConnectRented(String),
     /// connect to this Mac; `key`: the relay's key when it is a relay of one's own ("" none)
     Connect { id: String, password: String, via: Via, key: String },
     /// the list changed: keep it
@@ -159,6 +198,14 @@ pub enum Focus {
     Row(usize),
     /// the demo Mac (during the guided tour)
     Demo,
+    /// the account bar's button, and a rented Mac
+    Account,
+    Rented(usize),
+    /// the sign-in page's buttons
+    Google,
+    Email,
+    Next,
+    Back,
 }
 
 /// The fields: the ID, the password, the relay (by ID), the address (by address), the name, the
@@ -185,6 +232,12 @@ pub enum Hot {
     RowInfo(usize),
     RowRemove(usize),
     Demo,
+    Account,
+    Rented(usize),
+    Google,
+    Email,
+    Next,
+    Back,
 }
 
 /// Which page is shown: the list, or the sheet adding a Mac (None) or editing one.
@@ -257,6 +310,16 @@ pub struct ConnectView {
     keys: bool,
     /// the demo Mac is offered, above the list (during the guided tour)
     demo: bool,
+    /// the provider's account, the Macs rented from it, and the one connecting
+    account: Account,
+    rented: Vec<Rented>,
+    busy_rented: Option<usize>,
+    /// a provider's own app: only its account and the Macs assigned to it (no Macs kept here, no
+    /// +), with a sign-in page while signed out
+    managed: bool,
+    google: bool,
+    login: Login,
+    logo: Option<(usize, Canvas)>,
     hot: Hot,
     down: Hot,
     seg: Anim,
@@ -299,6 +362,13 @@ impl ConnectView {
             scroll: 0.0,
             keys: false,
             demo: false,
+            account: Account::Off,
+            rented: vec![],
+            busy_rented: None,
+            managed: false,
+            google: false,
+            login: Login::Choose,
+            logo: None,
             hot: Hot::None,
             down: Hot::None,
             seg: Anim::at(0.0),
@@ -341,6 +411,175 @@ impl ConnectView {
         &self.computers
     }
 
+    /// The provider's account (the bar at the top; Off: no bar).
+    pub fn set_account(&mut self, a: Account) {
+        if !matches!(a, Account::SignedIn(_)) {
+            self.rented.clear();
+        }
+        if matches!(a, Account::SignedIn(_)) && self.busy_rented.is_none() {
+            // signed in (the email code's request is over): the page's state starts again
+            self.busy = false;
+            self.status = Status::None;
+            self.login = Login::Choose;
+            if self.managed {
+                self.focus = Focus::Account;
+            }
+        }
+        if a == Account::Off && matches!(self.focus, Focus::Account | Focus::Rented(_)) {
+            self.focus = Focus::Add;
+        }
+        self.account = a;
+        self.scroll = self.scroll.min(self.max_scroll());
+    }
+
+    pub fn account(&self) -> &Account {
+        &self.account
+    }
+
+    /// The Macs the signed-in user rents.
+    pub fn set_rented(&mut self, list: Vec<Rented>) {
+        if self.busy_rented.is_some() {
+            return;
+        }
+        self.rented = list;
+        if let Focus::Rented(i) = self.focus {
+            if i >= self.rented.len() {
+                self.focus = Focus::Add;
+            }
+        }
+        self.scroll = self.scroll.min(self.max_scroll());
+    }
+
+    pub fn rented(&self) -> &[Rented] {
+        &self.rented
+    }
+
+    /// A provider's own app: only the account and its Macs (`google`: Google sign-in is offered).
+    pub fn set_managed(&mut self, on: bool, google: bool) {
+        self.managed = on;
+        self.google = google;
+        if on {
+            self.computers.clear();
+            self.demo = false;
+            self.focus = if self.login_page() { self.order()[0] } else { Focus::Account };
+        }
+    }
+
+    pub fn set_google(&mut self, google: bool) {
+        self.google = google;
+    }
+
+    pub fn login(&self) -> &Login {
+        &self.login
+    }
+
+    /// The code was mailed: type it.
+    pub fn email_sent(&mut self, email: &str) {
+        self.busy = false;
+        self.status = Status::None;
+        self.login = Login::Code(email.into());
+        self.fields[ID].set_text("");
+        self.set_focus(Focus::Field(ID));
+    }
+
+    /// The sign-in page is shown (instead of the list).
+    fn login_page(&self) -> bool {
+        self.managed && matches!(self.account, Account::SignedOut | Account::Waiting(_))
+    }
+
+    /// Fields take typing: the sheet's, or the sign-in page's.
+    fn typing(&self) -> bool {
+        self.editing() || self.login_page()
+    }
+
+    fn login_next(&mut self) -> Option<Act> {
+        if self.busy {
+            return None;
+        }
+        match self.login.clone() {
+            Login::Choose => None,
+            Login::Email => {
+                let e = self.fields[NAME].text().trim().to_lowercase();
+                if !e.contains('@') || !e.contains('.') || e.len() < 5 {
+                    self.status = Status::Error("Type your email address.".into());
+                    return None;
+                }
+                self.busy = true;
+                self.since = Instant::now();
+                self.status = Status::Busy("Sending the code…".into());
+                Some(Act::EmailStart(e))
+            }
+            Login::Code(email) => {
+                let c: String = self.fields[ID].text().chars().filter(|c| c.is_ascii_digit()).collect();
+                if c.len() != 6 {
+                    self.status = Status::Error("Type the 6-digit code from the mail.".into());
+                    return None;
+                }
+                self.busy = true;
+                self.since = Instant::now();
+                self.status = Status::Busy("Signing in…".into());
+                Some(Act::EmailVerify { email, code: c })
+            }
+        }
+    }
+
+    fn login_back(&mut self) {
+        self.busy = false;
+        self.status = Status::None;
+        self.login = match self.login {
+            Login::Code(_) => Login::Email,
+            _ => Login::Choose,
+        };
+        let f = if self.login == Login::Email { Focus::Field(NAME) } else { self.order()[0] };
+        self.set_focus(f);
+    }
+
+    fn login_email(&mut self) {
+        self.status = Status::None;
+        self.login = Login::Email;
+        self.set_focus(Focus::Field(NAME));
+    }
+
+    fn login_google(&mut self) -> Option<Act> {
+        if self.busy || !self.google {
+            return None;
+        }
+        self.status = Status::None;
+        Some(Act::SignIn)
+    }
+
+    // the sign-in page's places (DIPs): the card and its rows
+    fn card(&self) -> (f32, f32, f32, f32) {
+        (self.p(32.0), self.p(300.0), self.p(W - 64.0), self.p(236.0))
+    }
+
+    fn login_button(&self, row: usize) -> (f32, f32, f32, f32) {
+        let (x, y, w, _) = self.card();
+        (x + self.p(24.0), y + self.p(24.0 + row as f32 * 72.0), w - self.p(48.0), self.p(44.0))
+    }
+
+    /// "Continue with email" (under Google and "OR" when Google is offered)
+    fn email_button(&self) -> (f32, f32, f32, f32) {
+        let (x, y, w, _) = self.card();
+        (x + self.p(24.0), y + self.p(if self.google { 104.0 } else { 70.0 }), w - self.p(48.0), self.p(44.0))
+    }
+
+    /// Continue / Sign in, under the field
+    fn next_button(&self) -> (f32, f32, f32, f32) {
+        let (x, y, w, _) = self.card();
+        (x + self.p(24.0), y + self.p(126.0), w - self.p(48.0), self.p(44.0))
+    }
+
+    fn login_field(&self) -> (f32, f32, f32, f32) {
+        let (x, y, w, _) = self.card();
+        (x + self.p(24.0), y + self.p(62.0), w - self.p(48.0), self.p(FH))
+    }
+
+    /// Nothing to list: "No Computers" (and the big Add button).
+    fn empty(&self) -> bool {
+        self.computers.is_empty() && self.rented.is_empty()
+    }
+
     pub fn page(&self) -> Page {
         self.page
     }
@@ -354,6 +593,7 @@ impl ConnectView {
     /// password field empty, to type it again; anything else is said on the Mac's row.
     pub fn fail(&mut self, why: &str) {
         self.busy = false;
+        self.busy_rented = None;
         self.status = Status::Error(why.into());
         let Some(i) = self.busy_row.take() else { return };
         if why.to_lowercase().contains("password") {
@@ -537,6 +777,39 @@ impl ConnectView {
         Some(Act::Connect { id: String::new(), password: String::new(), via: Via::Demo, key: String::new() })
     }
 
+    /// Connect to rented Mac `i` (connect.rs asks the portal for its ID and password).
+    fn connect_rented(&mut self, i: usize) -> Option<Act> {
+        if self.busy {
+            return None;
+        }
+        let r = self.rented.get(i)?.clone();
+        self.set_focus(Focus::Rented(i));
+        if !r.ready {
+            self.status = Status::Error(format!("{} cannot be connected to yet: {}.", r.name, r.state.to_lowercase()));
+            return None;
+        }
+        self.busy = true;
+        self.busy_rented = Some(i);
+        self.busy_row = None;
+        self.since = Instant::now();
+        self.status = Status::Busy("Getting the Mac ready…".into());
+        Some(Act::ConnectRented(r.rental))
+    }
+
+    /// The account bar's button: Sign in, Cancel (while waiting) or Sign out.
+    fn account_act(&mut self) -> Option<Act> {
+        match self.account {
+            Account::Off => None,
+            Account::SignedOut => {
+                self.clear_error();
+                Some(Act::SignIn)
+            }
+            Account::Waiting(_) => Some(Act::CancelSignIn),
+            Account::SignedIn(_) if !self.busy => Some(Act::SignOut),
+            Account::SignedIn(_) => None,
+        }
+    }
+
     /// The ⓧ of Mac `i`: once to ask, twice to remove it.
     fn remove(&mut self, i: usize) -> Option<Act> {
         if self.busy || i >= self.computers.len() {
@@ -587,11 +860,24 @@ impl ConnectView {
     /// Tab's order: on the list the + and the Macs; on the sheet the fields, "custom relay", the
     /// segmented control, Save, Cancel.
     fn order(&self) -> Vec<Focus> {
+        if self.login_page() {
+            return match (&self.login, &self.account) {
+                (_, Account::Waiting(_)) => vec![Focus::Account],
+                (Login::Choose, _) if self.google => vec![Focus::Google, Focus::Email],
+                (Login::Choose, _) => vec![Focus::Email],
+                (Login::Email, _) => vec![Focus::Field(NAME), Focus::Next, Focus::Back],
+                (Login::Code(_), _) => vec![Focus::Field(ID), Focus::Next, Focus::Back],
+            };
+        }
         if !self.editing() {
-            let mut o = vec![Focus::Add];
+            let mut o = if self.managed { vec![] } else { vec![Focus::Add] };
             if self.demo {
                 o.push(Focus::Demo);
             }
+            if self.account != Account::Off {
+                o.push(Focus::Account);
+            }
+            o.extend((0..self.rented.len()).map(Focus::Rented));
             o.extend((0..self.computers.len()).map(Focus::Row));
             return o;
         }
@@ -604,6 +890,9 @@ impl ConnectView {
     }
 
     fn field_rect(&self, i: usize) -> (f32, f32, f32, f32) {
+        if self.login_page() {
+            return self.login_field();
+        }
         let row = self.rows().iter().position(|&r| r == i).unwrap_or(0);
         (self.p(FX), self.p(FIELD_Y0 + row as f32 * FIELD_STEP), self.p(FW), self.p(FH))
     }
@@ -627,7 +916,7 @@ impl ConnectView {
     }
 
     fn add_rect(&self) -> (f32, f32, f32, f32) {
-        if self.computers.is_empty() {
+        if self.empty() {
             (self.p(EMPTY_ADD.0), self.p(EMPTY_ADD.1), self.p(EMPTY_ADD.2), self.p(EMPTY_ADD.3))
         } else {
             (self.p(ADD.0), self.p(ADD.1), self.p(ADD.2), self.p(ADD.3))
@@ -639,9 +928,46 @@ impl ConnectView {
         (self.p(ADD.0), self.p(ADD.1), self.p(ADD.2), self.p(ADD.3))
     }
 
-    /// Where the first Mac's row is (lower when the demo Mac is offered above it).
+    /// Where the scrolling list starts (DIPs): under the demo Mac and the account bar.
+    fn fixed_top(&self) -> f32 {
+        ROW_Y0 + if self.demo { ROW_H + ROW_GAP } else { 0.0 } + if self.account != Account::Off { ACCT_H + ROW_GAP } else { 0.0 }
+    }
+
+    /// Where the first kept Mac's row is (DIPs): under the rented ones.
     fn rows_y0(&self) -> f32 {
-        ROW_Y0 + if self.demo { ROW_H + ROW_GAP } else { 0.0 }
+        self.fixed_top() + self.rented.len() as f32 * (ROW_H + ROW_GAP)
+    }
+
+    /// The account bar (it does not scroll).
+    fn account_rect(&self) -> (f32, f32, f32, f32) {
+        let y = ROW_Y0 + if self.demo { ROW_H + ROW_GAP } else { 0.0 };
+        (self.p(ROW_X), self.p(y), self.p(W - 2.0 * ROW_X), self.p(ACCT_H))
+    }
+
+    fn account_label(&self) -> &'static str {
+        match self.account {
+            Account::Waiting(_) => "Cancel",
+            Account::SignedIn(_) => "Sign out",
+            _ => "Sign in",
+        }
+    }
+
+    /// The bar's button, at its right.
+    fn account_button(&self) -> (f32, f32, f32, f32) {
+        let (x, y, w, h) = self.account_rect();
+        let bw = self.p(if matches!(self.account, Account::SignedOut) { 88.0 } else { 84.0 });
+        let bh = self.p(30.0);
+        (x + w - bw - self.p(12.0), y + (h - bh) / 2.0, bw, bh)
+    }
+
+    /// Rented Mac `i`'s row (above the kept ones; it scrolls with them).
+    fn rented_rect(&self, i: usize) -> (f32, f32, f32, f32) {
+        (self.p(ROW_X), self.p(self.fixed_top() + i as f32 * (ROW_H + ROW_GAP)) - self.scroll, self.p(W - 2.0 * ROW_X), self.p(ROW_H))
+    }
+
+    /// A row rectangle is at least partly in the list's view.
+    fn shown(&self, r: (f32, f32, f32, f32)) -> bool {
+        r.1 + r.3 > self.p(self.fixed_top() - 8.0) && r.1 < self.p(LIST_BOTTOM)
     }
 
     fn row_rect(&self, i: usize) -> (f32, f32, f32, f32) {
@@ -674,15 +1000,17 @@ impl ConnectView {
 
     /// Mac `i`'s row is at least partly in the list's view.
     fn row_shown(&self, i: usize) -> bool {
-        let (_, y, _, h) = self.row_rect(i);
-        y + h > self.p(self.rows_y0() - 8.0) && y < self.p(LIST_BOTTOM)
+        self.shown(self.row_rect(i))
     }
 
     /// The list scrolled so Mac `i` is in view.
     fn reveal_row(&mut self, i: usize) {
-        let (_, y, _, h) = self.row_rect(i);
-        if y < self.p(self.rows_y0()) {
-            self.scroll -= self.p(self.rows_y0()) - y;
+        self.reveal_rect(self.row_rect(i));
+    }
+
+    fn reveal_rect(&mut self, (_, y, _, h): (f32, f32, f32, f32)) {
+        if y < self.p(self.fixed_top()) {
+            self.scroll -= self.p(self.fixed_top()) - y;
         } else if y + h > self.p(LIST_BOTTOM) {
             self.scroll += y + h - self.p(LIST_BOTTOM);
         }
@@ -693,9 +1021,10 @@ impl ConnectView {
     pub fn probe(&self) -> TourProbe {
         let typed = if self.by_address { ADDRESS } else { ID };
         let first = if self.computers.is_empty() { (0.0, 0.0, 0.0, 0.0) } else { self.row_rect(0) };
+        let empty = self.empty();
         TourProbe {
             demo: if self.demo { self.demo_rect() } else { (0.0, 0.0, 0.0, 0.0) },
-            add: if self.computers.is_empty() { self.add_rect() } else { self.plus_rect() },
+            add: if empty { self.add_rect() } else { self.plus_rect() },
             id: self.field_rect(typed),
             password: self.field_rect(PASSWORD),
             save: self.connect_rect(),
@@ -730,15 +1059,42 @@ impl ConnectView {
                 return Hot::Lights((l != Light::Zoom).then_some(l));
             }
         }
+        if self.login_page() {
+            if matches!(self.account, Account::Waiting(_)) {
+                return if inside(self.login_button(1)) { Hot::Account } else { Hot::None };
+            }
+            return match self.login {
+                Login::Choose if self.google && inside(self.login_button(0)) => Hot::Google,
+                Login::Choose if inside(self.email_button()) => Hot::Email,
+                Login::Email | Login::Code(_) if inside(self.login_field()) => Hot::Field(if self.login == Login::Email { NAME } else { ID }),
+                Login::Email | Login::Code(_) if inside(self.next_button()) => Hot::Next,
+                Login::Email | Login::Code(_) if inside(self.back_rect()) => Hot::Back,
+                _ => Hot::None,
+            };
+        }
         if !self.editing() {
-            if inside(self.add_rect()) || inside(self.plus_rect()) {
+            if !self.managed && (inside(self.add_rect()) || inside(self.plus_rect())) {
                 return Hot::Add;
             }
             if self.demo && inside(self.demo_rect()) {
                 return Hot::Demo;
             }
-            if y < self.p(self.rows_y0() - 8.0) || y >= self.p(LIST_BOTTOM) {
+            if self.account != Account::Off {
+                if inside(self.account_button()) {
+                    return Hot::Account;
+                }
+                if inside(self.account_rect()) {
+                    return Hot::None;
+                }
+            }
+            if y < self.p(self.fixed_top() - 8.0) || y >= self.p(LIST_BOTTOM) {
                 return Hot::None;
+            }
+            for i in 0..self.rented.len() {
+                let r = self.rented_rect(i);
+                if self.shown(r) && inside(r) {
+                    return Hot::Rented(i);
+                }
             }
             for i in 0..self.computers.len() {
                 if !self.row_shown(i) || !inside(self.row_rect(i)) {
@@ -832,7 +1188,7 @@ impl ConnectView {
                 self.fields[i].place(c, shift);
                 self.drag = Some(i);
             }
-            Hot::Connect | Hot::Cancel | Hot::Add => self.press.retarget(0.96, Duration::from_millis(120), GIVE),
+            Hot::Connect | Hot::Cancel | Hot::Add | Hot::Account | Hot::Google | Hot::Email | Hot::Next => self.press.retarget(0.96, Duration::from_millis(120), GIVE),
             _ => {}
         }
         if !matches!(self.hot, Hot::RowRemove(_)) {
@@ -851,7 +1207,7 @@ impl ConnectView {
         self.mouse_move(x, y);
         self.drag = None;
         let down = std::mem::replace(&mut self.down, Hot::None);
-        if matches!(down, Hot::Connect | Hot::Cancel | Hot::Add) {
+        if matches!(down, Hot::Connect | Hot::Cancel | Hot::Add | Hot::Account | Hot::Google | Hot::Email | Hot::Next) {
             self.press.retarget(1.0, Duration::from_millis(400), BACK);
         }
         if down != self.hot {
@@ -889,6 +1245,18 @@ impl ConnectView {
             }
             Hot::RowRemove(i) => self.remove(i),
             Hot::Demo => self.connect_demo(),
+            Hot::Account => self.account_act(),
+            Hot::Rented(i) => self.connect_rented(i),
+            Hot::Google => self.login_google(),
+            Hot::Email => {
+                self.login_email();
+                None
+            }
+            Hot::Next => self.login_next(),
+            Hot::Back => {
+                self.login_back();
+                None
+            }
             _ => None,
         }
     }
@@ -949,28 +1317,64 @@ impl ConnectView {
                 match next {
                     Focus::Field(f) => self.fields[f].select_all(),
                     Focus::Row(r) => self.reveal_row(r),
+                    Focus::Rented(r) => self.reveal_rect(self.rented_rect(r)),
                     _ => {}
                 }
                 return None;
             }
-            Key::New if !self.busy => {
+            Key::New if !self.busy && !self.managed => {
                 self.open(None);
                 return None;
             }
             _ => {}
         }
+        if self.login_page() {
+            match (k, self.focus) {
+                (Key::Enter, Focus::Field(_) | Focus::Next) | (Key::Space, Focus::Next) => return self.login_next(),
+                (Key::Enter | Key::Space, Focus::Google) => return self.login_google(),
+                (Key::Enter | Key::Space, Focus::Email) => self.login_email(),
+                (Key::Enter | Key::Space, Focus::Back) | (Key::Escape, _) => self.login_back(),
+                (Key::Enter | Key::Space, Focus::Account) => return self.account_act(),
+                (_, Focus::Field(i)) => {
+                    let f = &mut self.fields[i];
+                    match k {
+                        Key::Left => f.go(if ctrl { Move::WordLeft } else { Move::Left }, shift),
+                        Key::Right => f.go(if ctrl { Move::WordRight } else { Move::Right }, shift),
+                        Key::Home | Key::Up => f.go(Move::Home, shift),
+                        Key::End | Key::Down => f.go(Move::End, shift),
+                        Key::Backspace => f.backspace(ctrl),
+                        Key::Delete => f.delete(ctrl),
+                        Key::SelectAll => f.select_all(),
+                        Key::Copy => return f.copied().map(Act::Copy),
+                        Key::Cut => return f.cut().map(Act::Copy),
+                        _ => {}
+                    }
+                    self.clear_error();
+                }
+                _ => {}
+            }
+            return None;
+        }
         if !self.editing() {
             let n = self.computers.len();
+            // Up and Down walk Tab's order: the +, the demo Mac, the account, the rented Macs,
+            // the kept ones
+            let order = self.order();
+            let at = order.iter().position(|f| *f == self.focus);
             match (k, self.focus) {
-                (Key::Down, Focus::Add) if self.demo => self.set_focus(Focus::Demo),
-                (Key::Down, Focus::Demo) if n > 0 => self.set_focus(Focus::Row(0)),
-                (Key::Up, Focus::Demo) => self.set_focus(Focus::Add),
-                (Key::Up, Focus::Row(0)) if self.demo => self.set_focus(Focus::Demo),
+                (Key::Down, _) => {
+                    if let Some(&f) = at.and_then(|i| order.get(i + 1)) {
+                        self.set_focus(f);
+                    }
+                }
+                (Key::Up, _) => {
+                    if let Some(&f) = at.and_then(|i| i.checked_sub(1)).and_then(|i| order.get(i)) {
+                        self.set_focus(f);
+                    }
+                }
                 (Key::Enter | Key::Space, Focus::Demo) => return self.connect_demo(),
-                (Key::Down, Focus::Add) if n > 0 => self.set_focus(Focus::Row(0)),
-                (Key::Down, Focus::Row(r)) if r + 1 < n => self.set_focus(Focus::Row(r + 1)),
-                (Key::Up, Focus::Row(0)) => self.set_focus(Focus::Add),
-                (Key::Up, Focus::Row(r)) => self.set_focus(Focus::Row(r - 1)),
+                (Key::Enter | Key::Space, Focus::Account) => return self.account_act(),
+                (Key::Enter | Key::Space, Focus::Rented(r)) => return self.connect_rented(r),
                 (Key::Home, _) if n > 0 => self.set_focus(Focus::Row(0)),
                 (Key::End, _) if n > 0 => self.set_focus(Focus::Row(n - 1)),
                 (Key::Enter | Key::Space, Focus::Row(r)) => return self.connect(r),
@@ -979,8 +1383,10 @@ impl ConnectView {
                 (Key::Escape, _) => self.confirm = None,
                 _ => {}
             }
-            if let Focus::Row(r) = self.focus {
-                self.reveal_row(r);
+            match self.focus {
+                Focus::Row(r) => self.reveal_row(r),
+                Focus::Rented(r) => self.reveal_rect(self.rented_rect(r)),
+                _ => {}
             }
             return None;
         }
@@ -1041,7 +1447,7 @@ impl ConnectView {
 
     /// Typed text goes to the field with the focus.
     pub fn char(&mut self, c: char) {
-        if c.is_control() || !self.editing() {
+        if c.is_control() || !self.typing() {
             return;
         }
         if let Focus::Field(i) = self.focus {
@@ -1052,7 +1458,7 @@ impl ConnectView {
     }
 
     pub fn paste(&mut self, s: &str) {
-        if !self.editing() {
+        if !self.typing() {
             return;
         }
         if let Focus::Field(i) = self.focus {
@@ -1066,7 +1472,7 @@ impl ConnectView {
     /// When the next frame is due: soon while something moves, at the caret's next blink, or
     /// never (nothing changes until the user does something).
     pub fn next_frame(&self, now: Instant) -> Option<Duration> {
-        let moving = !self.seg.done_at(now) || !self.ring.done_at(now) || !self.press.done_at(now) || !self.flip.done_at(now) || !self.reveal.done_at(now) || matches!(self.status, Status::Busy(_));
+        let moving = !self.seg.done_at(now) || !self.ring.done_at(now) || !self.press.done_at(now) || !self.flip.done_at(now) || !self.reveal.done_at(now) || matches!(self.status, Status::Busy(_)) || matches!(self.account, Account::Waiting(_));
         if moving {
             return Some(Duration::from_millis(16));
         }
@@ -1223,28 +1629,46 @@ impl ConnectView {
 
     /// The list of Macs (or "No Computers").
     fn render_list(&mut self, now: Instant) -> Canvas {
+        if self.login_page() {
+            return self.render_login(now);
+        }
         let t = theme(self.dark);
         let s = self.s;
         let mut c = self.background(false);
         let on_list = !self.editing();
-        // the toolbar's +
-        let (ax, ay, aw, ah) = self.plus_rect();
-        let k = if on_list && !self.computers.is_empty() { self.press_of(Hot::Add, now) } else { 1.0 };
+        // the toolbar's + (a provider's app has none: its Macs are assigned to the account)
+        let (ax, ay, aw, ah) = if self.managed { (-1000.0, 0.0, 1.0, 1.0) } else { self.plus_rect() };
+        let k = if on_list && !self.empty() { self.press_of(Hot::Add, now) } else { 1.0 };
         let (aw2, ah2) = (aw * k, ah * k);
         let (ax2, ay2) = (ax + (aw - aw2) / 2.0, ay + (ah - ah2) / 2.0);
         let pressed = on_list && self.down == Hot::Add && self.hot == Hot::Add;
         self.glass(&mut c, 3, ax2, ay2, aw2, ah2, Kind::Control, pressed);
-        if on_list && self.hot == Hot::Add && !pressed && !self.computers.is_empty() {
+        if on_list && self.hot == Hot::Add && !pressed && !self.empty() {
             c.fill_round_rect(ax2, ay2, aw2, ah2, ah2 / 2.0, Rgba::WHITE.alpha(0.18));
         }
         look::symbol(&mut c, Symbol::Plus, ax + aw / 2.0, ay + ah / 2.0, self.p(14.0), t.text);
-        if on_list && self.keys && self.focus == Focus::Add && !self.computers.is_empty() {
+        if on_list && self.keys && self.focus == Focus::Add && !self.empty() {
             self.focus_ring(&mut c, ax, ay, aw, ah, ah / 2.0, now, &t);
         }
         if self.demo {
             self.draw_demo(&mut c, now, &t);
         }
-        if self.computers.is_empty() {
+        if self.account != Account::Off {
+            self.draw_account(&mut c, now, &t);
+        }
+        if self.empty() && self.managed {
+            let cx = self.w as f32 / 2.0;
+            look::mac_icon(&mut c, cx, self.p(250.0), self.p(118.0), self.dark);
+            let m = self.text("No Mac yet", 20.0, 700, self.p(380.0));
+            Self::put(&mut c, &m, cx - m.1 as f32 / 2.0, self.p(318.0), t.text);
+            for (n, l) in text::wrap(&format!("When {} assigns you a Mac, it shows here.", crate::brand::name()), Style::dip(13.0, 400, s), self.p(320.0), 2).iter().enumerate() {
+                let m = self.text(l, 13.0, 400, self.p(340.0));
+                Self::put(&mut c, &m, cx - m.1 as f32 / 2.0, self.p(348.0 + n as f32 * 17.0), t.text2);
+            }
+            if let Status::Error(why) = self.status.clone() {
+                self.error_line(&mut c, &why, self.p(H - 52.0), &t);
+            }
+        } else if self.empty() {
             let cx = self.w as f32 / 2.0;
             look::mac_icon(&mut c, cx, self.p(228.0), self.p(118.0), self.dark);
             let m = self.text("No Computers", 20.0, 700, self.p(380.0));
@@ -1261,8 +1685,13 @@ impl ConnectView {
             }
         } else {
             // the rows, clipped to the list
-            let (top, bottom) = (self.p(self.rows_y0() - 8.0), self.p(LIST_BOTTOM));
+            let (top, bottom) = (self.p(self.fixed_top() - 8.0), self.p(LIST_BOTTOM));
             let mut list = Canvas::new(self.w, (bottom - top).ceil().max(1.0) as usize);
+            for i in 0..self.rented.len() {
+                if self.shown(self.rented_rect(i)) {
+                    self.draw_rented(&mut list, i, top, now, &t);
+                }
+            }
             for i in 0..self.computers.len() {
                 if self.row_shown(i) {
                     self.draw_row(&mut list, i, top, now, &t);
@@ -1274,7 +1703,13 @@ impl ConnectView {
             match self.status.clone() {
                 Status::Error(why) if self.busy_row.is_none() && !self.editing() => self.error_line(&mut c, &why, y, &t),
                 _ => {
-                    let hint = if self.busy { "Connecting to your Mac…" } else { "Click a Mac to connect. Point at it to edit or remove it." };
+                    let hint = if self.busy {
+                        "Connecting to your Mac…"
+                    } else if self.computers.is_empty() {
+                        "Click a Mac to connect."
+                    } else {
+                        "Click a Mac to connect. Point at it to edit or remove it."
+                    };
                     let m = self.text(hint, 12.0, 400, self.p(FW));
                     Self::put(&mut c, &m, (self.w as f32 - m.1 as f32) / 2.0, y, t.text3);
                 }
@@ -1353,7 +1788,7 @@ impl ConnectView {
         let r = self.p(14.0);
         let on_list = !self.editing();
         let hot = on_list && self.hot == Hot::Demo;
-        let busy = self.busy && self.busy_row.is_none();
+        let busy = self.busy && self.busy_row.is_none() && self.busy_rented.is_none();
         c.shadow(x, y, w, h, r, self.p(10.0), self.p(3.0), t.accent.alpha(if self.dark { 0.35 } else { 0.22 }));
         // (Taro's violet runs into its blue; a provider's colour into a deeper shade of itself)
         let end = if crate::brand::get().is_provider() { t.accent.shade(-0.2) } else { t.accent.lerp(Rgba::rgb(0x2b, 0x7b, 0xff), 0.45) };
@@ -1379,6 +1814,195 @@ impl ConnectView {
         }
         if on_list && self.keys && self.focus == Focus::Demo {
             self.focus_ring(c, x, y, w, h, r, now, t);
+        }
+    }
+
+    /// The "Back" link of the email and code steps.
+    fn back_rect(&self) -> (f32, f32, f32, f32) {
+        let (x, y, _, h) = self.card();
+        (x + self.p(24.0), y + h - self.p(40.0), self.p(140.0), self.p(26.0))
+    }
+
+    /// A provider's app, signed out: its logo, its name and the ways to sign in, as a card.
+    fn render_login(&mut self, now: Instant) -> Canvas {
+        let t = theme(self.dark);
+        let mut c = self.background(false);
+        let cx = self.w as f32 / 2.0;
+        // the provider's icon
+        let n = self.p(84.0).round() as usize;
+        if self.logo.as_ref().is_none_or(|(k, _)| *k != n) {
+            self.logo = Some((n, crate::brand::icon(n)));
+        }
+        if let Some((_, icon)) = &self.logo {
+            let icon = icon.clone();
+            c.composite(&icon, (cx - n as f32 / 2.0).round() as isize, self.p(86.0).round() as isize, 1.0);
+        }
+        let name = crate::brand::name();
+        let m = self.text(name, 30.0, 700, self.p(W - 48.0));
+        Self::put(&mut c, &m, cx - m.1 as f32 / 2.0, self.p(190.0), t.text);
+        let m = self.text("Sign in to connect to your Macs", 15.0, 400, self.p(W - 48.0));
+        Self::put(&mut c, &m, cx - m.1 as f32 / 2.0, self.p(240.0), t.text2);
+        // the card
+        let (x, y, w, h) = self.card();
+        let r = self.p(22.0);
+        let (fill, line) = if self.dark { (Rgba::WHITE.alpha(0.06), Rgba::WHITE.alpha(0.12)) } else { (Rgba::WHITE.alpha(0.92), Rgba::rgba(20, 40, 80, 24)) };
+        c.shadow(x, y, w, h, r, self.p(18.0), self.p(6.0), Rgba::BLACK.alpha(if self.dark { 0.3 } else { 0.06 }));
+        c.fill_round_rect(x - 0.5 * self.s, y - 0.5 * self.s, w + self.s, h + self.s, r + 0.5 * self.s, line);
+        c.fill_round_rect(x, y, w, h, r, fill);
+        let on = true;
+        let ring = |v: &Self, c: &mut Canvas, f: Focus, rect: (f32, f32, f32, f32)| {
+            if on && v.keys && v.focus == f {
+                v.focus_ring(c, rect.0, rect.1, rect.2, rect.3, rect.3 / 2.0, now, &t);
+            }
+        };
+        match (&self.account, self.login.clone()) {
+            (Account::Waiting(code), _) => {
+                let code = code.clone();
+                look::spinner(&mut c, cx - self.p(110.0), y + self.p(46.0), self.p(16.0), t.accent, now.saturating_duration_since(self.since).as_secs_f32());
+                let m = self.text("Continue in your browser", 15.0, 600, w - self.p(60.0));
+                Self::put(&mut c, &m, cx - self.p(94.0), y + self.p(36.0), t.text);
+                let m = self.text(&format!("Code {code}"), 13.0, 500, w - self.p(48.0));
+                Self::put(&mut c, &m, cx - m.1 as f32 / 2.0, y + self.p(70.0), t.text2);
+                let b = self.login_button(1);
+                let k = self.press_of(Hot::Account, now);
+                self.button(&mut c, 6, Hot::Account, "Cancel", Kind::Control, b, k, false);
+                ring(self, &mut c, Focus::Account, b);
+            }
+            (_, Login::Choose) => {
+                let mut row = 0;
+                if self.google {
+                    let b = self.login_button(0);
+                    let k = self.press_of(Hot::Google, now);
+                    self.button(&mut c, 6, Hot::Google, "Continue with Google", Kind::Control, b, k, false);
+                    ring(self, &mut c, Focus::Google, b);
+                    let m = self.text("OR", 12.0, 500, self.p(60.0));
+                    Self::put(&mut c, &m, cx - m.1 as f32 / 2.0, y + self.p(84.0), t.text3);
+                    row = 2;
+                }
+                let _ = row;
+                let b = self.email_button();
+                let k = self.press_of(Hot::Email, now);
+                self.button(&mut c, 7, Hot::Email, "Continue with email", Kind::Accent, b, k, false);
+                ring(self, &mut c, Focus::Email, b);
+                let note = match crate::brand::get().vendor() {
+                    Some(v) => format!("By continuing you sign in to your {v} account."),
+                    None => format!("By continuing you sign in to your {name} account."),
+                };
+                for (i, l) in text::wrap(&note, Style::dip(12.0, 400, self.s), w - self.p(48.0), 2).iter().enumerate() {
+                    let m = self.text(l, 12.0, 400, w - self.p(48.0));
+                    Self::put(&mut c, &m, cx - m.1 as f32 / 2.0, y + h - self.p(48.0) + i as f32 * self.p(16.0), t.text3);
+                }
+            }
+            (_, step) => {
+                let (title, field, ph, sym) = match &step {
+                    Login::Code(e) => (format!("Type the code sent to {e}"), ID, "6-digit code", Symbol::Lock),
+                    _ => ("Your email address".to_string(), NAME, "name@company.com", Symbol::Globe),
+                };
+                let m = self.text(&title, 14.0, 600, w - self.p(48.0));
+                Self::put(&mut c, &m, x + self.p(24.0), y + self.p(30.0), t.text);
+                self.draw_field(&mut c, field, ph, sym, now, &t);
+                let b = self.next_button();
+                let k = self.press_of(Hot::Next, now);
+                let label = if matches!(step, Login::Code(_)) { "Sign in" } else { "Continue" };
+                self.button(&mut c, 7, Hot::Next, label, Kind::Accent, b, k, self.busy);
+                ring(self, &mut c, Focus::Next, b);
+                let br = self.back_rect();
+                let m = self.text("‹ Back", 13.0, 500, br.2);
+                Self::put(&mut c, &m, br.0, br.1 + (br.3 - m.2 as f32) / 2.0, if self.hot == Hot::Back { t.accent } else { t.text2 });
+            }
+        }
+        match self.status.clone() {
+            Status::Error(why) => self.error_line(&mut c, &why, self.p(H - 52.0), &t),
+            Status::Busy(l) => {
+                let m = self.text(&l, 12.0, 500, self.p(FW));
+                Self::put(&mut c, &m, cx - m.1 as f32 / 2.0, self.p(H - 52.0), t.text2);
+            }
+            Status::None => {}
+        }
+        c
+    }
+
+    /// The provider's account bar: who is signed in, the code waiting for approval, or Sign in.
+    fn draw_account(&mut self, c: &mut Canvas, now: Instant, t: &Theme) {
+        let (x, y, w, h) = self.account_rect();
+        let r = self.p(14.0);
+        let (fill, line) = if self.dark { (Rgba::WHITE.alpha(0.06), Rgba::WHITE.alpha(0.12)) } else { (Rgba::WHITE.alpha(0.7), Rgba::rgba(20, 40, 80, 22)) };
+        c.fill_round_rect(x - 0.5 * self.s, y - 0.5 * self.s, w + self.s, h + self.s, r + 0.5 * self.s, line);
+        c.fill_round_rect(x, y, w, h, r, fill);
+        let (bx, _, _, _) = self.account_button();
+        let tx = x + self.p(16.0);
+        let room = bx - tx - self.p(10.0);
+        let provider = crate::brand::name();
+        let (title, sub) = match &self.account {
+            Account::SignedIn(email) => (format!("Signed in to {provider}"), email.clone()),
+            Account::Waiting(code) => (format!("Code {code}"), "Approve it in your browser, then come back".to_string()),
+            _ => (format!("Your {provider} account"), "Sign in to see the Macs you rent".to_string()),
+        };
+        let waiting = matches!(self.account, Account::Waiting(_));
+        let title_x = if waiting { tx + self.p(22.0) } else { tx };
+        if waiting {
+            look::spinner(c, tx + self.p(7.0), y + self.p(19.0), self.p(14.0), t.accent, now.saturating_duration_since(self.since).as_secs_f32());
+        }
+        let m = self.text(&title, 14.0, if waiting { 700 } else { 600 }, room);
+        Self::put(c, &m, title_x, y + self.p(10.0), t.text);
+        let m = self.text(&sub, 12.0, 400, room);
+        Self::put(c, &m, tx, y + self.p(31.0), t.text2);
+        let on_list = !self.editing();
+        let k = if on_list { self.press_of(Hot::Account, now) } else { 1.0 };
+        let kind = if self.account == Account::SignedOut { Kind::Accent } else { Kind::Control };
+        let rect = self.account_button();
+        self.button(c, 5, Hot::Account, self.account_label(), kind, rect, k, false);
+        if on_list && self.keys && self.focus == Focus::Account {
+            self.focus_ring(c, rect.0, rect.1, rect.2, rect.3, rect.3 / 2.0, now, t);
+        }
+    }
+
+    /// Rented Mac `i`'s row, into `list` (which starts `top` px down the window).
+    fn draw_rented(&mut self, list: &mut Canvas, i: usize, top: f32, now: Instant, t: &Theme) {
+        let (x, y, w, h) = self.rented_rect(i);
+        let y = y - top;
+        let rad = self.p(14.0);
+        let on_list = !self.editing();
+        let m = self.rented[i].clone();
+        let hot = on_list && self.hot == Hot::Rented(i) && m.ready;
+        let pressed = hot && self.down == Hot::Rented(i);
+        let busy = self.busy_rented == Some(i);
+        let (fill, line) = if self.dark { (Rgba::WHITE.alpha(if hot { 0.11 } else { 0.07 }), Rgba::WHITE.alpha(0.12)) } else { (Rgba::WHITE.alpha(if hot { 0.98 } else { 0.86 }), Rgba::rgba(20, 40, 80, 26)) };
+        list.shadow(x, y, w, h, rad, self.p(8.0), self.p(2.0), Rgba::BLACK.alpha(if self.dark { 0.28 } else { 0.06 }));
+        list.fill_round_rect(x - 0.5 * self.s, y - 0.5 * self.s, w + self.s, h + self.s, rad + 0.5 * self.s, line);
+        list.fill_round_rect(x, y, w, h, rad, if pressed { fill.lerp(t.accent, 0.12) } else { fill });
+        // a strip of the provider's colour: rented, not kept here
+        list.fill_round_rect(x, y + self.p(12.0), self.p(3.0), h - self.p(24.0), self.p(1.5), t.accent.alpha(if m.ready { 0.9 } else { 0.35 }));
+        if busy {
+            list.fill_round_rect(x, y, w, h, rad, t.accent.alpha(0.08));
+        }
+        look::mac_icon(list, x + self.p(40.0), y + h / 2.0 - self.p(3.0), self.p(52.0), self.dark);
+        let tx = x + self.p(78.0);
+        let badge = if m.ready { "Rented".to_string() } else { m.state.clone() };
+        let bm = self.text(&badge, 11.0, 600, self.p(120.0));
+        let bw = bm.1 as f32 + self.p(16.0);
+        let room = w - self.p(78.0) - bw - self.p(28.0);
+        let name = self.text(&m.name, 14.5, 600, room);
+        Self::put(list, &name, tx, y + self.p(13.0), if m.ready { t.text } else { t.text2 });
+        let (bx, by, bh) = (x + w - bw - self.p(16.0), y + self.p(13.0), self.p(20.0));
+        let bcol = if m.ready { t.accent } else { t.text3 };
+        list.fill_round_rect(bx, by, bw, bh, bh / 2.0, bcol.alpha(0.14));
+        Self::put(list, &bm, bx + self.p(8.0), by + (bh - bm.2 as f32) / 2.0, bcol);
+        let sub_y = y + self.p(35.0);
+        if busy {
+            let label = match &self.status {
+                Status::Busy(l) => l.clone(),
+                _ => "Connecting…".into(),
+            };
+            look::spinner(list, tx + self.p(7.0), sub_y + self.p(8.0), self.p(14.0), t.text2, now.saturating_duration_since(self.since).as_secs_f32());
+            let lm = self.text(&label, 12.0, 500, w - self.p(120.0));
+            Self::put(list, &lm, tx + self.p(20.0), sub_y, t.text2);
+        } else {
+            let dm = self.text(&m.detail, 12.0, 400, w - self.p(98.0));
+            Self::put(list, &dm, tx, sub_y, t.text2);
+        }
+        if on_list && self.keys && self.focus == Focus::Rented(i) {
+            self.focus_ring(list, x, y, w, h, rad, now, t);
         }
     }
 
@@ -1496,7 +2120,7 @@ impl ConnectView {
         c.shadow(x, y, w, h, r, self.p(4.0), self.p(1.0), Rgba::BLACK.alpha(if self.dark { 0.25 } else { 0.035 }));
         c.fill_round_rect(x - 0.5 * s, y - 0.5 * s, w + s, h + s, r + 0.5 * s, line);
         c.fill_round_rect(x, y, w, h, r, fill);
-        let focused = self.editing() && self.focus == Focus::Field(i);
+        let focused = self.typing() && self.focus == Focus::Field(i);
         if focused {
             self.focus_ring(c, x, y, w, h, r, now, t);
         }
@@ -1559,6 +2183,11 @@ impl ConnectView {
             }
         }
     }
+}
+
+#[cfg(test)]
+fn tests_rented(n: usize, ready: bool) -> Rented {
+    Rented { rental: format!("0f8fad5b-d9cb-469f-a165-7086772895{n:02}"), name: format!("Mac mini {n:03}"), detail: "Mac mini M4 · M4 1 day · Acme Studio".into(), ready, state: if ready { "Ready".into() } else { "Being prepared".into() } }
 }
 
 #[cfg(test)]
@@ -1748,6 +2377,110 @@ mod tests {
         assert_eq!(v.key(Key::Enter, false, false).map(|a| matches!(a, Act::Connect { via: Via::Demo, .. })), Some(true));
     }
 
+    use super::tests_rented as rented;
+
+    #[test]
+    fn the_providers_account_signs_in_and_lists_rented_macs() {
+        let mut v = ConnectView::new(vec![mac("111111111", "a")]);
+        v.set_window(460, 600, 1.0, false, Level::Full);
+        let before = v.row_rect(0);
+        assert_eq!(v.account(), &Account::Off);
+        v.set_account(Account::SignedOut);
+        assert!(v.row_rect(0).1 > before.1, "the kept Macs move down under the account bar");
+        let _ = v.render(later());
+        // Sign in, then Cancel while the code waits
+        let b = v.account_button();
+        assert_eq!(click(&mut v, b), Some(Act::SignIn));
+        v.set_account(Account::Waiting("BCDF-GHJK".into()));
+        let _ = v.render(later());
+        assert!(v.next_frame(Instant::now()).is_some(), "the spinner turns while it waits");
+        let b = v.account_button();
+        assert_eq!(click(&mut v, b), Some(Act::CancelSignIn));
+        // signed in: the rented Macs come above the kept one
+        v.set_account(Account::SignedIn("me@acme.test".into()));
+        v.set_rented(vec![rented(1, true), rented(2, false)]);
+        assert!(v.rented_rect(1).1 < v.row_rect(0).1);
+        let _ = v.render(later());
+        let r = v.rented_rect(0);
+        assert_eq!(click(&mut v, r), Some(Act::ConnectRented(rented(1, true).rental)));
+        assert!(v.is_busy());
+        let _ = v.render(later());
+        let r = v.row_rect(0);
+        assert_eq!(click(&mut v, r), None, "one connection at a time");
+        v.fail("The Mac cannot be reached right now.");
+        assert!(!v.is_busy());
+        assert!(matches!(v.status(), Status::Error(e) if e.contains("reached")));
+        // one not ready yet says why, and does not connect
+        let r = v.rented_rect(1);
+        assert_eq!(click(&mut v, r), None);
+        assert!(matches!(v.status(), Status::Error(e) if e.contains("being prepared")));
+        // the keyboard walks the +, the account, the rented Macs, the kept one
+        v.set_focus(Focus::Add);
+        for want in [Focus::Account, Focus::Rented(0), Focus::Rented(1), Focus::Row(0)] {
+            v.key(Key::Down, false, false);
+            assert_eq!(v.focus(), want);
+        }
+        v.key(Key::Up, false, false);
+        v.key(Key::Up, false, false);
+        assert_eq!(v.focus(), Focus::Rented(0));
+        assert_eq!(v.key(Key::Enter, false, false), Some(Act::ConnectRented(rented(1, true).rental)));
+        v.fail("x");
+        // Sign out; signed out, the rented Macs go
+        v.set_focus(Focus::Account);
+        assert_eq!(v.key(Key::Enter, false, false), Some(Act::SignOut));
+        v.set_account(Account::SignedOut);
+        assert!(v.rented().is_empty());
+        // only rented Macs, none kept: no "No Computers"
+        let mut v = ConnectView::new(vec![]);
+        v.set_window(460, 600, 1.0, false, Level::Full);
+        v.set_account(Account::SignedIn("me@acme.test".into()));
+        v.set_rented(vec![rented(1, true)]);
+        assert!(!v.empty());
+        assert_eq!(v.add_rect(), v.plus_rect());
+        let _ = v.render(later());
+    }
+
+    #[test]
+    fn a_providers_app_signs_in_first_and_lists_only_assigned_macs() {
+        let mut v = ConnectView::new(vec![mac("111111111", "a")]);
+        v.set_window(460, 600, 1.0, false, Level::Full);
+        v.set_account(Account::SignedOut);
+        v.set_managed(true, true);
+        assert!(v.computers().is_empty(), "no Macs kept on this PC");
+        let _ = v.render(later());
+        assert_eq!(v.order(), vec![Focus::Google, Focus::Email]);
+        let b = v.login_button(0);
+        assert_eq!(click(&mut v, b), Some(Act::SignIn));
+        // by email: the address, the code
+        let b = v.email_button();
+        assert_eq!(click(&mut v, b), None);
+        assert_eq!((v.login(), v.focus()), (&Login::Email, Focus::Field(NAME)));
+        typed(&mut v, "Ana@Acme.example");
+        let _ = v.render(later());
+        assert_eq!(v.key(Key::Enter, false, false), Some(Act::EmailStart("ana@acme.example".into())));
+        v.email_sent("ana@acme.example");
+        assert_eq!(v.focus(), Focus::Field(ID));
+        typed(&mut v, "12a345");
+        assert_eq!(v.key(Key::Enter, false, false), None, "six digits");
+        typed(&mut v, "6");
+        assert_eq!(v.key(Key::Enter, false, false), Some(Act::EmailVerify { email: "ana@acme.example".into(), code: "123456".into() }));
+        v.fail("That code is wrong.");
+        v.key(Key::Escape, false, false);
+        assert_eq!(v.login(), &Login::Email);
+        // a code accepted: busy, then signed in and free to connect
+        let _ = v.login_next();
+        assert!(v.is_busy());
+        // signed in: only the assigned Macs, no +
+        v.set_account(Account::SignedIn("ana@acme.example".into()));
+        let _ = v.render(later());
+        assert_ne!(v.hit(v.plus_rect().0 + 4.0, v.plus_rect().1 + 4.0), Hot::Add);
+        assert_eq!(v.key(Key::New, false, true), None);
+        assert_eq!(v.page(), Page::List);
+        v.set_rented(vec![rented(1, true)]);
+        let r = v.rented_rect(0);
+        assert_eq!(click(&mut v, r), Some(Act::ConnectRented(rented(1, true).rental)));
+    }
+
     #[test]
     fn a_long_list_scrolls() {
         let list = (0..12).map(|i| mac(&format!("{i:09}"), "p")).collect();
@@ -1808,6 +2541,7 @@ mod tests {
 /// Pictures of the connect window (RM_PREVIEW=dir cargo test -p rm-viewer connectui::preview).
 #[cfg(test)]
 mod preview {
+    use super::tests_rented as rented;
     use super::*;
 
     fn save(c: &Canvas, path: &std::path::Path) {
@@ -1816,6 +2550,10 @@ mod preview {
             ppm.extend_from_slice(&[p[2], p[1], p[0]]);
         }
         std::fs::write(path, ppm).unwrap();
+    }
+
+    fn macs_kept() -> Vec<Computer> {
+        vec![Computer { name: "Studio Mac".into(), ..Computer { id: "482913027".into(), password: "x".into(), ..Default::default() } }]
     }
 
     #[test]
@@ -1862,6 +2600,47 @@ mod preview {
         size(&mut v, false);
         v.set_demo(true);
         save(&v.render(later), &dir.join("connect-demo.ppm"));
+        // a provider's Taro: signed out, waiting for the code, signed in with rented Macs
+        let mut v = ConnectView::new(macs_kept());
+        size(&mut v, false);
+        v.set_account(Account::SignedOut);
+        save(&v.render(later), &dir.join("connect-account-signed-out.ppm"));
+        v.set_account(Account::Waiting("BCDF-GHJK".into()));
+        save(&v.render(later), &dir.join("connect-account-waiting.ppm"));
+        v.set_account(Account::SignedIn("ana@acme.example".into()));
+        v.set_rented(vec![rented(1, true), rented(2, false)]);
+        let r = v.rented_rect(0);
+        v.mouse_move(r.0 + 100.0, r.1 + 20.0);
+        save(&v.render(later), &dir.join("connect-account-rented.ppm"));
+        let mut v = ConnectView::new(macs_kept());
+        size(&mut v, true);
+        v.set_account(Account::SignedIn("ana@acme.example".into()));
+        v.set_rented(vec![rented(1, true), rented(2, false)]);
+        save(&v.render(later), &dir.join("connect-account-rented-dark.ppm"));
+        // a provider's own app: the sign-in page, its steps, the assigned Macs
+        let mut v = ConnectView::new(vec![]);
+        size(&mut v, false);
+        v.set_account(Account::SignedOut);
+        v.set_managed(true, true);
+        save(&v.render(later), &dir.join("login-choose.ppm"));
+        let mut d = ConnectView::new(vec![]);
+        size(&mut d, true);
+        d.set_account(Account::SignedOut);
+        d.set_managed(true, true);
+        save(&d.render(later), &dir.join("login-choose-dark.ppm"));
+        v.login_email();
+        for c in "ana@acme.example".chars() {
+            v.char(c);
+        }
+        save(&v.render(later), &dir.join("login-email.ppm"));
+        v.email_sent("ana@acme.example");
+        save(&v.render(later), &dir.join("login-code.ppm"));
+        v.set_account(Account::Waiting("BCDF-GHJK".into()));
+        save(&v.render(later), &dir.join("login-waiting.ppm"));
+        v.set_account(Account::SignedIn("ana@acme.example".into()));
+        save(&v.render(later), &dir.join("login-empty.ppm"));
+        v.set_rented(vec![rented(1, true), rented(2, false)]);
+        save(&v.render(later), &dir.join("login-macs.ppm"));
         // the sheet half way in
         let mut v = ConnectView::new(vec![]);
         size(&mut v, true);

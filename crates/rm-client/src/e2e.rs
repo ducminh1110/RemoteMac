@@ -389,8 +389,13 @@ pub fn run<S: Read + Write>(sess: &mut Session<S>, app: &str) -> Report {
     c.r.check("clipboard Mac->client (Cmd+C arrives as ClipboardSet 'pasted!')", ok, format!("{:?}", c.clipboard));
 
     // ---- app icon for the taskbar
+    // icons are drawn off the agent's reader thread and sent at low priority, behind video:
+    // ask once more if the first answer is slow
     c.send(Message::GetAppIcon { application_id: app.into() });
-    let ok = c.pump(8, |c| c.icon.is_some());
+    let ok = c.pump(10, |c| c.icon.is_some()) || {
+        c.send(Message::GetAppIcon { application_id: app.into() });
+        c.pump(15, |c| c.icon.is_some())
+    };
     let detail = c.icon.as_ref().map(|(s, px)| {
         let opaque = px.as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count();
         (ok && *s >= 16 && px.len() == (*s * *s * 4) as usize && opaque > 0, format!("size={s} bytes={} opaquePixels={opaque}", px.len()))

@@ -334,7 +334,7 @@ pub(crate) mod tests {
             r##"{{"schema":"taro.provider/v1","provider_id":"acme-cloud",
               "product":{{"name":"Acme Connect","short_name":"Acme","vendor":"Acme Cloud Ltd","support_url":"https://acme.example/help"}},
               "branding":{{"primary_color":"{colour}","icon":"icon.png"}},
-              "relay":{{"host":"relay.acme.example","port":7471,"key":"acme-key-0123456789abcdef"}},
+              "relay":{{"host":"relay.acme.example","port":7471,"key":"test-key-bbbbbbbbbbbbbbbb"}},
               "updates":{{"clients":"{updates}"}}}}"##
         )
     }
@@ -391,7 +391,7 @@ pub(crate) mod tests {
         let b = Brand::next_to(&d.join("Acme.exe")).unwrap();
         assert!(b.is_provider());
         assert_eq!((b.name(), b.short_name(), b.vendor(), b.support()), ("Acme Connect", "Acme", Some("Acme Cloud Ltd"), Some("https://acme.example/help")));
-        assert_eq!(b.relay(), Some(("relay.acme.example:7471".to_string(), "acme-key-0123456789abcdef")));
+        assert_eq!(b.relay(), Some(("relay.acme.example:7471".to_string(), "test-key-bbbbbbbbbbbbbbbb")));
         assert_eq!(b.updates(), Updates::InPlace);
         // the colour as rm-brand derives it: the primary in light mode, its dark variant in dark
         let t = b.provider().unwrap().tokens();
@@ -416,7 +416,7 @@ pub(crate) mod tests {
         std::fs::write(d.join("provider").join("provider.json"), "{ not json").unwrap();
         assert!(Brand::next_to(&d.join("Acme.exe")).is_err());
         // valid JSON, a wrong field: named
-        std::fs::write(d.join("provider").join("provider.json"), acme_json("#0F766E", "notify").replace("acme-key-0123456789abcdef", "short")).unwrap();
+        std::fs::write(d.join("provider").join("provider.json"), acme_json("#0F766E", "notify").replace("test-key-bbbbbbbbbbbbbbbb", "short")).unwrap();
         let e = Brand::next_to(&d.join("Acme.exe")).unwrap_err();
         assert!(e.contains("relay.key"), "{e}");
         std::fs::write(d.join("provider").join("provider.json"), acme_json("purple", "notify")).unwrap();
