@@ -99,7 +99,7 @@ async fn relay_json(State(r): State<R>) -> Response<Body> {
     let installed = taro_update::apply::installed(&r.layout)
         .ok()
         .map(|i| i.version);
-    web::bytes(StatusCode::OK, "application/json", json!({ "product": r.provider.product.name, "vendor": r.provider.product.vendor, "host": r.provider.relay.host, "port": r.provider.relay.port, "version": installed.unwrap_or_else(|| env!("CARGO_PKG_VERSION").into()) }).to_string())
+    web::bytes(StatusCode::OK, "application/json", json!({ "product": r.provider.product.name, "vendor": r.provider.product.vendor, "support_url": r.provider.product.support_url, "host": r.provider.relay.host, "port": r.provider.relay.port, "version": installed.unwrap_or_else(|| env!("CARGO_PKG_VERSION").into()) }).to_string())
 }
 
 async fn status_page(State(r): State<R>) -> Response<Body> {
