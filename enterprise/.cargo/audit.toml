@@ -1,0 +1,7 @@
+# cargo audit (CI: Enterprise > audit)
+[advisories]
+ignore = [
+  # rsa (Marvin attack): only in Cargo.lock through sqlx's MySQL driver, which is never built
+  # (Postgres only); `cargo tree -e all -i rsa --target all` is empty.
+  "RUSTSEC-2023-0071",
+]

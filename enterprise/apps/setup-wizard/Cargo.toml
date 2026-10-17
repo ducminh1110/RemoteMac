@@ -18,7 +18,7 @@ path = "src/lib.rs"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "rustls-tls-native-roots", "http2"] }
-hickory-resolver = { version = "0.25", default-features = false, features = ["tokio", "system-config"] }
+hickory-resolver = { version = "0.26", default-features = false, features = ["tokio", "system-config"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"

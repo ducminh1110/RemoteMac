@@ -4,15 +4,16 @@ FROM rust:1-bookworm AS build
 WORKDIR /src
 COPY . .
 RUN cargo build --release --locked -p taro-enterprise
+# the web apps that exist in this checkout (each is optional)
+RUN mkdir -p /web/apps /web/packages && cp -r packages/design-tokens /web/packages/ \
+    && for d in customer-portal provider-console; do if [ -d apps/$d ]; then cp -r apps/$d /web/apps/; fi; done
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home /srv/taro taro
 WORKDIR /srv/taro
 COPY --from=build /src/target/release/taro-enterprise /usr/local/bin/taro-enterprise
-COPY apps/customer-portal apps/customer-portal
-COPY apps/provider-console apps/provider-console
-COPY packages/design-tokens packages/design-tokens
+COPY --from=build /web/ ./
 ENV TARO_WEB_DIR=/srv/taro TARO_LISTEN=0.0.0.0:8080 TARO_OPS_LISTEN=127.0.0.1:8081
 USER taro
 EXPOSE 8080

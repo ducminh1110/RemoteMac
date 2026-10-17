@@ -24,20 +24,22 @@ pub trait DnsResolver: Send + Sync {
 /// resolver is built per verification, so records added a minute ago are not hidden by a cache.
 pub struct HickoryDns;
 
-fn resolver() -> hickory_resolver::TokioResolver {
-    use hickory_resolver::config::ResolverConfig;
-    use hickory_resolver::name_server::TokioConnectionProvider;
-    match hickory_resolver::TokioResolver::builder_tokio() {
-        Ok(b) => b.build(),
-        Err(_) => hickory_resolver::Resolver::builder_with_config(
-            ResolverConfig::cloudflare(),
-            TokioConnectionProvider::default(),
-        )
-        .build(),
-    }
+fn resolver() -> Result<hickory_resolver::TokioResolver, String> {
+    use hickory_resolver::config::{ResolverConfig, CLOUDFLARE};
+    use hickory_resolver::net::runtime::TokioRuntimeProvider;
+    hickory_resolver::TokioResolver::builder_tokio()
+        .and_then(|b| b.build())
+        .or_else(|_| {
+            hickory_resolver::Resolver::builder_with_config(
+                ResolverConfig::udp_and_tcp(&CLOUDFLARE),
+                TokioRuntimeProvider::default(),
+            )
+            .build()
+        })
+        .map_err(|e| e.to_string())
 }
 
-fn dns_err(e: hickory_resolver::ResolveError) -> String {
+fn dns_err(e: hickory_resolver::net::NetError) -> String {
     if e.is_no_records_found() || e.is_nx_domain() {
         "no records found".into()
     } else {
@@ -53,13 +55,18 @@ fn fq(name: &str) -> String {
 impl DnsResolver for HickoryDns {
     fn txt<'a>(&'a self, name: &'a str) -> BoxFut<'a, Result<Vec<String>, String>> {
         Box::pin(async move {
-            let r = resolver().txt_lookup(fq(name)).await.map_err(dns_err)?;
-            Ok(r.iter()
-                .map(|t| {
-                    t.txt_data()
-                        .iter()
-                        .map(|p| String::from_utf8_lossy(p).into_owned())
-                        .collect::<String>()
+            use hickory_resolver::proto::rr::RData;
+            let r = resolver()?.txt_lookup(fq(name)).await.map_err(dns_err)?;
+            Ok(r.answers()
+                .iter()
+                .filter_map(|rec| match &rec.data {
+                    RData::TXT(t) => Some(
+                        t.txt_data
+                            .iter()
+                            .map(|p| String::from_utf8_lossy(p).into_owned())
+                            .collect::<String>(),
+                    ),
+                    _ => None,
                 })
                 .collect())
         })
@@ -67,7 +74,7 @@ impl DnsResolver for HickoryDns {
 
     fn ips<'a>(&'a self, name: &'a str) -> BoxFut<'a, Result<Vec<IpAddr>, String>> {
         Box::pin(async move {
-            let r = resolver().lookup_ip(fq(name)).await.map_err(dns_err)?;
+            let r = resolver()?.lookup_ip(fq(name)).await.map_err(dns_err)?;
             Ok(r.iter().collect())
         })
     }
@@ -75,12 +82,13 @@ impl DnsResolver for HickoryDns {
     fn cname<'a>(&'a self, name: &'a str) -> BoxFut<'a, Result<Vec<String>, String>> {
         Box::pin(async move {
             use hickory_resolver::proto::rr::{RData, RecordType};
-            let r = resolver()
+            let r = resolver()?
                 .lookup(fq(name), RecordType::CNAME)
                 .await
                 .map_err(dns_err)?;
-            Ok(r.record_iter()
-                .filter_map(|rec| match rec.data() {
+            Ok(r.answers()
+                .iter()
+                .filter_map(|rec| match &rec.data {
                     RData::CNAME(c) => Some(c.0.to_ascii().trim_end_matches('.').to_lowercase()),
                     _ => None,
                 })

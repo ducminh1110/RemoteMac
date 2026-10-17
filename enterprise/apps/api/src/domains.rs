@@ -176,22 +176,31 @@ async fn create(
 
 /// The TXT values published at `_taro-verify.<host>`.
 async fn txt_values(host: &str) -> Result<Vec<String>, String> {
-    let resolver = hickory_resolver::TokioAsyncResolver::tokio(
-        hickory_resolver::config::ResolverConfig::cloudflare(),
-        hickory_resolver::config::ResolverOpts::default(),
-    );
+    let resolver = hickory_resolver::Resolver::builder_with_config(
+        hickory_resolver::config::ResolverConfig::udp_and_tcp(
+            &hickory_resolver::config::CLOUDFLARE,
+        ),
+        hickory_resolver::net::runtime::TokioRuntimeProvider::default(),
+    )
+    .build()
+    .map_err(|e| format!("DNS resolver: {e}"))?;
     match resolver.txt_lookup(format!("_taro-verify.{host}.")).await {
         Ok(r) => Ok(r
+            .answers()
             .iter()
-            .map(|t| {
-                t.iter()
-                    .map(|b| String::from_utf8_lossy(b).to_string())
-                    .collect::<String>()
+            .filter_map(|rec| match &rec.data {
+                hickory_resolver::proto::rr::RData::TXT(t) => Some(
+                    t.txt_data
+                        .iter()
+                        .map(|b| String::from_utf8_lossy(b).to_string())
+                        .collect::<String>(),
+                ),
+                _ => None,
             })
             .collect()),
         Err(e) => Err(format!(
             "no TXT record found at _taro-verify.{host} ({})",
-            e.kind()
+            e
         )),
     }
 }
