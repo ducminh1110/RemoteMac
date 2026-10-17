@@ -4,7 +4,7 @@ exclude = ["enterprise"]
 members = ["crates/moonlight-sys", "crates/rm-gamestream", "crates/rm-decode", "crates/rm-fakeagent", "crates/rm-viewer", "crates/rm-protocol", "crates/rm-core", "crates/rm-relay", "crates/rm-agent", "crates/rm-client", "crates/rm-brand"]
 
 [workspace.package]
-version = "1.4.1"
+version = "1.5.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 

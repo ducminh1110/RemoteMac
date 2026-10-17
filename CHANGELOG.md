@@ -4,6 +4,15 @@ Each version of Taro (called MacBridge until 1.2.0), newest first. Both sides sh
 same version; a newer Windows app works with an older Mac app without the features the Mac
 lacks.
 
+## 1.5.0
+
+### Added
+- Taro Enterprise: a provider's own Taro app opens on a sign-in page with the provider's icon,
+  name and colour (Continue with Google, or with email and a mailed code). Signed in, it lists
+  only the Macs the provider assigned to the account, each a click away; no ID to type.
+- Sign-in from the app is approved in the provider's portal (a device code) and can be revoked
+  there; Sign out ends it.
+
 ## 1.4.1
 
 ### Added

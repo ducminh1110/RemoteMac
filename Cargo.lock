@@ -447,7 +447,7 @@ dependencies = [
 
 [[package]]
 name = "moonlight-sys"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -581,7 +581,7 @@ dependencies = [
 
 [[package]]
 name = "rm-agent"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "rm-core",
  "rm-protocol",
@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "rm-brand"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "rm-client"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "rm-agent",
  "rm-core",
@@ -617,7 +617,7 @@ dependencies = [
 
 [[package]]
 name = "rm-core"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "rm-protocol",
  "serde",
@@ -627,14 +627,14 @@ dependencies = [
 
 [[package]]
 name = "rm-decode"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "openh264",
 ]
 
 [[package]]
 name = "rm-fakeagent"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "openh264",
  "rm-gamestream",
@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "rm-gamestream"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -656,7 +656,7 @@ dependencies = [
 
 [[package]]
 name = "rm-protocol"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "chacha20poly1305",
  "hkdf",
@@ -671,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "rm-relay"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -681,7 +681,7 @@ dependencies = [
 
 [[package]]
 name = "rm-viewer"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "ab_glyph_rasterizer",
  "embed-resource",
