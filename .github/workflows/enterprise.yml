@@ -28,7 +28,8 @@ jobs:
       TARO_REQUIRE_DB_TESTS: "1"
     steps:
       - uses: actions/checkout@v4
-      - run: cargo fmt --all --check
+      # only the enterprise packages (--all would also reach the Taro crates they depend on)
+      - run: cargo fmt --check -p taro-enterprise -p taro-enterprise-setup -p taro-update -p taro-relay
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - name: Migrations apply to an empty database, and again (idempotent)

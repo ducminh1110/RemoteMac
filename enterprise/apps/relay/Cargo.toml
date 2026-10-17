@@ -1,0 +1,44 @@
+[package]
+name = "taro-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Taro Enterprise relay server: the relay, its first-run setup (Wizard 2), TLS, health and enterprise updates"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "taro-relay"
+path = "src/main.rs"
+
+[dependencies]
+rm-relay = { path = "../../../crates/rm-relay" }
+rm-brand = { path = "../../../crates/rm-brand" }
+taro-update = { path = "../../crates/taro-update" }
+axum = "0.8"
+base64 = "0.22"
+hex = "0.4"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
+hickory-resolver = { version = "0.26", default-features = false, features = ["tokio", "system-config"] }
+instant-acme = { version = "0.8", default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
+libc = "0.2"
+rand = "0.8"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+toml = "0.8"
+toml_edit = "0.22"
+tower = { version = "0.5", features = ["util"] }
+x509-parser = "0.16"
+
+[dev-dependencies]
+http-body-util = "0.1"

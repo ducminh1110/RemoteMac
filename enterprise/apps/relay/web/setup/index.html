@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relay setup</title>
+<link rel="stylesheet" href="/assets/app.css">
+<link rel="stylesheet" href="/brand/tokens.css">
+<link rel="stylesheet" href="/brand/theme.css">
+<script type="module" src="/assets/app.js"></script>
+</head>
+<body>
+<header class="top">
+  <img class="logo" src="/brand/logo.png" alt="" width="36" height="36">
+  <div>
+    <h1 id="title">Relay setup</h1>
+    <p class="sub" id="subtitle">Wizard 2 · first-run setup of this server</p>
+  </div>
+  <span class="pill" id="mode-pill" hidden></span>
+</header>
+<div class="shell">
+  <nav class="steps" aria-label="Setup steps">
+    <ol id="steps"></ol>
+  </nav>
+  <main id="main" tabindex="-1">
+    <p class="loading">Loading…</p>
+  </main>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
