@@ -222,6 +222,34 @@ impl Relay {
     }
 }
 
+/// The provider's own services: sign-in and the Macs a user may use. Taro's client is otherwise the
+/// standard Taro app; with this set it also signs the user in at the provider (not at Taro) and
+/// lists the Macs that user rented or was given, then connects to them through the provider's
+/// relay. Without it the client works as standard Taro does: ID and password.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Account {
+    /// the provider's portal origin (Taro Enterprise): `https://portal.acme.example`, no path
+    pub portal: String,
+}
+
+/// A portal origin: https (http only for this computer, for development), no path, query or user.
+pub fn valid_portal(s: &str) -> bool {
+    let rest = match s.strip_prefix("https://") {
+        Some(r) => r,
+        None => match s.strip_prefix("http://") {
+            Some(r) if ["localhost", "127.0.0.1", "[::1]"].iter().any(|h| r == *h || r.starts_with(&format!("{h}:"))) => r,
+            _ => return false,
+        },
+    };
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((h, p)) if !h.ends_with(']') || h.starts_with('[') => (h, Some(p)),
+        _ => (rest, None),
+    };
+    let host_ok = valid_host(host) || matches!(host, "localhost" | "[::1]");
+    let port_ok = port.is_none_or(|p| p.parse::<u16>().is_ok_and(|n| n > 0));
+    s.len() <= 200 && host_ok && port_ok && !rest.contains(['/', '?', '#', '@']) && !s.contains(char::is_whitespace)
+}
+
 /// How the provider's clients take new Taro versions.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -257,6 +285,9 @@ pub struct Provider {
     pub product: Product,
     pub branding: Branding,
     pub relay: Relay,
+    /// sign-in and machine management at the provider (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<Account>,
     #[serde(default)]
     pub updates: Updates,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -364,6 +395,11 @@ impl Provider {
         if !valid_relay_key(&self.relay.key) {
             err(&mut v, "relay.key", "16-128 letters, digits, dashes or underscores");
         }
+        if let Some(a) = &self.account {
+            if !valid_portal(&a.portal) {
+                err(&mut v, "account.portal", "the portal's https:// address, without a path (https://portal.example.com)");
+            }
+        }
         v
     }
 
@@ -432,9 +468,23 @@ mod tests {
             product: Product { name: "Acme Connect".into(), short_name: "Acme".into(), vendor: "Acme Cloud Ltd".into(), support_url: Some("https://acme.example/help".into()), support_email: None },
             branding: Branding { primary_color: "#2563eb".into(), tokens: None, theme: Theme::System, logo: Some("logo.png".into()), icon: None },
             relay: Relay { host: "relay.acme.example".into(), port: 7470, key: "k3y-0123456789abcdef".into() },
+            account: Some(Account { portal: "https://portal.acme.example".into() }),
             updates: Updates::default(),
             generated: None,
         }
+    }
+
+    #[test]
+    fn portals_are_origins() {
+        for ok in ["https://portal.acme.example", "https://portal.acme.example:8443", "http://localhost:8080", "http://127.0.0.1:3000", "https://10.0.0.5"] {
+            assert!(valid_portal(ok), "{ok}");
+        }
+        for bad in ["", "portal.acme.example", "http://portal.acme.example", "https://portal.acme.example/", "https://portal.acme.example/app", "https://a@portal.acme.example", "https://portal.acme.example?x=1", "https://x", "https://portal.acme.example:0", "ftp://portal.acme.example"] {
+            assert!(!valid_portal(bad), "{bad}");
+        }
+        let p = Provider { account: Some(Account { portal: "http://portal.acme.example".into() }), ..sample() };
+        assert!(p.problems().iter().any(|e| e.field == "account.portal"));
+        assert!(Provider { account: None, ..sample() }.problems().is_empty());
     }
 
     #[test]

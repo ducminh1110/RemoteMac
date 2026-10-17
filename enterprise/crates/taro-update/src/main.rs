@@ -1,6 +1,7 @@
 //! `taro-update`: the release side of Taro Enterprise updates (the release workflow runs it).
 //!
 //!   taro-update keygen
+//!   taro-update check-key            (the secret's public half is in release-signing.pub)
 //!   taro-update pack --component relay --version 0.2.0 --core x86_64=DIR [--core aarch64=DIR]
 //!                    [--base enterprise-core-files.json] [--migrations DIR] [--restart taro-relay]
 //!                    [--commit SHA] --out enterprise-update.zip --core-files-out FILE
@@ -23,7 +24,18 @@ fn key() -> ed25519_dalek::SigningKey {
     if v.trim().is_empty() {
         die("TARO_ENTERPRISE_SIGNING_KEY is not set: releases are signed with it (add it as a secret of the release workflow)");
     }
-    sig::parse_secret(&v).unwrap_or_else(|e| die(format!("TARO_ENTERPRISE_SIGNING_KEY: {e}")))
+    let k =
+        sig::parse_secret(&v).unwrap_or_else(|e| die(format!("TARO_ENTERPRISE_SIGNING_KEY: {e}")));
+    // what this repository's relays will trust is compiled in from release-signing.pub: a
+    // signature by any other key would be refused by every relay built from it
+    // (tests sign with a throwaway key and name its public half in TARO_UPDATE_TRUST)
+    if !keys(std::env::var("TARO_UPDATE_TRUST").ok()).contains(&k.verifying_key()) {
+        die(format!(
+            "TARO_ENTERPRISE_SIGNING_KEY does not belong to enterprise/keys/release-signing.pub: add its public half ({}) there, or set the secret that matches it",
+            sig::public_text(&k.verifying_key())
+        ));
+    }
+    k
 }
 
 fn keys(path: Option<String>) -> sig::TrustedKeys {
@@ -87,6 +99,10 @@ fn main() {
                 "public (enterprise/keys/release-signing.pub): {}",
                 sig::public_text(&k.verifying_key())
             );
+        }
+        Some("check-key") => {
+            let k = key();
+            println!("ok: {}", sig::public_text(&k.verifying_key()));
         }
         Some("pack") => {
             let need = |n: &str| flag(n).unwrap_or_else(|| die(format!("{n} is required")));

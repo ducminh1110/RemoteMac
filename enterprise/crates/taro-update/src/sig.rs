@@ -25,6 +25,11 @@ impl TrustedKeys {
         Ok(TrustedKeys(keys))
     }
 
+    /// Whether `k` is one of these keys.
+    pub fn contains(&self, k: &VerifyingKey) -> bool {
+        self.0.contains(k)
+    }
+
     pub fn from_keys(keys: Vec<VerifyingKey>) -> TrustedKeys {
         TrustedKeys(keys)
     }

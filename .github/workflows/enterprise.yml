@@ -60,6 +60,9 @@ jobs:
           k=$(target/release/taro-update keygen)
           export TARO_ENTERPRISE_SIGNING_KEY=$(echo "$k" | sed -n 's/^secret.*: //p')
           echo "$k" | sed -n 's/^public.*: //p' > test.pub
+          # a key the repository does not trust is refused for signing
+          if target/release/taro-update check-key 2>/dev/null; then echo "signed with a key not in release-signing.pub"; exit 1; fi
+          export TARO_UPDATE_TRUST=test.pub
           v=$(target/release/taro-relay version | awk '{print $2}')
           p=$(scripts/package-relay.sh "$v" "$(uname -m)" target/release/taro-relay pk | tail -1)
           scripts/build-enterprise-update.sh "$v" out "$p"

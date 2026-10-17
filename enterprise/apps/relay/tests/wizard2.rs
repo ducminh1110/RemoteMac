@@ -82,6 +82,7 @@ fn provider(relay_port: u16) -> rm_brand::Provider {
             port: relay_port,
             key: "acme-admission-key-0123456789".into(),
         },
+        account: None,
         updates: Default::default(),
         generated: None,
     }

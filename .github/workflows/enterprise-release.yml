@@ -17,7 +17,9 @@ name: Enterprise release
 #   SHA256SUMS
 #
 # Signing needs the TARO_ENTERPRISE_SIGNING_KEY secret (its public half is in
-# enterprise/keys/release-signing.pub). Nothing is published unless every artifact was built.
+# enterprise/keys/release-signing.pub, compiled into the relays this repository builds; a key that
+# is not there is refused). TaroEnterpriseSetup.exe creates both when you press Start. Nothing is
+# published unless every artifact was built.
 on:
   workflow_dispatch:
     inputs:
@@ -58,7 +60,7 @@ jobs:
         env:
           K: ${{ secrets.TARO_ENTERPRISE_SIGNING_KEY }}
         run: |
-          [ -n "$K" ] || { echo "Add the TARO_ENTERPRISE_SIGNING_KEY secret (Settings > Secrets and variables > Actions): enterprise releases are signed with it."; exit 1; }
+          [ -n "$K" ] || { echo "No TARO_ENTERPRISE_SIGNING_KEY secret. TaroEnterpriseSetup.exe sets it up when you press Start (it makes the key on your PC, stores it as this secret and commits its public half to enterprise/keys/release-signing.pub); or run taro-update keygen and add both by hand."; exit 1; }
 
   relay:
     needs: check
