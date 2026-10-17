@@ -42,6 +42,8 @@ enum Ev {
     SignInFailed(String),
     Macs(Result<Vec<Rented>, String>),
     Mac(Result<enterprise::Mac, String>),
+    Google(bool),
+    EmailSent(String),
 }
 
 /// The provider's portal, when there is one.
@@ -172,6 +174,8 @@ fn portal_events(rx: &Receiver<Ev>) -> bool {
             };
             match ev {
                 Ev::Waiting(code) => sh.view.set_account(Account::Waiting(code)),
+                Ev::Google(g) => sh.view.set_google(g),
+                Ev::EmailSent(e) => sh.view.email_sent(&e),
                 Ev::SignedIn { token, email } => {
                     save_account(&p.url, Some((&token, &email)));
                     p.token = Some(token);
@@ -180,8 +184,10 @@ fn portal_events(rx: &Receiver<Ev>) -> bool {
                     sh.view.set_error("");
                 }
                 Ev::SignInFailed(why) => {
-                    sh.view.set_account(Account::SignedOut);
-                    sh.view.set_error(&why);
+                    if !matches!(sh.view.account(), Account::SignedOut) {
+                        sh.view.set_account(Account::SignedOut);
+                    }
+                    sh.view.fail(&why);
                 }
                 Ev::Macs(r) => {
                     p.fetching = false;
@@ -368,7 +374,9 @@ pub fn connect_window<T: Send>(error: Option<&str>, try_connect: impl Fn(&str, &
         let wc = WNDCLASSW { style: CS_DBLCLKS, lpfnWndProc: Some(proc), hInstance: hinst, lpszClassName: CLASS, hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), ..Default::default() };
         RegisterClassW(&wc); // a second call fails harmlessly (already registered)
         let style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME;
-        let mut view = ConnectView::new(load_computers());
+        // a provider's own app keeps no Macs of its own: only the ones assigned to the account
+        let managed = crate::brand::provider().is_some_and(|p| p.account.is_some());
+        let mut view = ConnectView::new(if managed { vec![] } else { load_computers() });
         // a provider's Taro: its portal's account (signed in already, or not)
         let (tx, rx) = channel::<Ev>();
         let portal = crate::brand::provider().and_then(|p| p.account.as_ref()).map(|a| {
@@ -379,8 +387,11 @@ pub fn connect_window<T: Send>(error: Option<&str>, try_connect: impl Fn(&str, &
             });
             Portal { url: a.portal.clone(), token: kept.map(|k| k.0), tx, cancel: Arc::new(AtomicBool::new(false)), fetching: false, last_fetch: None }
         });
+        if managed {
+            view.set_managed(true, false);
+        }
         // the guided tour's first part: the demo Mac, above the list
-        view.set_demo(crate::tour::offers_demo());
+        view.set_demo(!managed && crate::tour::offers_demo());
         if let Some(e) = error {
             view.set_error(e);
         }
@@ -402,9 +413,17 @@ pub fn connect_window<T: Send>(error: Option<&str>, try_connect: impl Fn(&str, &
             sh.hwnd = hwnd.0 as isize;
             if let Some(p) = sh.portal.as_mut() {
                 fetch_macs(p, hwnd.0 as isize);
+                // is Google offered on the sign-in page?
+                let (url, tx, h) = (p.url.clone(), p.tx.clone(), hwnd.0 as isize);
+                std::thread::spawn(move || {
+                    let _ = tx.send(Ev::Google(enterprise::device::google(&url)));
+                    wake(h);
+                });
             }
         });
-        crate::tour::start(hinst);
+        if !managed {
+            crate::tour::start(hinst);
+        }
 
         let mut msg = MSG::default();
         let result = std::thread::scope(|scope| {
@@ -556,6 +575,35 @@ fn act(hwnd: HWND, a: Option<Act>) {
                     sign_in(p, hwnd);
                     sh.view.set_account(Account::Waiting("…".into()));
                 }
+            });
+        }
+        Some(Act::EmailStart(email)) => {
+            with(|sh| {
+                let hwnd = sh.hwnd;
+                let Some(p) = sh.portal.as_ref() else { return };
+                let (url, tx) = (p.url.clone(), p.tx.clone());
+                std::thread::spawn(move || {
+                    let _ = tx.send(match enterprise::device::email_start(&url, &email) {
+                        Ok(()) => Ev::EmailSent(email),
+                        Err(e) => Ev::SignInFailed(e),
+                    });
+                    wake(hwnd);
+                });
+            });
+        }
+        Some(Act::EmailVerify { email, code }) => {
+            with(|sh| {
+                let hwnd = sh.hwnd;
+                let Some(p) = sh.portal.as_ref() else { return };
+                let (url, tx) = (p.url.clone(), p.tx.clone());
+                std::thread::spawn(move || {
+                    let _ = tx.send(match enterprise::device::email_verify(&url, &email, &code) {
+                        Ok(Poll::Approved { token, email }) => Ev::SignedIn { token, email },
+                        Ok(_) => Ev::SignInFailed("The portal did not sign you in. Try again.".into()),
+                        Err(e) => Ev::SignInFailed(e),
+                    });
+                    wake(hwnd);
+                });
             });
         }
         Some(Act::CancelSignIn) => {

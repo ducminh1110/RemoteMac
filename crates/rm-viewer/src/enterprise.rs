@@ -235,8 +235,35 @@ pub mod device {
         format!("{} {} on Windows", crate::brand::name(), env!("CARGO_PKG_VERSION"))
     }
 
+    /// Whether the portal offers Google sign-in.
+    pub fn google(portal: &str) -> bool {
+        call("GET", &format!("{portal}/api/v1/auth/providers"), None, None)
+            .ok()
+            .and_then(|(st, b)| (st == 200).then(|| serde_json::from_slice::<serde_json::Value>(&b).ok()).flatten())
+            .and_then(|v| v.get("google").and_then(|g| g.as_bool()))
+            .unwrap_or(false)
+    }
+
+    /// Mail a sign-in code to `email`.
+    pub fn email_start(portal: &str, email: &str) -> Result<(), String> {
+        let body = serde_json::json!({ "email": email }).to_string();
+        let (st, b) = call("POST", &format!("{portal}/api/v1/devices/email/start"), None, Some(&body))?;
+        if st == 202 || st == 200 {
+            return Ok(());
+        }
+        let v = json_of(st, &b)?;
+        Err(api_error(st, &v, "the sign-in"))
+    }
+
+    /// The code from the mail: Taro's token.
+    pub fn email_verify(portal: &str, email: &str, code: &str) -> Result<Poll, String> {
+        let body = serde_json::json!({ "email": email, "code": code, "client": client() }).to_string();
+        let (st, b) = call("POST", &format!("{portal}/api/v1/devices/email/verify"), None, Some(&body))?;
+        parse_poll(st, &b)
+    }
+
     pub fn start(portal: &str) -> Result<DeviceStart, String> {
-        let body = serde_json::json!({ "client": client() }).to_string();
+        let body = serde_json::json!({ "client": client(), "via": "google" }).to_string();
         let (st, b) = call("POST", &format!("{portal}/api/v1/devices/authorize"), None, Some(&body))?;
         parse_start(st, &b, portal)
     }
