@@ -4,24 +4,29 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Relay status</title>
+<link rel="stylesheet" href="/common/taro-glass.css">
 <link rel="stylesheet" href="/assets/app.css">
 <link rel="stylesheet" href="/brand/tokens.css">
 <link rel="stylesheet" href="/brand/theme.css">
 <script type="module" src="/assets/app.js"></script>
 </head>
 <body>
-<main class="wrap">
-  <section class="card" aria-live="polite">
-    <img class="logo" src="/brand/logo.png" alt="" width="56" height="56">
-    <h1 id="product">Relay</h1>
-    <p class="state" id="state"><span class="dot" aria-hidden="true"></span><span id="state-text">Checking…</span></p>
-    <dl class="kv">
-      <dt>Address</dt><dd id="addr">–</dd>
-      <dt>Version</dt><dd id="version">–</dd>
-      <dt>Operated by</dt><dd id="vendor">–</dd>
-    </dl>
-    <p class="hint">Use this address in the app your provider gave you. Sessions are end-to-end encrypted between your computer and your Mac.</p>
+<div class="stage single" id="stage">
+  <canvas class="wallpaper" aria-hidden="true"></canvas>
+  <section class="glass status" data-glass="card" aria-live="polite">
+    <div class="frost"></div>
+    <div class="inner">
+      <img class="logo" src="/brand/logo.png" alt="" width="64" height="64">
+      <h1 id="product">Relay</h1>
+      <p class="state" id="state"><span class="dot" aria-hidden="true"></span><span id="state-text">Checking…</span></p>
+      <dl class="kv">
+        <dt>Address</dt><dd id="addr">–</dd>
+        <dt>Version</dt><dd id="version">–</dd>
+        <dt>Operated by</dt><dd id="vendor">–</dd>
+      </dl>
+      <p class="hint">Use this address in the app your provider gave you. Sessions are end-to-end encrypted between your computer and your Mac.</p>
+    </div>
   </section>
-</main>
+</div>
 </body>
 </html>

@@ -10,7 +10,7 @@ W="$(mktemp -d)"
 trap 'rm -rf "$W"' EXIT
 pkg="$(scripts/package-relay.sh "$V" "$A" "$B" "$W/out" | tail -1)"
 tar -tzf "$pkg" | sort > "$W/list"
-for f in install.sh VERSION ARCH README.md core/bin/taro-relay core/web/relay/setup/index.html core/web/relay/status/app.js provider/README.txt; do
+for f in install.sh VERSION ARCH README.md core/bin/taro-relay core/web/relay/setup/index.html core/web/relay/status/app.js core/web/relay/common/liquidglass.js core/web/relay/common/taro-glass.css provider/README.txt; do
   grep -q "/$f\$" "$W/list" || { echo "missing $f in the package"; exit 1; }
 done
 tar -xzf "$pkg" -C "$W"

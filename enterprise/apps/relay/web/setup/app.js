@@ -1,5 +1,6 @@
 // Taro relay setup (Wizard 2). Shared core UI: it only knows the API; the provider's name,
 // colour and logo come from the server (/api/state, /brand/*).
+import { startGlass } from "/common/taro-glass.js";
 const token = new URLSearchParams(location.search).get("t") || "";
 history.replaceState(null, "", "/");
 
@@ -116,7 +117,7 @@ async function refresh() {
   document.title = p ? `${p.product} relay setup` : "Relay setup";
   const pill = document.getElementById("mode-pill");
   pill.hidden = false;
-  pill.textContent = st.configured ? "Reconfiguring" : "First run";
+  pill.replaceChildren(h("span", { class: "dot", "aria-hidden": "true" }), st.configured ? "Reconfiguring" : "First run");
 }
 
 async function saveSettings(errBox) {
@@ -318,6 +319,8 @@ function render() {
   renderNav();
   document.getElementById("main").replaceChildren(views[current]());
 }
+
+startGlass(document.getElementById("stage"));
 
 (async () => {
   try { await refresh(); render(); }

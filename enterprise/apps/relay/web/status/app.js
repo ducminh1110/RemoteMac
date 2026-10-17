@@ -1,4 +1,6 @@
 // Relay status page: what is public about this relay (never its key).
+import { startGlass } from "/common/taro-glass.js";
+startGlass(document.getElementById("stage"));
 const $ = (id) => document.getElementById(id);
 (async () => {
   try {

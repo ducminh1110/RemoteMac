@@ -12,7 +12,7 @@ use axum::body::Body;
 use axum::http::{header, HeaderValue, Response, StatusCode};
 use taro_update::policy::Layout;
 
-pub const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+pub const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /// The core web files built in (fallback when the installed copy is missing).
 pub fn embedded(rel: &str) -> Option<&'static str> {
@@ -23,6 +23,10 @@ pub fn embedded(rel: &str) -> Option<&'static str> {
         "status/index.html" => include_str!("../web/status/index.html"),
         "status/app.css" => include_str!("../web/status/app.css"),
         "status/app.js" => include_str!("../web/status/app.js"),
+        "common/liquidglass.js" => include_str!("../../../packages/liquid-glass/liquidglass.js"),
+        "common/taro-glass.js" => include_str!("../../../packages/liquid-glass/taro-glass.js"),
+        "common/taro-glass.css" => include_str!("../../../packages/liquid-glass/taro-glass.css"),
+        "common/LICENSE.md" => include_str!("../../../packages/liquid-glass/LICENSE.md"),
         _ => return None,
     })
 }

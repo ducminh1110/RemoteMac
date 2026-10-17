@@ -110,6 +110,10 @@ async fn status_asset(State(r): State<R>, UrlPath(f): UrlPath<String>) -> Respon
     web::core_asset(&r.layout, &format!("status/{f}"))
 }
 
+async fn common(State(r): State<R>, UrlPath(f): UrlPath<String>) -> Response<Body> {
+    web::core_asset(&r.layout, &format!("common/{f}"))
+}
+
 async fn brand(State(r): State<R>, UrlPath(f): UrlPath<String>) -> Response<Body> {
     web::brand(&r.layout, &f)
 }
@@ -142,6 +146,7 @@ fn public_router(r: R) -> Router {
         .route("/healthz", get(healthz))
         .route("/.well-known/taro/relay.json", get(relay_json))
         .route("/assets/{file}", get(status_asset))
+        .route("/common/{file}", get(common))
         .route("/brand/{file}", get(brand))
         .with_state(r)
 }

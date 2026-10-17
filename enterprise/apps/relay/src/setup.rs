@@ -138,6 +138,7 @@ pub fn router(s: S) -> Router {
         .merge(api)
         .route("/", get(index))
         .route("/assets/{file}", get(asset))
+        .route("/common/{file}", get(common))
         .route("/brand/{file}", get(brand))
         .route(
             "/favicon.ico",
@@ -226,6 +227,10 @@ async fn index(State(s): State<S>, Query(q): Query<Tok>) -> Response<Body> {
 
 async fn asset(State(s): State<S>, UrlPath(file): UrlPath<String>) -> Response<Body> {
     web::core_asset(&s.layout, &format!("setup/{file}"))
+}
+
+async fn common(State(s): State<S>, UrlPath(file): UrlPath<String>) -> Response<Body> {
+    web::core_asset(&s.layout, &format!("common/{file}"))
 }
 
 async fn brand(State(s): State<S>, UrlPath(file): UrlPath<String>) -> Response<Body> {

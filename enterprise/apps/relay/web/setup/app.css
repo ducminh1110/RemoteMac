@@ -1,106 +1,25 @@
-/* Taro relay setup (Wizard 2). Shared core: colours come from /brand/tokens.css (the
-   provider's primary colour) and /brand/theme.css (the provider's own overrides), loaded after
-   this file. These are only the defaults. */
-:root {
-  --primary: #7C4AE8; --primary-hover: #7043D1; --primary-active: #633BBA; --primary-border: #5935A7;
-  --primary-soft: #EFE9FC; --on-primary: #FFFFFF;
-  --bg: #F5F5F7; --panel: #FFFFFF; --text: #1D1D1F; --muted: #6E6E73; --line: #E3E3E8;
-  --ok: #1F8A4C; --ok-soft: #E7F6EC; --warn: #B25E00; --warn-soft: #FFF4E0; --fail: #C4302B; --fail-soft: #FDECEB;
-  --radius: 12px; --shadow: 0 1px 2px rgba(0,0,0,.05), 0 8px 24px rgba(0,0,0,.06);
-  color-scheme: light dark;
-  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
-}
-@media (prefers-color-scheme: dark) {
-  :root { --bg: #161618; --panel: #1F1F22; --text: #F2F2F5; --muted: #A1A1A8; --line: #34343A;
-    --ok: #4CC27A; --ok-soft: #173322; --warn: #F0A847; --warn-soft: #3A2A12; --fail: #FF6B63; --fail-soft: #3D1A18;
-    --shadow: 0 1px 2px rgba(0,0,0,.4); }
-}
-* { box-sizing: border-box; }
-html, body { margin: 0; background: var(--bg); color: var(--text); }
-body { min-height: 100vh; }
-.top { display: flex; align-items: center; gap: 14px; padding: 18px 28px; border-bottom: 1px solid var(--line); background: var(--panel); }
-.top .logo { width: 36px; height: 36px; border-radius: 9px; object-fit: contain; }
-.top h1 { font-size: 17px; margin: 0; letter-spacing: -.01em; }
-.top .sub { margin: 0; color: var(--muted); font-size: 13px; }
-.pill { margin-left: auto; font-size: 12px; padding: 3px 10px; border-radius: 99px; background: var(--primary-soft); color: var(--primary-active); font-weight: 600; }
-.shell { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 28px; max-width: 1120px; margin: 0 auto; padding: 28px; }
-.steps ol { list-style: none; margin: 0; padding: 0; position: sticky; top: 20px; }
-.steps li button { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 12px; border-radius: 9px; cursor: pointer; color: var(--text); }
-.steps li button:hover { background: color-mix(in srgb, var(--primary) 8%, transparent); }
-.steps li button:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
-.steps li button[aria-current="step"] { background: var(--primary); color: var(--on-primary); font-weight: 600; }
-.steps .num { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 600; background: var(--line); color: var(--muted); flex: none; }
-.steps [aria-current="step"] .num { background: color-mix(in srgb, var(--on-primary) 25%, transparent); color: var(--on-primary); }
-.steps .done .num { background: var(--ok); color: #fff; }
-.steps .bad .num { background: var(--fail); color: #fff; }
-.steps .warn .num { background: var(--warn); color: #fff; }
-main { min-width: 0; }
-main:focus { outline: none; }
-.card { background: var(--panel); border-radius: var(--radius); box-shadow: var(--shadow); padding: 24px 26px; margin-bottom: 18px; }
-.card h2 { margin: 0 0 4px; font-size: 21px; letter-spacing: -.015em; }
-.card h3 { margin: 18px 0 8px; font-size: 15px; }
-.lead { color: var(--muted); margin: 0 0 18px; }
-.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 22px; }
-.kv { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 8px 16px; margin: 0; }
+/* Taro relay setup (Wizard 2): what this page adds to /common/taro-glass.css. */
+.card { margin: 0 0 8px; }
+.card + .card { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--line); }
+.kv { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 10px 18px; margin: 0; padding: 16px 18px; border-radius: 16px; background: var(--fill); border: 1px solid var(--line); }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; overflow-wrap: anywhere; }
-.swatch { display: inline-block; width: 14px; height: 14px; border-radius: 4px; vertical-align: -2px; margin-right: 6px; background: var(--primary); border: 1px solid rgba(0,0,0,.12); }
-code, .mono { font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
-code { background: color-mix(in srgb, var(--text) 7%, transparent); padding: 1px 6px; border-radius: 5px; overflow-wrap: anywhere; }
-pre { background: color-mix(in srgb, var(--text) 6%, transparent); padding: 12px 14px; border-radius: 9px; overflow-x: auto; font-size: 13px; margin: 8px 0; }
-.btns { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; align-items: center; }
-button.b { font: inherit; font-weight: 600; border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 9px; padding: 8px 16px; cursor: pointer; }
-button.b:hover { border-color: var(--primary-border); }
-button.b.primary { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
-button.b.primary:hover { background: var(--primary-hover); }
-button.b.primary:active { background: var(--primary-active); }
-button.b:focus-visible { outline: 3px solid color-mix(in srgb, var(--primary) 40%, transparent); outline-offset: 1px; }
-button.b:disabled { opacity: .55; cursor: default; }
-.link { color: var(--primary); text-decoration: none; font-weight: 500; }
-.link:hover { text-decoration: underline; }
-.checks { list-style: none; margin: 0; padding: 0; }
-.checks li { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 4px 10px; padding: 11px 0; border-top: 1px solid var(--line); }
+.swatch { display: inline-block; width: 15px; height: 15px; border-radius: 5px; vertical-align: -2px; margin-right: 7px; background: var(--primary); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .12); }
+.checks { list-style: none; margin: 0; padding: 4px 16px; border-radius: 16px; background: var(--fill); border: 1px solid var(--line); }
+.checks li { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 3px 10px; padding: 13px 0; border-top: 1px solid var(--line); }
 .checks li:first-child { border-top: 0; }
-.checks .ic { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 13px; font-weight: 700; color: #fff; }
-.ic.ok { background: var(--ok); } .ic.warn { background: var(--warn); } .ic.fail { background: var(--fail); } .ic.skip { background: var(--muted); }
-.checks .label { font-weight: 600; }
+.checks .ic { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 800; color: #fff; margin-top: 1px; }
+.ic.ok { background: var(--ok); } .ic.warn { background: var(--warn); } .ic.fail { background: var(--fail); } .ic.skip { background: var(--faint); }
+.checks .label { font-weight: 650; }
 .checks .detail { color: var(--muted); grid-column: 2; }
-.checks .fix { grid-column: 2; background: var(--warn-soft); color: var(--text); padding: 7px 10px; border-radius: 8px; font-size: 14px; }
+.checks .fix { grid-column: 2; background: var(--warn-soft); padding: 8px 12px; border-radius: 10px; font-size: 14px; margin-top: 4px; }
 .checks .fail-row .fix { background: var(--fail-soft); }
-.note { padding: 11px 14px; border-radius: 9px; background: var(--primary-soft); color: var(--text); margin: 12px 0; font-size: 14px; border-left: 3px solid var(--primary); }
-.note.warn { background: var(--warn-soft); border-left-color: var(--warn); }
-.note.fail { background: var(--fail-soft); border-left-color: var(--fail); }
-.note.ok { background: var(--ok-soft); border-left-color: var(--ok); }
-label.field { display: block; margin: 12px 0 4px; font-weight: 600; font-size: 14px; }
-input[type=text], input[type=email] { font: inherit; width: 100%; padding: 8px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); }
-input[type=text]:focus, input[type=email]:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 25%, transparent); }
-input[aria-invalid=true] { border-color: var(--fail); }
-.err { color: var(--fail); font-size: 13px; margin: 4px 0 0; min-height: 0; }
-.hint { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
-.choices { display: grid; gap: 10px; }
-.choice { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 2px 10px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; }
-.choice:has(input:checked) { border-color: var(--primary); background: var(--primary-soft); }
-.choice input { margin: 3px 0 0; accent-color: var(--primary); }
-.choice .t { font-weight: 600; }
-.choice .d { grid-column: 2; color: var(--muted); font-size: 14px; }
-.check { display: flex; gap: 8px; align-items: flex-start; margin: 10px 0; }
-.check input { margin-top: 4px; accent-color: var(--primary); }
-.sub-fields { padding: 4px 0 0 30px; }
-.steplist { margin: 0; padding-left: 20px; }
-.steplist li { margin: 3px 0; }
-.spinner { width: 16px; height: 16px; border: 2px solid color-mix(in srgb, var(--primary) 25%, transparent); border-top-color: var(--primary); border-radius: 50%; animation: spin .8s linear infinite; display: inline-block; vertical-align: -3px; }
-@keyframes spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
-.toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 10px; box-shadow: var(--shadow); font-size: 14px; max-width: calc(100vw - 32px); }
+.sub-fields { padding: 6px 0 0 34px; max-width: 560px; }
+.steplist { margin: 0; padding-left: 22px; }
+.steplist li { margin: 4px 0; }
 .loading { color: var(--muted); }
 @media (max-width: 760px) {
-  .shell { grid-template-columns: minmax(0, 1fr); padding: 16px; gap: 16px; }
-  .steps ol { position: static; display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
-  .steps li button { width: auto; white-space: nowrap; padding: 7px 10px; }
-  .steps .name { display: none; }
-  .steps [aria-current="step"] .name { display: inline; }
-  .top { padding: 14px 16px; }
-  .card { padding: 18px 16px; }
-  .grid2, .kv { grid-template-columns: minmax(0, 1fr); }
+  .kv { grid-template-columns: minmax(0, 1fr); }
   .kv dt { margin-top: 6px; }
+  .sub-fields { padding-left: 0; }
 }
