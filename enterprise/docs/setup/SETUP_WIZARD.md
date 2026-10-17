@@ -89,11 +89,14 @@ tables, status indicators, field descriptions and errors, and a Previous/Next fo
         keys stay next to it;
      4. keeps a backup of the key at `%LOCALAPPDATA%\Taro Enterprise\signing`, encrypted with
         DPAPI for this Windows account;
-     5. starts `enterprise-release.yml` for the version in `enterprise/Cargo.toml` and follows
+     5. lets the repository's workflows publish releases (Settings → Actions → General →
+        Workflow permissions: **Read and write permissions**). When GitHub refuses the change
+        (an organization policy), the row says so with the link, and you change it there;
+     6. starts `enterprise-release.yml` for the version in `enterprise/Cargo.toml` and follows
         the run, linking to it. GitHub Actions builds and signs the release for free. The
         Windows and Mac clients come from the Taro release of the repository your copy was
         forked from;
-     6. when **Build the packages** is ticked (the default; it needs steps 2 to 4), checks the
+     7. when **Build the packages** is ticked (the default; it needs steps 2 to 4), checks the
         release's signature and builds and validates your packages: steps 6 to 8 run by
         themselves.
    - Running Start again reuses everything: the copy is synced, the key in this PC's backup is
@@ -103,8 +106,21 @@ tables, status indicators, field descriptions and errors, and a Previous/Next fo
      unless **Make a new signing key** is ticked. taro-update refuses to sign with a key that
      is not in `release-signing.pub`, so a mismatch fails the run instead of publishing a
      release nobody trusts.
+   - **When GitHub refuses the secret** (an organization policy, or a fine-grained token
+     without Secrets access), Start stops before the release, the Secret row says
+     *Do it yourself*, and the page shows **Add the secret yourself**:
+     1. open **New repository secret** (the link: Settings → Secrets and variables → Actions →
+        New repository secret) in your copy, signed in to GitHub as its owner;
+     2. Name: `TARO_ENTERPRISE_SIGNING_KEY` (**Copy the name**);
+     3. Secret: press **Copy the key** and paste it as it is (one line, `ed25519-secret:…`);
+     4. press **Add secret** on GitHub;
+     5. back in the wizard, press **Start again**. It sees that the secret has changed, keeps
+        the same key, commits its public half, makes the backup and goes on with the release.
+     Paste the key nowhere else. Until then it is held only in the program's memory: closing
+     the program or signing out of GitHub drops it, and the next Start makes a new one.
    - The private key is never shown, logged, exported in the summary, put in a package or sent
-     unsealed.
+     unsealed, except by **Copy the key**, which exists only while a refused secret waits to be
+     added by hand.
 6. **Components and versions**:
    - lists the `enterprise-v…` releases on GitHub;
    - verifies the chosen one's `taro-enterprise-components.json` signature with the release
@@ -173,6 +189,10 @@ integration tests against a local fake of the GitHub releases API and the asset 
   - a classic token without `workflow` is refused;
   - the owner releases from the repository itself, with the old key kept;
   - an unknown secret is kept and the failed run reported with its link;
+  - a refused secret: Start stops before the release, Copy the key gives the key of the
+    committed-to-be public half (and nothing before or after), Start again before it is added
+    keeps the same key, and once it is added by hand Start goes on with it (no secret write);
+  - Start sets the workflow permissions to read and write;
   - neither the key nor the token appears in any response, the log, the state, the summary,
     or any request body except sealed.
 - `tests/guard.rs`: the request guard and the security headers.

@@ -164,6 +164,12 @@ pub struct GhRepo {
     /// GitHub Actions allowed to run (off in a new fork)
     pub actions: bool,
     pub syncs: u32,
+    /// each change of a secret (by Start or "by hand" in a test); GitHub's updated_at follows it
+    pub secret_changes: u32,
+    /// GitHub refuses secrets (an organization policy, a token without Secrets access)
+    pub refuse_secrets: bool,
+    /// default_workflow_permissions set by Start
+    pub workflow_permissions: Option<String>,
 }
 
 impl GhRepo {
@@ -184,6 +190,9 @@ impl GhRepo {
             parent,
             actions,
             syncs: 0,
+            secret_changes: 0,
+            refuse_secrets: false,
+            workflow_permissions: None,
         }
     }
 }
@@ -472,6 +481,10 @@ pub async fn start_fake(key: &ed25519_dalek::SigningKey) -> (Arc<Fake>, HashMap<
             axum::routing::put(gh_actions_on),
         )
         .route(
+            &format!("{api}/actions/permissions/workflow"),
+            axum::routing::put(gh_workflow_permissions),
+        )
+        .route(
             &format!("{api}/actions/workflows/{{wf}}/enable"),
             axum::routing::put(gh_workflow_on),
         )
@@ -633,6 +646,21 @@ async fn gh_actions_on(State(f): State<F>, h: H, Path((o, r)): P2, body: String)
     StatusCode::NO_CONTENT.into_response()
 }
 
+async fn gh_workflow_permissions(
+    State(f): State<F>,
+    h: H,
+    Path((o, r)): P2,
+    body: String,
+) -> Response {
+    authed!(h);
+    let v: Value = serde_json::from_str(&body).unwrap_or_default();
+    f.gh.lock()
+        .unwrap()
+        .repo(&format!("{o}/{r}"))
+        .workflow_permissions = v["default_workflow_permissions"].as_str().map(String::from);
+    StatusCode::NO_CONTENT.into_response()
+}
+
 async fn gh_workflow_on(h: H) -> Response {
     authed!(h);
     StatusCode::NO_CONTENT.into_response()
@@ -656,14 +684,11 @@ async fn gh_secret_get(
     Path((o, r, name)): Path<(String, String, String)>,
 ) -> Response {
     authed!(h);
-    if f.gh
-        .lock()
-        .unwrap()
-        .repo(&format!("{o}/{r}"))
-        .secrets
-        .contains_key(&name)
-    {
-        Json(json!({"name": name})).into_response()
+    let mut g = f.gh.lock().unwrap();
+    let repo = g.repo(&format!("{o}/{r}"));
+    if repo.secrets.contains_key(&name) {
+        let at = format!("2026-10-17T10:00:{:02}Z", repo.secret_changes);
+        Json(json!({"name": name, "updated_at": at})).into_response()
     } else {
         not_found()
     }
@@ -681,6 +706,14 @@ async fn gh_secret_put(
     let v: Value = serde_json::from_str(&body).unwrap_or_default();
     assert_eq!(v["key_id"], "kid-1");
     let repo = g.repo(&format!("{o}/{r}"));
+    if repo.refuse_secrets {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"message": "Resource not accessible by personal access token"})),
+        )
+            .into_response();
+    }
+    repo.secret_changes += 1;
     repo.secrets.insert(
         name,
         v["encrypted_value"]

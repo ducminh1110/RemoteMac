@@ -242,6 +242,11 @@ impl GitHub {
 
     /// Whether an Actions secret of this name exists (its value can never be read).
     pub async fn has_secret(&self, full: &str, name: &str) -> GhResult<bool> {
+        Ok(self.secret_updated(full, name).await?.is_some())
+    }
+
+    /// When the secret was last set (`Some("")` when GitHub does not say); `None`: no secret.
+    pub async fn secret_updated(&self, full: &str, name: &str) -> GhResult<Option<String>> {
         let (s, b) = self
             .call(
                 Method::GET,
@@ -250,10 +255,23 @@ impl GitHub {
             )
             .await?;
         match s {
-            s if s.is_success() => Ok(true),
-            StatusCode::NOT_FOUND => Ok(false),
+            s if s.is_success() => Ok(Some(
+                b["updated_at"].as_str().unwrap_or_default().to_string(),
+            )),
+            StatusCode::NOT_FOUND => Ok(None),
             s => Err(err(s, &b)),
         }
+    }
+
+    /// Let workflows' GITHUB_TOKEN write (publish releases) by default in the repository.
+    pub async fn set_workflow_write(&self, full: &str) -> GhResult<()> {
+        self.ok(
+            Method::PUT,
+            &format!("/repos/{full}/actions/permissions/workflow"),
+            Some(json!({ "default_workflow_permissions": "write" })),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// `(key_id, base64 X25519 public key)` that Actions secrets are sealed for.

@@ -125,6 +125,7 @@ async fn one_token_does_everything_and_again_reuses_it() {
             ("secret", "ok"),
             ("pub", "ok"),
             ("backup", "ok"),
+            ("perms", "ok"),
             ("release", "ok"),
             ("verify", "ok"),
             ("build", "ok"),
@@ -187,6 +188,7 @@ async fn one_token_does_everything_and_again_reuses_it() {
             ("secret", "skipped"),
             ("pub", "skipped"),
             ("backup", "skipped"),
+            ("perms", "ok"),
             ("release", "skipped"),
             ("verify", "ok"),
             ("build", "ok"),
@@ -217,7 +219,7 @@ async fn one_token_does_everything_and_again_reuses_it() {
     assert_eq!(st["signing"]["done"], true, "{}", st["signing"]);
     let s = statuses(&st);
     assert_eq!(s[1], ("key".into(), "skipped".into()), "{s:?}");
-    assert_eq!(s[5], ("release".into(), "ok".into()), "{s:?}");
+    assert_eq!(s[6], ("release".into(), "ok".into()), "{s:?}");
     assert_eq!(st["components"]["selected"]["tag"], "enterprise-v0.3.1");
     assert_eq!(st["validation"]["ok"], true);
     let mut g = w.fake.gh.lock().unwrap();
@@ -246,6 +248,7 @@ async fn the_owner_releases_from_the_repository_itself() {
             ("secret", "ok"),
             ("pub", "ok"),
             ("backup", "ok"),
+            ("perms", "ok"),
             ("release", "ok"),
         ])
     );
@@ -297,5 +300,98 @@ async fn an_unknown_secret_is_kept_and_a_failed_run_is_reported() {
     // the workflow cannot sign with that secret: the run fails, with its link
     let e = st["signing"]["error"].as_str().unwrap();
     assert!(e.contains("failure") && e.contains("/actions/runs/"), "{e}");
-    assert_eq!(s[4], ("release".into(), "fail".into()));
+    assert_eq!(s[4], ("perms".into(), "ok".into()));
+    assert_eq!(s[5], ("release".into(), "fail".into()));
+}
+
+#[tokio::test]
+async fn a_refused_secret_is_added_by_hand_and_start_goes_on_with_the_same_key() {
+    let w = wizard("signing-manual").await;
+    w.fake.gh.lock().unwrap().repo(REPO).refuse_secrets = true;
+    assert_eq!(connect(&w, REPO).await.0, 200);
+
+    // no key waits to be added: nothing to copy
+    assert_eq!(w.post("/api/signing/manual-key", json!({})).await.0, 400);
+
+    let start = json!({ "build": false });
+    assert_eq!(w.post("/api/signing/start", start.clone()).await.0, 200);
+    let st = wait_signing(&w).await;
+    let s = statuses(&st);
+    assert_eq!(s[0], ("key".into(), "ok".into()));
+    assert_eq!(s[1], ("secret".into(), "manual".into()));
+    assert_eq!(st["signing"]["manual_secret"], true);
+    let e = st["signing"]["error"].as_str().unwrap();
+    assert!(
+        e.contains("Add it yourself") && e.contains("/settings/secrets/actions/new"),
+        "{e}"
+    );
+    let public = st["signing"]["items"][0]["detail"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        w.fake.gh.lock().unwrap().repo(REPO).dispatches.is_empty(),
+        "no release without the secret"
+    );
+
+    // the key for the operator to paste, and only it
+    let (c, v) = w.post("/api/signing/manual-key", json!({})).await;
+    assert_eq!(c, 200, "{v}");
+    assert_eq!(v["name"], "TARO_ENTERPRISE_SIGNING_KEY");
+    assert_eq!(v["repo"], REPO);
+    let key = v["key"].as_str().unwrap().to_string();
+    let k = sig::parse_secret(&key).unwrap();
+    assert_eq!(sig::public_text(&k.verifying_key()), public);
+
+    // Start again before it is added: GitHub refuses again, the same key still waits
+    assert_eq!(w.post("/api/signing/start", start.clone()).await.0, 200);
+    let st = wait_signing(&w).await;
+    assert_eq!(statuses(&st)[1], ("secret".into(), "manual".into()));
+    assert!(st["signing"]["items"][0]["detail"]
+        .as_str()
+        .unwrap()
+        .starts_with(&public));
+
+    // the operator adds it in GitHub's settings
+    {
+        let mut g = w.fake.gh.lock().unwrap();
+        let r = g.repo(REPO);
+        let sealed = taro_enterprise_setup::util::b64(
+            &r.secrets_key
+                .public_key()
+                .seal(&mut crypto_box::aead::OsRng, key.as_bytes())
+                .unwrap(),
+        );
+        r.secrets
+            .insert("TARO_ENTERPRISE_SIGNING_KEY".into(), sealed);
+        r.secret_changes += 1;
+    }
+    assert_eq!(w.post("/api/signing/start", start).await.0, 200);
+    let st = wait_signing(&w).await;
+    assert_eq!(st["signing"]["done"], true, "{}", st["signing"]);
+    assert_eq!(
+        statuses(&st),
+        all(&[
+            ("key", "ok"),
+            ("secret", "ok"),
+            ("pub", "ok"),
+            ("backup", "ok"),
+            ("perms", "ok"),
+            ("release", "ok"),
+        ])
+    );
+    assert_eq!(st["signing"]["manual_secret"], false);
+    assert_eq!(st["signing"]["key_public"], public.as_str());
+    assert_eq!(opened_secret(&w.fake, REPO), key);
+    let (puts, perms) = {
+        let g = w.fake.gh.lock().unwrap();
+        (
+            g.repos[REPO].secret_puts,
+            g.repos[REPO].workflow_permissions.clone(),
+        )
+    };
+    assert_eq!(puts, 0);
+    assert_eq!(perms.as_deref(), Some("write"));
+    // the key cannot be copied any more
+    assert_eq!(w.post("/api/signing/manual-key", json!({})).await.0, 400);
 }

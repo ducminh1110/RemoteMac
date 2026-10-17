@@ -689,7 +689,7 @@ const views = {
     const where = r ? r.full_name : g.fork_to;
     const build = drafts.build !== false;
     const ready = ["identity", "branding", "relay"].every((id) => ["ok", "warn"].includes(stepState(id).status));
-    const statusOf = (it) => status(it.status === "running" ? "info" : it.status === "skipped" ? "skip" : it.status, { running: "In progress", pending: "Pending", ok: "Done", fail: "Failed", skipped: "Kept" }[it.status]);
+    const statusOf = (it) => status(it.status === "running" ? "info" : it.status === "skipped" ? "skip" : it.status === "manual" ? "warn" : it.status, { running: "In progress", pending: "Pending", ok: "Done", fail: "Failed", skipped: "Kept", manual: "Do it yourself" }[it.status]);
     const link = (url, text) => h("a", { href: url, target: "_blank", rel: "noreferrer" }, text);
     const detail = (d) => {
       if (!d) return "";
@@ -751,6 +751,7 @@ const views = {
           h("tbody", {}, g.items.map((it) => h("tr", { class: it.status },
             h("td", { class: "st" }, statusOf(it)), h("td", { class: "name" }, it.label),
             h("td", { class: "muted" }, detail(it.detail)))))))) : null,
+      g.manual_secret && r ? manualSecret(r, st) : null,
       g.backup_path ? container({ title: "Key backup" }, alert("info", "Keep this file safe", h("span", {}, "The signing key is backed up, encrypted for your Windows account, at ", h("span", { class: "path" }, g.backup_path), ". Your relays trust only this key and the ones before it: keep the backup if you change PC."))) : null);
   },
 
@@ -912,3 +913,25 @@ $("quit").addEventListener("click", async () => {
       alert("err", (e && e.error) || "Unknown error", "Open the link printed in the TaroEnterpriseSetup window, including its token.")));
   }
 })();
+
+// GitHub refused the Actions secret: the operator adds it in the repository's settings. The key
+// is copied only from here, only while it waits to be added.
+function manualSecret(r, st) {
+  const NAME = "TARO_ENTERPRISE_SIGNING_KEY";
+  const newUrl = r.html_url + "/settings/secrets/actions/new";
+  const copy = (text, what) => navigator.clipboard.writeText(text).then(() => ({ message: what + " copied to the clipboard." }),
+    () => { throw { error: "The browser did not allow copying." }; });
+  const a = (url, text) => h("a", { href: url, target: "_blank", rel: "noreferrer" }, text);
+  return container({ title: "Add the secret yourself", desc: "GitHub did not let this program store the signing key as an Actions secret (an organization policy, or a token without access to secrets). Add it in " + r.full_name + "'s settings; it takes a minute." },
+    alert("warn", "Only in GitHub's secret form", "The key signs your releases: paste it nowhere else, never in a file, chat or issue. It is still kept only in this program's memory; the encrypted backup is made once the secret is in place."),
+    h("ol", { class: "manual-steps" },
+      h("li", {}, "Open ", a(newUrl, "New repository secret"), " (Settings → Secrets and variables → Actions → New repository secret) in " + r.full_name + ". Sign in to GitHub as its owner if asked."),
+      h("li", {}, "Name: ", h("code", {}, NAME), " ", button("Copy the name", { id: "copy-secret-name", onclick: (ev) => run(ev.currentTarget, "…", st, () => copy(NAME, "The name")) })),
+      h("li", {}, "Secret: ", button("Copy the key", { kind: "primary", id: "copy-secret-key", onclick: (ev) => run(ev.currentTarget, "…", st, async () => {
+        const x = await api("POST", "/api/signing/manual-key", {});
+        return copy(x.key, "The key");
+      }) }), " and paste it into the Secret box as it is (one line, starting with ed25519)."),
+      h("li", {}, "Press ", h("strong", {}, "Add secret"), " on GitHub."),
+      h("li", {}, "Come back here and press ", h("strong", {}, "Start again"), ": it sees the secret, uses the same key, commits its public half, makes the backup and goes on with the release.")),
+    h("p", { class: "muted" }, "Workflows cannot publish either? In ", a(r.html_url + "/settings/actions", "Settings → Actions → General"), ", choose Workflow permissions: Read and write permissions, then Save."));
+}

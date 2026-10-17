@@ -144,3 +144,5 @@ input[type=color] { width: 54px; height: 34px; padding: 2px; border: 1px solid v
 @media (forced-colors: active) {
   .swatch-btn[aria-checked="true"], .g-cell[aria-pressed="true"] { outline: 3px solid Highlight; }
 }
+.manual-steps { margin: 12px 0 8px; padding-left: 22px; line-height: 1.9; }
+.manual-steps li { margin: 6px 0; }

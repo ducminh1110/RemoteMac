@@ -145,9 +145,11 @@ pub fn router(app: App) -> Router {
         .merge(uploads)
         .layer(middleware::from_fn_with_state(app.clone(), scrub_responses));
     // Not scrubbed: the explicit "reveal" of the relay key (the only response that may carry
-    // it) and the uploaded images (binary, no secrets).
+    // it), the signing key for adding the secret by hand (only after GitHub refused it) and the
+    // uploaded images (binary, no secrets).
     let unscrubbed = Router::new()
         .route("/api/relay/key/reveal", post(relay_key_reveal))
+        .route("/api/signing/manual-key", post(signing_manual_key))
         .route("/api/branding/{slot}/image", get(image_get))
         .layer(DefaultBodyLimit::max(1024));
     Router::new()
@@ -682,6 +684,30 @@ async fn relay_key_reveal(State(app): State<App>) -> Response {
     match k {
         None => ApiErr::bad("No admission key yet.").into_response(),
         Some(k) => Json(json!({ "ok": true, "key": k })).into_response(),
+    }
+}
+
+/// The signing key, for the operator to add the secret by hand: only while GitHub's refusal of
+/// it is being worked around, never otherwise.
+async fn signing_manual_key(State(app): State<App>) -> Response {
+    let k = {
+        let w = app.w();
+        let s = &w.signing;
+        s.pending_key
+            .as_ref()
+            .filter(|_| s.manual_secret)
+            .map(|(r, k, _)| (r.clone(), k.expose().to_string()))
+    };
+    match k {
+        None => ApiErr::bad("No key is waiting to be added by hand.").into_response(),
+        Some((repo, key)) => {
+            app.log.info(format!(
+                "Step 5: the signing key was copied to add {} to {repo} by hand",
+                crate::config::SIGNING_SECRET
+            ));
+            Json(json!({ "ok": true, "repo": repo, "name": crate::config::SIGNING_SECRET, "key": key }))
+                .into_response()
+        }
     }
 }
 

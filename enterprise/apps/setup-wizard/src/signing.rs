@@ -20,6 +20,13 @@
 //! secret is kept unless the operator asks for a new key; then the new public key goes next to
 //! the old ones when releases signed by them exist. The private key is never shown, logged,
 //! put in a package, or sent anywhere but sealed to GitHub; the token only goes to GitHub's API.
+//!
+//! One exception, when GitHub refuses the secret (an organization policy, a token without
+//! Secrets access): the run stops, the key is kept in memory and the page shows how to add the
+//! secret by hand in the repository's settings, with a button that copies the key (only then,
+//! only for that repository). Start again sees the secret has been added and goes on with the
+//! same key. Start also lets the repository's workflows publish releases (Workflow permissions:
+//! Read and write); when GitHub refuses that, the page says where to change it.
 
 use crate::config::{
     Endpoints, KEYS_FILE, NEW_TOKEN_URL, RELEASE_WORKFLOW, SIGNING_SECRET, TAG_PREFIX,
@@ -73,6 +80,13 @@ pub struct SigningState {
     pub token: Option<Secret>,
     #[serde(skip)]
     pub key_secret: Option<Secret>,
+    /// GitHub refused the secret: the page shows how to add it by hand (Settings, Secrets and
+    /// variables, Actions) and can copy `pending_key` for it
+    pub manual_secret: bool,
+    /// the key waiting to be added by hand, its repository, and the secret's `updated_at` when
+    /// GitHub refused it (a different one later: the operator has added it)
+    #[serde(skip)]
+    pub pending_key: Option<(String, Secret, Option<String>)>,
 }
 
 fn item(id: &str, label: impl Into<String>) -> BuildItem {
@@ -319,6 +333,12 @@ pub async fn connect(app: &Arc<AppState>, token: Secret, repo: &str) -> Result<S
     s.error = None;
     s.items.clear();
     s.done = false;
+    // a key waiting to be added by hand is for its own repository only
+    let here = s.repo.as_ref().map(|r| r.full_name.clone());
+    s.manual_secret = s
+        .pending_key
+        .as_ref()
+        .is_some_and(|(r, _, _)| Some(r) == here.as_ref());
     w.rev += 1;
     app.log.info(format!("GitHub: signed in as {login}"));
     Ok(msg)
@@ -373,6 +393,10 @@ pub fn start(app: &Arc<AppState>, req: StartReq) -> Result<(), String> {
     ));
     items.push(item("pub", format!("Its public half in {KEYS_FILE}")));
     items.push(item("backup", "Encrypted backup of the key on this PC"));
+    items.push(item(
+        "perms",
+        "Let the workflow publish releases (Workflow permissions: read and write)",
+    ));
     items.push(item(
         "release",
         "Release, built and signed by GitHub Actions",
@@ -514,16 +538,17 @@ async fn run(
     take_backup(app, &full);
 
     // 2. the signing key
-    let (has_secret, held) = {
+    let (has_secret, held, pending) = {
         let w = app.w();
         let s = &w.signing;
         let held = s
             .key_public
             .as_ref()
             .is_some_and(|p| s.repo_keys.contains(p));
-        (s.has_secret, held)
+        let pending = s.pending_key.as_ref().is_some_and(|(r, _, _)| r == &full);
+        (s.has_secret, held, pending)
     };
-    if req.new_key || !has_secret {
+    if req.new_key || !has_secret || pending {
         new_key(app, &g, &repo).await?;
     } else {
         let why = if held {
@@ -536,7 +561,20 @@ async fn run(
         }
     }
 
-    // 3. the release
+    // 3. the release: GITHUB_TOKEN must be allowed to publish it
+    set(app, "perms", "running", None);
+    match g.set_workflow_write(&full).await {
+        Ok(()) => set(app, "perms", "ok", Some("read and write".into())),
+        Err(x) => set(
+            app,
+            "perms",
+            "manual",
+            Some(format!(
+                "GitHub refused the change ({x}). If the release cannot be published, choose Workflow permissions: Read and write permissions, then Save: {}/settings/actions",
+                repo.html_url
+            )),
+        ),
+    }
     let version =
         app.w().signing.version.clone().ok_or_else(|| {
             format!("{VERSION_FILE} of {full} has no [workspace.package] version")
@@ -620,28 +658,90 @@ async fn run(
 
 async fn new_key(app: &Arc<AppState>, g: &GitHub, repo: &Repo) -> Result<(), String> {
     let full = &repo.full_name;
-    set(app, "key", "running", None);
-    let k = sig::generate();
-    let secret = Secret::new(sig::secret_text(&k));
-    app.log.register_secret(&secret);
-    let public = sig::public_text(&k.verifying_key());
-    drop(k);
-    set(app, "key", "ok", Some(public.clone()));
+    // the key of a Start that stopped for the secret to be added by hand
+    let pending = app
+        .w()
+        .signing
+        .pending_key
+        .clone()
+        .filter(|(r, _, _)| r == full);
+    let secret = match &pending {
+        Some((_, s, _)) => {
+            let p = public_of(s).ok_or("the kept key is not valid")?;
+            set(
+                app,
+                "key",
+                "ok",
+                Some(format!("{p} (kept from the last Start)")),
+            );
+            s.clone()
+        }
+        None => {
+            set(app, "key", "running", None);
+            let k = sig::generate();
+            let secret = Secret::new(sig::secret_text(&k));
+            app.log.register_secret(&secret);
+            set(app, "key", "ok", Some(sig::public_text(&k.verifying_key())));
+            secret
+        }
+    };
+    let public = public_of(&secret).ok_or("the key is not valid")?;
 
     set(app, "secret", "running", None);
-    let (key_id, repo_key) = g.secrets_key(full).await.map_err(e)?;
-    let sealed = crate::sealed::seal_for_github(&repo_key, &secret)?;
-    g.put_secret(full, SIGNING_SECRET, &sealed, &key_id)
-        .await
-        .map_err(|x| format!("could not store the secret: {x}"))?;
-    set(
-        app,
-        "secret",
-        "ok",
-        Some("stored; only GitHub Actions can read it".into()),
-    );
+    let now = g.secret_updated(full, SIGNING_SECRET).await.map_err(e)?;
+    let by_hand = match &pending {
+        Some((_, _, before)) => now.is_some() && &now != before,
+        None => false,
+    };
+    if by_hand {
+        set(
+            app,
+            "secret",
+            "ok",
+            Some("added by you in GitHub's settings".into()),
+        );
+    } else {
+        let stored = async {
+            let (key_id, repo_key) = g.secrets_key(full).await.map_err(e)?;
+            let sealed = crate::sealed::seal_for_github(&repo_key, &secret)?;
+            g.put_secret(full, SIGNING_SECRET, &sealed, &key_id)
+                .await
+                .map_err(e)
+        }
+        .await;
+        if let Err(x) = stored {
+            {
+                let mut w = app.w();
+                w.signing.pending_key = Some((full.clone(), secret.clone(), now));
+                w.signing.manual_secret = true;
+            }
+            set(
+                app,
+                "secret",
+                "manual",
+                Some(format!(
+                    "GitHub refused it ({x}); add it yourself as shown below"
+                )),
+            );
+            app.log.warn(format!(
+                "Step 5: GitHub refused {SIGNING_SECRET} for {full}; the operator adds it by hand"
+            ));
+            return Err(format!(
+                "GitHub did not let this program store {SIGNING_SECRET} ({x}). Add it yourself as shown in “Add the secret yourself”, then press Start again: {}/settings/secrets/actions/new",
+                repo.html_url
+            ));
+        }
+        set(
+            app,
+            "secret",
+            "ok",
+            Some("stored; only GitHub Actions can read it".into()),
+        );
+    }
     {
         let mut w = app.w();
+        w.signing.pending_key = None;
+        w.signing.manual_secret = false;
         w.signing.has_secret = true;
         w.signing.key_public = Some(public.clone());
         w.signing.key_source = Some("made on this PC".into());
