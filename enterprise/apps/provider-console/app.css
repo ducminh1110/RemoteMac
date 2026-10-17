@@ -293,4 +293,4 @@ input[type=color] { width: 48px; height: 34px; padding: 2px; border: 1px solid v
 
 .form-actions.start { justify-content: flex-start; }
 .container-foot code, .foot code { overflow-wrap: anywhere; }
-.form-grid.assign { align-items: end; }
+.form-grid.assign { align-items: start; }

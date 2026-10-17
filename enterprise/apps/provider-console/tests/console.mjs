@@ -165,6 +165,20 @@ try {
     check("assignments: ending a Mac that is being prepared shows the 409 message (Mac was already ready; skipped)", true);
   }
 
+  // ---- clean up: end every test assignment so that the mock Macs are free for the next run
+  for (let i = 0; i < 6; i++) {
+    const row = await page.$('#assignments-grid tbody tr:has-text("@example.test"):has(button:has-text("End"))');
+    if (!row) break;
+    if (/Ready/.test(await row.innerText())) {
+      await (await row.$('button:has-text("End")')).click();
+      await page.click('.modal-back .m-foot button:has-text("End assignment")');
+      await page.waitForSelector(".modal-back", { state: "detached" });
+    }
+    await sleep(1500);
+  }
+  await page.waitForTimeout(500);
+  check("assignments: test assignments are all ended", !(await page.$('#assignments-grid tbody tr:has(button:has-text("End"))')));
+
   // ---- every page renders
   for (const [path, title] of PAGES) {
     await nav(page, path);

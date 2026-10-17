@@ -55,8 +55,8 @@ export async function page(ctx) {
   let form = null;
   if (manage) {
     const fEmail = field({ label: "Customer email", name: "email", type: "email", required: true, placeholder: "name@company.com", id: "assign-email",
-      desc: "An account and organization are made if the customer has none." });
-    const fPlan = field({ label: "Plan", name: "plan_id", type: "select", required: true, id: "assign-plan",
+      desc: "The account is made if there is none." });
+    const fPlan = field({ label: "Plan", name: "plan_id", type: "select", required: true, id: "assign-plan", desc: "Active plans only.",
       options: plans.map((p) => [p.id, `${p.name} · ${p.chip} · ${p.region}`]) });
     const errBox = h("div", { role: "alert" });
     const submit = button("Assign Mac", { kind: "primary", type: "submit", id: "assign-submit" });
