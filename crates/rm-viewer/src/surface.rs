@@ -241,9 +241,15 @@ pub fn transparency_off() -> bool {
     personalize("EnableTransparency") == Some(0)
 }
 
-/// Taro's colour: its violet (brighter in dark mode), whatever Windows' accent is.
+/// Taro's colour: its violet (brighter in dark mode), whatever Windows' accent is; a provider's
+/// Taro: the provider's colour (brand.rs).
 pub fn accent() -> Rgba {
     crate::look::theme(dark_mode()).accent
+}
+
+/// Text drawn on [`accent`].
+pub fn on_accent() -> Rgba {
+    crate::look::theme(dark_mode()).on_accent
 }
 
 /// The display scale of the monitor at a screen point.

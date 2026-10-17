@@ -181,6 +181,8 @@ pub enum Hot {
     Field(Field),
     /// an item of the open menu
     Item(usize),
+    /// the provider's support link in About
+    Support,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -192,6 +194,8 @@ pub enum Act {
     Update(UpdateButton),
     /// Check the Mac for updates, or update it
     UpdateMac(UpdateButton),
+    /// a provider's Taro: open its support page (or write to its support address)
+    OpenSupport(String),
 }
 
 /// A menu open on a field: its items and the one under the pointer.
@@ -232,6 +236,10 @@ pub struct SettingsView {
     about: About,
     /// Taro's icon in About this Taro, at its size
     icon: Option<(usize, Canvas)>,
+    /// this copy of Taro (the standard one, or a provider's: About says whose)
+    brand: crate::brand::Brand,
+    /// where About's support link was drawn last
+    support_rect: Option<(f32, f32, f32, f32)>,
 }
 
 /// The part of an option shown on its menu button: before " — " or " (".
@@ -247,7 +255,13 @@ impl SettingsView {
         for f in [Field::Pacing, Field::Audio, Field::Cursor, Field::AutoUpdate, Field::Stage] {
             knobs.insert(f, Anim::at(if Self::switch_of(&settings, f) { 1.0 } else { 0.0 }));
         }
-        SettingsView { settings, workspaces, section: 0, hot: Hot::None, down: Hot::None, menu: None, knobs, dragging: false, w: W as usize, h: H as usize, s: 1.0, dark: false, active: true, level: Level::Full, texts: HashMap::new(), glass: None, menu_glass: None, about: About::default(), icon: None }
+        SettingsView { settings, workspaces, section: 0, hot: Hot::None, down: Hot::None, menu: None, knobs, dragging: false, w: W as usize, h: H as usize, s: 1.0, dark: false, active: true, level: Level::Full, texts: HashMap::new(), glass: None, menu_glass: None, about: About::default(), icon: None, brand: crate::brand::get().clone(), support_rect: None }
+    }
+
+    /// Show `b`'s name, icon and About (tests; the window uses this copy's).
+    pub fn set_brand(&mut self, b: crate::brand::Brand) {
+        self.brand = b;
+        self.icon = None;
     }
 
     /// What About this Taro shows now.
@@ -411,7 +425,8 @@ impl SettingsView {
                 rows.push((*f, (x, y, w, self.p(f.height()))));
                 y += self.p(f.height());
             }
-            let lines = if note.is_empty() { vec![] } else { text::wrap(note, Style::dip(11.5, 400, self.s), w - self.p(16.0), 4) };
+            let note = if self.section == ABOUT { self.about_note(note) } else { self.brand.named(note).into_owned() };
+            let lines = if note.is_empty() { vec![] } else { text::wrap(&note, Style::dip(11.5, 400, self.s), w - self.p(16.0), 4) };
             groups.push(((x, top, w, y - top), lines.clone()));
             y += self.p(8.0) + lines.len() as f32 * self.p(15.0) + self.p(if lines.is_empty() { 10.0 } else { 16.0 });
         }
@@ -453,27 +468,60 @@ impl SettingsView {
         let (x, y) = (self.content_x(), self.p(72.0));
         let n = self.p(96.0).round() as usize;
         if self.icon.as_ref().is_none_or(|(k, _)| *k != n) {
-            self.icon = Some((n, crate::logo::icon(n)));
+            self.icon = Some((n, self.brand.icon(n)));
         }
         if let Some((_, icon)) = &self.icon {
             c.composite(icon, x.round() as isize, y.round() as isize, 1.0);
         }
         let tx = x + n as f32 + self.p(18.0);
         let tw = self.content_w() - n as f32 - self.p(18.0);
-        let name = self.text("Taro", 24.0, 700, tw);
+        let brand = self.brand.clone();
+        let name = self.text(brand.name(), 24.0, 700, tw);
         Self::put(c, &name, tx, y + self.p(8.0), t.text);
-        let version = self.text(&format!("Version {}", self.about.version), 13.0, 400, tw);
+        // a provider's Taro: the official Taro inside, its version
+        let version_line = if brand.is_provider() { format!("Based on Taro {}", self.about.version) } else { format!("Version {}", self.about.version) };
+        let version = self.text(&version_line, 13.0, 400, tw);
         Self::put(c, &version, tx, y + self.p(44.0), t.text2);
+        let mut line = y + self.p(64.0);
+        // whose it is, and where its customers get help (a link)
+        self.support_rect = None;
+        if let Some(vendor) = brand.vendor() {
+            let by = self.text(&format!("By {vendor}"), 12.0, 400, tw);
+            Self::put(c, &by, tx, line, t.text2);
+            if let Some(help) = brand.support() {
+                let gap = self.p(10.0);
+                let room = (tw - by.1 as f32 - gap).max(self.p(60.0));
+                let m = self.text(help, 12.0, 500, room);
+                let sx = tx + by.1 as f32 + gap;
+                let col = if self.hot == Hot::Support { t.accent.lerp(t.text, 0.25) } else { t.accent };
+                Self::put(c, &m, sx, line, col);
+                if self.hot == Hot::Support {
+                    c.fill_round_rect(sx, line + m.2 as f32, m.1 as f32, self.p(1.0), 0.0, col.fade(0.6));
+                }
+                self.support_rect = Some((sx, line, m.1 as f32, m.2 as f32));
+            }
+            line += self.p(18.0);
+        }
         let mac_line = match &self.about.mac {
-            Some(v) => format!("The Mac runs Taro {v}"),
+            Some(v) => brand.named(&format!("The Mac runs Taro {v}")).into_owned(),
             None => "No Mac connected yet".to_string(),
         };
         let mac = self.text(&mac_line, 12.0, 400, tw);
-        Self::put(c, &mac, tx, y + self.p(64.0), t.text2);
+        Self::put(c, &mac, tx, line, t.text2);
         // a Mac behind this PC: how to bring it up to date
         if self.about.mac.as_deref().is_some_and(|m| crate::update::newer(&self.about.version, m)) {
             let hint = self.text("Update it below, or run ./taro-update.sh on the Mac.", 12.0, 600, tw);
-            Self::put(c, &hint, tx, y + self.p(82.0), t.accent);
+            Self::put(c, &hint, tx, line + self.p(18.0), t.accent);
+        }
+    }
+
+    /// The note under About's updates: where updates come from, for this copy.
+    fn about_note(&self, standard: &str) -> String {
+        let (name, vendor) = (self.brand.name(), self.brand.vendor().unwrap_or_default());
+        match self.brand.updates() {
+            crate::brand::Updates::Installer => standard.to_string(),
+            crate::brand::Updates::InPlace => format!("Updates come from Taro's releases on GitHub: the new program is checked and put in place of this one ({vendor}'s settings next to it stay as they are), then {name} opens again. The Mac fetches its own update when asked here; it goes on with the same ID and password, and {name} reconnects."),
+            crate::brand::Updates::Off => format!("Updates are provided by {vendor}: new versions of {name} come from them. The Mac fetches its own update when asked here, if {vendor} allows it there."),
         }
     }
 
@@ -503,6 +551,9 @@ impl SettingsView {
             if inside(self.section_rect(i)) {
                 return Hot::Section(i);
             }
+        }
+        if self.section == ABOUT && self.support_rect.is_some_and(inside) {
+            return Hot::Support;
         }
         let (rows, _) = self.layout();
         for (f, r) in rows {
@@ -582,6 +633,10 @@ impl SettingsView {
         }
         match down {
             Hot::Lights(Some(l)) => Some(Act::Window(l)),
+            Hot::Support => {
+                let help = self.brand.support()?;
+                Some(Act::OpenSupport(if help.starts_with("https://") { help.to_string() } else { format!("mailto:{help}") }))
+            }
             Hot::Section(i) => {
                 self.section = i;
                 None
@@ -701,12 +756,12 @@ impl SettingsView {
             let (ix, iy) = (x + self.p(8.0), y + (h - ic) / 2.0);
             c.fill_round_rect_with(ix, iy, ic, ic, self.p(5.5), |_, py| sec.colour.shade(0.12).lerp(sec.colour.shade(-0.08), ((py - iy) / ic).clamp(0.0, 1.0)));
             look::symbol(&mut c, sec.icon, ix + ic / 2.0, iy + ic / 2.0, self.p(12.5), Rgba::WHITE);
-            let m = self.text(sec.name, 13.0, if chosen { 600 } else { 500 }, w - self.p(40.0));
-            let fg = if chosen && self.active { Rgba::WHITE } else { t.text };
+            let m = self.text(&self.brand.named(sec.name), 13.0, if chosen { 600 } else { 500 }, w - self.p(40.0));
+            let fg = if chosen && self.active { t.on_accent } else { t.text };
             Self::put(&mut c, &m, ix + ic + self.p(9.0), y + (h - m.2 as f32) / 2.0, fg);
         }
         // the section: its name, then its groups
-        let title = self.text(SECTIONS[self.section].name, 20.0, 700, self.content_w());
+        let title = self.text(&self.brand.named(SECTIONS[self.section].name), 20.0, 700, self.content_w());
         Self::put(&mut c, &title, self.content_x(), self.p(26.0), if self.active { t.text } else { t.text2 });
         if self.section == ABOUT {
             self.draw_about_header(&mut c);
@@ -728,7 +783,7 @@ impl SettingsView {
             if k > 0 && rows[k - 1].1 .1 + rows[k - 1].1 .3 == y {
                 c.fill_round_rect(x + self.p(16.0), y, w - self.p(32.0), (0.75 * s).max(1.0), 0.0, t.divider);
             }
-            let m = self.text(f.label(), 13.0, 400, w * 0.45);
+            let m = self.text(&self.brand.named(f.label()), 13.0, 400, w * 0.45);
             if matches!(*f, Field::Updates | Field::MacUpdate) {
                 // the state on a second line, beside the button
                 Self::put(&mut c, &m, x + self.p(16.0), y + h / 2.0 - m.2 as f32 - self.p(1.0), t.text);
@@ -798,7 +853,7 @@ impl SettingsView {
                     };
                     c.fill_round_rect(bx, by, bw, bh, bh / 2.0, fill);
                     let lm = self.text(label, 13.0, 500, bw);
-                    let fg = if install { Rgba::WHITE } else if enabled { t.text } else { t.text3 };
+                    let fg = if install { t.on_accent } else if enabled { t.text } else { t.text3 };
                     Self::put(&mut c, &lm, bx + (bw - lm.1 as f32) / 2.0, by + (bh - lm.2 as f32) / 2.0, fg);
                 }
             }
@@ -833,7 +888,7 @@ impl SettingsView {
                 if lit {
                     c.fill_round_rect(mx + self.p(5.0), iy, mw - self.p(10.0), ih, self.p(6.0), t.accent.fade(open));
                 }
-                let fg = if lit { Rgba::WHITE } else { t.text };
+                let fg = if lit { t.on_accent } else { t.text };
                 if i == chosen {
                     look::symbol(&mut c, Symbol::Check, mx + self.p(17.0), iy + ih / 2.0, self.p(11.0), fg.fade(open));
                 }
@@ -932,6 +987,29 @@ mod tests {
         // the automatic check can be turned off
         let (x, y, w, h) = row(&mut v, Field::AutoUpdate);
         assert!(matches!(click(&mut v, x + w - 30.0, y + h / 2.0), Some(Act::Changed(s)) if !s.auto_update));
+    }
+
+    #[test]
+    fn about_a_providers_taro_names_it_and_links_its_support() {
+        let mut v = view();
+        v.set_brand(crate::brand::tests::acme("#0F766E", "notify"));
+        v.set_section(ABOUT);
+        v.set_about(About { version: "1.4.1".into(), mac: Some("1.4.1".into()), status: "Acme Connect is up to date.".into(), button: Some(UpdateButton::Check), ..About::default() });
+        let _ = v.render(Instant::now() + Duration::from_secs(2));
+        // the support link was drawn, and a click on it opens it
+        let (x, y, w, h) = v.support_rect.expect("a support link");
+        assert_eq!(click(&mut v, x + w / 2.0, y + h / 2.0), Some(Act::OpenSupport("https://acme.example/help".into())));
+        // where updates come from: Taro's releases, in place, the provider's settings kept
+        assert!(v.about_note("standard").contains("Acme Cloud Ltd's settings next to it stay"));
+        assert_eq!(v.brand.named(SECTIONS[ABOUT].name), "About this Acme Connect");
+        // updates off: who provides them
+        v.set_brand(crate::brand::tests::acme("#0F766E", "off"));
+        assert!(v.about_note("standard").starts_with("Updates are provided by Acme Cloud Ltd"));
+        // the standard Taro: as before, no link
+        v.set_brand(crate::brand::Brand::standard());
+        assert_eq!(v.about_note("standard"), "standard");
+        let _ = v.render(Instant::now() + Duration::from_secs(2));
+        assert_eq!(v.support_rect, None);
     }
 
     #[test]

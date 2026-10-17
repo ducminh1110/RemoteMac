@@ -168,7 +168,7 @@ pub fn start(hinst: HINSTANCE) {
     }
     let Some((owner, _, _)) = crate::connect::tour_probe() else { return };
     surface::register(hinst, CLASS, Some(proc), IDC_ARROW);
-    let Some(surf) = Surface::new(hinst, CLASS, "Taro tour", None, true, false) else { return };
+    let Some(surf) = Surface::new(hinst, CLASS, &format!("{} tour", crate::brand::name()), None, true, false) else { return };
     let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
     unsafe {
         let _ = GetMonitorInfoW(MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST), &mut info);
@@ -388,7 +388,7 @@ fn tick() {
         let cw = 360.0 * s;
         let pad = 20.0 * s;
         let body_style = Style::dip(13.5, 400, s);
-        let lines = text::wrap(step.body, body_style, cw - 2.0 * pad, 6);
+        let lines = text::wrap(&crate::brand::named(step.body), body_style, cw - 2.0 * pad, 6);
         let done = t.done_at.is_some() && !step.great.is_empty();
         let ch = pad + 24.0 * s + 8.0 * s + lines.len() as f32 * 19.0 * s + if done { 30.0 * s } else { 0.0 } + 16.0 * s + 34.0 * s + pad;
         let (cx, cy, arrow) = match target {
@@ -433,7 +433,8 @@ fn tick() {
         let ink = Rgba::rgb(0x1d, 0x1d, 0x1f);
         let grey = Rgba::rgb(0x6e, 0x6e, 0x73);
         let px = |v: f32| (v * s).round() as i32;
-        let title = if t.step == 0 { format!("{} {}", step.title, env!("CARGO_PKG_VERSION")) } else { step.title.to_string() };
+        let title = crate::brand::named(step.title);
+        let title = if t.step == 0 { format!("{title} {}", env!("CARGO_PKG_VERSION")) } else { title.into_owned() };
         surface::text(&mut c, &title, cx + pad, cy + pad, cw - 2.0 * pad, px(18.0), 700, ink, Align::Left);
         let mut y = cy + pad + 24.0 * s + 8.0 * s;
         for l in &lines {
@@ -456,7 +457,7 @@ fn tick() {
         let emphasised = last || t.done_at.is_some() || step.target == Target::None;
         let fill = if emphasised { accent } else { Rgba::rgba(0, 0, 0, 20) };
         c.fill_capsule(next.0 + next.3 / 2.0, next.1 + next.3 / 2.0, next.0 + next.2 - next.3 / 2.0, next.1 + next.3 / 2.0, next.3 / 2.0, fill);
-        surface::text(&mut c, label, next.0, next.1 + 8.0 * s, next.2, px(14.0), 600, if emphasised { Rgba::WHITE } else { ink }, Align::Center);
+        surface::text(&mut c, label, next.0, next.1 + 8.0 * s, next.2, px(14.0), 600, if emphasised { surface::on_accent() } else { ink }, Align::Center);
         t.next = next;
         t.skip = if last { (0.0, 0.0, 0.0, 0.0) } else { (cx + pad, by, 80.0 * s, 34.0 * s) };
         if !last {

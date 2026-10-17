@@ -699,7 +699,7 @@ impl View {
             let r = if ms.len() > 1 { 6.0 * s } else { ph / 2.0 };
             c.fill_round_rect(icx - pw / 2.0, ly - 1.0 * s, pw, ph, r, bg.fade(show.min(1.0)));
             if self.active {
-                fg = Rgba::WHITE;
+                fg = t.on_accent;
             }
         }
         for (n, m) in ms.iter().enumerate() {

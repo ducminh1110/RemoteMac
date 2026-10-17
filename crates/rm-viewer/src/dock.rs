@@ -268,7 +268,7 @@ mod win {
             });
             return;
         }
-        let Some(surf) = Surface::new(hinst, CLASS, "Taro Dock", None, true, false) else { return };
+        let Some(surf) = Surface::new(hinst, CLASS, &format!("{} Dock", crate::brand::name()), None, true, false) else { return };
         let hwnd = surf.hwnd;
         DOCK.with(|d| {
             *d.borrow_mut() = Some(Dock {

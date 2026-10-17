@@ -7,8 +7,10 @@ import CryptoKit
 /// Taro's version (the same as the Windows app's, Cargo.toml).
 let appVersion = "1.4.1"
 
-/// The relay used when none is given: built in by release builds, none from source.
-let defaultRelay: String? = builtinRelay.trimmingCharacters(in: .whitespaces).isEmpty ? nil : builtinRelay
+/// The relay used when none is given: a provider's (provider/provider.json next to this
+/// program, Provider.swift), else the one built in by release builds (none from source). In a
+/// provider's Taro the built-in one is never used.
+let defaultRelay: String? = provider.map { $0.relayAddress } ?? (builtinRelay.trimmingCharacters(in: .whitespaces).isEmpty ? nil : builtinRelay)
 
 func sessionToken(id: String, password: String) -> String {
     let digest = SHA256.hash(data: Data("remotemac/v1:\(id):\(password)".utf8))

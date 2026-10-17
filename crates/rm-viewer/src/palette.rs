@@ -199,7 +199,7 @@ mod win {
         let m = crate::glass::Material::for_kind(crate::glass::Kind::Sheet, dark, accent);
         let reach = crate::glass::margin(&m, scale, level, w as usize, tallest, 16.0 * scale);
         let backdrop = if level == crate::glass::Level::Off { None } else { surface::capture(x - reach as i32, y - reach as i32, w as usize + 2 * reach, tallest + 2 * reach) };
-        let Some(surf) = Surface::new(hinst, CLASS, "Taro Search", None, true, true) else { return };
+        let Some(surf) = Surface::new(hinst, CLASS, &format!("{} Search", crate::brand::name()), None, true, true) else { return };
         let hwnd = surf.hwnd;
         let icons = icons.into_iter().filter(|(_, (s, px))| px.len() == (*s * *s * 4) as usize).map(|(k, (s, px))| (k, Canvas::from_rgba(s as usize, s as usize, &px))).collect();
         let results = search(&entries, "", ROWS);
@@ -300,6 +300,8 @@ mod win {
             let (mx, my) = (margin as f32, margin as f32);
             let wf = w as f32;
             let (fg, fg2) = surface::glass_text(m.dark);
+            // what is written on the accent (the selected result)
+            let on = crate::look::theme(m.dark).on_accent;
             // the field: a magnifier, the text or the placeholder, the caret
             let (gx, gy) = (mx + 24.0 * s, my + FIELD * s / 2.0);
             c.stroke_round_rect_with(gx - 8.0 * s, gy - 9.0 * s, 15.0 * s, 15.0 * s, 7.5 * s, 2.0 * s, |_, _| fg2);
@@ -333,14 +335,14 @@ mod win {
                 if let Some(ic) = m.icons.get(&e.id) {
                     c.draw(ic, mx + 18.0 * s, iy, isz, isz, 0.0, 1.0);
                 } else {
-                    c.fill_round_rect(mx + 18.0 * s, iy, isz, isz, 7.0 * s, if lit { Rgba::WHITE.alpha(0.3) } else { fg2.fade(0.4) });
+                    c.fill_round_rect(mx + 18.0 * s, iy, isz, isz, 7.0 * s, if lit { on.alpha(0.3) } else { fg2.fade(0.4) });
                 }
                 let (mask, mw, mh) = text(&mut m.texts, "name", &e.name, 15.0 * s, 500, wf * 0.6).clone();
-                c.fill_mask(&mask, mw, (mx + 60.0 * s) as isize, (top + ((ROW - 4.0) * s - mh as f32) / 2.0).round() as isize, if lit { Rgba::WHITE } else { fg });
+                c.fill_mask(&mask, mw, (mx + 60.0 * s) as isize, (top + ((ROW - 4.0) * s - mh as f32) / 2.0).round() as isize, if lit { on } else { fg });
                 let hint = if e.running { "Switch to it" } else if lit { "Open" } else { "" };
                 if !hint.is_empty() {
                     let (mask, hw, hh) = text(&mut m.texts, "hint", hint, 12.0 * s, 400, wf * 0.3).clone();
-                    c.fill_mask(&mask, hw, (mx + wf - 20.0 * s - hw as f32) as isize, (top + ((ROW - 4.0) * s - hh as f32) / 2.0).round() as isize, if lit { Rgba::WHITE.alpha(0.85) } else { fg2 });
+                    c.fill_mask(&mask, hw, (mx + wf - 20.0 * s - hw as f32) as isize, (top + ((ROW - 4.0) * s - hh as f32) / 2.0).round() as isize, if lit { on.alpha(0.85) } else { fg2 });
                 }
             }
             // opening: a spring from slightly smaller; closing: a fade

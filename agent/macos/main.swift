@@ -16,7 +16,11 @@ func log(_ s: String) { if logsEnabled { FileHandle.standardError.write(Data("[a
 /// Errors that stop the app are always shown.
 func fail(_ s: String) -> Never { FileHandle.standardError.write(Data("taro: \(s)\n".utf8)); exit(1) }
 
-let usage = """
+// a provider's Taro: provider/provider.json next to this program (Provider.swift), read before
+// anything else; a wrong one ends the program here
+_ = provider
+
+let usage = named("""
 usage: taro [--password SECRET] [--id 123456789] [--relay HOST:PORT] [--port N] [--foreground] [--logs-enabled]
        taro --stop
        RM_SESSION_TOKEN=.. taro --relay HOST:PORT --session NAME
@@ -26,9 +30,10 @@ usage: taro [--password SECRET] [--id 123456789] [--relay HOST:PORT] [--port N] 
   --logs-enabled     write a log (stderr; in the background ~/Library/Logs/Taro/taro.log)
   --stop             stop the Taro running in the background
   --check-permissions  say which macOS permissions are missing (exit 3 when one is)
+  --print-provider   show the product, the relay and whether a provider key is set
   --version          show the version
-"""
-var relayArg: String?, sessionArg: String?, passwordArg: String?, idArg: String?, foreground = false
+""")
+var relayArg: String?, sessionArg: String?, passwordArg: String?, idArg: String?, foreground = false, printProviderAsked = false
 var argv = CommandLine.arguments.dropFirst().makeIterator()
 while let a = argv.next() {
     switch a {
@@ -45,10 +50,15 @@ while let a = argv.next() {
     case "-h", "--help": print(usage); exit(0)
     case "--version": print("taro \(appVersion)"); exit(0)
     case "--check-permissions": exit(checkPermissions())
+    case "--print-provider": printProviderAsked = true
     default: fail(usage)
     }
 }
 let env = ProcessInfo.processInfo.environment
+if printProviderAsked {
+    printProvider(relay: [relayArg, env["RM_RELAY"], defaultRelay].compactMap { $0?.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty })
+    exit(0)
+}
 // a write to a viewer or relay that is gone returns an error; by default it would kill us
 signal(SIGPIPE, SIG_IGN)
 // started in the background (below): our own session, so closing the terminal does not end us;
@@ -59,7 +69,7 @@ if env["RM_DAEMON"] != nil && env["RM_WORKER"] == nil { becomeDaemon(); supervis
 let onTerminal = isatty(STDIN_FILENO) == 1 || isatty(STDOUT_FILENO) == 1 || isatty(STDERR_FILENO) == 1
 let goBackground = !foreground && env["RM_DAEMON"] == nil && sessionArg == nil && onTerminal
 if goBackground, let pid = runningInBackground() {
-    print("Taro is already running in the background (pid \(pid)). Stop it with: \(CommandLine.arguments[0]) --stop")
+    print("\(productName) is already running in the background (pid \(pid)). Stop it with: \(CommandLine.arguments[0]) --stop")
     exit(1)
 }
 // a session that ended without a word (a crash, power lost) may have left the PC's wallpaper
@@ -81,7 +91,7 @@ if let s = sessionArg {
     // ID + password mode; a restart for the next client keeps both (RM_PASSWORD, RM_ID)
     // the ID: given, else from the relay (it keeps IDs unique there), else this Mac's own
     // (with no relay it is only reached on this network, where the viewer looks for it by ID)
-    if env["RM_DAEMON"] == nil && env["RM_RESTARTED"] == nil { print("  Starting Taro…"); fflush(stdout) } // (asking the relay for the ID can take a few seconds)
+    if env["RM_DAEMON"] == nil && env["RM_RESTARTED"] == nil { print("  Starting \(productName)…"); fflush(stdout) } // (asking the relay for the ID can take a few seconds)
     let id: String
     if let given = idArg ?? env["RM_ID"] {
         id = given
@@ -102,7 +112,7 @@ if let s = sessionArg {
     // a restart for the next client; a stale RM_QUIET_BANNER in the user's shell does not hide it)
     if env["RM_QUIET_BANNER"] == nil || (env["RM_DAEMON"] == nil && env["RM_RESTARTED"] == nil) {
         print("")
-        print("  Taro is ready — connect from Windows with:")
+        print("  \(productName) is ready — connect from Windows with:")
         print("    ID session to connect: \(displayID(id))")
         print("    Password: \(password)")
         if let r = relayAddr {

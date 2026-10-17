@@ -18,7 +18,10 @@ rm-decode = { path = "../rm-decode" }
 rm-fakeagent = { path = "../rm-fakeagent" }
 moonlight-sys = { path = "../moonlight-sys" }
 rm-gamestream = { path = "../rm-gamestream" }
+rm-brand = { path = "../rm-brand" }
 serde_json.workspace = true
+# a provider's icon.png (provider/ next to the exe)
+png = "0.18"
 rustybuzz = "0.20"
 ab_glyph_rasterizer = "0.1"
 sha2 = "0.10"

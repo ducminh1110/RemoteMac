@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
   push:
     branches: [claude/inspiring-einstein-er2d37]
-    paths: [crates/**, scripts/windows-smoke.ps1, scripts/windows-showcase.ps1, .github/workflows/windows-viewer.yml, Cargo.*]
+    paths: [crates/**, scripts/windows-smoke.ps1, scripts/windows-showcase.ps1, scripts/windows-branded.ps1, .github/workflows/windows-viewer.yml, Cargo.*]
 
 permissions:
   contents: read
@@ -13,7 +13,7 @@ permissions:
 jobs:
   viewer:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - name: Unit tests (portable crates, incl. fake-agent end-to-end)
@@ -23,6 +23,15 @@ jobs:
       - name: Smoke test the native viewer
         shell: pwsh
         run: ./scripts/windows-smoke.ps1
+      - name: A provider's Taro, branded (Acme Connect, its relay and key from provider.json)
+        shell: pwsh
+        run: ./scripts/windows-branded.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: branded-client-screenshots
+          path: |
+            out/branded-client/**
       - uses: actions/upload-artifact@v4
         if: always()
         with:

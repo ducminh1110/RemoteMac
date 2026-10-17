@@ -34,6 +34,23 @@ done
 
 command -v curl >/dev/null || die "curl is needed (it comes with macOS)"
 
+# a provider's Taro: the official taro with provider/provider.json next to it. Only the
+# program files below are ever replaced: the provider/ folder stays as it is. A provider that
+# ships its own packages (updates.clients "off") is not updated from here at all.
+product="Taro"
+pj="$here/provider/provider.json"
+if [[ -f "$pj" ]]; then
+  product="$(plutil -extract product.name raw -o - "$pj" 2>/dev/null)" || product=""
+  vendor="$(plutil -extract product.vendor raw -o - "$pj" 2>/dev/null)" || vendor=""
+  clients="$(plutil -extract updates.clients raw -o - "$pj" 2>/dev/null)" || clients="notify"
+  [[ -n "$product" ]] || die "$pj is not valid (no product.name): download the package again from your provider"
+  if [[ "$clients" == "off" ]]; then
+    say "Updates of $product are provided by ${vendor:-your provider}: get the new package from them."
+    (( porcelain )) && exit 1
+    exit 0
+  fi
+fi
+
 # what this folder has
 current=""
 if [[ -x "$here/taro" ]]; then
@@ -119,11 +136,14 @@ got="$("$new/taro" --version 2>/dev/null | awk '{print $2}')"
 
 out "progress 94"; out "stage installing"
 # in place, each file at once (mv: a program or this script still running keeps its old copy)
-for f in taro taro.sh taro-update.sh README.txt; do
+# (the program files only: never provider/; a provider's Taro keeps its own README)
+files="taro taro.sh taro-update.sh README.txt"
+[[ -f "$pj" ]] && files="taro taro.sh taro-update.sh"
+for f in $files; do
   [[ -f "$new/$f" ]] || continue
   cp -p "$new/$f" "$here/.$f.new" && mv -f "$here/.$f.new" "$here/$f" || die "could not replace $here/$f (is the folder writable?)"
 done
-say "Taro $got is in $here."
+say "$product $got is in $here."
 out "progress 100"
 if (( porcelain )); then out "done $got"; exit 0; fi
 

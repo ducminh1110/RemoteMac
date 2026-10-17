@@ -7,8 +7,24 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let has = |k: &str| args.iter().any(|a| a == k);
+    // a provider's Taro: provider/provider.json next to this program gives the product's name,
+    // colour, icon, relay and key (brand.rs), before anything is shown or connects. A provider
+    // folder that is wrong stops here: never Taro's own relay in place of the provider's.
+    let brand = match rm_viewer::brand::init() {
+        Ok(b) => b,
+        Err(why) => {
+            let msg = format!("This program cannot start: its provider settings are not valid.\n\n{why}\n\nDownload the package again from your provider, or ask them for help.");
+            eprintln!("{msg}");
+            #[cfg(windows)]
+            if !has("--smoke") && !has("--showcase") && !has("--write-icon") {
+                let title = std::env::current_exe().ok().and_then(|e| e.file_stem().map(|s| s.to_string_lossy().into_owned())).unwrap_or_else(|| "Taro".into());
+                rm_viewer::native::message_box(&title, &msg);
+            }
+            std::process::exit(4)
+        }
+    };
     if has("-h") || has("--help") {
-        eprintln!("usage: Taro.exe                      (asks for the Mac's ID and password)\n       Taro.exe --id 123456789 --password PASS\n       RM_SESSION_TOKEN=.. Taro.exe --session NAME   (legacy)\n  [--relay HOST:PORT | --direct HOST[:PORT]] [--app testapp] [--logs-enabled] [--raw-ctrl] [--no-clipboard] [--renderer d3d11|gdi] [--mac-file-panel] [--no-shortcuts] [--smoke] [--showcase DIR --apps xcode,textedit --settle SECS --type TEXT]");
+        eprintln!("{}", brand.named("usage: Taro.exe                      (asks for the Mac's ID and password)\n       Taro.exe --id 123456789 --password PASS\n       RM_SESSION_TOKEN=.. Taro.exe --session NAME   (legacy)\n  [--relay HOST:PORT | --direct HOST[:PORT]] [--app testapp] [--logs-enabled] [--raw-ctrl] [--no-clipboard] [--renderer d3d11|gdi] [--mac-file-panel] [--no-shortcuts] [--smoke] [--showcase DIR --apps xcode,textedit --settle SECS --type TEXT]"));
         std::process::exit(0)
     }
     // started again by Taro itself (the guided tour leaving its demo Mac): once the old one is
@@ -17,13 +33,20 @@ fn main() {
     if let Some(pid) = get("--wait-pid").and_then(|p| p.parse::<u32>().ok()) {
         rm_viewer::native::wait_for_process(pid, std::time::Duration::from_secs(10));
     }
-    // Taro's icon as an .ico file (the installer and its shortcuts take it)
+    // what an update in place left behind (a provider's Taro: <exe>.old), once it is not running
+    #[cfg(windows)]
+    if let Ok(exe) = std::env::current_exe() {
+        rm_viewer::update::clean_after_update(&exe);
+    }
+    // Taro's icon as an .ico file (the installer and its shortcuts take it; a provider's Taro:
+    // its icon)
     if let Some(path) = get("--write-icon") {
-        let ico = rm_viewer::ico::rgba_to_ico(256, &rm_viewer::logo::rgba(256)).expect("icon");
+        let ico = rm_viewer::ico::rgba_to_ico(256, &rm_viewer::brand::icon_rgba(256)).expect("icon");
         std::process::exit(if std::fs::write(&path, ico).is_ok() { 0 } else { 1 })
     }
     // a Mac on this network is found by its ID; for one elsewhere: --relay, $RM_RELAY, the relay
-    // built into this build (none in the source), or what the connect window is given
+    // built into this build (a provider's Taro: the provider's, from brand::init; none in the
+    // source), or what the connect window is given
     let relay = get("--relay").or_else(|| std::env::var("RM_RELAY").ok().filter(|r| !r.is_empty())).or_else(|| rm_protocol::session::default_relay().map(String::from));
     // or straight to the Mac at an address (IP or host name, IPv4 or IPv6), any network
     rm_viewer::net::set_direct(get("--direct"));
@@ -37,13 +60,13 @@ fn main() {
             let quiet = has("--smoke") || has("--showcase");
             let fail = |why: String| -> ! {
                 if !quiet {
-                    rm_viewer::native::message_box("Taro", &format!("This link could not be opened:\n\n{why}"));
+                    rm_viewer::native::message_box(brand.name(), &format!("This link could not be opened:\n\n{why}"));
                 }
                 std::process::exit(1)
             };
             // never spend the one-time grant while another Taro holds the session
             if rm_viewer::launcher::running() {
-                fail("Taro is already connected to a Mac. Disconnect first (the red Disconnect button in Taro), then open the link again from the portal.".into());
+                fail(brand.named("Taro is already connected to a Mac. Disconnect first (the red Disconnect button in Taro), then open the link again from the portal.").into_owned());
             }
             let link = rm_viewer::enterprise::parse_link(&url).unwrap_or_else(|e| fail(e));
             let mac = rm_viewer::enterprise::redeem(&link).unwrap_or_else(|e| fail(e));
@@ -88,13 +111,17 @@ fn main() {
         let crash_log = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             crash_log(info);
-            let msg = format!("Taro stopped because of an internal error:\n\n{info}\n\n{}", rm_viewer::log_hint());
+            let msg = format!("{} stopped because of an internal error:\n\n{info}\n\n{}", brand.name(), rm_viewer::log_hint());
             eprintln!("{msg}");
             if !quiet {
-                rm_viewer::native::message_box("Taro", &msg);
+                rm_viewer::native::message_box(brand.name(), &msg);
             }
         }));
-        eprintln!("Taro {} starting (relay {})", env!("CARGO_PKG_VERSION"), relay.as_deref().unwrap_or("none: this network only"));
+        match brand.provider() {
+            // (never the key itself)
+            Some(p) => eprintln!("{} (Taro {}, provider {}) starting (relay {}; the provider's relay key)", brand.name(), env!("CARGO_PKG_VERSION"), p.provider_id, relay.as_deref().unwrap_or("none")),
+            None => eprintln!("Taro {} starting (relay {})", env!("CARGO_PKG_VERSION"), relay.as_deref().unwrap_or("none: this network only")),
+        }
         let opts = rm_viewer::ui::Options { relay, session, token, prompt: prompt && !has("--smoke") && !has("--showcase"), app: get("--app"), ctrl_as_command: !has("--raw-ctrl"), smoke: has("--smoke"), clipboard: !has("--no-clipboard"), d3d: get("--renderer").as_deref() != Some("gdi"), windows_file_picker: !has("--mac-file-panel") && !has("--showcase"), shortcuts: !has("--no-shortcuts"),
             showcase: get("--showcase").map(|dir| rm_viewer::ui::ShowcaseOptions {
                 apps: get("--apps").unwrap_or_else(|| "xcode".into()).split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
@@ -107,7 +134,7 @@ fn main() {
     }
     #[cfg(not(windows))]
     {
-        let _ = (relay, session, token, prompt);
+        let _ = (relay, session, token, prompt, brand);
         eprintln!("Taro needs Windows (the portable parts are covered by `cargo test -p rm-viewer`)");
         std::process::exit(2);
     }

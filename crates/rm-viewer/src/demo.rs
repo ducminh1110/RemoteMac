@@ -538,7 +538,7 @@ fn notes_back(p: &mut Pen, w: f32, h: f32, active: bool) {
         } else if i != 1 {
             p.hline(x + 2.0, y, sw - 34.0, HAIRLINE);
         }
-        p.text(title, 13.0, 650, x + 2.0, y + 21.0, INK, sw - 32.0);
+        p.text(&crate::brand::named(title), 13.0, 650, x + 2.0, y + 21.0, INK, sw - 32.0);
         let tw = p.text(when, 11.5, 500, x + 2.0, y + 38.0, if i == 0 { INK } else { INK2 }, 80.0);
         p.text(first, 11.5, 400, x + 2.0 + tw + 6.0, y + 38.0, if i == 0 { INK.alpha(0.7) } else { INK2 }, sw - 40.0 - tw);
         y += row;
@@ -569,9 +569,9 @@ fn notes_text(p: &mut Pen, w: f32, h: f32, sc: &Scene) {
     let ew = w - ex - 28.0;
     p.text_center("October 16, 2026 at 9:41 AM", 11.0, 500, ex + ew / 2.0, bar + 14.0, INK3);
     // the title, a little room under it, the text
-    let mut lines: Vec<(String, f32, i32, Rgba, bool)> = vec![(NOTES[0].0.to_string(), 22.0, 700, INK, false), (String::new(), 4.0, 400, INK, false)];
+    let mut lines: Vec<(String, f32, i32, Rgba, bool)> = vec![(crate::brand::named(NOTES[0].0).into_owned(), 22.0, 700, INK, false), (String::new(), 4.0, 400, INK, false)];
     for para in WELCOME {
-        for l in wrap(para, 13.5, 400, p.s, ew) {
+        for l in wrap(&crate::brand::named(para), 13.5, 400, p.s, ew) {
             lines.push((l, 13.5, 400, INK, false));
         }
     }

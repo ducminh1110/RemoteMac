@@ -334,9 +334,9 @@ pub fn friendly_error(e: &str) -> String {
     } else if e.contains("not found on this network") || e.contains("did not answer at") || e.contains("is not a Mac address") || e.contains("could not be resolved") {
         return e.to_string();
     } else {
-        return format!("Cannot reach the Taro server: {e}");
+        return format!("Cannot reach the {} server: {e}", crate::brand::name());
     };
-    m.to_string()
+    crate::brand::named(m).into_owned()
 }
 
 /// Connect, handshake, optionally launch `app`, and start the receive thread.
@@ -372,7 +372,7 @@ fn connect_steps(relay: Option<&str>, session: &str, token: &str, app: Option<&s
     });
     *ROUTE.lock().unwrap() = match &route {
         // the Demo Mac's relay is on this PC: not a route worth naming as one
-        _ if crate::demo::is_demo(session) => "Built into Taro".into(),
+        _ if crate::demo::is_demo(session) => crate::brand::named("Built into Taro").into_owned(),
         rm_relay::lan::Route::Lan(_) => "This network".into(),
         rm_relay::lan::Route::Direct(a) => format!("Direct to {}", a.ip()),
         rm_relay::lan::Route::Relay(_) => "Through the relay".into(),

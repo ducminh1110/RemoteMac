@@ -1280,10 +1280,44 @@ mod display_tests {
 pub mod session {
     use sha2::{Digest, Sha256};
 
-    /// The relay this build uses when none is given: none in the source; a distribution sets one
-    /// at build time (`RM_DEFAULT_RELAY=host:port cargo build`), as the official releases do.
-    pub fn default_relay() -> Option<&'static str> {
+    /// The relay set at start by a provider's Taro ([`set_builtin_relay`]).
+    static PROVIDER_RELAY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    /// The relay compiled into this binary: none in the source; a distribution sets one at build
+    /// time (`RM_DEFAULT_RELAY=host:port cargo build`), as the official releases do.
+    pub fn compiled_relay() -> Option<&'static str> {
         option_env!("RM_DEFAULT_RELAY").filter(|r| !r.trim().is_empty())
+    }
+
+    /// A provider's Taro (its `provider/provider.json`): its relay is the built-in one from now
+    /// on, in place of the one compiled in, which is then never used. Called once, at start,
+    /// before anything connects; another relay afterwards is refused.
+    pub fn set_builtin_relay(addr: &str) -> Result<(), String> {
+        let addr = addr.trim();
+        if addr.is_empty() {
+            return Err("the provider's relay is empty".into());
+        }
+        match PROVIDER_RELAY.set(addr.to_string()) {
+            Ok(()) => Ok(()),
+            Err(_) if provider_relay() == Some(addr) => Ok(()),
+            Err(_) => Err("the built-in relay was already set".into()),
+        }
+    }
+
+    /// The provider's relay, when one replaced the compiled one ([`set_builtin_relay`]).
+    pub fn provider_relay() -> Option<&'static str> {
+        PROVIDER_RELAY.get().map(String::as_str)
+    }
+
+    /// The relay this build uses when none is given: a provider's ([`set_builtin_relay`]), else
+    /// the one compiled in (none from source).
+    pub fn default_relay() -> Option<&'static str> {
+        pick_relay(provider_relay(), compiled_relay())
+    }
+
+    /// The provider's relay wins; the compiled one counts only when there is no provider.
+    pub fn pick_relay<'a>(provider: Option<&'a str>, compiled: Option<&'a str>) -> Option<&'a str> {
+        provider.or(compiled)
     }
 
     /// "123 456 789", "123-456-789" -> "123456789"; None unless it is 9 digits.
@@ -1331,6 +1365,14 @@ pub mod session {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn a_providers_relay_replaces_the_compiled_one() {
+            assert_eq!(pick_relay(Some("relay.acme.example:7471"), Some("remotemac.mooo.com:7470")), Some("relay.acme.example:7471"));
+            assert_eq!(pick_relay(Some("relay.acme.example:7471"), None), Some("relay.acme.example:7471"));
+            assert_eq!(pick_relay(None, Some("remotemac.mooo.com:7470")), Some("remotemac.mooo.com:7470"));
+            assert_eq!(pick_relay(None, None), None);
+        }
 
         #[test]
         fn ids_and_tokens() {

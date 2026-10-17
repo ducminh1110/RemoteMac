@@ -217,8 +217,12 @@ pub fn icon(n: usize) -> Canvas {
 
 /// The icon as straight-alpha RGBA (for a window's or a shortcut's icon).
 pub fn rgba(n: usize) -> Vec<u8> {
-    let c = icon(n);
-    let mut out = Vec::with_capacity(n * n * 4);
+    straight_rgba(&icon(n))
+}
+
+/// A canvas (premultiplied BGRA) as straight-alpha RGBA bytes (icons for Windows).
+pub fn straight_rgba(c: &Canvas) -> Vec<u8> {
+    let mut out = Vec::with_capacity(c.px.len() * 4);
     for p in &c.px {
         let a = p[3] as f32 / 255.0;
         let un = |v: u8| if a > 0.0 { (v as f32 / a).min(255.0) as u8 } else { 0 };

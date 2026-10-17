@@ -530,6 +530,8 @@ mod win {
             let mut b = o.borrow_mut();
             let Some(m) = b.as_mut() else { return };
             let (s, dark, accent) = (m.scale, m.dark, m.accent);
+            // what is written on the accent (white on Taro's violet; dark on a pale provider colour)
+            let on = crate::look::theme(dark).on_accent;
             let Some(pn) = m.panels.get_mut(k) else { return };
             let mut c = pn.base.clone();
             let (mx, my) = (pn.margin as f32, pn.margin as f32);
@@ -551,7 +553,7 @@ mod win {
                         if lit {
                             c.fill_round_rect(mx + PAD * s, top, w - 2.0 * PAD * s, h, 7.0 * s, accent);
                         }
-                        let col = if lit { Rgba::WHITE } else if enabled { fg } else { fg2.fade(0.6) };
+                        let col = if lit { on } else if enabled { fg } else { fg2.fade(0.6) };
                         if matches!(it, Item::Action { checked: true, .. }) {
                             // a check mark
                             let (cx, cy) = (mx + 20.0 * s, top + h / 2.0);
@@ -563,13 +565,13 @@ mod win {
                             c.fill_mask(mask, *mw, (mx + LABEL_X * s) as isize, (top + (h - *mh as f32) / 2.0).round() as isize, col);
                             if let Some((mask, sw, sh)) = short {
                                 let x = mx + w - RIGHT * s - *sw as f32;
-                                c.fill_mask(mask, *sw, x.round() as isize, (top + (h - *sh as f32) / 2.0).round() as isize, if lit { Rgba::WHITE.alpha(0.85) } else { fg2 });
+                                c.fill_mask(mask, *sw, x.round() as isize, (top + (h - *sh as f32) / 2.0).round() as isize, if lit { on.alpha(0.85) } else { fg2 });
                             }
                         }
                         if matches!(it, Item::Submenu { .. }) {
                             // a chevron: another menu opens here
                             let (cx, cy) = (mx + w - RIGHT * s - 3.0 * s, top + h / 2.0);
-                            let k = if lit { Rgba::WHITE } else if enabled { fg2 } else { fg2.fade(0.6) };
+                            let k = if lit { on } else if enabled { fg2 } else { fg2.fade(0.6) };
                             c.fill_capsule(cx - 2.0 * s, cy - 4.0 * s, cx + 2.0 * s, cy, 0.85 * s, k);
                             c.fill_capsule(cx + 2.0 * s, cy, cx - 2.0 * s, cy + 4.0 * s, 0.85 * s, k);
                         }

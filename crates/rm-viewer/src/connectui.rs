@@ -483,7 +483,7 @@ impl ConnectView {
             }
         }
         if c.password.is_empty() {
-            self.status = Status::Error("Type the password Taro shows on the Mac.".into());
+            self.status = Status::Error(crate::brand::named("Type the password Taro shows on the Mac.").into_owned());
             self.set_focus(Focus::Field(PASSWORD));
             return None;
         }
@@ -512,7 +512,7 @@ impl ConnectView {
         let c = self.computers.get(i)?.clone();
         if c.password.is_empty() {
             self.open(Some(i));
-            self.status = Status::Error("Type the password Taro shows on the Mac.".into());
+            self.status = Status::Error(crate::brand::named("Type the password Taro shows on the Mac.").into_owned());
             self.set_focus(Focus::Field(PASSWORD));
             return None;
         }
@@ -1112,14 +1112,22 @@ impl ConnectView {
             look::mac_icon(&mut c, self.w as f32 / 2.0, self.p(72.0), self.p(78.0), self.dark);
             let title = self.text(if kind == 2 { "Edit Mac" } else { "Add a Mac" }, 20.0, 700, self.p(380.0));
             Self::put(&mut c, &title, (self.w as f32 - title.1 as f32) / 2.0, self.p(108.0), t.text);
-            let what = if self.by_address { "Type the Mac's IP address or name and the password Taro shows on it." } else { "Open Taro on the Mac, then type the ID and password it shows." };
-            for (n, l) in text::wrap(what, Style::dip(13.0, 400, s), self.p(330.0), 2).iter().enumerate() {
+            let what = crate::brand::named(if self.by_address { "Type the Mac's IP address or name and the password Taro shows on it." } else { "Open Taro on the Mac, then type the ID and password it shows." });
+            for (n, l) in text::wrap(&what, Style::dip(13.0, 400, s), self.p(330.0), 2).iter().enumerate() {
                 let m = self.text(l, 13.0, 400, self.p(340.0));
                 Self::put(&mut c, &m, (self.w as f32 - m.1 as f32) / 2.0, self.p(136.0 + n as f32 * 17.0), t.text2);
             }
         } else {
-            let title = self.text("Taro", 13.5, 700, self.p(200.0));
-            Self::put(&mut c, &title, (self.w as f32 - title.1 as f32) / 2.0, self.p(22.0) - title.2 as f32 / 2.0, t.text);
+            let title = self.text(crate::brand::name(), 13.5, 700, self.p(200.0));
+            let mut tx = (self.w as f32 - title.1 as f32) / 2.0;
+            if crate::brand::get().is_provider() {
+                // a provider's Taro: its icon beside its name
+                let (d, gap) = (self.p(16.0).round(), self.p(6.0));
+                tx += (d + gap) / 2.0;
+                let icon = crate::brand::icon(d as usize);
+                c.composite(&icon, (tx - gap - d).round() as isize, (self.p(22.0) - d / 2.0).round() as isize, 1.0);
+            }
+            Self::put(&mut c, &title, tx, self.p(22.0) - title.2 as f32 / 2.0, t.text);
         }
         self.bg[slot] = Some((key, c.clone()));
         c
@@ -1165,7 +1173,7 @@ impl ConnectView {
         if self.hot == hot && !pressed && !dim {
             c.fill_round_rect(bx2, by2, bw2, bh2, bh2 / 2.0, Rgba::WHITE.alpha(if kind == Kind::Accent { 0.1 } else { 0.18 }));
         }
-        let fg = if kind == Kind::Accent { Rgba::WHITE.fade(if dim { 0.75 } else { 1.0 }) } else { t.text };
+        let fg = if kind == Kind::Accent { t.on_accent.fade(if dim { 0.75 } else { 1.0 }) } else { t.text };
         let m = self.text(label, 13.5, 600, bw);
         Self::put(c, &m, bx2 + (bw2 - m.1 as f32) / 2.0, by2 + (bh2 - m.2 as f32) / 2.0, fg);
     }
@@ -1241,7 +1249,7 @@ impl ConnectView {
             look::mac_icon(&mut c, cx, self.p(228.0), self.p(118.0), self.dark);
             let m = self.text("No Computers", 20.0, 700, self.p(380.0));
             Self::put(&mut c, &m, cx - m.1 as f32 / 2.0, self.p(296.0), t.text);
-            for (n, l) in text::wrap("Click + to add your Mac: its ID and the password Taro shows on it.", Style::dip(13.0, 400, s), self.p(320.0), 2).iter().enumerate() {
+            for (n, l) in text::wrap(&crate::brand::named("Click + to add your Mac: its ID and the password Taro shows on it."), Style::dip(13.0, 400, s), self.p(320.0), 2).iter().enumerate() {
                 let m = self.text(l, 13.0, 400, self.p(340.0));
                 Self::put(&mut c, &m, cx - m.1 as f32 / 2.0, self.p(326.0 + n as f32 * 17.0), t.text2);
             }
@@ -1347,25 +1355,27 @@ impl ConnectView {
         let hot = on_list && self.hot == Hot::Demo;
         let busy = self.busy && self.busy_row.is_none();
         c.shadow(x, y, w, h, r, self.p(10.0), self.p(3.0), t.accent.alpha(if self.dark { 0.35 } else { 0.22 }));
-        let (a, b) = (t.accent.lerp(Rgba::WHITE, if hot { 0.12 } else { 0.0 }), t.accent.lerp(Rgba::rgb(0x2b, 0x7b, 0xff), 0.45));
+        // (Taro's violet runs into its blue; a provider's colour into a deeper shade of itself)
+        let end = if crate::brand::get().is_provider() { t.accent.shade(-0.2) } else { t.accent.lerp(Rgba::rgb(0x2b, 0x7b, 0xff), 0.45) };
+        let (a, b) = (t.accent.lerp(Rgba::WHITE, if hot { 0.12 } else { 0.0 }), end);
         c.fill_round_rect_with(x, y, w, h, r, |px, _| a.lerp(b, ((px - x) / w).clamp(0.0, 1.0)));
         look::mac_icon(c, x + self.p(40.0), y + h / 2.0 - self.p(3.0), self.p(52.0), true);
         let tx = x + self.p(78.0);
         let room = w - self.p(98.0);
         let name = self.text("Demo Mac", 14.5, 700, room);
-        Self::put(c, &name, tx, y + self.p(13.0), Rgba::WHITE);
+        Self::put(c, &name, tx, y + self.p(13.0), t.on_accent);
         let sub_y = y + self.p(35.0);
         if busy {
             let label = match &self.status {
                 Status::Busy(l) => l.clone(),
                 _ => "Starting…".into(),
             };
-            look::spinner(c, tx + self.p(7.0), sub_y + self.p(8.0), self.p(14.0), Rgba::WHITE.alpha(0.85), now.saturating_duration_since(self.since).as_secs_f32());
+            look::spinner(c, tx + self.p(7.0), sub_y + self.p(8.0), self.p(14.0), t.on_accent.alpha(0.85), now.saturating_duration_since(self.since).as_secs_f32());
             let m = self.text(&label, 12.0, 500, room - self.p(22.0));
-            Self::put(c, &m, tx + self.p(20.0), sub_y, Rgba::WHITE.alpha(0.9));
+            Self::put(c, &m, tx + self.p(20.0), sub_y, t.on_accent.alpha(0.9));
         } else {
-            let m = self.text("Try Taro on a pretend Mac, no Mac needed", 12.0, 500, room);
-            Self::put(c, &m, tx, sub_y, Rgba::WHITE.alpha(0.88));
+            let m = self.text(&crate::brand::named("Try Taro on a pretend Mac, no Mac needed"), 12.0, 500, room);
+            Self::put(c, &m, tx, sub_y, t.on_accent.alpha(0.88));
         }
         if on_list && self.keys && self.focus == Focus::Demo {
             self.focus_ring(c, x, y, w, h, r, now, t);
@@ -1435,11 +1445,11 @@ impl ConnectView {
             let m = self.text("Straight to the Mac, no relay (port 7471 unless given).", 11.5, 400, self.p(FW - 16.0));
             Self::put(&mut c, &m, lx + self.p(6.0), ly + (lh - m.2 as f32) / 2.0, t.text3);
         } else {
-            let label = if self.custom_relay { "Use Taro's relay" } else { "Have a custom relay?" };
+            let label = if self.custom_relay { crate::brand::named("Use Taro's relay").into_owned() } else { "Have a custom relay?".to_string() };
             let over = on_sheet && self.hot == Hot::Link;
             let col = if over { t.accent.lerp(t.text, 0.25) } else { t.accent };
             look::symbol(&mut c, Symbol::Globe, lx + self.p(13.0), ly + lh / 2.0, self.p(13.0), col);
-            let m = self.text(label, 13.0, 500, lw);
+            let m = self.text(&label, 13.0, 500, lw);
             Self::put(&mut c, &m, lx + self.p(26.0), ly + (lh - m.2 as f32) / 2.0, col);
             if over {
                 c.fill_round_rect(lx + self.p(26.0), ly + (lh + m.2 as f32) / 2.0, m.1 as f32, self.p(1.0), 0.0, col.fade(0.6));

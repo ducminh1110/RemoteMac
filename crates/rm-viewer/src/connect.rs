@@ -199,7 +199,7 @@ pub fn connect_window<T: Send>(error: Option<&str>, try_connect: impl Fn(&str, &
             view.set_error(e);
         }
         STATE.with(|st| *st.borrow_mut() = Some(Shell { view, done: None }));
-        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("Taro"), style, CW_USEDEFAULT, CW_USEDEFAULT, 460, 600, None, None, Some(hinst), None).ok()?;
+        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, &windows::core::HSTRING::from(crate::brand::name()), style, CW_USEDEFAULT, CW_USEDEFAULT, 460, 600, None, None, Some(hinst), None).ok()?;
         crate::frame::adopt(hwnd);
         // its size at this scale, a little above the middle of the screen
         let s = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;

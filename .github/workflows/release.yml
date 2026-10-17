@@ -171,6 +171,7 @@ jobs:
           path: |
             dist/Taro-windows.zip
             dist/Taro-Setup.exe
+            dist/Taro/Taro.exe
 
   relay-bin:
     strategy:
@@ -322,4 +323,4 @@ jobs:
           # a version with a suffix (1.2.0-beta.1) is a pre-release; a plain one the latest release
           if [[ "$V" == *-* ]]; then KIND=--prerelease; else KIND=--latest; fi
           gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Taro $V" --notes-file notes.md $KIND \
-            dist/Taro-Setup.exe dist/Taro-macos.tar.gz dist/Taro-windows.zip dist/taro-relay.tar.gz
+            dist/Taro-Setup.exe dist/Taro-macos.tar.gz dist/Taro-windows.zip dist/taro-relay.tar.gz dist/Taro/Taro.exe

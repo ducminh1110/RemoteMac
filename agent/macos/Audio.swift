@@ -84,7 +84,7 @@ final class AudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         lock.lock(); let (all, set, on) = (everything, pids, wanted); lock.unlock()
         guard on else { return }
         if !CGPreflightScreenCaptureAccess() {
-            onStatus?("unavailable", "Screen Recording is not allowed for Taro (System Settings > Privacy & Security > Screen Recording)")
+            onStatus?("unavailable", "Screen Recording is not allowed for \(productName) (System Settings > Privacy & Security > Screen Recording)")
             return
         }
         do {

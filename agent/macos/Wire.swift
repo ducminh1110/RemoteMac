@@ -198,9 +198,13 @@ func int(_ v: Any?) -> Int { (v as? NSNumber)?.intValue ?? 0 }
 /// A distance from the viewer as whole pixels (nothing it sends can trap the conversion).
 func pixels(_ d: Double) -> Int32 { d.isFinite ? Int32(max(-100_000, min(100_000, d.rounded()))) : 0 }
 
-/// Admission key of a relay on a public address: the environment, else the one built in.
+/// Admission key of a relay on a public address: the environment, else the built-in one: a
+/// provider's (Provider.swift), or the one built into this binary (never sent by a provider's
+/// Taro).
 func relayKey() -> String? {
-    ProcessInfo.processInfo.environment["RM_RELAY_KEY"].flatMap({ $0.isEmpty ? nil : $0 }) ?? (builtinRelayKey.isEmpty ? nil : builtinRelayKey)
+    if let k = ProcessInfo.processInfo.environment["RM_RELAY_KEY"], !k.isEmpty { return k }
+    if let p = provider { return p.relayKey }
+    return builtinRelayKey.isEmpty ? nil : builtinRelayKey
 }
 
 func joinRelay(_ conn: Conn, session: String) throws {

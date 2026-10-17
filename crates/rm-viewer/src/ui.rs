@@ -598,7 +598,7 @@ fn start_reconnect() -> bool {
     }
     if let Some(l) = with_app(|a| a.launcher.as_ref().map(|l| l.hwnd.0 as isize)).flatten() {
         unsafe {
-            let _ = SetWindowTextW(hwnd_of(l), w!("Taro — connection lost, connecting again…"));
+            let _ = SetWindowTextW(hwnd_of(l), &HSTRING::from(format!("{} — connection lost, connecting again…", crate::brand::name())));
             let _ = ShowWindow(hwnd_of(l), SW_SHOW);
         }
     }
@@ -645,7 +645,7 @@ fn take_reconnected() {
             .flatten();
             if let Some(l) = launcher {
                 unsafe {
-                    let _ = SetWindowTextW(hwnd_of(l), w!("Taro"));
+                    let _ = SetWindowTextW(hwnd_of(l), &HSTRING::from(crate::brand::name()));
                 }
             }
             // the apps that were open come back (still running on the Mac: their windows reappear)
@@ -657,7 +657,7 @@ fn take_reconnected() {
         Err(why) => {
             crate::banner::hide();
             crate::lifecycle::set(crate::lifecycle::Phase::Disconnected);
-            native::message_box("Taro", &format!("The connection to the Mac was lost and could not be made again.\n\n{}\n\n{}", net::friendly_error(&why), crate::log_hint()));
+            native::message_box(crate::brand::name(), &format!("The connection to the Mac was lost and could not be made again.\n\n{}\n\n{}", net::friendly_error(&why), crate::log_hint()));
             quit(0);
         }
     }
@@ -831,7 +831,7 @@ fn on_update() {
     unsafe {
         let _ = GetCursorPos(&mut p);
     }
-    crate::banner::notice(HINSTANCE(hinst as *mut c_void), p.x, p.y, &format!("Taro {} is available", r.version), "Click to update now", || {
+    crate::banner::notice(HINSTANCE(hinst as *mut c_void), p.x, p.y, &format!("{} {} is available", crate::brand::name(), r.version), "Click to update now", || {
         open_about();
         crate::update::install();
     });
@@ -844,9 +844,9 @@ fn tray_add(hwnd: HWND) {
     if TRAY_HWND.swap(hwnd.0 as isize, std::sync::atomic::Ordering::Relaxed) != 0 {
         return;
     }
-    let Some(icon) = native::make_icon(32, &crate::logo::rgba(32)) else { return };
+    let Some(icon) = native::make_icon(32, &crate::brand::icon_rgba(32)) else { return };
     let mut tip = [0u16; 128];
-    for (d, c) in tip.iter_mut().zip("Taro".encode_utf16()) {
+    for (d, c) in tip.iter_mut().take(127).zip(crate::brand::name().encode_utf16()) {
         *d = c;
     }
     let nid = NOTIFYICONDATAW { cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32, hWnd: hwnd, uID: 1, uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP, uCallbackMessage: WM_TRAY, hIcon: icon, szTip: tip, ..Default::default() };
@@ -880,9 +880,9 @@ fn tray_open(hwnd: HWND) {
 fn tray_menu(hwnd: HWND) {
     unsafe {
         let Ok(m) = CreatePopupMenu() else { return };
-        let _ = AppendMenuW(m, MF_STRING, 1, w!("Open Taro"));
+        let _ = AppendMenuW(m, MF_STRING, 1, &HSTRING::from(format!("Open {}", crate::brand::name())));
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
-        let _ = AppendMenuW(m, MF_STRING, 2, w!("Quit Taro"));
+        let _ = AppendMenuW(m, MF_STRING, 2, &HSTRING::from(format!("Quit {}", crate::brand::name())));
         let mut p = POINT::default();
         let _ = GetCursorPos(&mut p);
         let _ = SetForegroundWindow(hwnd); // or the menu would not close when clicking elsewhere
@@ -2284,7 +2284,7 @@ fn handle_event(ev: UiEvent) {
             }
             if interactive {
                 // never vanish without a word
-                native::message_box("Taro", &format!("The connection to the Mac was closed.\n\n{why}\n\n{}", crate::log_hint()));
+                native::message_box(crate::brand::name(), &format!("The connection to the Mac was closed.\n\n{why}\n\n{}", crate::log_hint()));
             }
             on_mac_gone();
             quit(if with_app(|a| a.smoke.is_some()).unwrap_or(false) { 1 } else { 0 });

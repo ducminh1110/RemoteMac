@@ -58,6 +58,8 @@ fn workspaces() -> Vec<String> {
 fn about() -> About {
     let state = crate::update::state();
     let button = match &state {
+        // a provider that sends its own packages: nothing to check here
+        _ if crate::update::plan() == crate::update::Plan::Nothing => None,
         crate::update::State::Available(_) => Some(UpdateButton::Install),
         s if s.busy() => None,
         _ => Some(UpdateButton::Check),
@@ -70,7 +72,7 @@ fn about() -> About {
     let (mac_status, mac_button) = if crate::net::mac_version().is_none() {
         ("Connect to a Mac to update it from here.".to_string(), None)
     } else if !crate::net::mac_has("update") {
-        ("This Mac's Taro is older than 1.2.4: run ./taro-update.sh on it once.".to_string(), None)
+        (crate::brand::named("This Mac's Taro is older than 1.2.4: run ./taro-update.sh on it once.").into_owned(), None)
     } else {
         let b = match &mac {
             crate::update::MacState::Available(_) => Some(UpdateButton::Install),
@@ -117,7 +119,7 @@ pub fn show(hinst: HINSTANCE, owner: Option<HWND>, current: Settings, on_save: i
     unsafe {
         UI.with(|u| *u.borrow_mut() = Some(Ui { hwnd: HWND::default(), view: SettingsView::new(current, workspaces()), on_save: Rc::new(on_save), timer: false }));
         let style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME;
-        let Ok(hwnd) = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("Taro Settings"), style, CW_USEDEFAULT, CW_USEDEFAULT, 720, 560, owner, None, Some(hinst), None) else {
+        let Ok(hwnd) = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, &windows::core::HSTRING::from(&*crate::brand::named("Taro Settings")), style, CW_USEDEFAULT, CW_USEDEFAULT, 720, 560, owner, None, Some(hinst), None) else {
             UI.with(|u| u.borrow_mut().take());
             return;
         };
@@ -180,6 +182,7 @@ fn act(hwnd: HWND, a: Option<Act>) {
         Some(Act::Update(UpdateButton::Check)) => crate::update::check(false),
         Some(Act::Update(UpdateButton::Install)) => crate::update::install(),
         Some(Act::UpdateMac(b)) => crate::ui::ask_mac_update(b == UpdateButton::Install),
+        Some(Act::OpenSupport(url)) => crate::native::open_url(&url),
         None => {}
     }
     animate(hwnd);

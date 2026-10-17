@@ -3,6 +3,7 @@
 pub mod audio;
 #[cfg(windows)]
 pub mod banner;
+pub mod brand;
 pub mod cards;
 pub mod chrome;
 pub mod connectui;
@@ -83,7 +84,8 @@ pub fn log_hint() -> String {
     if logs_enabled() {
         format!("Log: {}", log_path().display())
     } else {
-        format!("Crash records: {}. For a full log, start Taro.exe with --logs-enabled.", crash::log_path().display())
+        // (the path as it is: only the words name the product)
+        format!("Crash records: {}. {}", crash::log_path().display(), brand::named("For a full log, start Taro.exe with --logs-enabled."))
     }
 }
 

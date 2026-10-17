@@ -51,7 +51,7 @@ impl Launcher {
             let _ = GetCursorPos(&mut pt);
             let s = crate::surface::scale_at(pt.x, pt.y);
             let (w, h) = ((920.0 * s) as i32, (620.0 * s) as i32);
-            let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("Taro"), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, w, h, None, None, Some(hinst), None).ok()?;
+            let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, &windows::core::HSTRING::from(crate::brand::name()), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, w, h, None, None, Some(hinst), None).ok()?;
             // files dropped here open on the Mac with their default app
             windows::Win32::UI::Shell::DragAcceptFiles(hwnd, true);
             crate::frame::adopt(hwnd);

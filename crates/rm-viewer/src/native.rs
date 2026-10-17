@@ -363,6 +363,18 @@ pub fn message_box(title: &str, text: &str) {
     }
 }
 
+/// Open a web page (https) or a new email (mailto:) the way Windows opens links: a provider's
+/// support link in About. Anything else is not opened.
+pub fn open_url(url: &str) {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    if !(url.starts_with("https://") || url.starts_with("mailto:")) || url.chars().any(|c| c.is_whitespace() || c == '"') {
+        return;
+    }
+    unsafe {
+        let _ = ShellExecuteW(None, &HSTRING::from("open"), &HSTRING::from(url), windows::core::PCWSTR::null(), windows::core::PCWSTR::null(), SW_SHOWNORMAL);
+    }
+}
+
 /// `taro://` links (from a Taro Enterprise portal) open this Taro.exe with `--url <link>`
 /// (per user, no administrator; written again at each start so a moved Taro.exe still works).
 pub fn register_url_scheme() {

@@ -13,7 +13,10 @@ pub struct Theme {
     pub text: Rgba,
     pub text2: Rgba,
     pub text3: Rgba,
+    /// Taro's violet, or the provider's colour (brand.rs): every component takes it from here
     pub accent: Rgba,
+    /// text and symbols drawn on the accent
+    pub on_accent: Rgba,
     pub field: Rgba,
     pub hover: Rgba,
     pub pressed: Rgba,
@@ -27,7 +30,36 @@ pub struct Theme {
     pub fail: Rgba,
 }
 
+/// The tokens of this copy of Taro (its colour from brand.rs).
 pub fn theme(dark: bool) -> Theme {
+    themed(dark, crate::brand::get())
+}
+
+/// The tokens for `brand`: Taro's own; for a provider the accent is its colour (rm-brand's
+/// primary, its dark variant in dark mode) and the window's soft tints and the panel's rim lean
+/// to that colour instead of to Taro's violet.
+pub fn themed(dark: bool, brand: &crate::brand::Brand) -> Theme {
+    let mut t = taro_theme(dark);
+    if brand.is_provider() {
+        let (accent, light) = (brand.accent(dark), brand.accent(false));
+        t.accent = accent;
+        t.on_accent = brand.on_accent(dark);
+        t.win = if dark {
+            let base = Rgba::rgb(0x1a, 0x1a, 0x1e);
+            [base.lerp(accent, 0.07), base.lerp(accent, 0.11), base.lerp(accent, 0.09)]
+        } else {
+            [Rgba::WHITE.lerp(light, 0.2), Rgba::WHITE.lerp(light, 0.12), Rgba::WHITE.lerp(light, 0.23)]
+        };
+        if !dark {
+            let deep = light.lerp(Rgba::BLACK, 0.6);
+            t.ring = deep.alpha(t.ring.a);
+            t.shade = deep.alpha(t.shade.a);
+        }
+    }
+    t
+}
+
+fn taro_theme(dark: bool) -> Theme {
     if dark {
         Theme {
             win: [Rgba::rgb(0x1b, 0x17, 0x25), Rgba::rgb(0x22, 0x1d, 0x2d), Rgba::rgb(0x1e, 0x19, 0x29)],
@@ -35,7 +67,8 @@ pub fn theme(dark: bool) -> Theme {
             text: Rgba::rgb(0xec, 0xec, 0xee),
             text2: Rgba::rgb(0xa0, 0xa0, 0xa8),
             text3: Rgba::rgb(0x6f, 0x6f, 0x78),
-            accent: Rgba::rgb(0xa0, 0x72, 0xff),
+            accent: crate::brand::TARO_ACCENT_DARK,
+            on_accent: Rgba::WHITE,
             field: Rgba::rgb(0x33, 0x33, 0x38),
             hover: Rgba::WHITE.alpha(0.07),
             pressed: Rgba::WHITE.alpha(0.12),
@@ -54,7 +87,8 @@ pub fn theme(dark: bool) -> Theme {
             text: Rgba::rgb(0x1d, 0x1d, 0x1f),
             text2: Rgba::rgb(0x6c, 0x6c, 0x72),
             text3: Rgba::rgb(0xa1, 0xa1, 0xa8),
-            accent: Rgba::rgb(0x7c, 0x4a, 0xe8),
+            accent: crate::brand::TARO_ACCENT,
+            on_accent: Rgba::WHITE,
             field: Rgba::rgb(0xef, 0xef, 0xf1),
             hover: Rgba::BLACK.alpha(0.05),
             pressed: Rgba::BLACK.alpha(0.09),
@@ -94,12 +128,14 @@ pub fn panel(c: &mut Canvas, x: f32, y: f32, w: f32, h: f32, r: f32, s: f32, t: 
     c.fill_round_rect(x, y, w, h, r, t.panel);
 }
 
-/// Taro's mark, `d` pixels square at (x, y): an accent rounded square with a white display.
-pub fn mark(c: &mut Canvas, x: f32, y: f32, d: f32, accent: Rgba) {
+/// Taro's mark, `d` pixels square at (x, y): an accent rounded square with a display on it in
+/// `on` (the colour read on the accent: white on Taro's violet). A provider's icon without an
+/// icon.png of its own (brand.rs).
+pub fn mark(c: &mut Canvas, x: f32, y: f32, d: f32, accent: Rgba, on: Rgba) {
     let k = d / 26.0;
     c.fill_round_rect_with(x, y, d, d, 6.5 * k, |_, py| accent.lerp(accent.shade(-0.18), ((py - y) / d).clamp(0.0, 1.0)));
-    c.stroke_round_rect_with(x + 6.0 * k, y + 7.0 * k, 14.0 * k, 9.5 * k, 2.0 * k, 1.5 * k, |_, _| Rgba::WHITE);
-    c.fill_capsule(x + d / 2.0 - 3.5 * k, y + 19.5 * k, x + d / 2.0 + 3.5 * k, y + 19.5 * k, 0.9 * k, Rgba::WHITE);
+    c.stroke_round_rect_with(x + 6.0 * k, y + 7.0 * k, 14.0 * k, 9.5 * k, 2.0 * k, 1.5 * k, |_, _| on);
+    c.fill_capsule(x + d / 2.0 - 3.5 * k, y + 19.5 * k, x + d / 2.0 + 3.5 * k, y + 19.5 * k, 0.9 * k, on);
 }
 
 /// The window buttons, as macOS draws them.
@@ -422,6 +458,33 @@ mod tests {
         assert!(near(at(0, 0), t.win[0]), "top left: {:?}", at(0, 0));
         assert!(near(at(39, 29), t.win[2]), "bottom right: {:?}", at(39, 29));
         assert!(at(20, 15)[3] == 255, "opaque");
+    }
+
+    #[test]
+    fn the_accent_comes_from_the_brand() {
+        use crate::brand::{tests::acme, Brand};
+        // the standard Taro: its violet, exactly as before
+        let std = Brand::standard();
+        assert_eq!(themed(false, &std).accent, Rgba::rgb(0x7c, 0x4a, 0xe8));
+        assert_eq!(themed(true, &std).accent, Rgba::rgb(0xa0, 0x72, 0xff));
+        assert_eq!(themed(false, &std).win[0], Rgba::rgb(0xe3, 0xda, 0xf8));
+        assert_eq!(themed(false, &std).on_accent, Rgba::WHITE);
+        // a provider: rm-brand's tokens, primary in light mode, primary_dark in dark mode
+        let b = acme("#0F766E", "notify");
+        let tok = b.provider().unwrap().tokens();
+        let hex = |s: &str| {
+            let c = rm_brand::Color::parse(s).unwrap();
+            Rgba::rgb(c.0, c.1, c.2)
+        };
+        assert_eq!(themed(false, &b).accent, hex(&tok.primary));
+        assert_eq!(themed(true, &b).accent, hex(&tok.primary_dark));
+        assert_eq!(themed(false, &b).on_accent, hex(&tok.on_primary));
+        assert_eq!(themed(true, &b).on_accent, hex(&tok.on_primary_dark));
+        // the window's tint leans to the provider's colour (more green than red), not violet
+        let w = themed(false, &b).win[0];
+        assert!(w.g > w.r && w.g > w.b * 0.9, "{w:?}");
+        // a pale primary: dark text on it
+        assert_eq!(themed(false, &acme("#FDE047", "notify")).on_accent, Rgba::rgb(0x11, 0x11, 0x11));
     }
 
     #[test]

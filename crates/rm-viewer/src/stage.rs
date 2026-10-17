@@ -1091,7 +1091,7 @@ fn ensure_windows(s: &mut Stage) {
                 s.host = Some(host);
                 let ic = w!("TaroStageIcons");
                 crate::surface::register(hinst.into(), ic, Some(icons_proc), IDC_HAND);
-                s.icons = crate::surface::Surface::new(hinst.into(), ic, "Taro Stage Manager icons", None, true, false);
+                s.icons = crate::surface::Surface::new(hinst.into(), ic, &format!("{} Stage Manager icons", crate::brand::name()), None, true, false);
                 SetTimer(Some(hwnd), POLL, POLL_MS, None);
                 return;
             }
