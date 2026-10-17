@@ -98,7 +98,7 @@ func superviseWorker() -> Never {
 /// `--stop`: end the Taro running in the background.
 func stopBackground() -> Bool {
     guard let pid = runningInBackground() else {
-        print("Taro is not running in the background.")
+        print("\(productName) is not running in the background.")
         return false
     }
     kill(pid, SIGTERM)
@@ -106,7 +106,7 @@ func stopBackground() -> Bool {
     if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
     try? FileManager.default.removeItem(at: pidFile)
     Wallpaper.restore() // the Mac's own wallpaper, if a session had changed it
-    print("Taro stopped (pid \(pid)).")
+    print("\(productName) stopped (pid \(pid)).")
     return true
 }
 
@@ -117,8 +117,8 @@ func checkPermissions() -> Int32 {
     let ax = AXIsProcessTrusted()
     let gui = CGSessionCopyCurrentDictionary() != nil
     func line(_ ok: Bool, _ what: String, _ why: String) -> String { "  \(ok ? "ok     " : "MISSING") \(what)\(ok ? "" : ": \(why)")" }
-    print("Taro permissions:")
-    print(line(gui, "logged-in desktop session", "run Taro from a logged-in user's desktop (not over SSH alone)"))
+    print("\(productName) permissions:")
+    print(line(gui, "logged-in desktop session", "run \(productName) from a logged-in user's desktop (not over SSH alone)"))
     print(line(screen, "Screen Recording", "System Settings > Privacy & Security > Screen Recording"))
     print(line(ax, "Accessibility", "System Settings > Privacy & Security > Accessibility"))
     return gui && screen && ax ? 0 : 3

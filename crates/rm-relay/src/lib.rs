@@ -48,10 +48,65 @@ fn is_true(b: &bool) -> bool {
     *b
 }
 
-/// Admission key for joins: the environment (`RM_RELAY_KEY`), else the key built into this
-/// binary (release builds set `RM_RELAY_KEY` at compile time, so users need not configure it).
+/// The key this process's joins present when it is not the usual one: `Some(k)` for a relay of
+/// one's own (its key, "" none: the built-in key is never sent to another relay), `None` for the
+/// usual key below.
+static KEY_OVERRIDE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_key_override(key: Option<String>) {
+    *KEY_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = key;
+}
+
+/// A provider's Taro: the key of its relay (`provider/provider.json`), set once at start
+/// ([`set_builtin_key`]). It takes the place of the key compiled into this binary, which that
+/// Taro then never sends to anyone.
+static PROVIDER_KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Make `key` this process's built-in admission key, in place of the compiled one (a provider's
+/// Taro, with its own relay). Once, at start; another key afterwards is refused.
+pub fn set_builtin_key(key: &str) -> Result<(), String> {
+    if key.is_empty() {
+        return Err("the provider's relay key is empty".into());
+    }
+    match PROVIDER_KEY.set(key.to_string()) {
+        Ok(()) => Ok(()),
+        Err(_) if PROVIDER_KEY.get().map(String::as_str) == Some(key) => Ok(()),
+        Err(_) => Err("the built-in relay key was already set".into()),
+    }
+}
+
+/// Whether a provider's key replaced the compiled one ([`set_builtin_key`]).
+pub fn has_provider_key() -> bool {
+    PROVIDER_KEY.get().is_some()
+}
+
+/// The key compiled into this binary (release builds set `RM_RELAY_KEY` at compile time).
+fn compiled_key() -> Option<&'static str> {
+    option_env!("RM_RELAY_KEY").filter(|k| !k.is_empty())
+}
+
+/// Admission key for joins: a relay of one's own's ([`set_key_override`]), else the environment
+/// (`RM_RELAY_KEY`), else the built-in key: a provider's ([`set_builtin_key`]), or the one
+/// compiled into this binary (so users need not configure it).
 pub fn env_key() -> Option<String> {
-    std::env::var("RM_RELAY_KEY").ok().filter(|k| !k.is_empty()).or_else(|| option_env!("RM_RELAY_KEY").filter(|k| !k.is_empty()).map(String::from))
+    let over = KEY_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    choose_key(over.as_deref(), std::env::var("RM_RELAY_KEY").ok().as_deref(), PROVIDER_KEY.get().map(String::as_str), compiled_key())
+}
+
+/// [`env_key`]'s choice: the override (`""`: no key at all), the environment, then the
+/// provider's key; the compiled key only when there is no provider.
+pub fn choose_key(over: Option<&str>, env: Option<&str>, provider: Option<&str>, compiled: Option<&str>) -> Option<String> {
+    let some = |k: &str| Some(k.to_string()).filter(|k| !k.is_empty());
+    if let Some(k) = over {
+        return some(k);
+    }
+    if let Some(k) = env.and_then(some) {
+        return Some(k);
+    }
+    match provider {
+        Some(p) => some(p),
+        None => compiled.and_then(some),
+    }
 }
 
 /// Wrong tokens allowed per session before it is locked (stops password guessing).
@@ -500,6 +555,29 @@ mod tests {
         addr
     }
     const TOK: &str = "0123456789abcdef-token";
+
+    #[test]
+    fn a_providers_key_replaces_the_compiled_one_and_never_leaks_it() {
+        const TARO: &str = "taro-compiled-key-0123456789";
+        const ACME: &str = "acme-provider-key-0123456789";
+        // the standard edition: the compiled key, unless the environment or an override says else
+        assert_eq!(choose_key(None, None, None, Some(TARO)).as_deref(), Some(TARO));
+        assert_eq!(choose_key(None, Some(""), None, Some(TARO)).as_deref(), Some(TARO));
+        assert_eq!(choose_key(None, Some("env-key"), None, Some(TARO)).as_deref(), Some("env-key"));
+        // a provider's Taro: its key, and the compiled one in no case
+        for over in [None, Some(""), Some("own-relay-key")] {
+            for env in [None, Some(""), Some("env-key")] {
+                let k = choose_key(over, env, Some(ACME), Some(TARO));
+                assert_ne!(k.as_deref(), Some(TARO), "override {over:?}, env {env:?}");
+            }
+        }
+        assert_eq!(choose_key(None, None, Some(ACME), Some(TARO)).as_deref(), Some(ACME));
+        assert_eq!(choose_key(None, None, Some(ACME), None).as_deref(), Some(ACME));
+        // a relay of one's own: its key, or none at all (""), never the built-in one
+        assert_eq!(choose_key(Some("own"), None, Some(ACME), Some(TARO)).as_deref(), Some("own"));
+        assert_eq!(choose_key(Some(""), None, Some(ACME), Some(TARO)), None);
+        assert_eq!(choose_key(Some(""), None, None, Some(TARO)), None);
+    }
 
     #[test]
     fn pairs_and_forwards_both_ways() {

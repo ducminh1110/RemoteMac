@@ -1,0 +1,5 @@
+# Taro Enterprise release signing keys (ed25519). Every enterprise-update.zip and
+# taro-enterprise-components.json is signed with the private half, held only in the
+# TARO_ENTERPRISE_SIGNING_KEY secret of the release workflow. To rotate: add the new key
+# here first (one release signed by the old key carries it), then switch the secret.
+ed25519:VBCM7iMltXcKPW7U05JsFlpOzPdy1bO/BPWJmWR1kio=

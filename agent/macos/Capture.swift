@@ -356,6 +356,19 @@ final class WindowStream: NSObject, SCStreamOutput, SCStreamDelegate {
     var region: (CGDirectDisplayID, CGRect, Set<pid_t>)?
     private var config: SCStreamConfiguration?
 
+    /// Its window waits in the viewer's Stage Manager sidebar (a small card): a few pictures a
+    /// second are enough there, the rest of the Mac's encoder and the link go to the windows in use.
+    private var background = false
+    private var frameRate: Int32 { background ? min(10, targetFPS) : targetFPS }
+    func setBackground(_ on: Bool) {
+        lock.lock(); let same = background == on; background = on; lock.unlock()
+        guard !same, let s = scStream, let c = config else { return }
+        c.minimumFrameInterval = CMTime(value: 1, timescale: frameRate)
+        s.updateConfiguration(c) { e in if let e = e { log("background rate not applied: \(e)") } }
+        // back in use: a full picture at once rather than after the next change
+        if !on { requestKeyframe() }
+    }
+
     /// The Mac's pointer in the picture or not (the viewer shows its own instead), live.
     func setCursor(_ on: Bool) {
         guard let s = scStream, let c = config, c.showsCursor != on else { return }
@@ -379,7 +392,7 @@ final class WindowStream: NSObject, SCStreamOutput, SCStreamDelegate {
             let cfg = SCStreamConfiguration()
             cfg.sourceRect = CGRect(x: r.minX - d.frame.minX, y: r.minY - d.frame.minY, width: r.width, height: r.height)
             (cfg.width, cfg.height) = capturePixels(r.width, r.height, backing: backingScale(of: r))
-            cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
+            cfg.minimumFrameInterval = CMTime(value: 1, timescale: frameRate)
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2
             cfg.queueDepth = 4; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true
             // only those apps' windows (the Dock and the desktop picture), or everything there (no
@@ -408,7 +421,7 @@ final class WindowStream: NSObject, SCStreamOutput, SCStreamDelegate {
             } else {
                 (cfg.width, cfg.height) = capturePixels(CGFloat(d.width), CGFloat(d.height))
             }
-            cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
+            cfg.minimumFrameInterval = CMTime(value: 1, timescale: frameRate)
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
             cfg.queueDepth = 4; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true // the Mac's pointer is in the picture (as Sunshine); content fills the output at any density
             let filter = SCContentFilter(display: d, excludingWindows: [])
@@ -435,7 +448,7 @@ final class WindowStream: NSObject, SCStreamOutput, SCStreamDelegate {
             cfg.sourceRect = CGRect(x: w.frame.minX - d.frame.minX, y: w.frame.minY - d.frame.minY, width: w.frame.width, height: w.frame.height)
             (cfg.width, cfg.height) = capturePixels(w.frame.width, w.frame.height, backing: backingScale(of: w.frame))
             pointsWide = w.frame.width
-            cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
+            cfg.minimumFrameInterval = CMTime(value: 1, timescale: frameRate)
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2
             cfg.queueDepth = 4; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true
             let s = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: cfg, delegate: self)
@@ -454,7 +467,7 @@ final class WindowStream: NSObject, SCStreamOutput, SCStreamDelegate {
         // 4:2:0 needs even sizes (an odd one gets no frames at all): round up a pixel
         (cfg.width, cfg.height) = capturePixels(w.frame.width, w.frame.height - cut, backing: backingScale(of: w.frame))
         pointsWide = w.frame.width
-        cfg.minimumFrameInterval = CMTime(value: 1, timescale: targetFPS)
+        cfg.minimumFrameInterval = CMTime(value: 1, timescale: frameRate)
         cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2 // YUV straight to the encoder (no conversion), BT.709 as the viewer expects
         cfg.queueDepth = 4; cfg.showsCursor = showRemoteCursor; cfg.scalesToFit = true // fill the output at any capture density (never a corner of it, never cropped)
         let filter = SCContentFilter(desktopIndependentWindow: w)

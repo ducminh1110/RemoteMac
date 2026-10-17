@@ -1,0 +1,58 @@
+# One server: Postgres, the Taro Enterprise API, and Caddy for TLS.
+# Caddy shares the API's network namespace: it reaches the API on 127.0.0.1, which is what the
+# loopback-only endpoints (/internal/tls/ask for on-demand TLS, /metrics) require.
+#   cp ../../.env.example .env   (fill it in; keep it off the repository)
+#   docker compose up -d
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: taro
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: taro
+    volumes:
+      - db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taro"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    image: ${TARO_IMAGE:-taro-enterprise:latest}
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TARO_DATABASE_URL: postgres://taro:${POSTGRES_PASSWORD}@db:5432/taro
+      TARO_LISTEN: 127.0.0.1:8080
+      TARO_OPS_LISTEN: 127.0.0.1:8081
+      TARO_TRUSTED_PROXY: "1"
+      TARO_AUTO_MIGRATE: "1"
+    depends_on:
+      db:
+        condition: service_healthy
+    # Caddy's ports, published from this namespace (Caddy joins it below)
+    ports:
+      - "80:80"
+      - "443:443"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    network_mode: "service:api"
+    env_file: .env
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+
+volumes:
+  db:
+  caddy_data:
+  caddy_config:

@@ -1,13 +1,12 @@
-//! "Connect to your Mac" window: the Mac prints an ID and a password, the user types them here.
-//! A Mac on the same network is found by its ID; for one elsewhere the relay server is used (the
-//! one built into this build, or one the user types; it is remembered). Or the user types the
-//! Mac's address (an IP or a host name, any network that reaches it). While it connects, the
-//! steps show as they happen (finding the Mac, checking the password, setting up, video).
-//! It looks like the sign-in of Apple's Screen Sharing (connectui.rs draws it; its fields are
-//! Taro's own). It has its own small message loop and returns once the user connects (or
-//! closes it).
+//! "Connect to your Mac" window: it opens on the Macs kept on this PC (a click connects; + adds
+//! one with the ID and the password the Mac shows, or its address). A Mac on the same network is
+//! found by its ID; for one elsewhere the relay server is used (the one built into this build, or
+//! one's own with its key). While it connects, the steps show as they happen (finding the Mac,
+//! checking the password, setting up, video). It looks like Apple's Screen Sharing (connectui.rs
+//! draws it; its fields are Taro's own). It has its own small message loop and returns once the
+//! user connects (or closes it).
 
-use crate::connectui::{Act, ConnectView, Key};
+use crate::connectui::{Act, Computer, ConnectView, Key};
 use std::ffi::c_void;
 use std::time::Instant;
 use windows::core::{w, PCWSTR};
@@ -24,105 +23,183 @@ const CLASS: PCWSTR = w!("RmConnect");
 const TIMER: usize = 1;
 const WM_MOUSE_LEAVE: u32 = 0x02A3;
 
+/// What to connect to: the ID, the password, how, the relay's key.
+type Target = (String, String, Via, String);
+
 struct Shell {
     view: ConnectView,
-    done: Option<Option<(String, String, Via)>>,
+    done: Option<Option<Target>>,
 }
 
 thread_local! { static STATE: std::cell::RefCell<Option<Shell>> = const { std::cell::RefCell::new(None) }; }
+
+/// The connect window, for the guided tour: where the controls are on the screen, what is typed.
+pub fn tour_probe() -> Option<(HWND, (i32, i32), crate::connectui::TourProbe)> {
+    let hwnd = HWND(CONNECT_HWND.with(|h| h.get()) as *mut c_void);
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let mut origin = POINT::default();
+    unsafe {
+        let _ = ClientToScreen(hwnd, &mut origin);
+    }
+    with(|sh| sh.view.probe()).map(|p| (hwnd, (origin.x, origin.y), p))
+}
+
+thread_local! { static CONNECT_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) }; }
 
 /// The window's state (None while it is in use further up: a message sent from inside).
 fn with<R>(f: impl FnOnce(&mut Shell) -> R) -> Option<R> {
     STATE.with(|st| st.try_borrow_mut().ok().and_then(|mut g| g.as_mut().map(f)))
 }
 
-/// Last ID used on this PC (so next time only the password is typed).
-fn last_id_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("APPDATA").map(|d| std::path::PathBuf::from(d).join("RemoteMac").join("last-id"))
+/// Where Taro keeps what it remembers on this PC.
+fn dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("APPDATA").map(|d| std::path::PathBuf::from(d).join("RemoteMac"))
 }
 
-pub fn remember_id(id: &str) {
-    if let Some(p) = last_id_path() {
-        let _ = std::fs::create_dir_all(p.parent().unwrap());
-        let _ = std::fs::write(p, id);
+/// The Macs kept on this PC; their passwords and relay keys are protected for this Windows user
+/// (DPAPI), so another user of the PC, or a copy of the file, cannot read them.
+fn computers_path() -> Option<std::path::PathBuf> {
+    dir().map(|d| d.join("computers.json"))
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
     }
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
 }
 
-pub fn last_id() -> Option<String> {
-    last_id_path().and_then(|p| std::fs::read_to_string(p).ok()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
-}
-
-/// The relay server last typed (blank when none was).
-fn last_relay_path() -> Option<std::path::PathBuf> {
-    last_id_path().map(|p| p.with_file_name("last-relay"))
-}
-
-pub fn remember_relay(relay: &str) {
-    if let Some(p) = last_relay_path() {
-        let _ = std::fs::create_dir_all(p.parent().unwrap());
-        let _ = std::fs::write(p, relay.trim());
+/// A secret, protected for this user ("" stays "").
+fn protect(secret: &str) -> String {
+    use windows::Win32::Security::Cryptography::*;
+    if secret.is_empty() {
+        return String::new();
     }
-}
-
-/// The Mac address typed last (blank when none was), and whether it was used last.
-fn last_address_path() -> Option<std::path::PathBuf> {
-    last_id_path().map(|p| p.with_file_name("last-address"))
-}
-
-pub fn remember_via(via: &Via) {
-    let Some(p) = last_address_path() else { return };
-    let _ = std::fs::create_dir_all(p.parent().unwrap());
-    match via {
-        Via::Id(relay) => {
-            remember_relay(relay);
-            // the address stays remembered, but the ID mode is the one used now
-            if let Ok(a) = std::fs::read_to_string(&p) {
-                let _ = std::fs::write(&p, a.trim_start_matches('*'));
-            }
+    unsafe {
+        let input = CRYPT_INTEGER_BLOB { cbData: secret.len() as u32, pbData: secret.as_ptr() as *mut u8 };
+        let mut out = CRYPT_INTEGER_BLOB::default();
+        if CryptProtectData(&input, w!("Taro"), None, None, None, CRYPTPROTECT_UI_FORBIDDEN, &mut out).is_err() {
+            return String::new();
         }
-        Via::Address(a) => {
-            let _ = std::fs::write(&p, format!("*{}", a.trim()));
-        }
+        let sealed = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
+        let _ = LocalFree(Some(HLOCAL(out.pbData as *mut c_void)));
+        format!("dpapi:{}", hex(&sealed))
     }
 }
 
-/// (address typed last, used last)
-pub fn last_address() -> (String, bool) {
-    let s = last_address_path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
-    let s = s.trim();
-    match s.strip_prefix('*') {
-        Some(a) => (a.to_string(), true),
-        None => (s.to_string(), false),
+/// A secret [`protect`] kept (None when it cannot be read: another user's, or damaged).
+fn unprotect(kept: &str) -> Option<String> {
+    use windows::Win32::Security::Cryptography::*;
+    if kept.is_empty() {
+        return Some(String::new());
+    }
+    let sealed = unhex(kept.strip_prefix("dpapi:")?)?;
+    unsafe {
+        let input = CRYPT_INTEGER_BLOB { cbData: sealed.len() as u32, pbData: sealed.as_ptr() as *mut u8 };
+        let mut out = CRYPT_INTEGER_BLOB::default();
+        CryptUnprotectData(&input, None, None, None, None, CRYPTPROTECT_UI_FORBIDDEN, &mut out).ok()?;
+        let plain = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
+        let _ = LocalFree(Some(HLOCAL(out.pbData as *mut c_void)));
+        String::from_utf8(plain).ok()
     }
 }
 
-/// What the relay field starts with: what was typed last, else the relay built into this build.
-pub fn last_relay() -> String {
-    last_relay_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| rm_protocol::session::default_relay().map(String::from))
+/// The Macs kept on this PC (on the first run of this version, the Mac typed last before it).
+pub fn load_computers() -> Vec<Computer> {
+    let Some(p) = computers_path() else { return vec![] };
+    let Ok(text) = std::fs::read_to_string(&p) else { return migrated() };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return vec![] };
+    let field = |m: &serde_json::Value, k: &str| m.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    v.get("computers")
+        .and_then(|l| l.as_array())
+        .map(|l| {
+            l.iter()
+                .map(|m| Computer {
+                    name: field(m, "name"),
+                    id: field(m, "id"),
+                    address: field(m, "address"),
+                    by_address: m.get("by_address").and_then(|x| x.as_bool()).unwrap_or(false),
+                    relay: field(m, "relay"),
+                    // a secret that cannot be read is asked for again
+                    key: unprotect(&field(m, "key")).unwrap_or_default(),
+                    password: unprotect(&field(m, "password")).unwrap_or_default(),
+                })
+                .filter(|c| if c.by_address { !c.address.is_empty() } else { c.id.len() == 9 })
+                .collect()
+        })
         .unwrap_or_default()
 }
 
-/// Show the window and connect from it: `try_connect(id, password, via)` runs on a background
-/// thread while the window stays responsive (the steps with a spinner); a failure is shown in
-/// red and the user can try again. `id` prefills the ID, `error` starts with a message (a lost
-/// connection). Returns what `try_connect` returned, or None if the user closed the window.
-pub fn connect_window<T: Send>(id: Option<&str>, error: Option<&str>, try_connect: impl Fn(&str, &str, &Via) -> Result<T, String> + Sync) -> Option<T> {
+pub fn save_computers(list: &[Computer]) {
+    let Some(p) = computers_path() else { return };
+    let macs: Vec<serde_json::Value> = list
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "name": c.name, "id": c.id, "address": c.address, "by_address": c.by_address,
+                "relay": c.relay, "key": protect(&c.key), "password": protect(&c.password),
+            })
+        })
+        .collect();
+    let text = serde_json::to_string_pretty(&serde_json::json!({ "version": 1, "computers": macs })).unwrap_or_default();
+    let _ = std::fs::create_dir_all(p.parent().unwrap());
+    // written whole then moved over the old one: a crash mid-write leaves the old list
+    let tmp = p.with_extension("json.new");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
+}
+
+/// Before 1.3 Taro kept only the ID, the relay and the address typed last: they become the first
+/// Macs of the list (without a password, asked for at the first click).
+fn migrated() -> Vec<Computer> {
+    let read = |name: &str| dir().and_then(|d| std::fs::read_to_string(d.join(name)).ok()).map(|s| s.trim().to_string()).unwrap_or_default();
+    let (id, relay, address) = (read("last-id"), read("last-relay"), read("last-address"));
+    let built_in = rm_protocol::session::default_relay().unwrap_or_default();
+    let mut list = vec![];
+    if rm_protocol::session::normalize_id(&id).is_some() {
+        let relay = if relay == built_in { String::new() } else { relay };
+        list.push(Computer { id: rm_protocol::session::normalize_id(&id).unwrap_or_default(), relay, ..Default::default() });
+    }
+    let (address, used_last) = match address.strip_prefix('*') {
+        Some(a) => (a.to_string(), true),
+        None => (address, false),
+    };
+    if !address.is_empty() {
+        let mac = Computer { by_address: true, address, ..Default::default() };
+        if used_last {
+            list.insert(0, mac);
+        } else {
+            list.push(mac);
+        }
+    }
+    list
+}
+
+/// Show the window and connect from it: `try_connect(id, password, via, key)` runs on a
+/// background thread while the window stays responsive (the steps with a spinner); a failure is
+/// shown in red and the user can try again. `error` starts with a message (a lost connection).
+/// Returns what `try_connect` returned, or None if the user closed the window.
+pub fn connect_window<T: Send>(error: Option<&str>, try_connect: impl Fn(&str, &str, &Via, &str) -> Result<T, String> + Sync) -> Option<T> {
     unsafe {
         let hinst: HINSTANCE = GetModuleHandleW(None).ok()?.into();
         let wc = WNDCLASSW { style: CS_DBLCLKS, lpfnWndProc: Some(proc), hInstance: hinst, lpszClassName: CLASS, hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), ..Default::default() };
         RegisterClassW(&wc); // a second call fails harmlessly (already registered)
         let style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME;
-        let (address, by_address) = last_address();
-        let mut view = ConnectView::new(id.unwrap_or(""), &last_relay(), &address, by_address);
+        let mut view = ConnectView::new(load_computers());
+        // the guided tour's first part: the demo Mac, above the list
+        view.set_demo(crate::tour::offers_demo());
         if let Some(e) = error {
             view.set_error(e);
         }
         STATE.with(|st| *st.borrow_mut() = Some(Shell { view, done: None }));
-        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("Taro"), style, CW_USEDEFAULT, CW_USEDEFAULT, 460, 572, None, None, Some(hinst), None).ok()?;
+        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, &windows::core::HSTRING::from(crate::brand::name()), style, CW_USEDEFAULT, CW_USEDEFAULT, 460, 600, None, None, Some(hinst), None).ok()?;
         crate::frame::adopt(hwnd);
         // its size at this scale, a little above the middle of the screen
         let s = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
@@ -134,10 +211,12 @@ pub fn connect_window<T: Send>(id: Option<&str>, error: Option<&str>, try_connec
         let _ = SetForegroundWindow(hwnd);
         let _ = SetFocus(Some(hwnd));
         schedule(hwnd);
+        CONNECT_HWND.with(|h| h.set(hwnd.0 as isize));
+        crate::tour::start(hinst);
 
         let mut msg = MSG::default();
         let result = std::thread::scope(|scope| {
-            type Attempt<'s, T> = ((String, Via), std::thread::ScopedJoinHandle<'s, Result<T, String>>);
+            type Attempt<'s, T> = std::thread::ScopedJoinHandle<'s, Result<T, String>>;
             let mut attempt: Option<Attempt<'_, T>> = None;
             loop {
                 // the step the attempt is at
@@ -158,17 +237,10 @@ pub fn connect_window<T: Send>(id: Option<&str>, error: Option<&str>, try_connec
                     }
                 }
                 // a connection attempt finished?
-                if attempt.as_ref().is_some_and(|(_, h)| h.is_finished()) {
-                    let ((typed, via), h) = attempt.take().unwrap();
+                if attempt.as_ref().is_some_and(|h| h.is_finished()) {
+                    let h = attempt.take().unwrap();
                     match h.join().unwrap_or_else(|_| Err("internal error while connecting".into())) {
-                        Ok(t) => {
-                            // (by address no ID was typed: the one remembered stays)
-                            if !typed.is_empty() {
-                                remember_id(&typed);
-                            }
-                            remember_via(&via);
-                            break Some(t);
-                        }
+                        Ok(t) => break Some(t),
                         Err(e) => {
                             with(|sh| sh.view.fail(&e));
                             redraw(hwnd);
@@ -178,10 +250,9 @@ pub fn connect_window<T: Send>(id: Option<&str>, error: Option<&str>, try_connec
                 }
                 match with(|sh| sh.done.take()).flatten() {
                     Some(None) => break None,
-                    Some(Some((typed, pw, via))) if attempt.is_none() => {
+                    Some(Some((id, pw, via, key))) if attempt.is_none() => {
                         let f = &try_connect;
-                        let (t2, v2) = (typed.clone(), via.clone());
-                        attempt = Some(((typed, via), scope.spawn(move || f(&t2, &pw, &v2))));
+                        attempt = Some(scope.spawn(move || f(&id, &pw, &via, &key)));
                         schedule(hwnd);
                     }
                     _ => {}
@@ -202,6 +273,8 @@ pub fn connect_window<T: Send>(id: Option<&str>, error: Option<&str>, try_connec
                 DispatchMessageW(&msg);
             }
         });
+        crate::tour::close();
+        CONNECT_HWND.with(|h| h.set(0));
         let _ = DestroyWindow(hwnd);
         STATE.with(|st| st.borrow_mut().take());
         result
@@ -256,8 +329,8 @@ fn paint(hdc: HDC) {
 /// What a click or a key asked for.
 fn act(hwnd: HWND, a: Option<Act>) {
     match a {
-        Some(Act::Connect { id, password, via }) => {
-            with(|sh| sh.done = Some(Some((id, password, via))));
+        Some(Act::Connect { id, password, via, key }) => {
+            with(|sh| sh.done = Some(Some((id, password, via, key))));
             unsafe {
                 let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
             }
@@ -269,6 +342,7 @@ fn act(hwnd: HWND, a: Option<Act>) {
         Some(Act::Copy(s)) => {
             crate::native::set_clipboard_text(hwnd, &s);
         }
+        Some(Act::Save(list)) => save_computers(&list),
         None => {}
     }
     redraw(hwnd);
@@ -333,6 +407,12 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             redraw(hwnd);
             LRESULT(0)
         }
+        WM_MOUSEWHEEL => {
+            let notches = ((wp.0 >> 16) & 0xffff) as i16 as f32 / 120.0;
+            with(|sh| sh.view.wheel(notches));
+            redraw(hwnd);
+            LRESULT(0)
+        }
         WM_MOUSE_LEAVE => {
             with(|sh| sh.view.mouse_leave());
             redraw(hwnd);
@@ -386,11 +466,12 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 v if ctrl && v == VIRTUAL_KEY(b'A' as u16) => Some(Key::SelectAll),
                 v if ctrl && v == VIRTUAL_KEY(b'C' as u16) => Some(Key::Copy),
                 v if ctrl && v == VIRTUAL_KEY(b'X' as u16) => Some(Key::Cut),
+                v if ctrl && v == VIRTUAL_KEY(b'N' as u16) => Some(Key::New),
                 _ => None,
             };
             if let Some(k) = k {
                 // Space types a space in a field (WM_CHAR); elsewhere it presses
-                let in_field = with(|sh| matches!(sh.view.focus(), crate::connectui::Focus::Field(_))).unwrap_or(false);
+                let in_field = with(|sh| sh.view.in_field()).unwrap_or(false);
                 if !(k == Key::Space && in_field) {
                     let a = with(|sh| sh.view.key(k, shift, ctrl)).flatten();
                     act(hwnd, a);

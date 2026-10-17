@@ -325,6 +325,10 @@ pub enum Message {
     /// Client -> agent: enter / leave fullscreen for this window (on the virtual display when
     /// there is one); the new size arrives as `WindowMoved`.
     WindowFullscreen { window_id: u64, on: bool },
+    /// Client -> agent (feature "background"): the window waits off stage (a card in the
+    /// viewer's Stage Manager sidebar), `on`; a few pictures a second are enough for it until it
+    /// comes back (`on` false: its full rate and a keyframe).
+    WindowBackground { window_id: u64, on: bool },
     /// Client -> agent: the decoder lost sync (or just started): send an IDR frame now. Like
     /// Moonlight, keyframes come on request instead of on a fixed timer.
     RequestKeyframe { window_id: u64 },
@@ -522,6 +526,20 @@ pub enum Message {
     /// Client -> agent: choose the item at `path` (indices into `DockMenu.menus`) of Dock item
     /// `id`'s menu.
     DockMenuInvoke { id: String, path: Vec<u32> },
+
+    /// Agent -> client: this window is (`on`) or is no longer in macOS full screen (a whole display:
+    /// a video made full screen in Safari, View > Enter Full Screen). The viewer shows it full
+    /// screen on the PC too, and back, instead of as one more window.
+    WindowIsFullscreen { window_id: u64, on: bool },
+    /// Client -> agent (feature "update"): look for a newer Taro for this Mac (`install` false),
+    /// or put it in place and start it (`install` true; the connection drops and the viewer
+    /// reconnects to the new one).
+    MacUpdate { install: bool },
+    /// Agent -> client: how that went. `state` is "up_to_date", "available" (`latest` is the
+    /// newer version), "installing" (`progress` 0-100), "done" (the files are in place; the
+    /// new program starts when this connection ends, so nothing is cut off) or "failed"
+    /// (`detail` says why).
+    MacUpdateStatus { state: String, version: String, latest: String, progress: u32, detail: String },
 }
 
 impl Message {
@@ -1032,6 +1050,9 @@ mod tests {
             Message::DockMenuGet { id: "app:com.apple.finder".into() },
             Message::DockMenu { id: "trash".into(), menus: vec![MenuNode { title: "Empty Trash".into(), enabled: true, ..Default::default() }] },
             Message::DockMenuInvoke { id: "trash".into(), path: vec![0] },
+            Message::WindowIsFullscreen { window_id: 7, on: true },
+            Message::MacUpdate { install: true },
+            Message::MacUpdateStatus { state: "available".into(), version: "1.2.3".into(), latest: "1.2.4".into(), progress: 40, detail: String::new() },
             Message::MenuBarStatus { available: true, window_id: 0x7FFF_0003, bounds: Rect { x: 0, y: 0, w: 1512, h: 33 }, reason: None },
         ] {
             let b = encode(&m).unwrap();
@@ -1239,6 +1260,7 @@ mod display_tests {
             Message::DisplayConfigure { width: 1920, height: 1080, scale: 1 },
             Message::DisplayStatus { available: true, display_id: 7, width: 1920, height: 1080, reason: None },
             Message::WindowFullscreen { window_id: 3, on: true },
+            Message::WindowBackground { window_id: 3, on: false },
         ] {
             let b = encode(&m).unwrap();
             assert_eq!(decode(&b).unwrap().unwrap().0, m);
@@ -1246,6 +1268,8 @@ mod display_tests {
         }
         let j = serde_json::to_string(&Message::WindowFullscreen { window_id: 3, on: true }).unwrap();
         assert_eq!(j, r#"{"type":"window_fullscreen","window_id":3,"on":true}"#);
+        let j = serde_json::to_string(&Message::WindowBackground { window_id: 3, on: true }).unwrap();
+        assert_eq!(j, r#"{"type":"window_background","window_id":3,"on":true}"#);
     }
 }
 
@@ -1256,10 +1280,44 @@ mod display_tests {
 pub mod session {
     use sha2::{Digest, Sha256};
 
-    /// The relay this build uses when none is given: none in the source; a distribution sets one
-    /// at build time (`RM_DEFAULT_RELAY=host:port cargo build`), as the official releases do.
-    pub fn default_relay() -> Option<&'static str> {
+    /// The relay set at start by a provider's Taro ([`set_builtin_relay`]).
+    static PROVIDER_RELAY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    /// The relay compiled into this binary: none in the source; a distribution sets one at build
+    /// time (`RM_DEFAULT_RELAY=host:port cargo build`), as the official releases do.
+    pub fn compiled_relay() -> Option<&'static str> {
         option_env!("RM_DEFAULT_RELAY").filter(|r| !r.trim().is_empty())
+    }
+
+    /// A provider's Taro (its `provider/provider.json`): its relay is the built-in one from now
+    /// on, in place of the one compiled in, which is then never used. Called once, at start,
+    /// before anything connects; another relay afterwards is refused.
+    pub fn set_builtin_relay(addr: &str) -> Result<(), String> {
+        let addr = addr.trim();
+        if addr.is_empty() {
+            return Err("the provider's relay is empty".into());
+        }
+        match PROVIDER_RELAY.set(addr.to_string()) {
+            Ok(()) => Ok(()),
+            Err(_) if provider_relay() == Some(addr) => Ok(()),
+            Err(_) => Err("the built-in relay was already set".into()),
+        }
+    }
+
+    /// The provider's relay, when one replaced the compiled one ([`set_builtin_relay`]).
+    pub fn provider_relay() -> Option<&'static str> {
+        PROVIDER_RELAY.get().map(String::as_str)
+    }
+
+    /// The relay this build uses when none is given: a provider's ([`set_builtin_relay`]), else
+    /// the one compiled in (none from source).
+    pub fn default_relay() -> Option<&'static str> {
+        pick_relay(provider_relay(), compiled_relay())
+    }
+
+    /// The provider's relay wins; the compiled one counts only when there is no provider.
+    pub fn pick_relay<'a>(provider: Option<&'a str>, compiled: Option<&'a str>) -> Option<&'a str> {
+        provider.or(compiled)
     }
 
     /// "123 456 789", "123-456-789" -> "123456789"; None unless it is 9 digits.
@@ -1307,6 +1365,14 @@ pub mod session {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn a_providers_relay_replaces_the_compiled_one() {
+            assert_eq!(pick_relay(Some("relay.acme.example:7471"), Some("remotemac.mooo.com:7470")), Some("relay.acme.example:7471"));
+            assert_eq!(pick_relay(Some("relay.acme.example:7471"), None), Some("relay.acme.example:7471"));
+            assert_eq!(pick_relay(None, Some("remotemac.mooo.com:7470")), Some("remotemac.mooo.com:7470"));
+            assert_eq!(pick_relay(None, None), None);
+        }
 
         #[test]
         fn ids_and_tokens() {

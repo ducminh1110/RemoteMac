@@ -26,6 +26,7 @@ const BUTTON_W: f32 = 40.0;
 const SEARCH_W: f32 = 230.0;
 const EDGE: f32 = 14.0;
 const SIDE: f32 = 22.0;
+const DISCONNECT_W: f32 = 96.0;
 
 /// What a click or a key asks of the window.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +34,8 @@ pub enum Act {
     Launch(String),
     Settings,
     Window(Light),
+    /// end the session with this Mac (the list of Macs comes back)
+    Disconnect,
 }
 
 /// Keys the launcher uses.
@@ -55,6 +58,8 @@ pub enum Hot {
     Lights(Option<Light>),
     Desktop,
     Settings,
+    /// the red Disconnect button, while a Mac is connected
+    Disconnect,
     Search,
     Clear,
     /// a tile, by its index in the tiles
@@ -196,6 +201,14 @@ impl View {
         &self.tiles
     }
 
+    /// Where app `id`'s icon and name are (client px), while its tile is shown and not scrolled
+    /// out of sight: the guided tour points at it.
+    pub fn tile_rect(&self, id: &str) -> Option<(f32, f32, f32, f32)> {
+        let k = self.shown.iter().position(|&i| self.tiles.get(i).is_some_and(|t| t.id == id))?;
+        let (cx, cy, cw, ch) = self.grid().cell(k, self.scroll.value());
+        (cy >= self.tb() && cy + ch <= self.h as f32).then_some((cx, cy, cw, ch))
+    }
+
     pub fn set_apps(&mut self, apps: &[(String, String, bool)]) {
         let open: Vec<String> = self.tiles.iter().filter(|t| t.open).map(|t| t.id.clone()).collect();
         let first = self.tiles.is_empty() && !apps.is_empty();
@@ -285,6 +298,21 @@ impl View {
         (sx - 10.0 * s - w, sy, w, sh)
     }
 
+    fn connected(&self) -> bool {
+        self.state == "Connected"
+    }
+
+    /// The red Disconnect button, left of the Mac Desktop and Settings (while connected).
+    fn disconnect_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        if !self.connected() {
+            return None;
+        }
+        let s = self.s;
+        let (gx, gy, _, gh) = self.group_rect();
+        let w = DISCONNECT_W * s;
+        Some((gx - 10.0 * s - w, gy, w, gh))
+    }
+
     fn clear_spot(&self) -> (f32, f32) {
         let (x, y, w, h) = self.search_rect();
         (x + w - 16.0 * self.s, y + h / 2.0)
@@ -342,6 +370,9 @@ impl View {
             }
         }
         let inside = |r: (f32, f32, f32, f32)| x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3;
+        if self.disconnect_rect().is_some_and(inside) {
+            return Hot::Disconnect;
+        }
         let g = self.group_rect();
         if inside(g) {
             return if x < g.0 + g.2 / 2.0 { Hot::Desktop } else { Hot::Settings };
@@ -418,13 +449,17 @@ impl View {
         if pressed.is_some() {
             self.press.retarget(1.0, d(500), BACK);
         }
-        if down != self.hot {
+        // a tile pressed and let go on itself opens, even when something in between (a leave
+        // Windows sends as the mouse is captured, a list refresh) forgot what was down
+        let tile = matches!(self.hot, Hot::Tile(i) if pressed == Some(i));
+        if down != self.hot && !tile {
             return None;
         }
-        match down {
+        match self.hot {
             Hot::Lights(Some(l)) => Some(Act::Window(l)),
             Hot::Desktop => Some(Act::Launch("desktop".into())),
             Hot::Settings => Some(Act::Settings),
+            Hot::Disconnect => Some(Act::Disconnect),
             Hot::Clear => {
                 self.query.clear();
                 self.refilter();
@@ -664,7 +699,7 @@ impl View {
             let r = if ms.len() > 1 { 6.0 * s } else { ph / 2.0 };
             c.fill_round_rect(icx - pw / 2.0, ly - 1.0 * s, pw, ph, r, bg.fade(show.min(1.0)));
             if self.active {
-                fg = Rgba::WHITE;
+                fg = t.on_accent;
             }
         }
         for (n, m) in ms.iter().enumerate() {
@@ -765,7 +800,8 @@ impl View {
         // the Mac's name and how it is connected
         let tx = lx + 2.0 * look::LIGHT_STEP * s + look::LIGHT_D * s / 2.0 + 20.0 * s;
         let (gx, gy, gw, gh) = self.group_rect();
-        let room = (gx - tx - 16.0 * s).max(40.0 * s);
+        let right = self.disconnect_rect().map_or(gx, |r| r.0);
+        let room = (right - tx - 16.0 * s).max(40.0 * s);
         let mac = self.mac.clone();
         let title = self.text(&mac, 15.0, 650, room);
         let connected = self.state == "Connected";
@@ -785,6 +821,18 @@ impl View {
         let sy = ty + title.2 as f32 - 2.0 * s;
         c.fill_circle(tx + 3.5 * s, sy + subm.2 as f32 / 2.0, 3.2 * s, dot);
         Self::put(c, &subm, tx + 11.0 * s, sy, t.text2);
+        // Disconnect: red, as a destructive button on the Mac
+        if let Some((dx, dy, dw, dh)) = self.disconnect_rect() {
+            let red = if self.dark { Rgba::rgb(0xff, 0x45, 0x3a) } else { Rgba::rgb(0xff, 0x3b, 0x30) };
+            let col = match (self.hot == Hot::Disconnect, self.down == Hot::Disconnect) {
+                (true, true) => red.lerp(Rgba::rgb(0, 0, 0), 0.18),
+                (true, false) => red.lerp(Rgba::WHITE, 0.10),
+                _ => red,
+            };
+            c.fill_round_rect(dx, dy, dw, dh, dh / 2.0, if self.active { col } else { col.alpha(0.55) });
+            let m = self.text("Disconnect", 13.0, 600, dw - 16.0 * s);
+            Self::put(c, &m, dx + (dw - m.1 as f32) / 2.0, dy + (dh - m.2 as f32) / 2.0, Rgba::WHITE);
+        }
         // the Mac Desktop and Settings, one glass capsule
         let pressed_group = matches!(self.down, Hot::Desktop | Hot::Settings) && self.hot == self.down;
         self.glass(c, 1, gx, gy, gw, gh, gh / 2.0, pressed_group);
@@ -887,6 +935,14 @@ mod tests {
         let (cx, cy) = (x + w / 2.0, y + 40.0);
         v.mouse_down(cx, cy);
         assert_eq!(v.mouse_up(cx, cy), Some(Act::Launch("safari".into())));
+        // a leave between press and release (Windows posts one as the press captures the mouse)
+        v.mouse_down(cx, cy);
+        v.mouse_leave();
+        assert_eq!(v.mouse_up(cx, cy), Some(Act::Launch("safari".into())), "the press survives a leave");
+        // pressed on one app, let go on another: nothing
+        let (x2, y2, w2, _) = g.cell(2, 0.0);
+        v.mouse_down(cx, cy);
+        assert_eq!(v.mouse_up(x2 + w2 / 2.0, y2 + 40.0), None);
         // the lights, the Mac Desktop, Settings
         let (lx, ly) = v.lights();
         v.mouse_down(lx, ly);
@@ -898,6 +954,13 @@ mod tests {
         assert_eq!(v.mouse_up(gx + 5.0, gy + gh / 2.0), Some(Act::Launch("desktop".into())));
         v.mouse_down(gx + gw - 5.0, gy + gh / 2.0);
         assert_eq!(v.mouse_up(gx + gw - 5.0, gy + gh / 2.0), Some(Act::Settings));
+        // connected: the red Disconnect left of them; not while connecting
+        let (dx, dy, dw, dh) = v.disconnect_rect().expect("shown while connected");
+        assert!(dx + dw < gx);
+        v.mouse_down(dx + dw / 2.0, dy + dh / 2.0);
+        assert_eq!(v.mouse_up(dx + dw / 2.0, dy + dh / 2.0), Some(Act::Disconnect));
+        v.set_connection("Studio", "Connecting…", "");
+        assert!(v.disconnect_rect().is_none());
         // an app that is not installed does nothing
         let k = v.shown.iter().position(|&i| v.tiles[i].id == "old").unwrap();
         let (x, y, w, _) = g.cell(k, 0.0);

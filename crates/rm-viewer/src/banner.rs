@@ -68,7 +68,7 @@ pub fn show(hinst: HINSTANCE, x: i32, y: i32) {
     let (w, h) = (460.0 * scale, 52.0 * scale);
     let pos = (wa.left + ((wa.right - wa.left) as f32 - w) as i32 / 2, wa.top + (14.0 * scale) as i32);
     let (base, margin) = surface::glass_panel(pos.0, pos.1, w as usize, h as usize, h / 2.0, crate::glass::Kind::Sheet, scale);
-    let Some(surf) = Surface::new(hinst, CLASS, "Taro — connecting again", None, true, false) else { return };
+    let Some(surf) = Surface::new(hinst, CLASS, &format!("{} — connecting again", crate::brand::name()), None, true, false) else { return };
     let (dark, _, _) = surface::glass_look();
     let title = surface::text_mask("Connection lost — connecting again…", (14.0 * scale).round() as i32, 600, (w * 0.75) as usize);
     let hwnd = surf.hwnd;
@@ -110,11 +110,11 @@ pub fn notice(hinst: HINSTANCE, x: i32, y: i32, title: &str, sub: &str, on_click
     let (w, h) = (400.0 * scale, 56.0 * scale);
     let pos = (wa.left + ((wa.right - wa.left) as f32 - w) as i32 / 2, wa.top + (14.0 * scale) as i32);
     let (base, margin) = surface::glass_panel(pos.0, pos.1, w as usize, h as usize, h / 2.0, crate::glass::Kind::Sheet, scale);
-    let Some(surf) = Surface::new(hinst, CLASS, "Taro", None, true, false) else { return };
+    let Some(surf) = Surface::new(hinst, CLASS, crate::brand::name(), None, true, false) else { return };
     let (dark, _, _) = surface::glass_look();
     let title = surface::text_mask(title, (14.0 * scale).round() as i32, 600, (w * 0.75) as usize);
     let sub = surface::text_mask(sub, (12.0 * scale).round() as i32, 400, (w * 0.75) as usize);
-    let icon = crate::logo::icon((34.0 * scale).round() as usize);
+    let icon = crate::brand::icon((34.0 * scale).round() as usize);
     let hwnd = surf.hwnd;
     BANNER.with(|b| {
         *b.borrow_mut() = Some(Banner {

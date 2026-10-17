@@ -23,6 +23,52 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run end-to-end
         run: ./scripts/e2e-macos.sh
+      - name: A provider's Taro (provider/provider.json next to taro)
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          # no provider folder: Taro's own name, and the relay of this build (none from source)
+          out="$(out/remote-agent-mac --print-provider)"; echo "$out"
+          grep -qx 'product: Taro' <<<"$out" || fail "the standard name"
+          grep -qx 'relay: none (this network only)' <<<"$out" || fail "the standard relay"
+          grep -qx 'provider key: not set' <<<"$out" || fail "no provider key"
+          # a provider's package: the same binary, unmodified, with provider/ next to it
+          P="$RUNNER_TEMP/Acme"; rm -rf "$P"; mkdir -p "$P/provider"
+          cp out/remote-agent-mac "$P/taro"; install -m 0755 agent/macos/taro.sh agent/macos/taro-update.sh "$P/"
+          KEY=acme-ci-key-0123456789abcdef
+          write() {
+            printf '{"schema":"taro.provider/v1","provider_id":"acme-cloud","product":{"name":"Acme Connect","short_name":"Acme","vendor":"Acme Cloud Ltd"},"branding":{"primary_color":"#0F766E"},"relay":{"host":"relay.acme.example","port":7471,"key":"%s"},"updates":{"clients":"%s"}}\n' "$KEY" "$1" > "$P/provider/provider.json"
+          }
+          write notify
+          out="$("$P/taro" --print-provider)"; echo "$out"
+          grep -qx 'product: Acme Connect' <<<"$out" || fail "the provider's name"
+          grep -qx 'vendor: Acme Cloud Ltd' <<<"$out" || fail "the vendor"
+          grep -qx 'relay: relay.acme.example:7471' <<<"$out" || fail "the provider's relay"
+          grep -qx 'provider key: set' <<<"$out" || fail "the provider's key"
+          grep -qx 'client updates: notify' <<<"$out" || fail "client updates"
+          if grep -q "$KEY" <<<"$out"; then fail "the key itself was printed"; fi
+          # through a symbolic link elsewhere: the provider next to the real file
+          ln -sf "$P/taro" "$RUNNER_TEMP/taro-link"
+          "$RUNNER_TEMP/taro-link" --print-provider | grep -qx 'product: Acme Connect' || fail "not found through a symbolic link"
+          # --relay still wins; the help and taro.sh name the product
+          "$P/taro" --relay 127.0.0.1:9 --print-provider | grep -qx 'relay: 127.0.0.1:9' || fail "--relay"
+          "$P/taro" --help | grep -q 'stop the Acme Connect running in the background' || fail "the help"
+          "$P/taro.sh" --print-provider | grep -qx 'product: Acme Connect' || fail "taro.sh"
+          "$P/taro" --version | grep -qx "taro [0-9].*" || fail "--version stays machine-readable"
+          # updates off: taro-update.sh says who provides them and changes nothing
+          write off
+          before="$(shasum -a 256 "$P/taro")"
+          msg="$("$P/taro-update.sh" 2>&1)" || fail "taro-update.sh failed with updates off"; echo "$msg"
+          grep -q 'provided by Acme Cloud Ltd' <<<"$msg" || fail "taro-update.sh did not name the provider"
+          if "$P/taro-update.sh" --porcelain 2>/dev/null; then fail "the porcelain update should refuse"; fi
+          [[ "$(shasum -a 256 "$P/taro")" == "$before" && -f "$P/provider/provider.json" ]] || fail "taro-update.sh changed the package"
+          # a wrong provider.json, or none in the folder: a clear error, never Taro's own relay
+          printf '{"schema":"taro.provider/v1","product":{"name":"Acme Connect"}}' > "$P/provider/provider.json"
+          if "$P/taro" --print-provider 2>"$RUNNER_TEMP/err.txt"; then fail "an invalid provider.json was accepted"; fi
+          cat "$RUNNER_TEMP/err.txt"; grep -q 'provider settings are not valid' "$RUNNER_TEMP/err.txt" || fail "no clear error"
+          rm "$P/provider/provider.json"
+          if "$P/taro" --print-provider 2>/dev/null; then fail "a provider folder without provider.json was accepted"; fi
+          echo "provider mode: ok"
       - name: Probe the window sharing indicator
         if: always()
         timeout-minutes: 4

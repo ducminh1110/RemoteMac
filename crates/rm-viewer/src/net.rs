@@ -176,6 +176,8 @@ pub enum UiEvent {
     MenuBar { app: String, menus: Vec<rm_protocol::MenuNode> },
     /// The Mac's own Dock (feature "dock"), and the menu of one of its items.
     MacDock(Vec<rm_protocol::DockEntry>),
+    /// A window went into (or out of) macOS full screen on the Mac.
+    MacFullscreen { id: u64, on: bool },
     DockMenu { id: String, menus: Vec<rm_protocol::MenuNode> },
     /// The Mac's virtual display (Mac points), or why there is none.
     Display { available: bool, width: u32, height: u32, reason: Option<String> },
@@ -332,9 +334,9 @@ pub fn friendly_error(e: &str) -> String {
     } else if e.contains("not found on this network") || e.contains("did not answer at") || e.contains("is not a Mac address") || e.contains("could not be resolved") {
         return e.to_string();
     } else {
-        return format!("Cannot reach the Taro server: {e}");
+        return format!("Cannot reach the {} server: {e}", crate::brand::name());
     };
-    m.to_string()
+    crate::brand::named(m).into_owned()
 }
 
 /// Connect, handshake, optionally launch `app`, and start the receive thread.
@@ -369,6 +371,8 @@ fn connect_steps(relay: Option<&str>, session: &str, token: &str, app: Option<&s
         rm_relay::lan::Route::Relay(r) => format!("through the relay {r}"),
     });
     *ROUTE.lock().unwrap() = match &route {
+        // the Demo Mac's relay is on this PC: not a route worth naming as one
+        _ if crate::demo::is_demo(session) => crate::brand::named("Built into Taro").into_owned(),
         rm_relay::lan::Route::Lan(_) => "This network".into(),
         rm_relay::lan::Route::Direct(a) => format!("Direct to {}", a.ip()),
         rm_relay::lan::Route::Relay(_) => "Through the relay".into(),
@@ -417,6 +421,7 @@ fn connect_steps(relay: Option<&str>, session: &str, token: &str, app: Option<&s
     link.send(&settings.message(display_scale(), screen_px()));
     *MAC_FEATURES.lock().unwrap() = sess.negotiated.features.clone();
     *MAC_VERSION.lock().unwrap() = crate::update::version_in(&sess.agent);
+    crate::update::set_mac(crate::update::MacState::Unknown);
     // the Mac's sound, unless muted (a Mac without the feature is never asked)
     let audio = crate::audio::audio();
     audio.reset();
@@ -455,9 +460,13 @@ pub fn route_label() -> String {
     ROUTE.lock().unwrap().clone()
 }
 
-/// The Mac as people know it: "Mac 123 456 789" from its ID (the session), else "Your Mac".
+/// The Mac as people know it: "Mac 123 456 789" from its ID (the session), "Demo Mac" for the
+/// one built into Taro, else "Your Mac".
 pub fn mac_label() -> String {
     let s = SESSION.lock().unwrap().clone();
+    if crate::demo::is_demo(&s) {
+        return "Demo Mac".into();
+    }
     match s.strip_prefix("rm-").filter(|id| id.len() == 9 && id.chars().all(|c| c.is_ascii_digit())) {
         Some(id) => format!("Mac {} {} {}", &id[..3], &id[3..6], &id[6..]),
         None => "Your Mac".into(),
@@ -728,6 +737,8 @@ fn recv_loop(mut sess: Session<Secure>, _link: Link, video: Arc<Video>, tx: Send
                 }
                 Message::Apps { apps } => emit(UiEvent::Apps(apps)),
                 Message::DisplayStatus { available, width, height, reason, .. } => emit(UiEvent::Display { available, width, height, reason }),
+                Message::WindowIsFullscreen { window_id, on } => emit(UiEvent::MacFullscreen { id: window_id, on }),
+                Message::MacUpdateStatus { state, latest, progress, detail, .. } => crate::update::mac_status(&state, &latest, progress, &detail),
                 Message::DockItems { items } if items.len() <= 200 => emit(UiEvent::MacDock(items)),
                 Message::DockMenu { id, menus } if rm_protocol::MenuNode::count(&menus) <= rm_protocol::MAX_MENU_ITEMS => emit(UiEvent::DockMenu { id, menus }),
                 Message::MenuBar { application_id, menus } if rm_protocol::MenuNode::count(&menus) <= rm_protocol::MAX_MENU_ITEMS => {
@@ -856,6 +867,56 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::time::Instant::now() < deadline && !destroyed {
             if let Ok(UiEvent::Destroyed { .. }) = rx.recv_timeout(Duration::from_millis(300)) { destroyed = true }
+        }
+        assert!(destroyed);
+    }
+
+    /// The Demo Mac built into Taro is reached like any Mac: its apps are listed, Notes opens
+    /// with its pictures, its Dock lists its apps.
+    #[test]
+    fn the_demo_mac_is_a_mac() {
+        let mac = crate::demo::start().unwrap();
+        assert_eq!(crate::demo::start().unwrap(), mac, "one Demo Mac per process");
+        let (link, rx) = connect_with(Some(&mac.relay), &mac.session, &mac.token, None, false, || {}).unwrap();
+        assert!(mac_has("dock") && mac_has("exact"));
+        link.send(&Message::ListApps);
+        let (mut apps, mut win, mut frames, mut dock) = (vec![], None, 0, None);
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while std::time::Instant::now() < deadline && !(frames >= 2 && dock.is_some()) {
+            match rx.recv_timeout(Duration::from_millis(300)) {
+                Ok(UiEvent::Apps(a)) => {
+                    apps = a.iter().map(|x| x.id.clone()).collect();
+                    link.send(&Message::AppLaunch { application_id: "notes".into(), arguments: vec![], working_directory: None, environment: Default::default() });
+                }
+                Ok(UiEvent::WindowCreated { id, app, title, w, .. }) => {
+                    assert_eq!((app.as_str(), title.as_str(), w), ("notes", "Notes", 720));
+                    win = Some(id);
+                    link.send(&Message::DockList);
+                    link.send(&Message::TextInput { window_id: id, text: "hello".into() });
+                }
+                Ok(UiEvent::Frame { id, picture, .. }) => {
+                    assert_eq!(Some(id), win);
+                    // drawn at the display's scale (never more pixels than are shown)
+                    let want = ((720.0 * display_scale().clamp(1.0, 3.0)).round() as usize) & !1;
+                    assert_eq!(picture.size().0, want, "the window's width at the display's scale");
+                    frames += 1;
+                }
+                Ok(UiEvent::MacDock(items)) => dock = Some(items),
+                _ => {}
+            }
+        }
+        assert_eq!(apps, crate::demo::APPS.map(|a| a.0.to_string()));
+        assert!(frames >= 2, "decoded frames: {frames}");
+        let dock = dock.expect("the Demo Mac's Dock");
+        assert_eq!(dock.iter().map(|d| d.app_id.clone().unwrap()).collect::<Vec<_>>(), crate::demo::APPS.map(|a| a.0.to_string()));
+        assert!(dock[0].running && !dock[1].running, "Notes runs: {dock:?}");
+        link.send(&Message::WindowClose { window_id: win.unwrap() });
+        let mut destroyed = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline && !destroyed {
+            if let Ok(UiEvent::Destroyed { .. }) = rx.recv_timeout(Duration::from_millis(300)) {
+                destroyed = true
+            }
         }
         assert!(destroyed);
     }

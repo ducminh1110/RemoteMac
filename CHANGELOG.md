@@ -4,6 +4,121 @@ Each version of Taro (called MacBridge until 1.2.0), newest first. Both sides sh
 same version; a newer Windows app works with an older Mac app without the features the Mac
 lacks.
 
+## 1.4.1
+
+### Added
+- A red Disconnect button in the launcher's toolbar while a Mac is connected: after a yes, the
+  session ends (the Mac closes its apps, as when Taro quits) and Taro comes back to the list of
+  Macs, to pick another one.
+
+### Fixed
+- A Mac kept without a relay of its own could not be reached from another network ("not found"):
+  the connect window now goes through the relay built into Taro (or --relay / RM_RELAY) when
+  the Mac is not on this network, with that relay's usual key.
+
+## 1.4.0
+
+### Added
+- The connect window lists the Macs kept on this PC ("No Computers" when there are none). + adds
+  one: its ID and password, or an address; "Have a custom relay" takes a relay of one's own and
+  its RM key. Save keeps it (passwords encrypted for this Windows user with DPAPI, in
+  %APPDATA%\RemoteMac\computers.json); the ID typed before is brought over. A wrong password
+  opens the Mac's sheet again with the password cleared; a kept password clears when its field
+  is clicked, to type a new one.
+- A Demo Mac inside Taro (Notes, TextEdit and Calculator, drawn and streamed on this PC) and a new
+  guided tour after an update: try the demo, open an app from the launcher, push the pointer to
+  the screen's edge for the Dock, search; then Taro starts again from the beginning to add your
+  own Mac.
+- The navigation ball's menu shows the stream at a glance (frame rate, bitrate, round trip,
+  latency) and turns the stats overlay on and off.
+- Crash records with no --logs-enabled needed: a panic, or a crash Rust never sees (an illegal
+  instruction, a driver's access violation), goes to %LOCALAPPDATA%\Taro\crash.log, with a
+  minidump beside it for the latter (the newest five are kept).
+- Taro.exe carries its version (Properties > Details, and Windows' crash reports).
+
+### Changed
+- Stage Manager is rewritten after StageManagerForWindows (MIT, see NOTICE.md): scenes in
+  most-recently-used order (five in the sidebar), windows flying between the stage and their
+  cards (300 ms), the sidebar on screen, off screen or flying over when a window covers it, the
+  hover, press and drag of cards, app icons under each scene that filter the sidebar to an app.
+- Windows waiting in the Stage Manager sidebar ask the Mac for 10 pictures a second instead of
+  the full rate (Mac 1.4.0, feature "background"): the Mac's encoder and the link go to the
+  windows in use; on stage again, the full rate and a keyframe at once.
+
+### Fixed
+- A crash at start (0xC000001D, illegal instruction) on PCs whose processor has AVX2 or AVX-512
+  but whose Windows does not enable it: the video error correction now checks what the OS
+  enables (XGETBV) before choosing its fast paths.
+- Clicking an app in the launcher sometimes did nothing (Enter after a search worked): a press
+  now survives the leave Windows sends as the mouse is captured.
+
+## 1.2.8
+
+### Added
+- Taro runs in the background: closing its window no longer ends it. The Dock, the apps' windows
+  and the connection stay, and an icon in the notification area (behind the arrow of the taskbar)
+  opens Taro again; right-click for Open Taro / Quit Taro.
+- Stage Manager: each scene shows its app's icon and name under its cards; the card under the cursor
+  pops (1.08x, anchored on its left edge); a window put into the sidebar flies there as a card
+  from where it stood, straightening into its tilt on the way.
+- Drag and drop between the sidebar and the stage: drag a card out and the window stands where
+  you let go; drop a window (after moving it by its title bar) on the sidebar and it becomes a card.
+
+## 1.2.7
+
+### Changed
+- Stage Manager now follows StageManagerForWindows closely: the cards in the sidebar are live
+  captures (Windows.Graphics.Capture drawn through Composition) leaning in perspective with their
+  size, tilt and cascade from its formulas; the windows of one app are one scene; the sidebar
+  parks past the left edge while a window overlaps it and comes out when the cursor is at the edge.
+  Where capture or composition are missing the DWM thumbnails remain.
+- Switching scenes keeps each window's stacking, ignores the focus changes a switch itself causes
+  and the ones less than 100 ms apart, and parks windows past the bottom-right of the screens.
+
+## 1.2.6
+
+### Added
+- A guided tour (Getting Started) the first time Taro runs after an update, before it connects: the
+  screen dims a little and arrows point at the ID, the password and Connect; do what the card says
+  and it answers "Great!", Next goes on, Skip ends it (`RM_NO_TOUR=1` turns it off).
+
+### Changed
+- Stage Manager is live: a window leaving the stage is parked past the edge of the screens (as in
+  StageManagerForWindows, MIT: see NOTICE.md) and its card in the strip is a live DWM thumbnail
+  with rounded frames, not a still picture.
+- The Stage Manager strip slides down out of the way while the Mac's Dock is out, and comes back up
+  when the Dock goes.
+
+## 1.2.5
+
+### Added
+- Minimising a Mac window slides and shrinks it toward the side of the Dock (the bottom without one),
+  fading as it goes, as the Mac does (the light, the taskbar and Win+Down all do it).
+
+- Stage Manager (Settings > Dock): the app in use stands in the middle, the other apps' windows rest
+  as pictures at the left, newest first; a click on one brings it forward (the pictures are taken
+  when a window leaves the stage).
+
+### Fixed
+- An app opened from Taro comes to the front; it no longer opens behind the PC's own windows.
+- A window the Mac puts in full screen (a video made full screen in Safari, View > Enter Full
+  Screen) fills the PC's monitor, and goes back when the Mac leaves full screen, instead of showing
+  as one more window (message `window_is_fullscreen`).
+
+## 1.2.4
+
+### Added
+- About this Taro: "Taro on the Mac" checks the Mac for a newer Taro and updates it from the PC's
+  window, with a progress bar and a "Done". The Mac replaces its files while connected and starts the
+  new program at the next connection, so the session is not cut (feature "update",
+  `taro-update.sh --porcelain`). The Windows update shows a progress bar too.
+
+### Fixed
+- The Dock: a menu of an item closes, and the Dock goes, once the pointer is away from both.
+- `./taro --password X` from a terminal shows "Starting Taro…" at once, goes to the background
+  whenever any of stdin/stdout/stderr is a terminal, and its ID banner is not hidden by a stale
+  RM_QUIET_BANNER.
+
 ## 1.2.3
 
 Taro updates itself, and Windows gets an installer. Update both sides (this once by hand: the

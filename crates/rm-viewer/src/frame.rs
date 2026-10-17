@@ -11,12 +11,12 @@ use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// Taro's icon (logo.rs) on the window: the taskbar and Alt+Tab show it.
+/// Taro's icon (logo.rs; a provider's: brand.rs) on the window: the taskbar and Alt+Tab show it.
 fn own_icon(hwnd: HWND) {
     thread_local! { static ICON: std::cell::Cell<Option<isize>> = const { std::cell::Cell::new(None) }; }
     let icon = ICON.with(|c| {
         if c.get().is_none() {
-            c.set(crate::native::make_icon(64, &crate::logo::rgba(64)).map(|h| h.0 as isize));
+            c.set(crate::native::make_icon(64, &crate::brand::icon_rgba(64)).map(|h| h.0 as isize));
         }
         c.get()
     });

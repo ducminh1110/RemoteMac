@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relay setup</title>
+<link rel="stylesheet" href="/common/taro-glass.css">
+<link rel="stylesheet" href="/assets/app.css">
+<link rel="stylesheet" href="/brand/tokens.css">
+<link rel="stylesheet" href="/brand/theme.css">
+<script type="module" src="/assets/app.js"></script>
+</head>
+<body>
+<div class="stage" id="stage">
+  <canvas class="wallpaper" aria-hidden="true"></canvas>
+  <header class="glass bar" data-glass="bar">
+    <img class="logo" src="/brand/logo.png" alt="" width="38" height="38">
+    <div>
+      <h1 id="title">Relay setup</h1>
+      <p class="sub" id="subtitle">Wizard 2 · first-run setup of this server</p>
+    </div>
+    <span class="spacer"></span>
+    <span class="pill" id="mode-pill" hidden></span>
+  </header>
+  <nav class="glass side steps" data-glass="side" aria-label="Setup steps">
+    <div class="frost"></div>
+    <ol id="steps"></ol>
+  </nav>
+  <main class="glass panel" data-glass="panel">
+    <div class="frost"></div>
+    <div class="scroll" id="main" tabindex="-1"><p class="loading">Loading…</p></div>
+  </main>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

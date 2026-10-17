@@ -16,7 +16,11 @@ func log(_ s: String) { if logsEnabled { FileHandle.standardError.write(Data("[a
 /// Errors that stop the app are always shown.
 func fail(_ s: String) -> Never { FileHandle.standardError.write(Data("taro: \(s)\n".utf8)); exit(1) }
 
-let usage = """
+// a provider's Taro: provider/provider.json next to this program (Provider.swift), read before
+// anything else; a wrong one ends the program here
+_ = provider
+
+let usage = named("""
 usage: taro [--password SECRET] [--id 123456789] [--relay HOST:PORT] [--port N] [--foreground] [--logs-enabled]
        taro --stop
        RM_SESSION_TOKEN=.. taro --relay HOST:PORT --session NAME
@@ -26,9 +30,10 @@ usage: taro [--password SECRET] [--id 123456789] [--relay HOST:PORT] [--port N] 
   --logs-enabled     write a log (stderr; in the background ~/Library/Logs/Taro/taro.log)
   --stop             stop the Taro running in the background
   --check-permissions  say which macOS permissions are missing (exit 3 when one is)
+  --print-provider   show the product, the relay and whether a provider key is set
   --version          show the version
-"""
-var relayArg: String?, sessionArg: String?, passwordArg: String?, idArg: String?, foreground = false
+""")
+var relayArg: String?, sessionArg: String?, passwordArg: String?, idArg: String?, foreground = false, printProviderAsked = false
 var argv = CommandLine.arguments.dropFirst().makeIterator()
 while let a = argv.next() {
     switch a {
@@ -45,19 +50,26 @@ while let a = argv.next() {
     case "-h", "--help": print(usage); exit(0)
     case "--version": print("taro \(appVersion)"); exit(0)
     case "--check-permissions": exit(checkPermissions())
+    case "--print-provider": printProviderAsked = true
     default: fail(usage)
     }
 }
 let env = ProcessInfo.processInfo.environment
+if printProviderAsked {
+    printProvider(relay: [relayArg, env["RM_RELAY"], defaultRelay].compactMap { $0?.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty })
+    exit(0)
+}
 // a write to a viewer or relay that is gone returns an error; by default it would kill us
 signal(SIGPIPE, SIG_IGN)
 // started in the background (below): our own session, so closing the terminal does not end us;
 // this copy watches over the worker (started again if it dies), which does the rest
 if env["RM_DAEMON"] != nil && env["RM_WORKER"] == nil { becomeDaemon(); superviseWorker() }
 /// From a terminal (not a script) with the ID and password: show them, then go to the background.
-let goBackground = !foreground && env["RM_DAEMON"] == nil && sessionArg == nil && isatty(STDOUT_FILENO) == 1
+/// (a terminal on any of stdin, stdout, stderr: not only stdout, which a wrapper may have piped)
+let onTerminal = isatty(STDIN_FILENO) == 1 || isatty(STDOUT_FILENO) == 1 || isatty(STDERR_FILENO) == 1
+let goBackground = !foreground && env["RM_DAEMON"] == nil && sessionArg == nil && onTerminal
 if goBackground, let pid = runningInBackground() {
-    print("Taro is already running in the background (pid \(pid)). Stop it with: \(CommandLine.arguments[0]) --stop")
+    print("\(productName) is already running in the background (pid \(pid)). Stop it with: \(CommandLine.arguments[0]) --stop")
     exit(1)
 }
 // a session that ended without a word (a crash, power lost) may have left the PC's wallpaper
@@ -79,6 +91,7 @@ if let s = sessionArg {
     // ID + password mode; a restart for the next client keeps both (RM_PASSWORD, RM_ID)
     // the ID: given, else from the relay (it keeps IDs unique there), else this Mac's own
     // (with no relay it is only reached on this network, where the viewer looks for it by ID)
+    if env["RM_DAEMON"] == nil && env["RM_RESTARTED"] == nil { print("  Starting \(productName)…"); fflush(stdout) } // (asking the relay for the ID can take a few seconds)
     let id: String
     if let given = idArg ?? env["RM_ID"] {
         id = given
@@ -95,9 +108,11 @@ if let s = sessionArg {
     setenv("RM_ID", id, 1); setenv("RM_PASSWORD", password, 1)
     sessionID = relaySession(id: id); token = sessionToken(id: id, password: password)
     directSecret = directToken(password: password)
-    if env["RM_QUIET_BANNER"] == nil {
+    // (the banner is for the program the user started: not for the copy in the background, nor for
+    // a restart for the next client; a stale RM_QUIET_BANNER in the user's shell does not hide it)
+    if env["RM_QUIET_BANNER"] == nil || (env["RM_DAEMON"] == nil && env["RM_RESTARTED"] == nil) {
         print("")
-        print("  Taro is ready — connect from Windows with:")
+        print("  \(productName) is ready — connect from Windows with:")
         print("    ID session to connect: \(displayID(id))")
         print("    Password: \(password)")
         if let r = relayAddr {
@@ -297,7 +312,7 @@ do {
     guard cmin <= 1 && cmax >= 1 else {
         try conn.send(["type": "error", "code": "version_mismatch", "message": "agent speaks protocol 1, client \(cmin)...\(cmax)"]); exit(1)
     }
-    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "mask", "exact", "menubar", "bye", "dock"],
+    try conn.send(["type": "server_hello", "min_version": 1, "max_version": 1, "codecs": ["h264"], "features": ["control", "video", "audio", "open_file", "mask", "exact", "menubar", "bye", "dock", "update", "background"],
                    "max_surface": [3840, 2160], "agent": "taro \(appVersion) \(ProcessInfo.processInfo.operatingSystemVersionString)"])
     try conn.send(probeCapabilities())
 } catch { fail("handshake: \(error)") }
@@ -538,6 +553,8 @@ func stopStream(_ id: CGWindowID) -> Task<Void, Never>? {
     return Task { await ws.stop(); log("stream stopped window=\(id) packets=\(ws.sent)") }
 }
 
+/// Windows the viewer was told are in full screen (the tracker's thread only).
+var fullScreenSent = Set<CGWindowID>()
 tracker.onCreated = { w in
     log("window created id=\(w.id) app=\(w.appID) role=\(w.role.rawValue) parent=\(w.parent.map { String($0) } ?? "-") \(Int(w.rect.width))x\(Int(w.rect.height)) titleBarCut=\(Int(w.inset))")
     lastSize[w.id] = w.rect.size
@@ -545,6 +562,12 @@ tracker.onCreated = { w in
     send(["type": "window_created", "window_id": Int(w.id), "application_id": w.appID, "title": String(w.title.prefix(1000)), "bounds": rectJSON(w.content),
           "parent_id": w.parent.map { Int($0) as Any } ?? NSNull(), "role": w.role.rawValue])
     startStream(w.id, inset: w.inset, popup: w.role == .popup)
+    // opened already in macOS full screen (a video made full screen in Safari): the viewer shows it
+    // full screen on the PC, not as one more window
+    if w.role == .window && isWholeDisplay(w.rect) {
+        fullScreenSent.insert(w.id)
+        send(["type": "window_is_fullscreen", "window_id": Int(w.id), "on": true])
+    }
     if w.role == .popup {
         // a menu is still being drawn (its items, the highlight) when it is first captured, and the
         // capture only sends a new picture when something changes: capture it afresh once it is up
@@ -561,6 +584,7 @@ tracker.onDestroyed = { id in
     displays.windowGone(id)
     lastSize.removeValue(forKey: id)
     lastInset.removeValue(forKey: id)
+    fullScreenSent.remove(id)
     restartLock.lock(); restartGen.removeValue(forKey: id); restartLock.unlock()
     stopStream(id)
     streamsLock.lock(); pictureRetries.removeValue(forKey: id); captureRestarts.removeValue(forKey: id); streamsLock.unlock()
@@ -569,6 +593,10 @@ tracker.onDestroyed = { id in
 }
 tracker.onMoved = { w in
     send(["type": "window_moved", "window_id": Int(w.id), "bounds": rectJSON(w.content)])
+    if w.role == .window, w.fullScreen != fullScreenSent.contains(w.id) {
+        if w.fullScreen { fullScreenSent.insert(w.id) } else { fullScreenSent.remove(w.id) }
+        send(["type": "window_is_fullscreen", "window_id": Int(w.id), "on": w.fullScreen])
+    }
     // size (or the title row cut) changed: the encoder is bound to a size, so the stream starts
     // again, once the size has settled (a live resize brings a new size every tick: restarting
     // each time captured and encoded nothing but keyframes)
@@ -939,6 +967,11 @@ func handle(_ m: [String: Any]) {
             // replacing it would leave the Mac's screen mirroring nothing
             if keepMirror, let st = displays.status() { send(st) } else { send(displays.configure(width: w, height: h, scale: sc)) }
         }
+    case "window_background":
+        // its window is a card in the viewer's Stage Manager sidebar, or back in use
+        let wid = CGWindowID(clamping: int(m["window_id"]))
+        streamsLock.lock(); let ws = streams[wid]; streamsLock.unlock()
+        ws?.setBackground(m["on"] as? Bool ?? false)
     case "window_fullscreen":
         let wid = CGWindowID(clamping: int(m["window_id"]))
         guard let w = tracker.current(wid) else { send(["type": "error", "code": "no_such_window", "message": "\(wid)"]); break }
@@ -1067,6 +1100,9 @@ func handle(_ m: [String: Any]) {
         }
     case "p2p_offer":
         sender.udp?.peerOffer(secret: m["secret"] as? String ?? "", candidates: m["candidates"] as? [String] ?? [])
+    case "mac_update":
+        // this Taro's own update, asked from the viewer (SelfUpdate.swift)
+        MacUpdater.run(install: m["install"] as? Bool ?? false) { send($0) }
     case "open_file":
         // a document from the viewer (dropped on an app's window, or on the launcher)
         let path = m["path"] as? String ?? ""

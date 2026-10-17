@@ -1,0 +1,15 @@
+# Taro Enterprise: the cloud control plane (its own workspace, apart from the Taro apps).
+[workspace]
+resolver = "2"
+members = ["apps/api", "apps/setup-wizard", "crates/taro-update", "apps/relay"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+# small, stripped release binaries (the API server and TaroEnterpriseSetup.exe)
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

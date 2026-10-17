@@ -1,0 +1,28 @@
+# TLS for the portal, the console and verified custom domains (Let's Encrypt via ACME).
+# Certificates for custom domains are only obtained when the API says the domain is verified.
+{
+	email {$ACME_EMAIL}
+	on_demand_tls {
+		ask http://127.0.0.1:8081/internal/tls/ask
+	}
+}
+
+# The Provider Console: Taro Operations only, from the allowed networks.
+{$OPS_HOST} {
+	@outside not remote_ip {$OPS_ALLOWED_CIDRS}
+	respond @outside "Not found" 404
+	reverse_proxy 127.0.0.1:8081
+}
+
+# The Customer Portal.
+{$PORTAL_HOST} {
+	reverse_proxy 127.0.0.1:8080
+}
+
+# Customers' verified custom domains (on-demand certificates, asked of the API first).
+https:// {
+	tls {
+		on_demand
+	}
+	reverse_proxy 127.0.0.1:8080
+}

@@ -30,6 +30,8 @@ pub const MIN_H: f32 = 400.0;
 pub enum Act {
     Launch(String),
     Settings,
+    /// the red Disconnect button
+    Disconnect,
 }
 
 pub struct Launcher {
@@ -49,7 +51,7 @@ impl Launcher {
             let _ = GetCursorPos(&mut pt);
             let s = crate::surface::scale_at(pt.x, pt.y);
             let (w, h) = ((920.0 * s) as i32, (620.0 * s) as i32);
-            let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("Taro"), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, w, h, None, None, Some(hinst), None).ok()?;
+            let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, &windows::core::HSTRING::from(crate::brand::name()), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, w, h, None, None, Some(hinst), None).ok()?;
             // files dropped here open on the Mac with their default app
             windows::Win32::UI::Shell::DragAcceptFiles(hwnd, true);
             crate::frame::adopt(hwnd);
@@ -66,6 +68,11 @@ impl Launcher {
     pub fn set_connection(&mut self, mac: &str, state: &str, route: &str) {
         self.view.set_connection(mac, state, route);
         self.redraw();
+    }
+
+    /// The Mac's name as the toolbar shows it.
+    pub fn mac_name(&self) -> String {
+        self.view.mac.clone()
     }
 
     /// The connection's phase now (connecting again, lost…): shown when it changes.
@@ -149,6 +156,16 @@ impl Launcher {
         }
     }
 
+    /// App `id`'s tile on the screen (px), while it is in sight.
+    pub fn tile_screen_rect(&self, id: &str) -> Option<RECT> {
+        let (x, y, w, h) = self.view.tile_rect(id)?;
+        let mut o = POINT::default();
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::ClientToScreen(self.hwnd, &mut o);
+        }
+        Some(RECT { left: o.x + x as i32, top: o.y + y as i32, right: o.x + (x + w) as i32, bottom: o.y + (y + h) as i32 })
+    }
+
     pub fn count(&self) -> usize {
         self.view.tiles().len()
     }
@@ -184,6 +201,7 @@ impl Launcher {
         match act? {
             crate::launchui::Act::Launch(id) => Some(Act::Launch(id)),
             crate::launchui::Act::Settings => Some(Act::Settings),
+            crate::launchui::Act::Disconnect => Some(Act::Disconnect),
             crate::launchui::Act::Window(l) => {
                 crate::frame::press(self.hwnd, l);
                 None
@@ -266,6 +284,11 @@ impl Launcher {
 }
 
 /// If another viewer is already running, hand it `app` and return true (this process should exit).
+/// Another Taro is running in this session (its launcher window exists).
+pub fn running() -> bool {
+    unsafe { FindWindowW(CLASS, PCWSTR::null()).is_ok_and(|w| !w.0.is_null()) }
+}
+
 pub fn forward_to_running_instance(app: Option<&str>) -> bool {
     unsafe {
         let Ok(existing) = FindWindowW(CLASS, PCWSTR::null()) else { return false };

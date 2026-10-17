@@ -3,9 +3,14 @@
 pub mod audio;
 #[cfg(windows)]
 pub mod banner;
+pub mod brand;
+pub mod cards;
 pub mod chrome;
 pub mod connectui;
+pub mod crash;
+pub mod demo;
 pub mod dock;
+pub mod enterprise;
 pub mod field;
 pub mod ico;
 pub mod keymap;
@@ -22,9 +27,12 @@ pub mod menu;
 pub mod glass;
 pub mod glassmenu;
 pub mod gsdesktop;
+pub mod scenes;
 pub mod settings;
 pub mod settingsui;
 pub mod text;
+#[cfg(windows)]
+pub mod tour;
 pub mod titlebar;
 pub mod update;
 pub mod net;
@@ -47,9 +55,15 @@ pub mod launcher;
 #[cfg(windows)]
 pub mod native;
 #[cfg(windows)]
+pub mod minimize;
+#[cfg(windows)]
 pub mod navball;
 #[cfg(windows)]
 pub mod shortcuts;
+#[cfg(windows)]
+pub mod stage;
+#[cfg(windows)]
+pub mod tiles;
 #[cfg(windows)]
 pub mod settings_ui;
 #[cfg(windows)]
@@ -70,7 +84,8 @@ pub fn log_hint() -> String {
     if logs_enabled() {
         format!("Log: {}", log_path().display())
     } else {
-        "For a log, start Taro.exe with --logs-enabled.".into()
+        // (the path as it is: only the words name the product)
+        format!("Crash records: {}. {}", crash::log_path().display(), brand::named("For a full log, start Taro.exe with --logs-enabled."))
     }
 }
 

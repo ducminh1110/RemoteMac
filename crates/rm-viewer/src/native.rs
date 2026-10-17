@@ -363,6 +363,40 @@ pub fn message_box(title: &str, text: &str) {
     }
 }
 
+/// Open a web page (https) or a new email (mailto:) the way Windows opens links: a provider's
+/// support link in About. Anything else is not opened.
+pub fn open_url(url: &str) {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    if !(url.starts_with("https://") || url.starts_with("mailto:")) || url.chars().any(|c| c.is_whitespace() || c == '"') {
+        return;
+    }
+    unsafe {
+        let _ = ShellExecuteW(None, &HSTRING::from("open"), &HSTRING::from(url), windows::core::PCWSTR::null(), windows::core::PCWSTR::null(), SW_SHOWNORMAL);
+    }
+}
+
+/// `taro://` links (from a Taro Enterprise portal) open this Taro.exe with `--url <link>`
+/// (per user, no administrator; written again at each start so a moved Taro.exe still works).
+pub fn register_url_scheme() {
+    use windows::Win32::System::Registry::{RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ};
+    let Ok(exe) = std::env::current_exe() else { return };
+    let command = format!("\"{}\" --url \"%1\"", exe.display());
+    let set = |key: &str, name: Option<&str>, value: &str| unsafe {
+        let wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
+        let name = name.map(HSTRING::from);
+        let _ = RegSetKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(key), name.as_ref().map_or(windows::core::PCWSTR::null(), |n| windows::core::PCWSTR(n.as_ptr())), REG_SZ.0, Some(wide.as_ptr() as *const c_void), (wide.len() * 2) as u32);
+    };
+    set("Software\\Classes\\taro", None, "URL:Taro");
+    set("Software\\Classes\\taro", Some("URL Protocol"), "");
+    set("Software\\Classes\\taro\\DefaultIcon", None, &format!("\"{}\",0", exe.display()));
+    set("Software\\Classes\\taro\\shell\\open\\command", None, &command);
+}
+
+/// Ask before something that cannot be undone: true for Yes.
+pub fn confirm(owner: HWND, title: &str, text: &str) -> bool {
+    unsafe { MessageBoxW(Some(owner), &HSTRING::from(text), &HSTRING::from(title), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_SETFOREGROUND) == IDYES }
+}
+
 /// Send this process's stderr (all the viewer's logging) to `path` when it has no console
 /// (the release build is a GUI app), so problems can be read afterwards.
 pub fn log_to_file(path: &std::path::Path) {
@@ -379,6 +413,17 @@ pub fn log_to_file(path: &std::path::Path) {
         if let Ok(f) = std::fs::File::create(path) {
             let h = windows::Win32::Foundation::HANDLE(f.into_raw_handle());
             let _ = SetStdHandle(STD_ERROR_HANDLE, h);
+        }
+    }
+}
+
+/// Wait until process `pid` has ended (at most `limit`).
+pub fn wait_for_process(pid: u32, limit: std::time::Duration) {
+    use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+    unsafe {
+        if let Ok(h) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            let _ = WaitForSingleObject(h, limit.as_millis() as u32);
+            let _ = windows::Win32::Foundation::CloseHandle(h);
         }
     }
 }

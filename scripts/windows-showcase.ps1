@@ -2,7 +2,10 @@
 # would see: every app window (Mac chrome included), the launcher and the whole Windows desktop
 # with all apps open, as PNG files in $Out, plus showcase.txt.
 param(
-  [Parameter(Mandatory)] [string] $Relay,
+  # the relay; empty: the viewer's built-in one (a provider's Taro: its provider.json's)
+  [string] $Relay = "",
+  # the viewer to run (a provider's Taro: its renamed exe, provider\ next to it)
+  [string] $Exe = "target\release\remote-mac-viewer.exe",
   [string] $Session = "",
   # the user's way in: the ID and password the Mac prints (instead of -Session + RM_SESSION_TOKEN)
   [string] $Id = "",
@@ -18,8 +21,8 @@ Add-Type -AssemblyName System.Drawing, System.Windows.Forms
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $Out "ready"), (Join-Path $Out "desktop.done")
 $log = Join-Path $Out "viewer.log"
-$viewer = Start-Process -PassThru -NoNewWindow -FilePath target\release\remote-mac-viewer.exe `
-  -ArgumentList ("--relay $Relay " + $(if ($Id) { "--id $Id --password $Password" } else { "--session $Session" }) + " --showcase `"$Out`" --apps $Apps --settle $Settle --no-shortcuts" + $(if ($Type) { " --type `"$Type`"" } else { "" })) -RedirectStandardError $log
+$viewer = Start-Process -PassThru -NoNewWindow -FilePath $Exe `
+  -ArgumentList ($(if ($Relay) { "--relay $Relay " } else { "" }) + $(if ($Id) { "--id $Id --password $Password" } else { "--session $Session" }) + " --showcase `"$Out`" --apps $Apps --settle $Settle --no-shortcuts" + $(if ($Type) { " --type `"$Type`"" } else { "" })) -RedirectStandardError $log
 
 function Save-Desktop([string] $path) {
   try {

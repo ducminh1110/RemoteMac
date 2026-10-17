@@ -5,10 +5,12 @@ import Foundation
 import CryptoKit
 
 /// Taro's version (the same as the Windows app's, Cargo.toml).
-let appVersion = "1.2.3"
+let appVersion = "1.4.1"
 
-/// The relay used when none is given: built in by release builds, none from source.
-let defaultRelay: String? = builtinRelay.trimmingCharacters(in: .whitespaces).isEmpty ? nil : builtinRelay
+/// The relay used when none is given: a provider's (provider/provider.json next to this
+/// program, Provider.swift), else the one built in by release builds (none from source). In a
+/// provider's Taro the built-in one is never used.
+let defaultRelay: String? = provider.map { $0.relayAddress } ?? (builtinRelay.trimmingCharacters(in: .whitespaces).isEmpty ? nil : builtinRelay)
 
 func sessionToken(id: String, password: String) -> String {
     let digest = SHA256.hash(data: Data("remotemac/v1:\(id):\(password)".utf8))
@@ -118,6 +120,7 @@ func restartForNextClient(after seconds: UInt32 = 1) -> Never {
     args.append(nil)
     // nothing of this session is carried into the next one (its sockets would pile up there)
     for fd in 3..<getdtablesize() { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
+    setenv("RM_RESTARTED", "1", 1) // the next one does not show the banner again
     execv(path, &args)
     fail("restart failed: errno \(errno)")
 }

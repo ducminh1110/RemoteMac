@@ -98,6 +98,12 @@ jobs:
           echo "newest release: $want; the copy now runs: $got"
           [[ -n "$want" && "$got" == "$want" ]] || { echo "the copy was not updated"; exit 1; }
           [[ -x "$t/taro.sh" ]] || { echo "taro.sh is gone"; exit 1; }
+          # (a fresh copy: the one above now has the released taro-update.sh, which may be older)
+          t="$RUNNER_TEMP/taro-copy2"; rm -rf "$t"; cp -R dist/Taro "$t"
+          # the mode Taro itself uses (the Mac updating from the PC's window): progress, then done
+          out="$("$t/taro-update.sh" --porcelain --force)" || { echo "the porcelain update failed"; exit 1; }
+          echo "$out" | tail -4
+          echo "$out" | grep -q '^progress 100$' && echo "$out" | grep -q "^done $want$" || { echo "no progress / done lines"; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: Taro-macos
@@ -165,6 +171,7 @@ jobs:
           path: |
             dist/Taro-windows.zip
             dist/Taro-Setup.exe
+            dist/Taro/Taro.exe
 
   relay-bin:
     strategy:
@@ -316,4 +323,4 @@ jobs:
           # a version with a suffix (1.2.0-beta.1) is a pre-release; a plain one the latest release
           if [[ "$V" == *-* ]]; then KIND=--prerelease; else KIND=--latest; fi
           gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Taro $V" --notes-file notes.md $KIND \
-            dist/Taro-Setup.exe dist/Taro-macos.tar.gz dist/Taro-windows.zip dist/taro-relay.tar.gz
+            dist/Taro-Setup.exe dist/Taro-macos.tar.gz dist/Taro-windows.zip dist/taro-relay.tar.gz dist/Taro/Taro.exe

@@ -15,12 +15,23 @@ rm-protocol = { path = "../rm-protocol" }
 rm-client = { path = "../rm-client" }
 rm-relay = { path = "../rm-relay" }
 rm-decode = { path = "../rm-decode" }
+rm-fakeagent = { path = "../rm-fakeagent" }
 moonlight-sys = { path = "../moonlight-sys" }
 rm-gamestream = { path = "../rm-gamestream" }
+rm-brand = { path = "../rm-brand" }
 serde_json.workspace = true
+# a provider's icon.png (provider/ next to the exe)
+png = "0.18"
 rustybuzz = "0.20"
 ab_glyph_rasterizer = "0.1"
 sha2 = "0.10"
+
+[build-dependencies]
+# compiles build.rs's version resource with rc.exe (MSVC) or windres (GNU); nothing elsewhere
+embed-resource = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows-numerics = "0.2"
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.61"
@@ -53,12 +64,29 @@ features = [
   "Win32_Media_MediaFoundation",
   "Win32_Media_Audio",
   "Win32_Security",
+  "Win32_Security_Cryptography",
   "Win32_System_Registry",
   "Win32_System_Console",
   "Win32_System_Threading",
   "Win32_Networking_WinHttp",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_IO",
+  "Win32_System_Kernel",
+  "Foundation",
+  "Foundation_Numerics",
+  "Graphics",
+  "Graphics_Capture",
+  "Graphics_DirectX",
+  "Graphics_DirectX_Direct3D11",
+  "UI_Composition",
+  "UI_Composition_Desktop",
+  "System",
+  "Win32_System_WinRT",
+  "Win32_System_WinRT_Composition",
+  "Win32_System_WinRT_Direct3D11",
+  "Win32_System_WinRT_Graphics_Capture",
 ]
 
 [dev-dependencies]
-rm-fakeagent = { path = "../rm-fakeagent" }
 openh264 = "0.9"

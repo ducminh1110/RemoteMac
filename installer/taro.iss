@@ -66,6 +66,13 @@ Source: "{#IconFile}"; DestDir: "{app}"; DestName: "taro.ico"; Flags: ignorevers
 Name: "{autoprograms}\Taro"; Filename: "{app}\Taro.exe"; IconFilename: "{app}\taro.ico"
 Name: "{autodesktop}\Taro"; Filename: "{app}\Taro.exe"; IconFilename: "{app}\taro.ico"; Tasks: desktopicon
 
+[Registry]
+; taro:// links from a Taro Enterprise portal open Taro (Taro writes the same keys at each start)
+Root: HKCU; Subkey: "Software\Classes\taro"; ValueType: string; ValueName: ""; ValueData: "URL:Taro"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\taro"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\taro\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\Taro.exe"",0"
+Root: HKCU; Subkey: "Software\Classes\taro\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\Taro.exe"" --url ""%1"""
+
 [Run]
 Filename: "{app}\Taro.exe"; Description: "{cm:LaunchProgram,Taro}"; Flags: nowait postinstall skipifsilent
 ; an update (silent): Taro again, as it was before

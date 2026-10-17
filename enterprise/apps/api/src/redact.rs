@@ -1,0 +1,92 @@
+//! Takes credentials out of text before it is logged or shown: API keys, tokens, signatures,
+//! passwords in URLs, bearer headers.
+
+/// Prefixes of credentials that must never appear in logs.
+const PREFIXES: &[&str] = &[
+    concat!("sk", "_live_"),
+    concat!("sk", "_test_"),
+    concat!("rk", "_live_"),
+    concat!("rk", "_test_"),
+    concat!("wh", "sec_"),
+    concat!("gh", "p_"),
+    concat!("gh", "o_"),
+    concat!("gh", "s_"),
+    concat!("gh", "u_"),
+    concat!("gi", "thub_pat_"),
+    "xoxb-",
+    "AKIA",
+];
+
+pub fn redact(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    'outer: while !rest.is_empty() {
+        for p in PREFIXES {
+            if rest.starts_with(p) {
+                out.push_str(p);
+                out.push_str("[redacted]");
+                let n = rest
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+                    .unwrap_or(rest.len());
+                rest = &rest[n..];
+                continue 'outer;
+            }
+        }
+        // "Bearer <token>" and "://user:password@" in URLs
+        if let Some(after) = rest.strip_prefix("Bearer ") {
+            out.push_str("Bearer [redacted]");
+            let n = after
+                .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+                .unwrap_or(after.len());
+            rest = &after[n..];
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("://") {
+            if let Some(at) = after.find('@') {
+                let creds = &after[..at];
+                if creds.contains(':')
+                    && !creds.contains('/')
+                    && !creds.contains(char::is_whitespace)
+                {
+                    out.push_str("://[redacted]@");
+                    rest = &after[at + 1..];
+                    continue;
+                }
+            }
+        }
+        let c = rest.chars().next().unwrap();
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact;
+
+    #[test]
+    fn credentials_are_taken_out() {
+        assert_eq!(
+            redact(concat!("key sk", "_test_abc123XYZ done")),
+            concat!("key sk", "_test_[redacted] done")
+        );
+        assert_eq!(
+            redact("Authorization: Bearer eyJhbGci.x.y next"),
+            "Authorization: Bearer [redacted] next"
+        );
+        assert_eq!(
+            redact("postgres://taro:hunter2@db:5432/taro"),
+            "postgres://[redacted]@db:5432/taro"
+        );
+        assert_eq!(
+            redact(concat!("wh", "sec_123 and gi", "thub_pat_11ABC")),
+            concat!("wh", "sec_[redacted] and gi", "thub_pat_[redacted]")
+        );
+        assert_eq!(
+            redact("plain text, nothing here: a@b.c"),
+            "plain text, nothing here: a@b.c"
+        );
+        assert_eq!(redact("héllo"), "héllo");
+    }
+}

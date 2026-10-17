@@ -27,7 +27,7 @@ fi
 
 # options that need no checks (--update: taro-update.sh, next to this script)
 case "${1:-}" in
-  --stop|--version|-h|--help) exec "$bin" "$@" ;;
+  --stop|--version|--print-provider|-h|--help) exec "$bin" "$@" ;;
   --update) shift; exec "$here/taro-update.sh" "$@" ;;
 esac
 

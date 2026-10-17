@@ -1,0 +1,11 @@
+/* Relay status page: what it adds to /common/taro-glass.css. */
+.status { grid-area: main; text-align: center; }
+.status .inner { padding: 36px 32px 30px; }
+.logo { width: 64px; height: 64px; border-radius: 16px; object-fit: contain; box-shadow: 0 4px 14px rgba(0, 0, 0, .18); }
+h1 { font-size: 26px; margin: 14px 0 4px; letter-spacing: -.02em; }
+.state { margin: 0 0 22px; font-weight: 650; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--faint); margin-right: 8px; vertical-align: 1px; }
+.up .dot { background: var(--ok); box-shadow: 0 0 0 4px var(--ok-soft); } .down .dot { background: var(--fail); }
+.kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 18px; text-align: left; margin: 0 auto; padding: 14px 18px; border-radius: 16px; background: var(--fill); border: 1px solid var(--line); }
+.kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace; font-size: 13.5px; }
+.hint { margin: 18px 0 0; }

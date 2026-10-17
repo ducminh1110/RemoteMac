@@ -71,6 +71,10 @@ const WM_VSYNC: u32 = WM_APP + 3;
 const WM_UPDATE: u32 = WM_APP + 4;
 /// The installer runs: Taro ends for it.
 const WM_UPDATE_QUIT: u32 = WM_APP + 5;
+/// The tray icon was used (its mouse messages).
+const WM_TRAY: u32 = WM_APP + 6;
+/// The window that owns the tray icon (0: none yet).
+static TRAY_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 const TIMER_ID: usize = 1;
 const WM_MOUSE_LEAVE: u32 = 0x02A3;
 
@@ -192,6 +196,8 @@ struct App {
     /// stats overlay on (Ctrl+Alt+Shift+S), and its last text
     overlay: bool,
     overlay_lines: Vec<String>,
+    /// the last second's numbers at a glance, for the navigation ball's menu
+    glance: Vec<String>,
     stats_logged: Instant,
 }
 
@@ -241,6 +247,18 @@ impl Stats {
                 self.shown_n += 1;
             }
         }
+    }
+
+    /// Two short lines for the navigation ball's menu: frame rate and bitrate; round trip and
+    /// capture-to-screen latency.
+    fn glance(&self, link: Option<&rm_client::udp::LinkStats>) -> Vec<String> {
+        let secs = self.since.elapsed().as_secs_f64().max(0.001);
+        let rtt = link.and_then(|l| l.rtt_ms).map_or("-".into(), |r| format!("{r:.0} ms"));
+        let latency = if self.shown_n > 0 { format!("{:.0} ms", self.shown_ms / self.shown_n as f64) } else { "-".into() };
+        vec![
+            format!("{:.0} fps  ·  {:.1} Mbit/s", self.shown as f64 / secs, self.bytes as f64 * 8.0 / secs / 1e6),
+            format!("RTT {rtt}  ·  Latency {latency}"),
+        ]
     }
 
     /// The overlay's lines (as Moonlight's: video, network, latency, decoder).
@@ -307,6 +325,8 @@ pub fn run(opts: Options) -> i32 {
         crate::palette::register(hinst);
         crate::banner::register(hinst);
         crate::dock::register(hinst);
+        crate::tour::set_session_hooks(tour_probe, back_to_start);
+        crate::stage::set_hooks(crate::stage::Hooks { front: bring_to_front, icon: |app| with_app(|a| a.icon_rgba.get(app).cloned()).flatten(), name: app_name, background: stage_background });
         crate::settings_ui::register(hinst);
         crate::navball::register(hinst, ball_menu);
         let controller = match CreateWindowExW(WINDOW_EX_STYLE(0), w!("RmController"), w!("rm-controller"), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(hinst), None) {
@@ -345,30 +365,58 @@ pub fn run(opts: Options) -> i32 {
         let (link, rx) = if opts.prompt {
             // ID + password window; it connects in the background and shows why an attempt failed
             let app = opts.app.clone();
-            let id = crate::connect::last_id();
-            let got = crate::connect::connect_window(id.as_deref(), None, |typed, password, via| {
+            // the relay a Mac without one of its own goes through: --relay, $RM_RELAY or the one
+            // built into this build
+            let built_in = opts.relay.clone();
+            let got = crate::connect::connect_window(None, |typed, password, via, key| {
+                // the guided tour's demo Mac: a pretend Mac inside Taro, through a relay on this PC
+                if *via == crate::connect::Via::Demo {
+                    let d = crate::demo::start()?;
+                    net::set_direct(None);
+                    rm_relay::set_key_override(Some(String::new()));
+                    return net::connect_with(Some(&d.relay), &d.session, &d.token, app.as_deref(), false, wake)
+                        .map(|x| {
+                            DEMO.store(true, std::sync::atomic::Ordering::Relaxed);
+                            crate::tour::demo_connected();
+                            (x, "Demo Mac".to_string())
+                        })
+                        .map_err(|e| {
+                            eprintln!("demo Mac: {e}");
+                            net::friendly_error(&e)
+                        });
+                }
                 // by its ID: the session of that ID; straight to an address: the direct session,
                 // the password alone (no ID, no relay)
                 let (session, token) = match via {
                     crate::connect::Via::Address(_) => (rm_protocol::session::DIRECT.to_string(), rm_protocol::session::direct_token(password)),
-                    crate::connect::Via::Id(_) => (rm_protocol::session::relay_session(typed), rm_protocol::session::token(typed, password)),
+                    _ => (rm_protocol::session::relay_session(typed), rm_protocol::session::token(typed, password)),
+                };
+                // a relay of one's own, when the Mac has one ("": the built-in relay)
+                let own = match via {
+                    crate::connect::Via::Id(r) => Some(r.trim()).filter(|r| !r.is_empty()),
+                    _ => None,
                 };
                 let relay = match via {
-                    crate::connect::Via::Id(r) => {
-                        net::set_direct(None);
-                        Some(r.as_str()).filter(|r| !r.trim().is_empty())
-                    }
                     crate::connect::Via::Address(a) => {
                         net::set_direct(Some(a.clone()));
                         None
                     }
+                    crate::connect::Via::Id(_) => {
+                        net::set_direct(None);
+                        // found on this network first, else through its relay or the built-in one
+                        own.or(built_in.as_deref())
+                    }
+                    crate::connect::Via::Demo => None,
                 };
+                // a relay of one's own gets its own key (none: nothing), never the built-in one;
+                // the built-in relay its usual key
+                rm_relay::set_key_override(own.map(|_| key.trim().to_string()));
                 net::connect_with(relay, &session, &token, app.as_deref(), false, wake)
                     .map(|x| {
                         remember_session(relay, &session, &token);
                         (x, match via {
                             crate::connect::Via::Address(a) => a.trim().to_string(),
-                            crate::connect::Via::Id(_) => rm_protocol::session::display_id(typed),
+                            _ => rm_protocol::session::display_id(typed),
                         })
                     })
                     .map_err(|e| {
@@ -378,6 +426,10 @@ pub fn run(opts: Options) -> i32 {
             });
             let Some((x, shown_id)) = got else { return 0 };
             opts.session = shown_id;
+            if DEMO.load(std::sync::atomic::Ordering::Relaxed) {
+                // a pretend Mac: no Start menu shortcuts for its apps
+                opts.shortcuts = false;
+            }
             x
         } else {
             match net::connect(opts.relay.as_deref(), &opts.session, &opts.token, opts.app.as_deref(), wake) {
@@ -421,7 +473,7 @@ pub fn run(opts: Options) -> i32 {
                 icons: HashMap::new(), icons_requested: Default::default(), clipboard: opts.clipboard, clip_applied: None, clip_applied_image: None, clip_seq: 0, d3d: opts.d3d, comp: use_comp,
                 launcher, panels: HashMap::new(), uploads: HashMap::new(), open_uploads: HashMap::new(), next_transfer: 1, redirect_panels: opts.windows_file_picker,
                 shortcut_dir, app_names: vec![], icon_rgba: HashMap::new(), menus: HashMap::new(), display_req: None, display: None, stats: Stats::default(),
-                pending: HashMap::new(), vsync: None, overlay: std::env::var_os("RM_STATS").is_some(), overlay_lines: vec![], stats_logged: Instant::now() - Duration::from_secs(4) })
+                pending: HashMap::new(), vsync: None, overlay: std::env::var_os("RM_STATS").is_some(), overlay_lines: vec![], glance: vec![], stats_logged: Instant::now() - Duration::from_secs(4) })
         });
         let pacer = if use_comp { start_pacer(ctl) } else { None };
         eprintln!("frame pacing: {}", if pacer.is_some() { "vsync" } else { "off" });
@@ -546,7 +598,7 @@ fn start_reconnect() -> bool {
     }
     if let Some(l) = with_app(|a| a.launcher.as_ref().map(|l| l.hwnd.0 as isize)).flatten() {
         unsafe {
-            let _ = SetWindowTextW(hwnd_of(l), w!("Taro — connection lost, connecting again…"));
+            let _ = SetWindowTextW(hwnd_of(l), &HSTRING::from(format!("{} — connection lost, connecting again…", crate::brand::name())));
             let _ = ShowWindow(hwnd_of(l), SW_SHOW);
         }
     }
@@ -593,7 +645,7 @@ fn take_reconnected() {
             .flatten();
             if let Some(l) = launcher {
                 unsafe {
-                    let _ = SetWindowTextW(hwnd_of(l), w!("Taro"));
+                    let _ = SetWindowTextW(hwnd_of(l), &HSTRING::from(crate::brand::name()));
                 }
             }
             // the apps that were open come back (still running on the Mac: their windows reappear)
@@ -605,7 +657,7 @@ fn take_reconnected() {
         Err(why) => {
             crate::banner::hide();
             crate::lifecycle::set(crate::lifecycle::Phase::Disconnected);
-            native::message_box("Taro", &format!("The connection to the Mac was lost and could not be made again.\n\n{}\n\n{}", net::friendly_error(&why), crate::log_hint()));
+            native::message_box(crate::brand::name(), &format!("The connection to the Mac was lost and could not be made again.\n\n{}\n\n{}", net::friendly_error(&why), crate::log_hint()));
             quit(0);
         }
     }
@@ -663,9 +715,74 @@ fn shortcuts_tick() {
     });
 }
 
+/// Connected to the guided tour's demo Mac (not a real one).
+static DEMO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The app the guided tour opens on the demo Mac.
+const TOUR_APP: &str = "notes";
+
+/// What the guided tour looks at over the demo Mac's session (screen px).
+fn tour_probe() -> Option<crate::tour::SessionProbe> {
+    if !DEMO.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let app = with_app(|a| {
+        let l = a.launcher.as_ref()?;
+        if !unsafe { IsWindowVisible(l.hwnd).as_bool() } {
+            return None;
+        }
+        l.tile_screen_rect(TOUR_APP)
+    })
+    .flatten()
+    .map(|r| (r.left as f32, r.top as f32, (r.right - r.left) as f32, (r.bottom - r.top) as f32));
+    let app_open = with_app(|a| a.remotes.values().any(|r| r.app == TOUR_APP && r.role == WindowRole::Window)).unwrap_or(false);
+    // the Dock's edge of the main screen (with the Dock off, there is nothing to wait for)
+    let edge = crate::dock::Edge::from_setting(crate::settings::Settings::load_cached().dock);
+    let mon = crate::stage::work();
+    let full = unsafe {
+        let m = MonitorFromPoint(POINT { x: mon.left + 1, y: mon.top + 1 }, MONITOR_DEFAULTTOPRIMARY);
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let _ = GetMonitorInfoW(m, &mut info);
+        info.rcMonitor
+    };
+    let strip = 6.0;
+    let edge_rect = match edge {
+        Some(crate::dock::Edge::Right) => (full.right as f32 - strip, full.top as f32, strip, (full.bottom - full.top) as f32),
+        _ => (full.left as f32, full.top as f32, strip, (full.bottom - full.top) as f32),
+    };
+    Some(crate::tour::SessionProbe { app, app_open, edge: edge_rect, dock_out: edge.is_none() || crate::dock::is_out() })
+}
+
+/// The guided tour leaves the demo Mac: Taro starts again from its first window, the way it was
+/// started (the new one waits for this one to be gone), and this one ends with the demo.
+/// The launcher's red Disconnect: after a yes, the session ends (the Mac closes its apps, as when
+/// Taro quits) and Taro starts again at the list of Macs.
+fn disconnect(owner: HWND) {
+    let mac = with_app(|a| a.launcher.as_ref().map(|l| l.mac_name())).flatten().unwrap_or_else(|| "this Mac".into());
+    if !native::confirm(owner, "Disconnect", &format!("Disconnect from {mac}?\n\nIts apps open on this PC close.")) {
+        return;
+    }
+    back_to_start();
+}
+
+fn back_to_start() {
+    if let Ok(exe) = std::env::current_exe() {
+        let mut args: Vec<String> = std::env::args().skip(1).collect();
+        // not straight back to the same Mac: the list of Macs, as at the start
+        for flag in ["--wait-pid", "--id", "--password", "--session", "--app"] {
+            if let Some(i) = args.iter().position(|a| a == flag) {
+                args.drain(i..(i + 2).min(args.len()));
+            }
+        }
+        let _ = std::process::Command::new(exe).args(args).arg("--wait-pid").arg(std::process::id().to_string()).spawn();
+    }
+    quit(0);
+}
+
 /// Taro ends for its installer: the connection is dropped, not closed, and the Mac keeps the
 /// session's apps open for the updated Taro to come back to.
 fn quit_for_update() {
+    tray_remove();
     crate::lifecycle::set(crate::lifecycle::Phase::Disconnecting);
     on_mac_gone();
     crate::lifecycle::set(crate::lifecycle::Phase::Disconnected);
@@ -714,13 +831,74 @@ fn on_update() {
     unsafe {
         let _ = GetCursorPos(&mut p);
     }
-    crate::banner::notice(HINSTANCE(hinst as *mut c_void), p.x, p.y, &format!("Taro {} is available", r.version), "Click to update now", || {
+    crate::banner::notice(HINSTANCE(hinst as *mut c_void), p.x, p.y, &format!("{} {} is available", crate::brand::name(), r.version), "Click to update now", || {
         open_about();
         crate::update::install();
     });
 }
 
+/// Taro keeps running when its window is closed: an icon in the notification area (behind the
+/// arrow of the taskbar) brings it back, or ends it.
+fn tray_add(hwnd: HWND) {
+    use windows::Win32::UI::Shell::*;
+    if TRAY_HWND.swap(hwnd.0 as isize, std::sync::atomic::Ordering::Relaxed) != 0 {
+        return;
+    }
+    let Some(icon) = native::make_icon(32, &crate::brand::icon_rgba(32)) else { return };
+    let mut tip = [0u16; 128];
+    for (d, c) in tip.iter_mut().take(127).zip(crate::brand::name().encode_utf16()) {
+        *d = c;
+    }
+    let nid = NOTIFYICONDATAW { cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32, hWnd: hwnd, uID: 1, uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP, uCallbackMessage: WM_TRAY, hIcon: icon, szTip: tip, ..Default::default() };
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+    }
+}
+
+fn tray_remove() {
+    use windows::Win32::UI::Shell::*;
+    let h = TRAY_HWND.swap(0, std::sync::atomic::Ordering::Relaxed);
+    if h != 0 {
+        let nid = NOTIFYICONDATAW { cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32, hWnd: HWND(h as *mut _), uID: 1, ..Default::default() };
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+        }
+    }
+}
+
+/// The launcher comes back from the tray.
+fn tray_open(hwnd: HWND) {
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+fn tray_menu(hwnd: HWND) {
+    unsafe {
+        let Ok(m) = CreatePopupMenu() else { return };
+        let _ = AppendMenuW(m, MF_STRING, 1, &HSTRING::from(format!("Open {}", crate::brand::name())));
+        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(m, MF_STRING, 2, &HSTRING::from(format!("Quit {}", crate::brand::name())));
+        let mut p = POINT::default();
+        let _ = GetCursorPos(&mut p);
+        let _ = SetForegroundWindow(hwnd); // or the menu would not close when clicking elsewhere
+        let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, Some(0), hwnd, None).0;
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(m);
+        match cmd {
+            1 => tray_open(hwnd),
+            2 => quit(0),
+            _ => {}
+        }
+    }
+}
+
 fn quit(code: i32) {
+    tray_remove();
     crate::lifecycle::set(crate::lifecycle::Phase::Disconnecting);
     // closed on purpose: the Mac closes the session's apps (a cut connection keeps them open)
     if let Some(l) = with_app(|a| a.link.clone()) {
@@ -799,6 +977,7 @@ fn launcher_act(hwnd: HWND, act: Option<launcher::Act>) {
     match act {
         Some(launcher::Act::Launch(app)) => launch_app(&app),
         Some(launcher::Act::Settings) => open_settings(Some(hwnd)),
+        Some(launcher::Act::Disconnect) => disconnect(hwnd),
         None => {}
     }
 }
@@ -865,6 +1044,8 @@ unsafe extern "system" fn launcher_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             let _ = TrackMouseEvent(&mut tme);
             LRESULT(0)
         }
+        // SetCapture on a press can post a leave: the press stays until the button comes up
+        WM_MOUSE_LEAVE if GetCapture() == hwnd => LRESULT(0),
         WM_MOUSE_LEAVE => {
             with_app(|a| a.launcher.as_mut().map(|l| l.mouse_leave()));
             LRESULT(0)
@@ -910,13 +1091,17 @@ unsafe extern "system" fn launcher_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             LRESULT(1)
         }
         WM_CLOSE => {
-            // Closing the launcher keeps the apps' windows open (and one still opening); with
-            // none, Taro ends. The menu bar strip is not an app's window.
-            let open = with_app(|a| a.remotes.values().any(|r| r.app != MENUBAR_APP)).unwrap_or(false);
-            if !open && !crate::splash::any() {
-                quit(0);
-            } else {
-                let _ = ShowWindow(hwnd, SW_HIDE);
+            // Closing the launcher does not end Taro: it goes on in the background (the Dock, the
+            // apps' windows, one still opening) with an icon in the notification area.
+            tray_add(hwnd);
+            let _ = ShowWindow(hwnd, SW_HIDE);
+            LRESULT(0)
+        }
+        WM_TRAY => {
+            match (lp.0 & 0xffff) as u32 {
+                WM_LBUTTONUP | WM_LBUTTONDBLCLK => tray_open(hwnd),
+                WM_RBUTTONUP | WM_CONTEXTMENU => tray_menu(hwnd),
+                _ => {}
             }
             LRESULT(0)
         }
@@ -940,6 +1125,18 @@ fn open_settings(owner: Option<HWND>) {
 }
 
 /// Settings at About this Taro (where updating is at).
+/// Ask the Mac to look for a newer Taro, or to update itself (About this Taro).
+pub fn ask_mac_update(install: bool) {
+    use crate::update::{set_mac, MacState};
+    if !net::mac_has("update") {
+        return;
+    }
+    set_mac(if install { MacState::Installing(0) } else { MacState::Checking });
+    if with_app(|a| a.link.send(&Message::MacUpdate { install })).is_none() {
+        set_mac(MacState::Failed("Not connected to a Mac.".into()));
+    }
+}
+
 fn open_about() {
     let Some(hinst) = with_app(|a| a.hinst) else { return };
     crate::settings_ui::show_about(HINSTANCE(hinst as *mut c_void), None, crate::settings::Settings::load(), settings_changed);
@@ -960,6 +1157,7 @@ fn settings_changed(s: crate::settings::Settings) {
         }
     });
     crate::motion::set_preference(s.motion);
+    stage_setting(s.stage_manager);
     // sound: volume at once; muting also stops the Mac sending it
     let sound = crate::audio::audio();
     sound.set_volume(s.volume as f32 / 100.0);
@@ -1327,10 +1525,141 @@ fn fit_to_work_area(hwnd: HWND) {
     }
 }
 
+/// When an app was last opened from here: its window comes to the front when it appears.
+static LAUNCHED: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+fn recently_launched() -> bool {
+    LAUNCHED.lock().unwrap().is_some_and(|t| t.elapsed() < Duration::from_secs(20))
+}
+
+/// Windows lets only the program in front take the front (a new window then opens behind the
+/// PC's other windows): this one joins the input of the window that is in front for a moment.
+/// A window went into Stage Manager's sidebar or came back: a Mac that can (feature
+/// "background") sends its card a few pictures a second, and the full rate again on stage.
+fn stage_background(hwnd: HWND, on: bool) {
+    if !net::mac_has("background") {
+        return;
+    }
+    BACKGROUND.with(|b| {
+        let mut b = b.borrow_mut();
+        b.retain(|(h, _)| *h != hwnd.0 as isize);
+        b.push((hwnd.0 as isize, on));
+    });
+    send_background();
+}
+
+thread_local! {
+    /// background hints not sent yet (the app's state was in use when they came: sent on the
+    /// next try, the stats tick at the latest)
+    static BACKGROUND: RefCell<Vec<(isize, bool)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn send_background() {
+    let pending = BACKGROUND.with(|b| std::mem::take(&mut *b.borrow_mut()));
+    if pending.is_empty() {
+        return;
+    }
+    let sent = with_app(|a| {
+        for (h, on) in &pending {
+            if let Some(r) = a.remotes.get(h) {
+                a.link.send(&Message::WindowBackground { window_id: r.id, on: *on });
+            }
+        }
+    });
+    if sent.is_none() {
+        BACKGROUND.with(|b| {
+            let mut b = b.borrow_mut();
+            let newer: Vec<(isize, bool)> = std::mem::take(&mut *b);
+            let mut kept: Vec<(isize, bool)> = pending.into_iter().filter(|(h, _)| !newer.iter().any(|(n, _)| n == h)).collect();
+            kept.extend(newer);
+            *b = kept;
+        });
+    }
+}
+
+fn bring_to_front(hwnd: HWND) {
+    unsafe {
+        let fg = GetForegroundWindow();
+        let me = windows::Win32::System::Threading::GetCurrentThreadId();
+        let them = GetWindowThreadProcessId(fg, None);
+        let joined = them != 0 && them != me && windows::Win32::System::Threading::AttachThreadInput(them, me, true).as_bool();
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+        let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+        let _ = SetForegroundWindow(hwnd);
+        if joined {
+            let _ = windows::Win32::System::Threading::AttachThreadInput(them, me, false);
+        }
+    }
+}
+
+// ------------------------------------------------------------------ Stage Manager
+
+fn stage_on() -> bool {
+    crate::settings::Settings::load_cached().stage_manager
+}
+
+/// The windows that take part: apps' main windows (not dialogs, menus, the Mac Desktop).
+fn stage_windows() -> Vec<isize> {
+    with_app(|a| a.remotes.iter().filter(|(_, r)| r.role == WindowRole::Window && r.parent.is_none() && !r.owned && r.app != DESKTOP_APP && !r.fullscreen).map(|(k, _)| *k).collect()).unwrap_or_default()
+}
+
+fn app_of(k: isize) -> String {
+    with_app(|a| a.remotes.get(&k).map(|r| r.app.clone())).flatten().unwrap_or_default()
+}
+
+/// An app's name as the Mac gives it (its id until the app list came).
+fn app_name(app: &str) -> String {
+    with_app(|a| a.app_names.iter().find(|(id, _)| id == app).map(|(_, n)| n.clone())).flatten().unwrap_or_else(|| app.to_string())
+}
+
+/// `hwnd` wanted on stage (`center`: a new window): its scene comes, with Stage Manager on.
+fn stage_focus(hwnd: HWND, center: bool) {
+    if !stage_on() {
+        return;
+    }
+    let k = hwnd.0 as isize;
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+    }
+    if center {
+        crate::stage::add(k, &app_of(k));
+    } else {
+        crate::stage::focus(k, &app_of(k));
+    }
+}
+
+/// A window is gone: its card too.
+fn stage_after_close(k: isize) {
+    crate::stage::remove(k);
+}
+
+/// Stage Manager turned on or off in Settings.
+fn stage_setting(on: bool) {
+    if on {
+        let fg = unsafe { GetForegroundWindow() }.0 as isize;
+        let windows: Vec<(isize, String)> = stage_windows().into_iter().map(|k| (k, app_of(k))).collect();
+        crate::stage::enable(windows, fg);
+    } else {
+        for h in crate::stage::disable() {
+            unsafe {
+                let _ = ShowWindow(hwnd_of(h), SW_SHOW);
+            }
+        }
+    }
+}
+
+/// Minimise a Mac window, sliding toward the side of the Dock.
+fn minimize_window(frame: HWND) {
+    crate::minimize::minimize(frame, crate::dock::Edge::from_setting(crate::settings::Settings::load_cached().dock));
+}
+
 /// Launch an app, or bring its existing main window to the front (like clicking a running app).
 fn launch_app(app: &str) {
     let existing = with_app(|a| a.remotes.iter().find(|(_, r)| r.app == app && r.parent.is_none()).map(|(k, _)| *k)).flatten();
     match existing {
+        Some(h) if stage_on() => stage_focus(hwnd_of(h), false),
         Some(h) => unsafe {
             // back from the taskbar if minimised; a maximised window stays maximised
             if IsIconic(hwnd_of(h)).as_bool() {
@@ -1339,6 +1668,7 @@ fn launch_app(app: &str) {
             let _ = SetForegroundWindow(hwnd_of(h));
         },
         None => {
+            *LAUNCHED.lock().unwrap() = Some(Instant::now());
             // Mac Desktop: the Mac lays out its screen at this PC's resolution (virtual display,
             // as BetterDummy), so it fills the monitor 1:1
             let mut arguments: Vec<String> = if app == DESKTOP_APP { desktop_fit().into_iter().collect() } else { vec![] };
@@ -1478,11 +1808,13 @@ fn on_local_clipboard(owner: HWND) {
 }
 
 fn stats_tick() {
+    send_background();
     let Some((lines, overlay)) = with_app(|a| {
         if a.stats.since.elapsed() < Duration::from_secs(1) {
             return None;
         }
         let link = a.link.udp.as_ref().and_then(|u| u.stats.lock().ok().map(|s| s.clone()));
+        a.glance = a.stats.glance(link.as_ref());
         let lines = a.stats.lines(link, a.vsync.is_some());
         if a.stats.shown > 0 && a.stats_logged.elapsed() >= Duration::from_secs(5) {
             eprintln!("stream: {}", lines.join(" | "));
@@ -1496,6 +1828,16 @@ fn stats_tick() {
     if overlay {
         draw_overlays(&lines);
     }
+}
+
+/// The stats overlay on or off (Ctrl+Alt+Shift+S, or the navigation ball's menu).
+fn toggle_stats() {
+    let (on, lines) = with_app(|a| {
+        a.overlay = !a.overlay;
+        (a.overlay, a.overlay_lines.clone())
+    })
+    .unwrap_or((false, vec![]));
+    if on { draw_overlays(&lines) } else { hide_overlays() }
 }
 
 /// Draw the stats panel on every composition window (top left of the picture).
@@ -1750,6 +2092,14 @@ fn handle_event(ev: UiEvent) {
             });
             sync_shortcuts();
         }
+        UiEvent::MacFullscreen { id, on } => {
+            // the Mac's own full screen (a video in Safari, View > Enter Full Screen): this PC's
+            // monitor too, and back; nothing is sent to the Mac (it is already there)
+            let hwnd = with_app(|a| a.remotes.iter().find(|(_, r)| r.id == id && r.app != DESKTOP_APP && r.fullscreen != on).map(|(k, _)| *k)).flatten();
+            if let Some(k) = hwnd {
+                toggle_fullscreen_with(hwnd_of(k), false);
+            }
+        }
         UiEvent::MacDock(items) => MAC_DOCK.with(|m| m.borrow_mut().items = Some(items)),
         UiEvent::DockMenu { id, menus } => on_dock_menu(id, menus),
         UiEvent::MenuBar { app, menus } => {
@@ -1886,6 +2236,7 @@ fn handle_event(ev: UiEvent) {
                     }
                     let _ = DestroyWindow(hwnd_of(h));
                 }
+                stage_after_close(h);
             }
             with_app(|a| a.panels.remove(&id));
             smoke_note_destroyed(id);
@@ -1933,7 +2284,7 @@ fn handle_event(ev: UiEvent) {
             }
             if interactive {
                 // never vanish without a word
-                native::message_box("Taro", &format!("The connection to the Mac was closed.\n\n{why}\n\n{}", crate::log_hint()));
+                native::message_box(crate::brand::name(), &format!("The connection to the Mac was closed.\n\n{why}\n\n{}", crate::log_hint()));
             }
             on_mac_gone();
             quit(if with_app(|a| a.smoke.is_some()).unwrap_or(false) { 1 } else { 0 });
@@ -2047,6 +2398,10 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
             keep_on_screen(hwnd);
         }
         let _ = ShowWindow(hwnd, if popup { SW_SHOWNOACTIVATE } else { SW_SHOW });
+        // an app the user just opened (or the dialog it opens): in front of the PC's own windows
+        if !popup && recently_launched() {
+            bring_to_front(hwnd);
+        }
         let compositor = if use_comp { comp::Comp::new(hwnd) } else { None };
         let presenter = if compositor.is_none() && with_app(|a| a.d3d).unwrap_or(false) { d3d::Presenter::new(content, w, h) } else { None };
         let renderer = compositor.as_ref().map(|c| c.kind).or(presenter.as_ref().map(|p| p.kind)).unwrap_or("gdi");
@@ -2055,6 +2410,9 @@ fn create_remote_window(id: u64, app: &str, title: &str, (x, y, w, h): (i32, i32
         let _ = InvalidateRect(Some(hwnd), None, false);
         eprintln!("window created id={id} app={app} role={role:?} parent={parent:?} renderer={renderer} {w}x{h}pt scale={scale} title={title:?}");
         launcher_sync();
+        if !popup && !owned && parent.is_none() && role == WindowRole::Window && app != DESKTOP_APP {
+            stage_focus(hwnd, true);
+        }
         if app == DESKTOP_APP {
             // the whole Mac: straight to fullscreen, as a remote desktop is used
             toggle_fullscreen(hwnd);
@@ -2284,6 +2642,11 @@ fn animate(frame: HWND, a: RECT, b: RECT) {
 const DESKTOP_APP: &str = "desktop";
 
 fn toggle_fullscreen(frame: HWND) {
+    toggle_fullscreen_with(frame, true);
+}
+
+/// `tell`: the Mac is asked to go the same way (not when it has gone there itself).
+fn toggle_fullscreen_with(frame: HWND, tell: bool) {
     let Some((on, saved, id, scale, desktop)) = with_app(|a| a.remotes.get(&(frame.0 as isize)).map(|r| (r.fullscreen, r.saved, r.id, r.scale, r.app == DESKTOP_APP))).flatten() else { return };
     unsafe {
         if !on {
@@ -2294,7 +2657,7 @@ fn toggle_fullscreen(frame: HWND) {
             let req = chrome::display_request(mon.right - mon.left, mon.bottom - mon.top, scale);
             with_app(|a| {
                 // the Mac Desktop is the Mac's own screen: it is only scaled, nothing to resize there
-                if !desktop && a.display_req != Some(req) {
+                if tell && !desktop && a.display_req != Some(req) {
                     a.display_req = Some(req);
                     a.link.send(&Message::DisplayConfigure { width: req.0, height: req.1, scale: req.2 });
                 }
@@ -2308,10 +2671,10 @@ fn toggle_fullscreen(frame: HWND) {
             let _ = SetWindowPos(frame, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             animate(frame, from, mon);
             layout(frame);
-            if !desktop {
-                with_app(|a| a.link.send(&Message::WindowFullscreen { window_id: id, on: true }));
-            } else {
+            if desktop {
                 crate::navball::show(frame); // the Mac Desktop: a navigation ball, no bar at the top edge
+            } else if tell {
+                with_app(|a| a.link.send(&Message::WindowFullscreen { window_id: id, on: true }));
             }
         } else {
             crate::navball::hide(frame);
@@ -2327,7 +2690,7 @@ fn toggle_fullscreen(frame: HWND) {
                 native::round_corners(frame);
             }
             layout(frame);
-            if !desktop {
+            if tell && !desktop {
                 with_app(|a| a.link.send(&Message::WindowFullscreen { window_id: id, on: false }));
             }
         }
@@ -2345,15 +2708,20 @@ fn ball_menu(frame: HWND, at: POINT) {
     const CLOSE: u32 = 5;
     const SOUND: u32 = 6;
     const SEARCH: u32 = 7;
+    const STATS: u32 = 8;
     let pointer = local_cursor().load(std::sync::atomic::Ordering::Relaxed);
     let sound = !crate::audio::audio().muted();
-    let mut items = vec![
+    let (glance, overlay) = with_app(|a| (a.glance.clone(), a.overlay)).unwrap_or_default();
+    // the stream at a glance: frame rate, bitrate, round trip, latency (each second)
+    let mut items: Vec<Item> = glance.iter().map(|l| Item::info(l)).collect();
+    items.extend([Item::action(STATS, "Show Stats").with_shortcut("Ctrl+Alt+Shift+S").checked(overlay), Item::Separator]);
+    items.extend([
         Item::action(EXIT, "Exit Full Screen").with_shortcut("F11"),
         Item::action(MINIMIZE, "Minimize"),
         Item::Separator,
         Item::action(SEARCH, "Open an App…").with_shortcut("Ctrl+Alt+Space"),
         Item::action(POINTER, "Show This PC's Pointer").with_shortcut("Ctrl+Alt+Shift+C").checked(pointer),
-    ];
+    ]);
     if crate::audio::audio().supported() {
         items.push(Item::action(SOUND, "Sound").with_shortcut("Ctrl+Alt+Shift+M").checked(sound));
     }
@@ -2365,12 +2733,13 @@ fn ball_menu(frame: HWND, at: POINT) {
         match cmd {
             Some(EXIT) => toggle_fullscreen(frame),
             Some(MINIMIZE) => {
-                let _ = ShowWindow(frame, SW_MINIMIZE);
+                minimize_window(frame);
             }
             Some(SETTINGS) => open_settings(Some(frame)),
             Some(POINTER) => set_local_pointer(!pointer),
             Some(SOUND) => toggle_mute(),
             Some(SEARCH) => open_palette(),
+            Some(STATS) => toggle_stats(),
             Some(CLOSE) => {
                 let _ = PostMessageW(Some(frame), WM_CLOSE, WPARAM(0), LPARAM(0));
             }
@@ -2853,7 +3222,7 @@ fn light_action(frame: HWND, l: chrome::Light) {
         match l {
             chrome::Light::Close => { let _ = PostMessageW(Some(frame), WM_CLOSE, WPARAM(0), LPARAM(0)); }
             _ if dialog => {}
-            chrome::Light::Minimize => { let _ = ShowWindow(frame, SW_MINIMIZE); }
+            chrome::Light::Minimize => minimize_window(frame),
             chrome::Light::Zoom => toggle_fullscreen(frame), // like the Mac: green = fullscreen
         }
     }
@@ -2889,6 +3258,11 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 mi.ptMaxPosition = POINT { x: w.left - m.left, y: w.top - m.top + bar };
                 mi.ptMaxSize = POINT { x: w.right - w.left, y: w.bottom - w.top - bar };
             }
+            LRESULT(0)
+        }
+        // minimising (the light, the taskbar, Win+Down): slides toward the Dock as the Mac's does
+        WM_SYSCOMMAND if (wp.0 & 0xFFF0) == SC_MINIMIZE as usize && !is_popup(hwnd) && !is_fullscreen(hwnd) => {
+            minimize_window(hwnd);
             LRESULT(0)
         }
         WM_NCHITTEST if is_popup(hwnd) => LRESULT(HTCLIENT as isize),
@@ -3060,7 +3434,12 @@ unsafe extern "system" fn remote_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             invoke_menu_cmd(hwnd, (wp.0 & 0xffff) as u16);
             LRESULT(0)
         }
+        WM_MOVING => {
+            crate::stage::window_moving(hwnd.0 as isize);
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
         WM_EXITSIZEMOVE => {
+            crate::stage::window_move_end(hwnd.0 as isize);
             request_remote_resize(hwnd);
             LRESULT(0)
         }
@@ -3321,12 +3700,7 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             // Ctrl+Alt+Shift+S: the stats overlay, as in Moonlight
             if vk == 'S' as u32 && mods.ctrl && mods.alt && mods.shift {
                 if down && !repeat {
-                    let (on, lines) = with_app(|a| {
-                        a.overlay = !a.overlay;
-                        (a.overlay, a.overlay_lines.clone())
-                    })
-                    .unwrap_or((false, vec![]));
-                    if on { draw_overlays(&lines) } else { hide_overlays() }
+                    toggle_stats();
                 }
                 return LRESULT(0);
             }
