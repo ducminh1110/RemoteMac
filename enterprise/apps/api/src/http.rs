@@ -133,7 +133,10 @@ async fn origin_check(
     }
     let path = req.uri().path();
     // machine endpoints authenticate by what they carry (a Stripe signature, a grant), not a cookie
-    if path.starts_with("/webhooks/") || path == "/api/v1/connect/redeem" {
+    if path.starts_with("/webhooks/")
+        || path == "/api/v1/connect/redeem"
+        || crate::devices::is_app_path(path)
+    {
         return next.run(req).await;
     }
     let origin = req
@@ -322,6 +325,8 @@ pub fn customer(state: &AppState) -> Router {
         .merge(crate::rentals::routes())
         .merge(crate::connectivity::routes())
         .merge(crate::connectivity::redeem_routes())
+        .merge(crate::devices::routes())
+        .merge(crate::devices::app_routes())
         .merge(crate::billing::routes())
         .merge(crate::billing::webhook_routes())
         .merge(crate::notifications::routes())

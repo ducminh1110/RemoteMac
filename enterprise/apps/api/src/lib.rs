@@ -12,6 +12,7 @@ pub mod config;
 pub mod connectivity;
 pub mod crypto;
 pub mod db;
+pub mod devices;
 pub mod domains;
 pub mod error;
 pub mod http;

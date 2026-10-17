@@ -23,12 +23,14 @@ use crate::state::AppState;
 
 const GRANT_SECONDS: i64 = 120;
 
-async fn grant(
-    State(state): State<AppState>,
-    auth: Auth,
-    Path(rental): Path<Uuid>,
-) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
-    let (r, role) = crate::rentals::visible(&state, &auth, rental).await?;
+/// Issue a one-time grant to connect to `rental` (the member it is assigned to, while it is
+/// ready). `auth` is a portal session or the Taro app's sign-in (see devices.rs).
+pub async fn issue(
+    state: &AppState,
+    auth: &Auth,
+    rental: Uuid,
+) -> ApiResult<(String, chrono::DateTime<Utc>)> {
+    let (r, role) = crate::rentals::visible(state, auth, rental).await?;
     if !role.can(Permission::MacsConnect) {
         return Err(ApiError::Forbidden);
     }
@@ -53,7 +55,7 @@ async fn grant(
             r.status
         )));
     }
-    if !crate::ops::flag(&state, "connect.grants").await {
+    if !crate::ops::flag(state, "connect.grants").await {
         return Err(ApiError::Unavailable(
             "Connecting is paused for a moment. Try again later.".into(),
         ));
@@ -86,7 +88,15 @@ async fn grant(
     )
     .await?;
     tx.commit().await?;
-    let grant = format!("{id}.{secret}");
+    Ok((format!("{id}.{secret}"), expires))
+}
+
+async fn grant(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(rental): Path<Uuid>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    let (grant, expires) = issue(&state, &auth, rental).await?;
     let server = state.config.public_url.origin().ascii_serialization();
     let mut link = url::Url::parse("taro://connect").unwrap();
     link.query_pairs_mut()
@@ -122,12 +132,24 @@ async fn redeem(
     ) {
         return Err(ApiError::RateLimited);
     }
+    Ok(Json(
+        redeem_grant(&state, &b.grant, b.client.as_deref(), ip.as_deref()).await?,
+    ))
+}
+
+/// Trade a grant for the Mac's connection details (once).
+pub async fn redeem_grant(
+    state: &AppState,
+    grant: &str,
+    client: Option<&str>,
+    ip: Option<&str>,
+) -> ApiResult<serde_json::Value> {
     let bad = || {
         ApiError::invalid(
             "This connection link is not valid any more. Choose Connect again in the portal.",
         )
     };
-    let (id, secret) = b.grant.split_once('.').ok_or_else(bad)?;
+    let (id, secret) = grant.split_once('.').ok_or_else(bad)?;
     let id: Uuid = id.parse().map_err(|_| bad())?;
     let mut tx = state.db.begin().await?;
     let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
@@ -147,7 +169,7 @@ async fn redeem(
             Event::new(Actor::System, "connect.redeem", "grant")
                 .resource(id)
                 .result(Outcome::Denied)
-                .ip(ip.as_deref()),
+                .ip(ip),
         )
         .await?;
         tx.commit().await?;
@@ -162,21 +184,21 @@ async fn redeem(
                 e.message
             ))
         })?;
-    sqlx::query("INSERT INTO remote_sessions (id, grant_id, rental_id, user_id, client) VALUES ($1, $2, $3, $4, $5)").bind(Uuid::new_v4()).bind(id).bind(rental).bind(user).bind(b.client.as_deref().map(|c| c.chars().take(80).collect::<String>())).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO remote_sessions (id, grant_id, rental_id, user_id, client) VALUES ($1, $2, $3, $4, $5)").bind(Uuid::new_v4()).bind(id).bind(rental).bind(user).bind(client.map(|c| c.chars().take(80).collect::<String>())).execute(&mut *tx).await?;
     audit::record(
         &mut *tx,
         Event::new(Actor::User(user), "connect.redeemed", "rental")
             .org(org)
             .resource(rental)
-            .ip(ip.as_deref())
+            .ip(ip)
             .details(json!({ "grant": id })),
     )
     .await?;
     tx.commit().await?;
     state.metrics.inc("taro_connections_total", &[]);
-    Ok(Json(
+    Ok(
         json!({ "taro_id": conn.taro_id, "relay": conn.relay, "password": conn.password, "mac_name": name, "rental_ends_at": ends }),
-    ))
+    )
 }
 
 /// Check every relay node: can it be reached over TCP, and how long did that take.
