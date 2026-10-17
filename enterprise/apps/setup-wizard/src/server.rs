@@ -127,6 +127,9 @@ pub fn router(app: App) -> Router {
         .route("/api/branding/tokens", post(branding_tokens))
         .route("/api/relay", post(relay_save))
         .route("/api/relay/key/generate", post(relay_key_generate))
+        .route("/api/signing/connect", post(signing_connect))
+        .route("/api/signing/disconnect", post(signing_disconnect))
+        .route("/api/signing/start", post(signing_start))
         .route("/api/components/discover", post(components_discover))
         .route("/api/components/select", post(components_select))
         .route("/api/components/platforms", post(components_platforms))
@@ -682,9 +685,94 @@ async fn relay_key_reveal(State(app): State<App>) -> Response {
     }
 }
 
+/// The release repository: the one signed in to in Step 5, else the default.
+fn release_endpoints(app: &App) -> crate::config::Endpoints {
+    let mut e = app.endpoints.clone();
+    if let Some(r) = &app.w().signing.repo {
+        e.repo = r.full_name.clone();
+    }
+    e
+}
+
+#[derive(Deserialize)]
+struct SigningConnectReq {
+    token: String,
+    repo: String,
+}
+
+async fn signing_connect(State(app): State<App>, body: Bytes) -> ApiResult {
+    let mut r: SigningConnectReq = parse(&body)?;
+    let token = Secret::new(r.token.trim().to_string());
+    zeroize::Zeroize::zeroize(&mut r.token);
+    let repo = r.repo.trim().trim_matches('/').to_string();
+    let valid = repo.split('/').count() == 2
+        && repo.split('/').all(|p| {
+            !p.is_empty()
+                && p.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        });
+    let mut f = serde_json::Map::new();
+    if token.is_empty() {
+        f.insert("github.token".into(), json!("Paste a GitHub token."));
+    }
+    if !valid {
+        f.insert(
+            "github.repo".into(),
+            json!("owner/repository, like ducminh1110/RemoteMac."),
+        );
+    }
+    if !f.is_empty() {
+        return Err(ApiErr::fields(Value::Object(f)));
+    }
+    match crate::signing::connect(&app, token, &repo).await {
+        Ok(msg) => ok(&app, Some(msg)),
+        Err(e) => {
+            app.log.warn(format!("GitHub: {e}"));
+            app.w().signing.error = None;
+            Err(ApiErr::bad(e))
+        }
+    }
+}
+
+async fn signing_disconnect(State(app): State<App>) -> ApiResult {
+    {
+        let mut w = app.w();
+        if w.signing.running {
+            return Err(ApiErr::bad("Wait for Start to finish."));
+        }
+        // the key this session made stays usable from its backup
+        w.signing = Default::default();
+        w.rev += 1;
+    }
+    ok(&app, Some("Signed out of GitHub.".into()))
+}
+
+#[derive(Deserialize)]
+struct SigningStartReq {
+    version: String,
+    #[serde(default)]
+    taro_version: Option<String>,
+    #[serde(default)]
+    new_key: bool,
+}
+
+async fn signing_start(State(app): State<App>, body: Bytes) -> ApiResult {
+    let r: SigningStartReq = parse(&body)?;
+    crate::signing::start(
+        &app,
+        crate::signing::StartReq {
+            version: r.version.trim().to_string(),
+            taro_version: r.taro_version.map(|t| t.trim().to_string()),
+            new_key: r.new_key,
+        },
+    )
+    .map_err(ApiErr::bad)?;
+    ok(&app, Some("Started.".into()))
+}
+
 async fn components_discover(State(app): State<App>) -> ApiResult {
     app.w().components.loading = true;
-    let r = crate::releases::discover(&app.http, &app.endpoints, &app.timings).await;
+    let r = crate::releases::discover(&app.http, &release_endpoints(&app), &app.timings).await;
     let mut w = app.w();
     w.components.loading = false;
     match r {
@@ -733,9 +821,15 @@ async fn components_select(State(app): State<App>, body: Bytes) -> ApiResult {
         w.components.verifying = Some(rel.tag.clone());
         rel
     };
-    let res =
-        crate::releases::fetch_verified(&app.http, &app.endpoints, &app.timings, &app.keys, &rel)
-            .await;
+    let keys = crate::signing::repo_trust(&app);
+    let res = crate::releases::fetch_verified(
+        &app.http,
+        &release_endpoints(&app),
+        &app.timings,
+        &keys,
+        &rel,
+    )
+    .await;
     let mut w = app.w();
     w.components.verifying = None;
     match res {

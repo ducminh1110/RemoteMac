@@ -411,7 +411,7 @@ async fn a_tampered_download_is_refused_and_leaves_nothing() {
     let e = st["build"]["error"].as_str().unwrap();
     assert!(e.contains("sha256") && e.contains("does not match"), "{e}");
     assert!(st["build"]["result"].is_null());
-    assert_eq!(st["steps"][5]["status"], "fail");
+    assert_eq!(st["steps"][6]["status"], "fail");
     assert_no_output(&w);
     let _ = std::fs::remove_dir_all(&w.out);
 }
@@ -461,7 +461,7 @@ async fn a_component_on_another_host_is_refused() {
         .as_str()
         .unwrap()
         .contains("evil.example.com is not an allowed download host"));
-    assert_eq!(v["state"]["steps"][4]["status"], "warn");
+    assert_eq!(v["state"]["steps"][5]["status"], "warn");
     assert_eq!(w.build().await.0, 200);
     let st = w.wait_build().await;
     let e = st["build"]["error"].as_str().unwrap();

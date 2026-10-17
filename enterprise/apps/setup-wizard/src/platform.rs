@@ -139,6 +139,96 @@ pub fn default_output_dir() -> PathBuf {
         .join("dist")
 }
 
+/// Where backups of release signing keys are kept: `%LOCALAPPDATA%\Taro Enterprise\signing`
+/// on Windows (each file encrypted for this Windows account with DPAPI), `~/.config/
+/// taro-enterprise/signing` elsewhere (readable by the owner only).
+pub fn default_key_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(d) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(d).join("Taro Enterprise").join("signing");
+        }
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config/taro-enterprise/signing")
+}
+
+/// Encrypt for this Windows account (DPAPI). Elsewhere the bytes stay as they are and the
+/// file's permissions protect them.
+#[cfg(windows)]
+pub fn protect(data: &[u8]) -> Result<Vec<u8>, String> {
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: data.len() as u32,
+        pbData: data.as_ptr() as *mut u8,
+    };
+    let mut out = CRYPT_INTEGER_BLOB::default();
+    // SAFETY: `input` points at `data` for the call; `out` is allocated by DPAPI and freed below.
+    unsafe {
+        CryptProtectData(&input, None, None, None, None, 0, &mut out).map_err(|e| e.to_string())?;
+        let v = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
+        let _ = LocalFree(Some(HLOCAL(out.pbData as _)));
+        Ok(v)
+    }
+}
+
+#[cfg(windows)]
+pub fn unprotect(data: &[u8]) -> Result<Vec<u8>, String> {
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: data.len() as u32,
+        pbData: data.as_ptr() as *mut u8,
+    };
+    let mut out = CRYPT_INTEGER_BLOB::default();
+    // SAFETY: as in `protect`.
+    unsafe {
+        CryptUnprotectData(&input, None, None, None, None, 0, &mut out)
+            .map_err(|e| e.to_string())?;
+        let v = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
+        let _ = LocalFree(Some(HLOCAL(out.pbData as _)));
+        Ok(v)
+    }
+}
+
+#[cfg(not(windows))]
+pub fn protect(data: &[u8]) -> Result<Vec<u8>, String> {
+    Ok(data.to_vec())
+}
+
+#[cfg(not(windows))]
+pub fn unprotect(data: &[u8]) -> Result<Vec<u8>, String> {
+    Ok(data.to_vec())
+}
+
+/// Write a file only its owner can read (Windows: the folder's ACL already is the user's).
+pub fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+    }
+    let tmp = path.with_extension("tmp");
+    {
+        use std::io::Write;
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            o.mode(0o600);
+        }
+        let mut f = o
+            .open(&tmp)
+            .map_err(|e| format!("{}: {e}", tmp.display()))?;
+        f.write_all(data)
+            .and_then(|_| f.sync_all())
+            .map_err(|e| format!("{}: {e}", tmp.display()))?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// Show a folder in the file manager (Explorer on Windows).
 #[cfg(windows)]
 pub fn open_folder(path: &Path) -> Result<(), String> {

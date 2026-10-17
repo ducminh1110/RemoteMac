@@ -262,8 +262,32 @@ check("relay saved", (await flashText(page, "ok")).includes("saved"));
 check("state never carries the key", !JSON.stringify(await apiState(page)).includes(key));
 await clearFlashes(page);
 
-// 5. components
+// 5. signing and release on GitHub (the fake): connect, Start, follow the run
 await step(page, 4);
+await page.fill("#f-github-token", "github-token-for-tests-0123456789");
+await page.click("#gh-connect");
+await page.waitForSelector("#gh-start");
+check("signed in to GitHub", (await flashText(page, "ok")).includes("octo"));
+await page.click("#gh-start");
+await page.waitForSelector(".modal:not(.picker)");
+check("Start asks first and lists what it will do", (await page.locator(".modal:not(.picker) li").count()) >= 4);
+await page.waitForTimeout(400);
+await shot(page, "light-05-signing-confirm");
+await page.click(".modal:not(.picker) .btn.primary");
+for (let i = 0; i < 400; i++) {
+  const s = await apiState(page);
+  if (!s.signing.running && (s.signing.done || s.signing.error)) break;
+  await page.waitForTimeout(100);
+}
+const sg = await apiState(page);
+check("Start made the key, the secret, the commit and the release", sg.signing.done === true, sg.signing.error || "");
+check("the key never reaches the page", !JSON.stringify(sg).includes("ed25519-secret") && !JSON.stringify(sg.signing).includes("key_secret"));
+await page.waitForSelector(".alert.ok:has-text('Release signed')");
+await shot(page, "light-05-signing-done");
+await clearFlashes(page);
+
+// 6. components
+await step(page, 5);
 await page.click("#discover");
 await page.waitForSelector("input[name=release]");
 check("newest release preselected", await page.isChecked("input[name=release][value='enterprise-v0.2.0']"));
@@ -272,14 +296,14 @@ await page.waitForSelector(".alert.ok:has-text('Signature valid')");
 check("4 platforms offered", (await page.locator("input.plat").count()) === 4);
 await clearFlashes(page);
 
-// 6. build (the fake streams slowly: progress is visible)
-await step(page, 5);
+// 7. build (the fake streams slowly: progress is visible)
+await step(page, 6);
 await page.click("#start-build");
 await page.waitForSelector("progress");
 await page.waitForFunction(() => [...document.querySelectorAll("progress")].some((p) => p.value > 0));
 check("cancel offered while building", (await page.locator("#cancel-build").count()) === 1);
 await clearFlashes(page);
-await shot(page, "light-06-build-progress");
+await shot(page, "light-07-build-progress");
 for (let i = 0; i < 600; i++) {
   const s = await apiState(page);
   if (!s.build.running) break;
@@ -288,11 +312,11 @@ for (let i = 0; i < 600; i++) {
 const st2 = await apiState(page);
 check("build finished", !!st2.build.result, st2.build.error || "");
 check("validation passed", st2.validation && st2.validation.ok, st2.validation && st2.validation.checks.length + " checks");
-const uiDone = await page.waitForFunction(() => document.querySelectorAll("#steps li")[5].classList.contains("done"), null, { timeout: 8000 }).then(() => true, () => false);
+const uiDone = await page.waitForFunction(() => document.querySelectorAll("#steps li")[6].classList.contains("done"), null, { timeout: 8000 }).then(() => true, () => false);
 check("the UI follows the build to its end (polling)", uiDone);
 
-// 7. validate & export
-await step(page, 6);
+// 8. validate & export
+await step(page, 7);
 await page.waitForSelector(".alert.ok:has-text('checks passed')");
 const [dl] = await Promise.all([page.waitForEvent("download"), page.click("#dl-json")]);
 await dl.saveAs(`${SHOTS}/summary.json`);
@@ -304,7 +328,7 @@ await dl2.saveAs(`${SHOTS}/summary.md`);
 check("Markdown summary masks the key", !readFileSync(`${SHOTS}/summary.md`, "utf8").includes(key));
 
 // every step at 1440x900, light and dark, and the open picker
-const NAMES = ["preflight", "identity", "branding", "relay", "components", "build", "validate"];
+const NAMES = ["preflight", "identity", "branding", "relay", "signing", "components", "build", "validate"];
 for (const scheme of ["light", "dark"]) {
   const p = await newPage({ width: 1440, height: 900 }, scheme);
   await p.goto(URL_);
@@ -329,7 +353,7 @@ for (const scheme of ["light", "dark"]) {
   await m.goto(URL_);
   await m.waitForSelector("#steps li button");
   const overflow = [];
-  for (let i = 0; i < 7; i++) {
+  for (let i = 0; i < NAMES.length; i++) {
     await step(m, i);
     const sw = await m.evaluate(() => document.documentElement.scrollWidth);
     if (sw > 390) overflow.push(i + ":" + sw);
@@ -346,7 +370,7 @@ for (const scheme of ["light", "dark"]) {
   await m.mouse.click(svm.x + svm.width * 0.5, svm.y + svm.height * 0.5);
   await shot(m, `phone-${scheme}-customize`);
   await m.click("#p-cancel");
-  if (scheme === "light") { await step(m, 6); await shot(m, "phone-light-validate"); }
+  if (scheme === "light") { await step(m, 7); await shot(m, "phone-light-validate"); }
 }
 
 const csp = (await Promise.all(pages.map((p) => p.evaluate(() => window.__csp).catch(() => [])))).flat();

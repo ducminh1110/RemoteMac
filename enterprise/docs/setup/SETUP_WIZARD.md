@@ -70,13 +70,38 @@ tables, status indicators, field descriptions and errors, and a Previous/Next fo
      rented or were given. Without it, the client works as standard Taro does, with ID and
      password;
    - client updates: notify or off.
-5. **Components and versions**:
+5. **Signing and release** (optional; for your own Enterprise releases):
+   - Connect with a GitHub token of the repository that holds the release workflow. A
+     fine-grained token needs Contents, Actions and Secrets (read and write). The token stays in
+     memory and is sent only to `api.github.com`.
+   - The wizard shows whether `TARO_ENTERPRISE_SIGNING_KEY` is set, the keys in
+     `enterprise/keys/release-signing.pub`, the existing `enterprise-v…` releases, and the
+     version of `enterprise/Cargo.toml`, which the workflow releases.
+   - **Start** (after a confirmation listing every action) does all of it, free on GitHub
+     Actions:
+     1. makes an ed25519 signing key on this PC;
+     2. stores its private half as the Actions secret, sealed with libsodium for the
+        repository (only Actions can read it);
+     3. commits its public half to `release-signing.pub`; next to the old keys when releases
+        exist, since relays installed from them trust only the keys they were built with;
+     4. backs the key up at `%LOCALAPPDATA%\Taro Enterprise\signing`, encrypted with DPAPI for
+        this Windows account;
+     5. starts `enterprise-release.yml` and follows its run to the end, linking to it.
+   - An existing secret is never replaced silently. With the backup of this PC the same key is
+     used again. Otherwise the secret is kept, unless **Make a new signing key** is ticked.
+     taro-update refuses to sign with a key that is not in `release-signing.pub`, so a
+     mismatch fails the run instead of publishing a release nobody trusts.
+   - The private key is never shown, logged, exported in the summary, put in a package or sent
+     unsealed.
+6. **Components and versions**:
    - lists the `enterprise-v…` releases on GitHub;
    - verifies the chosen one's `taro-enterprise-components.json` signature with the release
      key compiled into the wizard;
+   - releases are looked up in the repository of step 5 when you connected one; its keys are
+     trusted in addition to the wizard's own;
    - shows the pinned Enterprise, Taro and relay versions;
    - lets you choose the platforms to build.
-6. **Build**:
+7. **Build**:
    1. Every download URL is checked against the download policy (https, allowed hosts, no
       redirect elsewhere).
    2. Each file is streamed with its size and sha256 enforced.
@@ -85,7 +110,7 @@ tables, status indicators, field descriptions and errors, and a Previous/Next fo
    4. Only a complete build is renamed to its final name.
 
    Cancel or a failure leaves no output.
-7. **Validate and export**:
+8. **Validate and export**:
    - Every produced file is opened again and compared with what the build meant to write
      (26 checks for four platforms): the provider folder byte for byte, each archive's
      layout, the programs against the verified official files, the manifest and checksums.
@@ -122,6 +147,16 @@ integration tests against a local fake of the GitHub releases API and the asset 
   and importing a provider.json.
 - `tests/preservation.rs`: an Enterprise update applied over a relay installed from a built
   package leaves its `provider.json` byte-identical.
+- `tests/signing_flow.rs`: step 5 against a fake GitHub:
+  - the sealed secret opens (only with the repository's key) to a key whose public half was
+    committed, next to the old key;
+  - the workflow is started with the version and followed to its end;
+  - the backup is the owner's only;
+  - a second session reuses the key without replacing the secret;
+  - an unknown existing secret is kept;
+  - a failed run is reported with its link;
+  - neither the key nor the token appears in any response, the log, the state, the summary,
+    or any request body except sealed.
 - `tests/guard.rs`: the request guard and the security headers.
 - `tests/ui_demo.rs` (ignored) serves the real UI against the fake. `tests/ui/wizard1.mjs`
   drives it in headless Chromium and photographs every step:

@@ -32,6 +32,10 @@ hex = "0.4"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 flate2 = "1"
 tar = { version = "0.4", default-features = false }
+base64 = "0.22"
+# GitHub Actions secrets are libsodium sealed boxes
+crypto_box = { version = "0.9", features = ["seal", "std"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -42,6 +46,7 @@ windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_System_Console",
+    "Win32_Security_Cryptography",
     "Win32_System_SystemInformation",
     "Win32_Storage_FileSystem",
     "Win32_UI_Shell",
@@ -54,5 +59,4 @@ wry = { version = "0.57", default-features = false, features = ["os-webview"] }
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
-ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize"] }
 futures-util = { version = "0.3", default-features = false }

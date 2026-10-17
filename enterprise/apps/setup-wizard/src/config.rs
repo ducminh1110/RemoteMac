@@ -11,6 +11,11 @@ pub const RELEASE_REPO: &str = "ducminh1110/RemoteMac";
 pub const TAG_PREFIX: &str = "enterprise-v";
 pub const COMPONENTS_FILE: &str = "taro-enterprise-components.json";
 pub const COMPONENTS_SIG: &str = "taro-enterprise-components.json.sig";
+/// Step 5: the release workflow, its signing secret and the trusted keys file of the repository.
+pub const RELEASE_WORKFLOW: &str = "enterprise-release.yml";
+pub const SIGNING_SECRET: &str = "TARO_ENTERPRISE_SIGNING_KEY";
+pub const KEYS_FILE: &str = "enterprise/keys/release-signing.pub";
+pub const VERSION_FILE: &str = "enterprise/Cargo.toml";
 /// The only hosts anything is downloaded from (always over https). GitHub serves release
 /// assets from github.com and redirects to one of the other two.
 pub const DOWNLOAD_HOSTS: &[&str] = &[
@@ -84,6 +89,8 @@ pub struct Timings {
     pub http_timeout: Duration,
     /// The longest wait for the next chunk of a download.
     pub chunk_timeout: Duration,
+    /// How often the release workflow's run is looked at (Step 5).
+    pub actions_poll: Duration,
 }
 
 impl Default for Timings {
@@ -91,6 +98,7 @@ impl Default for Timings {
         Timings {
             http_timeout: Duration::from_secs(20),
             chunk_timeout: Duration::from_secs(60),
+            actions_poll: Duration::from_secs(10),
         }
     }
 }
@@ -100,6 +108,7 @@ impl Timings {
         Timings {
             http_timeout: Duration::from_secs(5),
             chunk_timeout: Duration::from_secs(5),
+            actions_poll: Duration::from_millis(50),
         }
     }
 }

@@ -13,6 +13,7 @@
 //! - [`package`]: assembling the archives (pure Rust: zip, tar, flate2)
 //! - [`build`]: the build task (download, assemble, atomically publish the output folder)
 //! - [`check`]: re-opening every produced file to validate it
+//! - [`signing`]: Step 5, the release signing key, its Actions secret and the release on GitHub
 //! - [`server`]: the loopback-only HTTP server and its JSON API
 //! - `window` (Windows): the app window that shows the pages
 
@@ -21,13 +22,16 @@ pub mod build;
 pub mod check;
 pub mod config;
 pub mod download;
+pub mod github;
 pub mod package;
 pub mod platform;
 pub mod preflight;
 pub mod redact;
 pub mod releases;
+pub mod sealed;
 pub mod secret;
 pub mod server;
+pub mod signing;
 pub mod state;
 pub mod summary;
 pub mod util;

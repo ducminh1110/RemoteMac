@@ -183,6 +183,7 @@ async fn start(
             keys: taro_update::official_keys(),
             output_dir,
             open_folder: Arc::new(platform::open_folder),
+            key_dir: platform::default_key_dir(),
         },
     );
     println!(

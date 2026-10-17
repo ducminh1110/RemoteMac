@@ -190,6 +190,8 @@ pub struct Wizard {
     pub build: BuildState,
     pub validation: Option<Report>,
     pub validation_running: bool,
+    /// Step 5: release signing on GitHub (optional)
+    pub signing: crate::signing::SigningState,
     /// bumped on every change of an input, so a build of older inputs shows as stale
     pub rev: u64,
 }
@@ -206,6 +208,8 @@ pub struct AppState {
     /// the release keys component manifests must be signed with
     pub keys: TrustedKeys,
     pub open_folder: FolderOpener,
+    /// where release signing keys are backed up (Step 5)
+    pub key_dir: PathBuf,
     pub shutdown: Arc<Notify>,
     wizard: Mutex<Wizard>,
 }
@@ -217,6 +221,8 @@ pub struct Options {
     pub keys: TrustedKeys,
     pub output_dir: PathBuf,
     pub open_folder: FolderOpener,
+    /// `platform::default_key_dir()` in the shipped wizard
+    pub key_dir: PathBuf,
 }
 
 impl AppState {
@@ -246,6 +252,7 @@ impl AppState {
             },
             validation: None,
             validation_running: false,
+            signing: Default::default(),
             rev: 0,
         };
         Arc::new(AppState {
@@ -257,6 +264,7 @@ impl AppState {
             log,
             keys: o.keys,
             open_folder: o.open_folder,
+            key_dir: o.key_dir,
             shutdown: Arc::new(Notify::new()),
             wizard: Mutex::new(w),
         })
@@ -464,6 +472,42 @@ impl Wizard {
         } else {
             step("relay", "Relay endpoint", "todo", "Not saved")
         });
+        let g = &self.signing;
+        v.push(if g.running {
+            step(
+                "signing",
+                "Signing & release",
+                "running",
+                "Running on GitHub",
+            )
+        } else if let Some(e) = &g.error {
+            step("signing", "Signing & release", "fail", e.clone())
+        } else if g.done {
+            step(
+                "signing",
+                "Signing & release",
+                "ok",
+                "Release signed on GitHub",
+            )
+        } else if let Some(r) = &g.repo {
+            step(
+                "signing",
+                "Signing & release",
+                if g.has_secret { "ok" } else { "todo" },
+                if g.has_secret {
+                    format!("{}: signing set up", r.full_name)
+                } else {
+                    format!("{}: no signing key yet", r.full_name)
+                },
+            )
+        } else {
+            step(
+                "signing",
+                "Signing & release",
+                "optional",
+                "Optional: your own releases",
+            )
+        });
         let c = &self.components;
         v.push(if c.verifying.is_some() || c.loading {
             step("components", "Components & versions", "running", "Checking")
@@ -543,12 +587,14 @@ impl Wizard {
             "build": self.build,
             "stale": self.build.result.as_ref().is_some_and(|r| r.rev != self.rev),
             "validation": self.validation,
+            "signing": self.signing,
             "config": {
                 "default_port": DEFAULT_PORT,
                 "key_len": KEY_LEN,
                 "taro_primary": rm_brand::TARO_PRIMARY.hex(),
                 "download_hosts": crate::config::DOWNLOAD_HOSTS,
                 "component_ids": COMPONENT_IDS,
+                "release_repo": crate::config::RELEASE_REPO,
             }
         })
     }
@@ -586,6 +632,7 @@ mod tests {
             },
             validation: None,
             validation_running: false,
+            signing: Default::default(),
             rev: 0,
         };
         w.branding.primary_color = "#3D7A5B".into();

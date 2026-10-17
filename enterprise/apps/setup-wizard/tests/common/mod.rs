@@ -146,7 +146,30 @@ pub fn relay_tgz(arch: &str) -> Vec<u8> {
     tgz(&refs)
 }
 
+/// The repository side of Step 5 (release signing) in the fake GitHub.
+pub struct GhRepo {
+    /// the X25519 key Actions secrets are sealed for (the test opens them with it)
+    pub secrets_key: crypto_box::SecretKey,
+    pub secrets: HashMap<String, String>,
+    /// path -> (text, blob sha)
+    pub files: HashMap<String, (String, String)>,
+    pub secret_puts: u32,
+    pub file_puts: u32,
+    pub dispatches: Vec<Value>,
+    /// workflow runs; each look advances one: queued -> in_progress -> completed
+    pub runs: Vec<Value>,
+    pub run_conclusion: String,
+    /// every request body the fake GitHub API received
+    pub bodies: Vec<String>,
+    pub extra_tags: Vec<String>,
+}
+
+pub const GH_TOKEN: &str = "github-token-for-tests-0123456789";
+pub const KEYS_PATH: &str = "enterprise/keys/release-signing.pub";
+pub const OLD_KEY: &str = "ed25519:VBCM7iMltXcKPW7U05JsFlpOzPdy1bO/BPWJmWR1kio=";
+
 pub struct Fake {
+    pub gh: Mutex<GhRepo>,
     pub base: Mutex<String>,
     /// served files by URL path below the fake (`/objects/…`, `/gh-web/…`)
     pub files: Mutex<HashMap<String, Vec<u8>>>,
@@ -190,14 +213,16 @@ async fn releases(State(f): State<F>) -> Response {
             "assets": [asset(tag, "taro-enterprise-components.json"), asset(tag, "taro-enterprise-components.json.sig"), asset(tag, "enterprise-update.zip")]
         })
     };
-    let _ = f;
-    Json(json!([
-        {"tag_name": TARO, "draft": false, "assets": [asset(TARO, "Taro-windows.zip")]},
+    let mut v = vec![
+        json!({"tag_name": TARO, "draft": false, "assets": [asset(TARO, "Taro-windows.zip")]}),
         rel("enterprise-v0.1.0", false),
         rel("enterprise-v0.2.0", false),
         rel("enterprise-v0.9.0", true),
-    ]))
-    .into_response()
+    ];
+    for t in f.gh.lock().unwrap().extra_tags.clone() {
+        v.push(json!({"tag_name": t, "draft": false, "assets": []}));
+    }
+    Json(Value::Array(v)).into_response()
 }
 
 async fn serve(f: &Fake, key: &str) -> Response {
@@ -266,7 +291,34 @@ fn comp(id: &str, version: &str, file: &str, url: &str, bytes: &[u8]) -> Compone
 /// The fake world: packages, two signed component manifests (0.2.0 is good; 0.1.0 lists a
 /// Windows client on a host outside the download policy), the server.
 pub async fn start_fake(key: &ed25519_dalek::SigningKey) -> (Arc<Fake>, HashMap<String, Vec<u8>>) {
+    let mut gh_files = HashMap::new();
+    gh_files.insert(
+        KEYS_PATH.to_string(),
+        (
+            format!("# Taro Enterprise release signing keys (ed25519).\n{OLD_KEY}\n"),
+            "sha-keys-0".to_string(),
+        ),
+    );
+    gh_files.insert(
+        "enterprise/Cargo.toml".to_string(),
+        (
+            "[workspace]\nmembers = []\n\n[workspace.package]\nversion = \"0.3.0\"\n".to_string(),
+            "sha-cargo-0".to_string(),
+        ),
+    );
     let f = Arc::new(Fake {
+        gh: Mutex::new(GhRepo {
+            secrets_key: crypto_box::SecretKey::generate(&mut crypto_box::aead::OsRng),
+            secrets: HashMap::new(),
+            files: gh_files,
+            secret_puts: 0,
+            file_puts: 0,
+            dispatches: vec![],
+            runs: vec![],
+            run_conclusion: "success".into(),
+            bodies: vec![],
+            extra_tags: vec![],
+        }),
         base: Mutex::new(String::new()),
         files: Mutex::new(HashMap::new()),
         requests: Mutex::new(vec![]),
@@ -346,7 +398,30 @@ pub async fn start_fake(key: &ed25519_dalek::SigningKey) -> (Arc<Fake>, HashMap<
             files.insert(format!("/objects/assets/{name}"), bytes.clone());
         }
     }
+    let api = format!("/gh-api/repos/{REPO}");
     let app = Router::new()
+        .route("/gh-api/user", get(gh_user))
+        .route(&api, get(gh_repo))
+        .route(
+            &format!("{api}/actions/secrets/public-key"),
+            get(gh_secrets_key),
+        )
+        .route(
+            &format!("{api}/actions/secrets/{{name}}"),
+            get(gh_secret_get).put(gh_secret_put),
+        )
+        .route(
+            &format!("{api}/contents/{{*path}}"),
+            get(gh_file_get).put(gh_file_put),
+        )
+        .route(
+            &format!("{api}/actions/workflows/{{wf}}/dispatches"),
+            axum::routing::post(gh_dispatch),
+        )
+        .route(
+            &format!("{api}/actions/workflows/{{wf}}/runs"),
+            get(gh_runs),
+        )
         .route(&format!("/gh-api/repos/{REPO}/releases"), get(releases))
         .route("/gh-web/", get(|| async { "github.com" }))
         .route("/gh-web/{*rest}", get(gh_web))
@@ -361,6 +436,176 @@ pub async fn start_fake(key: &ed25519_dalek::SigningKey) -> (Arc<Fake>, HashMap<
     *f.base.lock().unwrap() = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
     (f, sources)
+}
+
+fn authed(req: &axum::http::HeaderMap) -> bool {
+    req.get("authorization").and_then(|v| v.to_str().ok()) == Some(&format!("Bearer {GH_TOKEN}"))
+}
+
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({"message": "Bad credentials"})),
+    )
+        .into_response()
+}
+
+async fn gh_user(h: axum::http::HeaderMap) -> Response {
+    if !authed(&h) {
+        return unauthorized();
+    }
+    Json(json!({"login": "octo"})).into_response()
+}
+
+async fn gh_repo(h: axum::http::HeaderMap) -> Response {
+    if !authed(&h) {
+        return unauthorized();
+    }
+    Json(json!({"full_name": REPO, "html_url": format!("https://github.com/{REPO}"), "default_branch": "main", "private": false, "permissions": {"admin": true, "push": true}})).into_response()
+}
+
+async fn gh_secrets_key(State(f): State<F>, h: axum::http::HeaderMap) -> Response {
+    if !authed(&h) {
+        return unauthorized();
+    }
+    let pk = f.gh.lock().unwrap().secrets_key.public_key();
+    Json(json!({"key_id": "kid-1", "key": taro_enterprise_setup::util::b64(pk.as_bytes())}))
+        .into_response()
+}
+
+async fn gh_secret_get(
+    State(f): State<F>,
+    h: axum::http::HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    if !authed(&h) {
+        return unauthorized();
+    }
+    if f.gh.lock().unwrap().secrets.contains_key(&name) {
+        Json(json!({"name": name})).into_response()
+    } else {
+        (StatusCode::NOT_FOUND, Json(json!({"message": "Not Found"}))).into_response()
+    }
+}
+
+async fn gh_secret_put(
+    State(f): State<F>,
+    h: axum::http::HeaderMap,
+    Path(name): Path<String>,
+    body: String,
+) -> Response {
+    if !authed(&h) {
+        return unauthorized();
+    }
+    let mut g = f.gh.lock().unwrap();
+    g.bodies.push(body.clone());
+    let v: Value = serde_json::from_str(&body).unwrap_or_default();
+    assert_eq!(v["key_id"], "kid-1");
+    g.secrets.insert(
+        name,
+        v["encrypted_value"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    );
+    g.secret_puts += 1;
+    StatusCode::CREATED.into_response()
+}
+
+async fn gh_file_get(
+    State(f): State<F>,
+    h: axum::http::HeaderMap,
+    Path(path): Path<String>,
+) -> Response {
+    if !authed(&h) {
+        return unauthorized();
+    }
+    match f.gh.lock().unwrap().files.get(&path) {
+        Some((text, sha)) => Json(json!({"content": taro_enterprise_setup::util::b64(text.as_bytes()), "sha": sha, "encoding": "base64"})).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({"message": "Not Found"}))).into_response(),
+    }
+}
+
+async fn gh_file_put(
+    State(f): State<F>,
+    h: axum::http::HeaderMap,
+    Path(path): Path<String>,
+    body: String,
+) -> Response {
+    if !authed(&h) {
+        return unauthorized();
+    }
+    let mut g = f.gh.lock().unwrap();
+    g.bodies.push(body.clone());
+    let v: Value = serde_json::from_str(&body).unwrap_or_default();
+    let current = g.files.get(&path).map(|x| x.1.clone());
+    if v["sha"].as_str().map(str::to_string) != current {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"message": "sha does not match"})),
+        )
+            .into_response();
+    }
+    let text = String::from_utf8(
+        taro_enterprise_setup::util::b64_decode(v["content"].as_str().unwrap_or_default()).unwrap(),
+    )
+    .unwrap();
+    g.file_puts += 1;
+    let sha = format!("sha-{}-{}", path.len(), g.file_puts);
+    g.files.insert(path, (text, sha));
+    Json(json!({"commit": {"sha": "c0ffee0123456789"}})).into_response()
+}
+
+async fn gh_dispatch(
+    State(f): State<F>,
+    h: axum::http::HeaderMap,
+    Path(wf): Path<String>,
+    body: String,
+) -> Response {
+    if !authed(&h) {
+        return unauthorized();
+    }
+    assert_eq!(wf, "enterprise-release.yml");
+    let mut g = f.gh.lock().unwrap();
+    g.bodies.push(body.clone());
+    g.dispatches
+        .push(serde_json::from_str(&body).unwrap_or_default());
+    let id = 100 + g.runs.len() as u64;
+    let now = taro_enterprise_setup::util::rfc3339(taro_enterprise_setup::util::now_secs());
+    g.runs.insert(0, json!({"id": id, "status": "queued", "conclusion": null, "html_url": format!("https://github.com/{REPO}/actions/runs/{id}"), "created_at": now}));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn gh_runs(State(f): State<F>, h: axum::http::HeaderMap) -> Response {
+    if !authed(&h) {
+        return unauthorized();
+    }
+    let mut g = f.gh.lock().unwrap();
+    let conclusion = g.run_conclusion.clone();
+    let version = g.dispatches.last().map(|d| {
+        d["inputs"]["version"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    });
+    let mut finished = false;
+    if let Some(r) = g.runs.first_mut() {
+        let next = match r["status"].as_str() {
+            Some("queued") => "in_progress",
+            _ => "completed",
+        };
+        if next == "completed" && r["status"] != "completed" {
+            r["conclusion"] = json!(conclusion);
+            finished = conclusion == "success";
+        }
+        r["status"] = json!(next);
+    }
+    if finished {
+        if let Some(v) = version {
+            g.extra_tags.push(format!("enterprise-v{v}"));
+        }
+    }
+    Json(json!({"workflow_runs": g.runs})).into_response()
 }
 
 /// Replace one release's signature with a signature by another key.
@@ -445,6 +690,7 @@ pub async fn wizard_at(name: &str, addr: SocketAddr) -> Wiz {
             timings: Timings::fast(),
             keys: TrustedKeys::from_keys(vec![key.verifying_key()]),
             output_dir: out.clone(),
+            key_dir: tmp(&format!("{name}-keys")),
             open_folder: Arc::new(move |p: &std::path::Path| {
                 o2.lock().unwrap().push(p.to_path_buf());
                 Ok(())
@@ -461,6 +707,39 @@ pub async fn wizard_at(name: &str, addr: SocketAddr) -> Wiz {
         out,
         opened,
         key,
+    }
+}
+
+/// Another wizard session on the same fake GitHub and the same key backup folder (the same PC).
+pub async fn wizard_sharing(name: &str, w: &Wiz) -> Wiz {
+    let out = tmp(&format!("{name}-2"));
+    let opened = Arc::new(Mutex::new(Vec::new()));
+    let o2 = opened.clone();
+    let app = AppState::new(
+        SocketAddr::from(([127, 0, 0, 1], WIZ_PORT)),
+        ACCESS.to_string(),
+        Options {
+            endpoints: endpoints(&w.fake.base()),
+            timings: Timings::fast(),
+            keys: TrustedKeys::from_keys(vec![w.key.verifying_key()]),
+            output_dir: out.clone(),
+            key_dir: w.app.key_dir.clone(),
+            open_folder: Arc::new(move |p: &std::path::Path| {
+                o2.lock().unwrap().push(p.to_path_buf());
+                Ok(())
+            }),
+        },
+    );
+    let router = taro_enterprise_setup::server::router(app.clone());
+    Wiz {
+        app,
+        router,
+        responses: Mutex::new(vec![]),
+        fake: w.fake.clone(),
+        sources: w.sources.clone(),
+        out,
+        opened,
+        key: w.key.clone(),
     }
 }
 

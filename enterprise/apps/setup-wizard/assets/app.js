@@ -521,6 +521,7 @@ const STEPS = [
   { id: "identity", name: "Product identity" },
   { id: "branding", name: "Branding" },
   { id: "relay", name: "Relay endpoint" },
+  { id: "signing", name: "Signing and release" },
   { id: "components", name: "Components and versions" },
   { id: "build", name: "Build" },
   { id: "validate", name: "Validate and export" },
@@ -680,6 +681,54 @@ const views = {
           { value: "off", label: "Never look", note: "You ship new packages built with this wizard." }])));
   },
 
+  signing() {
+    const g = S.signing;
+    const st = "signing";
+    const r = g.repo;
+    const statusOf = (it) => status(it.status === "running" ? "info" : it.status === "skipped" ? "skip" : it.status, { running: "In progress", pending: "Pending", ok: "Done", fail: "Failed", skipped: "Kept" }[it.status]);
+    const connectBtn = button(r ? "Connect again" : "Connect", { kind: r ? "" : "primary", id: "gh-connect",
+      onclick: (ev) => run(ev.currentTarget, "Connecting…", st, async () => {
+        const x = await api("POST", "/api/signing/connect", { token: val("github.token"), repo: val("github.repo") });
+        drafts[fid("github.token")] = ""; return x;
+      }) });
+    const startBtn = r ? button(g.done ? "Start again" : "Start", { kind: "primary", id: "gh-start", disabled: g.running || !g.version,
+      onclick: async (ev) => {
+        const btn = ev.currentTarget;
+        const newKey = !!drafts.new_key;
+        const what = !g.has_secret || newKey
+          ? h("ul", {}, h("li", {}, "make a release signing key on this PC,"), h("li", {}, "store it as the Actions secret TARO_ENTERPRISE_SIGNING_KEY of " + r.full_name + " (sealed: only GitHub Actions can read it),"),
+              h("li", {}, "commit its public half to enterprise/keys/release-signing.pub,"), h("li", {}, "keep an encrypted backup on this PC,"), h("li", {}, "start the Enterprise release workflow for enterprise-v" + val("signing.version") + "."))
+          : h("ul", {}, h("li", {}, "keep the repository's signing key,"), h("li", {}, "start the Enterprise release workflow for enterprise-v" + val("signing.version") + "."));
+        if (!(await confirmDialog({ title: "Start on " + r.full_name + "?", confirm: "Start", body: [h("p", {}, "This will:"), what,
+          newKey && g.releases.length ? alert("warn", "A new key next to the old one", "Relays installed from earlier releases trust only the keys they were built with; the old key stays in release-signing.pub.") : null] }))) return;
+        run(btn, "Starting…", st, () => api("POST", "/api/signing/start", { version: val("signing.version"), taro_version: val("signing.taro") || null, new_key: newKey }));
+      } }) : null;
+    return page({ title: "Signing and release", desc: "Optional. Signs and publishes an Enterprise release on your own GitHub repository, with GitHub Actions (free). Skip it to build from Taro's official releases.", actions: startBtn },
+      g.error ? alert("err", "Not finished", g.error) : null,
+      g.done ? alert("ok", "Release signed and published", h("span", {}, "GitHub Actions built and signed it. Pick it in the next step. ", g.run ? h("a", { href: g.run.html_url, target: "_blank", rel: "noreferrer" }, "Open the run") : null)) : null,
+      container({ title: "GitHub", desc: "A token of the repository that holds the Enterprise release workflow. It stays in this program's memory and is sent only to api.github.com.", actions: connectBtn },
+        h("div", { class: "split" },
+          field(st, { name: "github.repo", label: "Repository", value: (r && r.full_name) || S.config.release_repo, mono: true, spellcheck: "false", desc: "owner/repository" }),
+          field(st, { name: "github.token", label: "Token", type: "password", value: "", mono: true, spellcheck: "false",
+            desc: "A fine-grained token of this repository with Contents, Actions and Secrets: read and write.", hint: r ? "Signed in as " + g.login + "." : "Not signed in." })),
+        r ? kv([["Repository", h("a", { href: r.html_url, target: "_blank", rel: "noreferrer" }, r.full_name)], ["Branch", r.default_branch],
+          ["Signing secret", g.has_secret ? status("ok", "Set") : status("pending", "Not set yet")],
+          ["Trusted keys", String(g.repo_keys.length)], ["This PC's key", g.key_public ? h("span", { class: "path" }, g.key_public) : "–"], ["Key from", g.key_source || "–"]], 3) : null),
+      r ? container({ title: "Release", desc: "The workflow releases the version written in enterprise/Cargo.toml of the repository." },
+        h("div", { class: "split" },
+          field(st, { name: "signing.version", label: "Enterprise version", value: g.version || "", mono: true, desc: "From enterprise/Cargo.toml.", hint: g.releases.length ? "Released already: " + g.releases.join(", ") : "No Enterprise release yet." }),
+          field(st, { name: "signing.taro", label: "Taro version for the clients", opt: true, value: "", mono: true, placeholder: "the one in Cargo.toml", desc: "The Taro release whose Windows and Mac clients your packages carry." })),
+        g.has_secret ? h("label", { class: "check" }, h("input", { type: "checkbox", id: "new-key", checked: !!drafts.new_key, onchange: (e) => { drafts.new_key = e.target.checked; render(); } }),
+          h("span", {}, "Make a new signing key", h("span", { class: "d" }, "Only if the old one is lost or exposed. Its public half is added next to the old ones."))) : null) : null,
+      g.items.length ? container({ title: g.running ? "Running" : g.error ? "Stopped" : "Done", flush: true },
+        h("div", { class: "table-wrap" }, h("table", { class: "table" },
+          h("thead", {}, h("tr", {}, h("th", {}, "Status"), h("th", {}, "Action"), h("th", {}, "Result"))),
+          h("tbody", {}, g.items.map((it) => h("tr", { class: it.status },
+            h("td", { class: "st" }, statusOf(it)), h("td", { class: "name" }, it.label),
+            h("td", { class: "muted" }, it.detail && /^https:\/\//.test(it.detail.split(": ").pop()) ? [it.detail.split(": ").slice(0, -1).join(": ") + ": ", h("a", { href: it.detail.split(": ").pop(), target: "_blank", rel: "noreferrer" }, "the run on GitHub")] : (it.detail || "")))))))) : null,
+      g.backup_path ? container({ title: "Key backup" }, alert("info", "Keep this file safe", h("span", {}, "The signing key is backed up, encrypted for your Windows account, at ", h("span", { class: "path" }, g.backup_path), ". Relays trust only this key and the ones before it: keep the backup if you change PC."))) : null);
+  },
+
   components() {
     const c = S.components;
     const rels = c.releases || [];
@@ -692,7 +741,7 @@ const views = {
       onclick: (ev) => run(ev.currentTarget, "Verifying signature…", "components", () => api("POST", "/api/components/select", { tag: pick })) }) : null;
     return page({ title: "Components and versions", desc: "The signed Taro Enterprise release your packages are built from.", nextDisabled: !s },
       c.error ? alert("err", "Not usable", c.error) : null,
-      container({ title: "Enterprise release", desc: "Releases tagged enterprise-v… of ducminh1110/RemoteMac on GitHub, newest first. Each lists the exact client and relay files it was tested with, signed with the Taro release key.", actions: [discover, select] },
+      container({ title: "Enterprise release", desc: "Releases tagged enterprise-v… of " + (S.signing.repo ? S.signing.repo.full_name : S.config.release_repo) + " on GitHub, newest first. Each lists the exact client and relay files it was tested with, signed with a trusted release key.", actions: [discover, select] },
         c.releases ? (rels.length ? tiles("release", "Release", pick, rels.map((r) => ({
           value: r.tag, disabled: !r.usable,
           label: r.tag + (r.prerelease ? " (pre-release)" : "") + (r === firstUsable ? " · newest" : ""),
@@ -810,7 +859,7 @@ function go(id) {
   $("main").focus();
 }
 
-const needsPoll = () => S && (S.build.running || S.components.loading || S.components.verifying);
+const needsPoll = () => S && (S.build.running || S.components.loading || S.components.verifying || S.signing.running);
 
 function schedulePoll() {
   if (pollTimer || !needsPoll()) return;
