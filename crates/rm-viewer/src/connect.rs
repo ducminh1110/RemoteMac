@@ -5,10 +5,19 @@
 //! checking the password, setting up, video). It looks like Apple's Screen Sharing (connectui.rs
 //! draws it; its fields are Taro's own). It has its own small message loop and returns once the
 //! user connects (or closes it).
+//!
+//! A provider's Taro (provider.json names its portal) also signs in to the provider: Sign in
+//! shows a code and opens the portal in the browser; once the user approves it there, Taro keeps
+//! the token (protected for this Windows user) and lists the Macs the user rents, refreshed every
+//! 30 seconds; a click on one asks the portal for its ID and password and connects.
 
-use crate::connectui::{Act, Computer, ConnectView, Key};
+use crate::connectui::{Account, Act, Computer, ConnectView, Key, Rented};
+use crate::enterprise::{self, Poll};
 use std::ffi::c_void;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
@@ -26,9 +35,176 @@ const WM_MOUSE_LEAVE: u32 = 0x02A3;
 /// What to connect to: the ID, the password, how, the relay's key.
 type Target = (String, String, Via, String);
 
+/// What the portal's background work brings back.
+enum Ev {
+    Waiting(String),
+    SignedIn { token: String, email: String },
+    SignInFailed(String),
+    Macs(Result<Vec<Rented>, String>),
+    Mac(Result<enterprise::Mac, String>),
+}
+
+/// The provider's portal, when there is one.
+struct Portal {
+    url: String,
+    token: Option<String>,
+    tx: Sender<Ev>,
+    /// the sign-in waiting for approval stops when set
+    cancel: Arc<AtomicBool>,
+    fetching: bool,
+    last_fetch: Option<Instant>,
+}
+
 struct Shell {
     view: ConnectView,
     done: Option<Option<Target>>,
+    portal: Option<Portal>,
+    hwnd: isize,
+}
+
+fn wake(hwnd: isize) {
+    unsafe {
+        let _ = PostMessageW(Some(HWND(hwnd as *mut c_void)), WM_NULL, WPARAM(0), LPARAM(0));
+    }
+}
+
+fn account_path() -> Option<std::path::PathBuf> {
+    dir().map(|d| d.join("account.json"))
+}
+
+/// The kept sign-in for this portal: the token (protected for this Windows user) and the address.
+fn load_account(portal: &str) -> Option<(String, String)> {
+    let text = std::fs::read_to_string(account_path()?).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    if v.get("portal")?.as_str()? != portal {
+        return None;
+    }
+    let token = unprotect(v.get("token")?.as_str()?)?;
+    Some((token, v.get("email").and_then(|e| e.as_str()).unwrap_or("").to_string()))
+}
+
+fn save_account(portal: &str, token_email: Option<(&str, &str)>) {
+    let Some(p) = account_path() else { return };
+    match token_email {
+        Some((token, email)) => {
+            let text = serde_json::json!({ "version": 1, "portal": portal, "email": email, "token": protect(token) }).to_string();
+            let _ = std::fs::create_dir_all(p.parent().unwrap());
+            let tmp = p.with_extension("json.new");
+            if std::fs::write(&tmp, text).is_ok() {
+                let _ = std::fs::rename(&tmp, &p);
+            }
+        }
+        None => {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
+/// Load the rented Macs in the background (unless that is under way).
+fn fetch_macs(p: &mut Portal, hwnd: isize) {
+    let Some(token) = p.token.clone() else { return };
+    if p.fetching {
+        return;
+    }
+    p.fetching = true;
+    p.last_fetch = Some(Instant::now());
+    let (url, tx) = (p.url.clone(), p.tx.clone());
+    std::thread::spawn(move || {
+        let _ = tx.send(Ev::Macs(enterprise::device::macs(&url, &token)));
+        wake(hwnd);
+    });
+}
+
+/// Sign in: a code, the portal's page in the browser, then waiting for the approval.
+fn sign_in(p: &mut Portal, hwnd: isize) {
+    p.cancel.store(true, Ordering::SeqCst);
+    let cancel = Arc::new(AtomicBool::new(false));
+    p.cancel = cancel.clone();
+    let (url, tx) = (p.url.clone(), p.tx.clone());
+    std::thread::spawn(move || {
+        let send = |e: Ev| {
+            let _ = tx.send(e);
+            wake(hwnd);
+        };
+        let start = match enterprise::device::start(&url) {
+            Ok(s) => s,
+            Err(e) => return send(Ev::SignInFailed(e)),
+        };
+        send(Ev::Waiting(start.user_code.clone()));
+        crate::native::open_url(&start.url);
+        let until = Instant::now() + Duration::from_secs(600);
+        let mut every = Duration::from_secs(start.interval);
+        while Instant::now() < until {
+            let next = Instant::now() + every;
+            while Instant::now() < next {
+                if cancel.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            match enterprise::device::poll(&url, &start.device_code) {
+                Ok(Poll::Pending) => {}
+                Ok(Poll::SlowDown) => every += Duration::from_secs(5),
+                Ok(Poll::Approved { token, email }) => return send(Ev::SignedIn { token, email }),
+                Err(e) => return send(Ev::SignInFailed(e)),
+            }
+        }
+        send(Ev::SignInFailed("The code expired. Choose Sign in again.".into()));
+    });
+}
+
+/// What the portal's work brought back, into the view (and a rented Mac to connect to). True when
+/// anything came.
+fn portal_events(rx: &Receiver<Ev>) -> bool {
+    let mut any = false;
+    while let Ok(ev) = rx.try_recv() {
+        any = true;
+        with(|sh| {
+            let hwnd = sh.hwnd;
+            let Some(p) = sh.portal.as_mut() else { return };
+            let signed_out = |sh: &mut Shell, why: &str| {
+                if let Some(p) = sh.portal.as_mut() {
+                    save_account(&p.url, None);
+                    p.token = None;
+                }
+                sh.view.set_account(Account::SignedOut);
+                sh.view.set_error(why);
+            };
+            match ev {
+                Ev::Waiting(code) => sh.view.set_account(Account::Waiting(code)),
+                Ev::SignedIn { token, email } => {
+                    save_account(&p.url, Some((&token, &email)));
+                    p.token = Some(token);
+                    fetch_macs(p, hwnd);
+                    sh.view.set_account(Account::SignedIn(email));
+                    sh.view.set_error("");
+                }
+                Ev::SignInFailed(why) => {
+                    sh.view.set_account(Account::SignedOut);
+                    sh.view.set_error(&why);
+                }
+                Ev::Macs(r) => {
+                    p.fetching = false;
+                    match r {
+                        Ok(list) => sh.view.set_rented(list),
+                        Err(e) if e == enterprise::SIGNED_OUT => signed_out(sh, &e),
+                        Err(e) => sh.view.set_error(&format!("Your Macs could not be loaded: {e}")),
+                    }
+                }
+                Ev::Mac(Ok(mac)) => {
+                    let via = crate::connectui::Via::Id(mac.relay.clone().unwrap_or_default());
+                    sh.done = Some(Some((mac.taro_id.clone(), mac.password.clone(), via, String::new())));
+                }
+                Ev::Mac(Err(e)) => {
+                    sh.view.fail(&e);
+                    if e == enterprise::SIGNED_OUT {
+                        signed_out(sh, &e);
+                    }
+                }
+            }
+        });
+    }
+    any
 }
 
 thread_local! { static STATE: std::cell::RefCell<Option<Shell>> = const { std::cell::RefCell::new(None) }; }
@@ -193,12 +369,22 @@ pub fn connect_window<T: Send>(error: Option<&str>, try_connect: impl Fn(&str, &
         RegisterClassW(&wc); // a second call fails harmlessly (already registered)
         let style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME;
         let mut view = ConnectView::new(load_computers());
+        // a provider's Taro: its portal's account (signed in already, or not)
+        let (tx, rx) = channel::<Ev>();
+        let portal = crate::brand::provider().and_then(|p| p.account.as_ref()).map(|a| {
+            let kept = load_account(&a.portal);
+            view.set_account(match &kept {
+                Some((_, email)) => Account::SignedIn(email.clone()),
+                None => Account::SignedOut,
+            });
+            Portal { url: a.portal.clone(), token: kept.map(|k| k.0), tx, cancel: Arc::new(AtomicBool::new(false)), fetching: false, last_fetch: None }
+        });
         // the guided tour's first part: the demo Mac, above the list
         view.set_demo(crate::tour::offers_demo());
         if let Some(e) = error {
             view.set_error(e);
         }
-        STATE.with(|st| *st.borrow_mut() = Some(Shell { view, done: None }));
+        STATE.with(|st| *st.borrow_mut() = Some(Shell { view, done: None, portal, hwnd: 0 }));
         let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, &windows::core::HSTRING::from(crate::brand::name()), style, CW_USEDEFAULT, CW_USEDEFAULT, 460, 600, None, None, Some(hinst), None).ok()?;
         crate::frame::adopt(hwnd);
         // its size at this scale, a little above the middle of the screen
@@ -212,6 +398,12 @@ pub fn connect_window<T: Send>(error: Option<&str>, try_connect: impl Fn(&str, &
         let _ = SetFocus(Some(hwnd));
         schedule(hwnd);
         CONNECT_HWND.with(|h| h.set(hwnd.0 as isize));
+        with(|sh| {
+            sh.hwnd = hwnd.0 as isize;
+            if let Some(p) = sh.portal.as_mut() {
+                fetch_macs(p, hwnd.0 as isize);
+            }
+        });
         crate::tour::start(hinst);
 
         let mut msg = MSG::default();
@@ -236,6 +428,19 @@ pub fn connect_window<T: Send>(error: Option<&str>, try_connect: impl Fn(&str, &
                         }
                     }
                 }
+                // the portal's answers; the rented Macs again every 30 s
+                if portal_events(&rx) {
+                    redraw(hwnd);
+                    schedule(hwnd);
+                }
+                with(|sh| {
+                    let hwnd = sh.hwnd;
+                    if let Some(p) = sh.portal.as_mut() {
+                        if p.last_fetch.is_some_and(|t| t.elapsed() > Duration::from_secs(30)) {
+                            fetch_macs(p, hwnd);
+                        }
+                    }
+                });
                 // a connection attempt finished?
                 if attempt.as_ref().is_some_and(|h| h.is_finished()) {
                     let h = attempt.take().unwrap();
@@ -257,16 +462,12 @@ pub fn connect_window<T: Send>(error: Option<&str>, try_connect: impl Fn(&str, &
                     }
                     _ => {}
                 }
-                // pump without blocking for long, so the attempt is noticed when it ends
-                if attempt.is_some() {
-                    if !PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                        let _ = MsgWaitForMultipleObjects(None, false, 50, QS_ALLINPUT);
-                        continue;
-                    }
-                    if msg.message == WM_QUIT {
-                        break None;
-                    }
-                } else if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                // pump without blocking for long, so the attempt (and the 30 s refresh) is noticed
+                if !PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = MsgWaitForMultipleObjects(None, false, if attempt.is_some() { 50 } else { 1000 }, QS_ALLINPUT);
+                    continue;
+                }
+                if msg.message == WM_QUIT {
                     break None;
                 }
                 let _ = TranslateMessage(&msg);
@@ -274,6 +475,11 @@ pub fn connect_window<T: Send>(error: Option<&str>, try_connect: impl Fn(&str, &
             }
         });
         crate::tour::close();
+        with(|sh| {
+            if let Some(p) = sh.portal.as_ref() {
+                p.cancel.store(true, Ordering::SeqCst);
+            }
+        });
         CONNECT_HWND.with(|h| h.set(0));
         let _ = DestroyWindow(hwnd);
         STATE.with(|st| st.borrow_mut().take());
@@ -343,6 +549,47 @@ fn act(hwnd: HWND, a: Option<Act>) {
             crate::native::set_clipboard_text(hwnd, &s);
         }
         Some(Act::Save(list)) => save_computers(&list),
+        Some(Act::SignIn) => {
+            with(|sh| {
+                let hwnd = sh.hwnd;
+                if let Some(p) = sh.portal.as_mut() {
+                    sign_in(p, hwnd);
+                    sh.view.set_account(Account::Waiting("…".into()));
+                }
+            });
+        }
+        Some(Act::CancelSignIn) => {
+            with(|sh| {
+                if let Some(p) = sh.portal.as_ref() {
+                    p.cancel.store(true, Ordering::SeqCst);
+                }
+                sh.view.set_account(Account::SignedOut);
+            });
+        }
+        Some(Act::SignOut) => {
+            with(|sh| {
+                if let Some(p) = sh.portal.as_mut() {
+                    if let Some(t) = p.token.take() {
+                        let url = p.url.clone();
+                        std::thread::spawn(move || enterprise::device::sign_out(&url, &t));
+                    }
+                    save_account(&p.url, None);
+                }
+                sh.view.set_account(Account::SignedOut);
+            });
+        }
+        Some(Act::ConnectRented(rental)) => {
+            with(|sh| {
+                let hwnd = sh.hwnd;
+                let Some(p) = sh.portal.as_ref() else { return };
+                let Some(token) = p.token.clone() else { return };
+                let (url, tx) = (p.url.clone(), p.tx.clone());
+                std::thread::spawn(move || {
+                    let _ = tx.send(Ev::Mac(enterprise::device::connect(&url, &token, &rental)));
+                    wake(hwnd);
+                });
+            });
+        }
         None => {}
     }
     redraw(hwnd);
