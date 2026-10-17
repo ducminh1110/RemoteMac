@@ -102,6 +102,10 @@ pub struct Config {
     /// the enterprise/ directory: the web apps are in apps/customer-portal and
     /// apps/provider-console, the shared design tokens in packages/design-tokens
     pub web_dir: std::path::PathBuf,
+    /// a key for the provider's own systems to assign Macs (Bearer, /api/v1/ops/assignments)
+    pub ops_api_key: Option<Secret>,
+    /// where customers download the provider's own Taro app (the portal's Download button)
+    pub app_download_url: Option<String>,
     /// hostnames the customer listener answers for besides the public URL's (verified custom
     /// domains are added from the database)
     pub trusted_proxies: bool,
@@ -234,6 +238,13 @@ impl Config {
                 .map(Into::into)
                 .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/../..").into()),
             trusted_proxies: var("TARO_TRUSTED_PROXY").as_deref() == Some("1"),
+            ops_api_key: match var("TARO_OPS_API_KEY") {
+                Some(k) if k.len() >= 32 => Some(Secret::new(k)),
+                Some(_) => return Err("TARO_OPS_API_KEY must be at least 32 characters".into()),
+                None => None,
+            },
+            app_download_url: var("TARO_APP_DOWNLOAD_URL")
+                .filter(|u| u.starts_with("https://") || env == Env::Development),
         })
     }
 
@@ -264,6 +275,8 @@ impl Config {
             bootstrap_admin_email: None,
             web_dir: concat!(env!("CARGO_MANIFEST_DIR"), "/../..").into(),
             trusted_proxies: false,
+            ops_api_key: None,
+            app_download_url: None,
         }
     }
 }

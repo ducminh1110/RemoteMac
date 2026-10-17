@@ -427,3 +427,60 @@ async fn denied_expired_and_paused() {
     let r = post_app(&w, "/api/v1/devices/authorize", json!({}), None).await;
     assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE, "{}", r.text);
 }
+
+#[tokio::test]
+async fn the_app_signs_in_by_email_code() {
+    let w = world!();
+    let r = post_app(
+        &w,
+        "/api/v1/devices/email/start",
+        json!({ "email": "Mail@Acme.test" }),
+        None,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::ACCEPTED, "{}", r.text);
+    let code = w
+        .mail
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(t, _, _)| t == "mail@acme.test")
+        .map(|(_, s, _)| s.rsplit(' ').next().unwrap().to_string())
+        .unwrap();
+    let wrong = if code == "000000" { "111111" } else { "000000" };
+    let r = post_app(
+        &w,
+        "/api/v1/devices/email/verify",
+        json!({ "email": "mail@acme.test", "code": wrong }),
+        None,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let r = post_app(
+        &w,
+        "/api/v1/devices/email/verify",
+        json!({ "email": "mail@acme.test", "code": code, "client": "Taro on Windows" }),
+        None,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    let token = r.json["access_token"].as_str().unwrap().to_string();
+    assert_eq!(
+        get_app(&w, "/api/v1/device/me", &token).await.json["email"],
+        "mail@acme.test"
+    );
+    let r = post_app(
+        &w,
+        "/api/v1/devices/email/verify",
+        json!({ "email": "mail@acme.test", "code": code }),
+        None,
+    )
+    .await;
+    assert_eq!(
+        r.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a code works once"
+    );
+}

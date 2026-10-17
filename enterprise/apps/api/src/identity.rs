@@ -296,6 +296,29 @@ async fn find_or_create_user(
     Ok((id, true))
 }
 
+/// The customer account of `email`, made if it does not exist yet (an operator assigning a Mac).
+pub async fn customer_user(
+    state: &AppState,
+    email: &str,
+    ip: Option<&str>,
+    method: &str,
+) -> ApiResult<Uuid> {
+    let mut tx = state.db.begin().await?;
+    let (user, created) = find_or_create_user(&mut tx, email, "").await?;
+    if created {
+        audit::record(
+            &mut *tx,
+            Event::new(Actor::User(user), "user.created", "user")
+                .resource(user)
+                .ip(ip)
+                .details(json!({ "method": method })),
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(user)
+}
+
 /// The configured first administrator becomes platform_admin while the platform has none.
 async fn bootstrap_admin(
     state: &AppState,
@@ -559,7 +582,26 @@ async fn email_start(
     from: SignInFrom,
     Json(b): Json<EmailStart>,
 ) -> ApiResult<impl IntoResponse> {
-    let email = b.email.trim().to_lowercase();
+    send_code(&state, from.audience, from.ip.clone(), &b.email).await?;
+    // the same answer whether or not the address has an account
+    Ok((StatusCode::ACCEPTED, Json(json!({ "sent": true }))))
+}
+
+/// Mail a sign-in code (and link) to `email` for `audience` (the Taro app signs in with it too:
+/// devices.rs).
+pub async fn send_code(
+    state: &AppState,
+    audience: Audience,
+    ip: Option<String>,
+    email: &str,
+) -> ApiResult<()> {
+    let from = SignInFrom {
+        audience,
+        ip,
+        user_agent: None,
+        old_cookie: None,
+    };
+    let email = email.trim().to_lowercase();
     if !valid_email(&email) {
         return Err(ApiError::invalid("Type a valid email address."));
     }
@@ -615,8 +657,7 @@ async fn email_start(
             "The sign-in mail could not be sent. Try again in a minute.".into(),
         ));
     }
-    // the same answer whether or not the address has an account
-    Ok((StatusCode::ACCEPTED, Json(json!({ "sent": true }))))
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -651,43 +692,7 @@ async fn email_verify(
                 .await?;
             row.ok_or_else(fail)?.0
         }
-        (None, Some(email), Some(code)) => {
-            let email = email.trim().to_lowercase();
-            let code = code.trim().to_string();
-            // the newest open request for this address takes the try
-            let row: Option<(Uuid, Vec<u8>, i32)> = sqlx::query_as("SELECT id, code_hash, attempts FROM email_login_tokens WHERE email = $1 AND audience = $2 AND used_at IS NULL AND expires_at > now() ORDER BY created_at DESC LIMIT 1")
-                .bind(&email)
-                .bind(from.audience.key())
-                .fetch_optional(&state.db)
-                .await?;
-            let (id, code_hash, attempts) = row.ok_or_else(fail)?;
-            if attempts >= EMAIL_CODE_TRIES {
-                return Err(fail());
-            }
-            if !crypto::eq(&crypto::hash(&format!("{email}:{code}")), &code_hash) {
-                // the fifth wrong code burns the request
-                sqlx::query("UPDATE email_login_tokens SET attempts = attempts + 1, used_at = CASE WHEN attempts + 1 >= $2 THEN now() ELSE NULL END WHERE id = $1").bind(id).bind(EMAIL_CODE_TRIES).execute(&state.db).await?;
-                state.metrics.inc(
-                    "taro_sign_ins_total",
-                    &[
-                        ("method", "email_code"),
-                        ("audience", from.audience.key()),
-                        ("result", "wrong_code"),
-                    ],
-                );
-                return Err(fail());
-            }
-            let used = sqlx::query(
-                "UPDATE email_login_tokens SET used_at = now() WHERE id = $1 AND used_at IS NULL",
-            )
-            .bind(id)
-            .execute(&state.db)
-            .await?;
-            if used.rows_affected() == 0 {
-                return Err(fail());
-            }
-            email
-        }
+        (None, Some(email), Some(code)) => check_code(&state, from.audience, &email, &code).await?,
         _ => {
             return Err(ApiError::invalid(
                 "Send the token from the link, or the email address and the code.",
@@ -698,6 +703,58 @@ async fn email_verify(
     let mut res = Json(json!({ "user_id": user })).into_response();
     res.headers_mut().append(header::SET_COOKIE, cookie);
     Ok(res)
+}
+
+/// The address whose newest open code this is (once; five wrong tries burn the request).
+pub async fn check_code(
+    state: &AppState,
+    audience: Audience,
+    email: &str,
+    code: &str,
+) -> ApiResult<String> {
+    let fail =
+        || ApiError::invalid("That link or code is wrong or has expired. Ask for a new one.");
+    let from = SignInFrom {
+        audience,
+        ip: None,
+        user_agent: None,
+        old_cookie: None,
+    };
+    let email = email.trim().to_lowercase();
+    let code = code.trim().to_string();
+    // the newest open request for this address takes the try
+    let row: Option<(Uuid, Vec<u8>, i32)> = sqlx::query_as("SELECT id, code_hash, attempts FROM email_login_tokens WHERE email = $1 AND audience = $2 AND used_at IS NULL AND expires_at > now() ORDER BY created_at DESC LIMIT 1")
+                .bind(&email)
+                .bind(from.audience.key())
+                .fetch_optional(&state.db)
+                .await?;
+    let (id, code_hash, attempts) = row.ok_or_else(fail)?;
+    if attempts >= EMAIL_CODE_TRIES {
+        return Err(fail());
+    }
+    if !crypto::eq(&crypto::hash(&format!("{email}:{code}")), &code_hash) {
+        // the fifth wrong code burns the request
+        sqlx::query("UPDATE email_login_tokens SET attempts = attempts + 1, used_at = CASE WHEN attempts + 1 >= $2 THEN now() ELSE NULL END WHERE id = $1").bind(id).bind(EMAIL_CODE_TRIES).execute(&state.db).await?;
+        state.metrics.inc(
+            "taro_sign_ins_total",
+            &[
+                ("method", "email_code"),
+                ("audience", from.audience.key()),
+                ("result", "wrong_code"),
+            ],
+        );
+        return Err(fail());
+    }
+    let used = sqlx::query(
+        "UPDATE email_login_tokens SET used_at = now() WHERE id = $1 AND used_at IS NULL",
+    )
+    .bind(id)
+    .execute(&state.db)
+    .await?;
+    if used.rows_affected() == 0 {
+        return Err(fail());
+    }
+    Ok(email)
 }
 
 // ------------------------------------------------------------------ Google (OpenID Connect)
@@ -1109,6 +1166,7 @@ async fn providers(State(state): State<AppState>) -> Json<serde_json::Value> {
         "email": true,
         "environment": state.config.env.as_str(),
         "simulated_provider": state.provider.is_simulated(),
+        "app_download_url": state.config.app_download_url,
         "billing": state.billing.is_some(),
         "billing_live": state.config.stripe.as_ref().is_some_and(|s| s.live),
     }))

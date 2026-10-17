@@ -136,6 +136,7 @@ async fn origin_check(
     if path.starts_with("/webhooks/")
         || path == "/api/v1/connect/redeem"
         || crate::devices::is_app_path(path)
+        || crate::assignments::is_key_request(&req)
     {
         return next.run(req).await;
     }
@@ -332,6 +333,9 @@ pub fn customer(state: &AppState) -> Router {
         .merge(crate::notifications::routes())
         .merge(crate::branding::routes())
         .merge(crate::domains::routes())
+        // the console's machine endpoints are not here (not even as the portal's page)
+        .route("/metrics", axum::routing::any(api_not_found))
+        .route("/internal/{*rest}", axum::routing::any(api_not_found))
         .fallback_service(web(state, "customer-portal"));
     common(state, api, Audience::Customer)
         .layer(middleware::from_fn_with_state(state.clone(), host_check))
@@ -343,6 +347,7 @@ pub fn ops(state: &AppState) -> Router {
     let api = Router::new()
         .merge(crate::identity::routes())
         .merge(crate::ops::routes())
+        .merge(crate::assignments::routes())
         .merge(crate::branding::ops_routes())
         .route("/metrics", get(metrics))
         .route("/internal/tls/ask", get(crate::domains::tls_ask))

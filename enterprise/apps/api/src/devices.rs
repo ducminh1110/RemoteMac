@@ -6,6 +6,13 @@
 //! `POST /api/v1/devices/token`, then gets a token for this user. Only hashes of the device code
 //! and of the token are stored; codes live ten minutes and work once.
 //!
+//! The app also signs in by email without a browser: `POST /api/v1/devices/email/start` mails
+//! the portal's sign-in code, `POST /api/v1/devices/email/verify` trades it for a token (the same
+//! codes, limits and tries as the portal's own email sign-in).
+//!
+//! For Google the app asks for a code with `via: "google"`: the portal's page goes straight to
+//! Google, then shows the approval.
+//!
 //! With the token (`Authorization: Bearer tdv_…`) the app lists the Macs assigned to the user
 //! (`GET /api/v1/device/macs`) and connects to one (`POST /api/v1/device/macs/{id}/connect`):
 //! a one-time connection grant is issued and redeemed on the spot, with every check of a grant
@@ -73,6 +80,8 @@ fn client_name(c: Option<String>) -> String {
 #[derive(Deserialize)]
 struct AuthorizeReq {
     client: Option<String>,
+    /// "google": the portal's page signs in with Google first
+    via: Option<String>,
 }
 
 async fn authorize(
@@ -107,13 +116,17 @@ async fn authorize(
         .execute(&state.db)
         .await?;
     let portal = state.config.public_url.origin().ascii_serialization();
+    let via = match b.via.as_deref() {
+        Some("google") if state.config.google.is_some() => "&via=google",
+        _ => "",
+    };
     Ok((
         StatusCode::CREATED,
         Json(json!({
             "device_code": device_code,
             "user_code": code,
             "verification_uri": format!("{portal}/device"),
-            "verification_uri_complete": format!("{portal}/device?code={code}"),
+            "verification_uri_complete": format!("{portal}/device?code={code}{via}"),
             "expires_in": CODE_MINUTES * 60,
             "interval": INTERVAL_SECS,
         })),
@@ -178,6 +191,22 @@ async fn token(
             ),
         ));
     };
+    sqlx::query("UPDATE device_authorizations SET consumed_at = now() WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    let reply = issue_token(&mut tx, user, &client, "device_code").await?;
+    tx.commit().await?;
+    Ok((StatusCode::OK, Json(reply)))
+}
+
+/// A token for the app, and the answer that carries it (once).
+async fn issue_token(
+    tx: &mut sqlx::PgConnection,
+    user: Uuid,
+    client: &str,
+    method: &str,
+) -> ApiResult<serde_json::Value> {
     let tid = Uuid::new_v4();
     let secret = crypto::token(32);
     let until = Utc::now() + Duration::days(TOKEN_DAYS);
@@ -185,32 +214,89 @@ async fn token(
         .bind(tid)
         .bind(user)
         .bind(crypto::hash(&secret))
-        .bind(&client)
+        .bind(client)
         .bind(until)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("UPDATE device_authorizations SET consumed_at = now() WHERE id = $1")
-        .bind(id)
         .execute(&mut *tx)
         .await?;
     audit::record(
         &mut *tx,
         Event::new(Actor::User(user), "device.signed_in", "device_token")
             .resource(tid)
-            .details(json!({ "client": client })),
+            .details(json!({ "client": client, "method": method })),
     )
     .await?;
     let (email,): (String,) = sqlx::query_as("SELECT email FROM users WHERE id = $1")
         .bind(user)
         .fetch_one(&mut *tx)
         .await?;
+    Ok(
+        json!({ "status": "approved", "access_token": format!("tdv_{}.{secret}", tid.simple()), "email": email, "expires_at": until }),
+    )
+}
+
+#[derive(Deserialize)]
+struct EmailStartReq {
+    email: String,
+}
+
+fn paused() -> ApiError {
+    ApiError::Unavailable("Signing in to the app is paused for a moment. Try again later.".into())
+}
+
+/// The app signs in by email: the portal's sign-in code is mailed.
+async fn email_start(
+    State(state): State<AppState>,
+    parts: Parts,
+    Json(b): Json<EmailStartReq>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    if !crate::ops::flag(&state, "devices.sign_in").await {
+        return Err(paused());
+    }
+    let ip = crate::identity::client_ip(&parts, &state);
+    crate::identity::send_code(&state, Audience::Customer, ip, &b.email).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "sent": true }))))
+}
+
+#[derive(Deserialize)]
+struct EmailVerifyReq {
+    email: String,
+    code: String,
+    client: Option<String>,
+}
+
+/// The code from the mail, typed in the app: a token for the app.
+async fn email_verify(
+    State(state): State<AppState>,
+    parts: Parts,
+    Json(b): Json<EmailVerifyReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let ip = crate::identity::client_ip(&parts, &state);
+    if !state.limiter.allow(
+        "device_email_verify",
+        ip.as_deref().unwrap_or(""),
+        30,
+        std::time::Duration::from_secs(600),
+    ) {
+        return Err(ApiError::RateLimited);
+    }
+    if !crate::ops::flag(&state, "devices.sign_in").await {
+        return Err(paused());
+    }
+    let email = crate::identity::check_code(&state, Audience::Customer, &b.email, &b.code).await?;
+    let user =
+        crate::identity::customer_user(&state, &email, ip.as_deref(), "device_email").await?;
+    let (disabled,): (bool,) =
+        sqlx::query_as("SELECT disabled_at IS NOT NULL FROM users WHERE id = $1")
+            .bind(user)
+            .fetch_one(&state.db)
+            .await?;
+    if disabled {
+        return Err(ApiError::Forbidden);
+    }
+    let mut tx = state.db.begin().await?;
+    let reply = issue_token(&mut tx, user, &client_name(b.client), "email").await?;
     tx.commit().await?;
-    Ok((
-        StatusCode::OK,
-        Json(
-            json!({ "status": "approved", "access_token": format!("tdv_{}.{secret}", tid.simple()), "email": email, "expires_at": until }),
-        ),
-    ))
+    Ok(Json(reply))
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -475,6 +561,8 @@ pub fn app_routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/devices/authorize", post(authorize))
         .route("/api/v1/devices/token", post(token))
+        .route("/api/v1/devices/email/start", post(email_start))
+        .route("/api/v1/devices/email/verify", post(email_verify))
         .route("/api/v1/device/me", get(me))
         .route("/api/v1/device/macs", get(macs))
         .route("/api/v1/device/macs/{id}/connect", post(connect))
@@ -485,6 +573,8 @@ pub fn app_routes() -> Router<AppState> {
 pub fn is_app_path(path: &str) -> bool {
     path == "/api/v1/devices/authorize"
         || path == "/api/v1/devices/token"
+        || path == "/api/v1/devices/email/start"
+        || path == "/api/v1/devices/email/verify"
         || path.starts_with("/api/v1/device/")
 }
 
