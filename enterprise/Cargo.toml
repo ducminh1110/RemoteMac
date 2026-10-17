@@ -1,7 +1,7 @@
 # Taro Enterprise: the cloud control plane (its own workspace, apart from the Taro apps).
 [workspace]
 resolver = "2"
-members = ["apps/api", "apps/setup-wizard"]
+members = ["apps/api", "apps/setup-wizard", "crates/taro-update"]
 
 [workspace.package]
 version = "0.1.0"

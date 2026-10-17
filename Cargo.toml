@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 exclude = ["enterprise"]
-members = ["crates/moonlight-sys", "crates/rm-gamestream", "crates/rm-decode", "crates/rm-fakeagent", "crates/rm-viewer", "crates/rm-protocol", "crates/rm-core", "crates/rm-relay", "crates/rm-agent", "crates/rm-client"]
+members = ["crates/moonlight-sys", "crates/rm-gamestream", "crates/rm-decode", "crates/rm-fakeagent", "crates/rm-viewer", "crates/rm-protocol", "crates/rm-core", "crates/rm-relay", "crates/rm-agent", "crates/rm-client", "crates/rm-brand"]
 
 [workspace.package]
 version = "1.4.1"

@@ -524,6 +524,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rm-brand"
+version = "1.4.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rm-client"
 version = "1.4.1"
 dependencies = [
