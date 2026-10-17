@@ -175,7 +175,7 @@ export async function pageDevice(ctx) {
       h("div", { class: "device-ask" },
         h("p", { class: "device-line" }, h("strong", {}, req.client), " wants to sign in to your account",
           req.ip ? [" from ", h("span", { class: "mono" }, req.ip)] : null, ", ", h("time", { datetime: req.created_at, title: fmtDateTime(req.created_at) }, fmtRel(req.created_at)), "."),
-        kv([["Account", S.me.email], ["Code", h("span", { class: "mono" }, code)]], 3),
+        kv([["Account", S.me.email], ["Code", h("span", { class: "mono" }, code)]], 1),
         alert("warn", null, "If you did not start this sign-in, choose Deny.")),
       h("div", { class: "form-actions" }, deny, approve));
     approve.focus();

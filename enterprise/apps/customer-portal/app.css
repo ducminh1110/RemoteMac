@@ -112,7 +112,8 @@ img.auth-logo { width: 40px; height: 40px; border-radius: 8px; object-fit: conta
   .topnav .badge.hide-sm, .topnav .service.hide-sm, .topnav .hide-sm { display: none; }
 }
 @media (max-width: 560px) {
-  .topnav .brand-name { max-width: 110px; }
+  .topnav .brand-name { display: none; }
+  .topmenu a, .topnav .linkish { white-space: nowrap; }
   .topmenu { margin-left: 4px; }
   .topmenu a { padding: 6px 8px; }
   .topnav .linkish { padding: 0 6px; }
