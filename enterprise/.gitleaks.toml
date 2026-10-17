@@ -15,6 +15,9 @@ regexes = [
   '''test-key-[a-z0-9]+''',
   '''k3y-0123456789abcdef''',
   '''acme-admission-key-0123456789''',
+  '''placeholder-key-0123456789''',
+  '''globex-key-0123456789abcdef''',
+  '''0123456789abcdef-_XYZ''',
   '''0123456789abcdef0''',
   # the PAKE test vector shared by Secure.swift and rm-protocol's shared_vectors test
   '''3a6365467c85f122da38bf3b7192b081049bbf94ace2a9e0''',
