@@ -170,6 +170,27 @@ async fn the_providers_system_assigns_with_the_api_key() {
             .status,
         StatusCode::UNAUTHORIZED
     );
+    // the key lists the plans' ids to assign with
+    let auth = format!("Bearer {key}");
+    let r = w
+        .raw(
+            &mut machine,
+            Method::GET,
+            "/api/v1/ops/assignments/plans",
+            None,
+            &[("authorization", auth.as_str())],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    assert!(
+        r.json["plans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == json!(plan)),
+        "{}",
+        r.text
+    );
     let r = send(key.into()).await;
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
     let rental = r.json["rental"]["id"].as_str().unwrap().to_string();

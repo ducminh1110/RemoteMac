@@ -5,7 +5,7 @@ import Foundation
 import CryptoKit
 
 /// Taro's version (the same as the Windows app's, Cargo.toml).
-let appVersion = "1.5.0"
+let appVersion = "1.5.1"
 
 /// The relay used when none is given: a provider's (provider/provider.json next to this
 /// program, Provider.swift), else the one built in by release builds (none from source). In a

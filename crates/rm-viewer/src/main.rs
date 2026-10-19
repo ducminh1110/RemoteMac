@@ -130,7 +130,7 @@ fn main() {
                 app_timeout: std::time::Duration::from_secs(get("--app-timeout").and_then(|s| s.parse().ok()).unwrap_or(150)),
                 type_text: get("--type"),
             }) };
-        std::process::exit(rm_viewer::ui::run(opts));
+        rm_viewer::native::exit_now(rm_viewer::ui::run(opts));
     }
     #[cfg(not(windows))]
     {

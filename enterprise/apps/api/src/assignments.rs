@@ -6,6 +6,7 @@
 //!
 //! The provider's own systems do the same with `Authorization: Bearer <TARO_OPS_API_KEY>`
 //! (automatic assignment, e.g. after a sale elsewhere): a key request never uses a session.
+//! `GET /api/v1/ops/assignments/plans` lists the active plans' ids for it.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -116,6 +117,25 @@ async fn list(
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "assignments": rows })))
+}
+
+/// The active plans an assignment can use (for the provider's systems: the key cannot read the
+/// console's plan pages).
+async fn plans(
+    State(state): State<AppState>,
+    mut parts: axum::http::request::Parts,
+) -> ApiResult<Json<serde_json::Value>> {
+    by(&state, &mut parts, P::OpsOrgsRead).await?;
+    let rows: Vec<(Uuid, String, String, Option<i32>)> = sqlx::query_as(
+        "SELECT id, name, billing, duration_hours FROM mac_plans WHERE active ORDER BY name",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    let plans: Vec<_> = rows
+        .into_iter()
+        .map(|(id, name, billing, hours)| json!({ "id": id, "name": name, "billing": billing, "duration_hours": hours }))
+        .collect();
+    Ok(Json(json!({ "plans": plans })))
 }
 
 #[derive(Deserialize)]
@@ -306,5 +326,6 @@ async fn end(
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/ops/assignments", get(list).post(create))
+        .route("/api/v1/ops/assignments/plans", get(plans))
         .route("/api/v1/ops/assignments/{id}/end", post(end))
 }

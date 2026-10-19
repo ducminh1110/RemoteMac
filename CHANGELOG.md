@@ -4,6 +4,21 @@ Each version of Taro (called MacBridge until 1.2.0), newest first. Both sides sh
 same version; a newer Windows app works with an older Mac app without the features the Mac
 lacks.
 
+## 1.5.1
+
+### Fixed
+- Disconnect no longer crashes Taro on Windows. Taro left through the normal process exit, which
+  deleted the windows' drawing surfaces after Windows had begun taking its graphics library
+  down; Windows recorded a GDI32 access violation each time (the new Taro still opened, so it
+  went unnoticed). Taro now undoes everything it owns (tray icon, Start menu shortcuts, the
+  Mac's session) and ends at once.
+- A click on part of a Mac window that is below the Dock or past the edge of the Mac's screen
+  now works. The picture showed the whole window (Calculator's equals button included) but the
+  Mac's pointer cannot reach below the screen, so the click landed on nothing. In app mode the
+  Mac now keeps every window entirely on its usable screen when it opens, when the app moves
+  it, and when the Mac Desktop is closed (moved, and made smaller only when it is bigger than
+  the screen). The Mac Desktop is left alone: windows go where you put them there.
+
 ## 1.5.0
 
 ### Added

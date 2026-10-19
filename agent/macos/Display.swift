@@ -347,6 +347,56 @@ final class DisplayManager {
         desktopOpen = false
         lock.lock(); let any = !saved.isEmpty; lock.unlock()
         if any && chromeSaved != nil { applyChrome(menu: true, dock: true) }
+        // windows left half off the screen on the Desktop come back (the displays settle first)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.8) { [self] in keepAllVisible() }
+    }
+
+    /// When a window was last put back on the screen by us, and the frame it was given: its own
+    /// move to that frame is not answered with another one, and an app that keeps putting its
+    /// window elsewhere is not fought every tick.
+    private var fitted: [CGWindowID: CFAbsoluteTime] = [:]
+
+    /// A window the pointer cannot reach all of. The picture shows all of a window, also the part
+    /// that is below the Dock or past the screen's edge, but a click there lands on nothing: a
+    /// button drawn at the bottom of Calculator did not answer. In app mode every window is put
+    /// entirely on the usable screen (moved, and made smaller only when bigger than it). Not on
+    /// the Mac Desktop, where the user places windows as they like, nor in full screen.
+    func keepVisible(_ w: WinInfo) {
+        guard w.role == .window, !w.fullScreen else { return }
+        lock.lock()
+        let managed = saved[w.id] != nil || desktopOpen
+        let recent = fitted[w.id].map { CFAbsoluteTimeGetCurrent() - $0 < 1.5 } ?? false
+        if !managed && !recent { fitted[w.id] = CFAbsoluteTimeGetCurrent() }
+        lock.unlock()
+        guard !managed, !recent else { return }
+        // the display most of the window is on (else the main one: it is off every screen)
+        var ids = [CGDirectDisplayID](repeating: 0, count: 8)
+        var n: UInt32 = 0
+        CGGetDisplaysWithRect(w.rect, UInt32(ids.count), &ids, &n)
+        var best = CGMainDisplayID(), bestArea: CGFloat = 0
+        for d in ids.prefix(Int(n)) {
+            let i = CGDisplayBounds(d).intersection(w.rect)
+            if !i.isNull, i.width * i.height > bestArea { best = d; bestArea = i.width * i.height }
+        }
+        let area = usable(best)
+        guard area.width > 100, area.height > 100 else { return }
+        var f = w.rect
+        f.size.width = min(f.width, area.width)
+        f.size.height = min(f.height, area.height)
+        f.origin.x = min(max(f.minX, area.minX), area.maxX - f.width)
+        f.origin.y = min(max(f.minY, area.minY), area.maxY - f.height)
+        guard abs(f.minX - w.rect.minX) > 1 || abs(f.minY - w.rect.minY) > 1 || abs(f.width - w.rect.width) > 1 || abs(f.height - w.rect.height) > 1 else { return }
+        guard let aw = axWindowFor(pid: w.pid, id: w.id, rect: w.rect) else { return }
+        log("window \(w.id) reached off the screen (\(Int(w.rect.width))x\(Int(w.rect.height)) at \(Int(w.rect.minX)),\(Int(w.rect.minY))): moved to \(Int(f.width))x\(Int(f.height)) at \(Int(f.minX)),\(Int(f.minY))")
+        // the size only when it changes: setting it again can reset a window that cannot take it
+        var p = f.origin, s = f.size
+        if f.size != w.rect.size, let v = AXValueCreate(.cgSize, &s) { AXUIElementSetAttributeValue(aw, kAXSizeAttribute as CFString, v) }
+        if let v = AXValueCreate(.cgPoint, &p) { AXUIElementSetAttributeValue(aw, kAXPositionAttribute as CFString, v) }
+    }
+
+    /// Every window of the session, once (the Mac Desktop closed).
+    func keepAllVisible() {
+        for w in tracker.all() { keepVisible(w) }
     }
 
     func setChromeHidden(_ hide: Bool) {

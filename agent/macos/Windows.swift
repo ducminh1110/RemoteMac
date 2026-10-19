@@ -298,6 +298,7 @@ final class WindowTracker {
     }
 
     func current(_ id: CGWindowID) -> WinInfo? { seenLock.lock(); defer { seenLock.unlock() }; return seen[id] }
+    func all() -> [WinInfo] { seenLock.lock(); defer { seenLock.unlock() }; return Array(seen.values) }
 
     /// An app that was already open on the Mac is now shown on Windows: its windows that existed
     /// when the agent started (left alone as the user's until now) are reported like new ones.

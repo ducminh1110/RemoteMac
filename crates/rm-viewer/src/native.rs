@@ -427,3 +427,20 @@ pub fn wait_for_process(pid: u32, limit: std::time::Duration) {
         }
     }
 }
+
+/// End this process now, as the viewer's last act. `ExitProcess` (what `std::process::exit` calls)
+/// runs the thread-local destructors of the UI thread and every DLL's detach on the way out: the
+/// remote windows' GDI surfaces were deleted there, after the libraries they use were already
+/// being torn down, and Windows recorded a GDI32 access violation at each Disconnect. Everything
+/// the viewer must undo (the tray icon, the Start menu shortcuts, the Mac's session) is undone
+/// before this is called, and Windows frees the rest with the process.
+pub fn exit_now(code: i32) -> ! {
+    use std::io::Write as _;
+    use windows::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    unsafe {
+        let _ = TerminateProcess(GetCurrentProcess(), code as u32);
+    }
+    std::process::exit(code)
+}

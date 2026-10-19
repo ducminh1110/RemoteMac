@@ -562,6 +562,8 @@ tracker.onCreated = { w in
     send(["type": "window_created", "window_id": Int(w.id), "application_id": w.appID, "title": String(w.title.prefix(1000)), "bounds": rectJSON(w.content),
           "parent_id": w.parent.map { Int($0) as Any } ?? NSNull(), "role": w.role.rawValue])
     startStream(w.id, inset: w.inset, popup: w.role == .popup)
+    // a window that opens partly off the screen is put back on it: a click there reaches nothing
+    DispatchQueue.global().async { displays.keepVisible(w) }
     // opened already in macOS full screen (a video made full screen in Safari): the viewer shows it
     // full screen on the PC, not as one more window
     if w.role == .window && isWholeDisplay(w.rect) {
@@ -593,6 +595,7 @@ tracker.onDestroyed = { id in
 }
 tracker.onMoved = { w in
     send(["type": "window_moved", "window_id": Int(w.id), "bounds": rectJSON(w.content)])
+    if w.role == .window && !w.fullScreen { DispatchQueue.global().async { displays.keepVisible(w) } }
     if w.role == .window, w.fullScreen != fullScreenSent.contains(w.id) {
         if w.fullScreen { fullScreenSent.insert(w.id) } else { fullScreenSent.remove(w.id) }
         send(["type": "window_is_fullscreen", "window_id": Int(w.id), "on": w.fullScreen])
