@@ -63,7 +63,9 @@ pub fn before_restart(layout: &Layout, sys: &dyn System) -> Result<(), String> {
         .flatten()
         .map(|p| p.product.name)
         .unwrap_or_else(|| "Taro".into());
-    let root = std::env::var_os("TARO_ROOT").map(std::path::PathBuf::from);
+    let root = std::env::var_os("TARO_ROOT")
+        .filter(|r| !r.is_empty())
+        .map(std::path::PathBuf::from);
     let dir = sys.units_dir();
     for (name, text) in crate::setup::units(layout, root.as_deref()) {
         let path = dir.join(name);

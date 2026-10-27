@@ -91,7 +91,9 @@ if [[ -f provider/provider.json ]]; then
   fi
 fi
 
-TARO_ROOT="$ROOT" "$OPT/core/bin/taro-relay" install-core --version "$VERSION" --arch "$ARCH" >/dev/null
+# TARO_ROOT only when installing under a folder (an empty one would make the paths relative)
+RUN=(env); [[ -n "$ROOT" ]] && RUN=(env TARO_ROOT="$ROOT")
+"${RUN[@]}" "$OPT/core/bin/taro-relay" install-core --version "$VERSION" --arch "$ARCH" >/dev/null
 ok "recorded as version $VERSION"
 
 if [[ $RECOVER -eq 1 && -z "$ROOT" ]] && systemctl list-unit-files taro-relay.service >/dev/null 2>&1; then
@@ -100,7 +102,7 @@ fi
 
 if [[ $SETUP -eq 1 && $RECOVER -eq 0 ]]; then
   echo
-  exec env TARO_ROOT="$ROOT" "$OPT/core/bin/taro-relay" setup
+  exec "${RUN[@]}" "$OPT/core/bin/taro-relay" setup
 fi
 echo
 echo "  Next: sudo taro-relay setup"

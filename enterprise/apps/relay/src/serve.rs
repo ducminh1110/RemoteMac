@@ -340,6 +340,9 @@ pub fn run(layout: Layout) -> ! {
                 }
                 Err(e) => {
                     eprintln!("taro-relay: the portal and the console could not start: {e}");
+                    if !crate::portal::secret_file(&layout).exists() {
+                        eprintln!("taro-relay: they are not set up on this server yet: sudo taro-relay portal enable");
+                    }
                     None
                 }
             },

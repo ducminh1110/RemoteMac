@@ -6,7 +6,7 @@
 //!   taro-relay status | health | version
 //!   taro-relay update check | apply [FILE | --latest] [--yes] [--overwrite-modified]
 //!                     | rollback | status | auto
-//!   taro-relay portal status | setup-code   the portal and the console on this server
+//!   taro-relay portal status | setup-code | enable   the portal and the console on this server
 //!   taro-relay install-core --version V --arch A   (install.sh: record a fresh installation)
 //!
 //! TARO_ROOT=DIR puts the whole installation under DIR (tests, portable installs).
@@ -25,7 +25,8 @@ fn die(msg: impl std::fmt::Display) -> ! {
 }
 
 fn layout() -> (Layout, Option<PathBuf>) {
-    match std::env::var_os("TARO_ROOT") {
+    // set but empty (install.sh before 0.2.1 passed TARO_ROOT="" on a normal install): the system
+    match std::env::var_os("TARO_ROOT").filter(|r| !r.is_empty()) {
         Some(r) => {
             let r = PathBuf::from(r);
             (Layout::under(&r), Some(r))
@@ -214,6 +215,20 @@ fn portal_cmd(args: &[String]) {
                 "Open {}/console/ and enter it to make the first administrator (it works only while there is none).",
                 taro_relay::portal::site(&r)
             );
+        }
+        // what an update from 0.2 on does by itself (update.rs before_restart): for a relay
+        // updated by 0.1's updater, which knows nothing of the portal
+        Some("enable") => {
+            if !sys.is_root() && root.is_none() {
+                die("this changes folders and the systemd unit: sudo taro-relay portal enable");
+            }
+            taro_relay::update::before_restart(&layout, &sys).unwrap_or_else(|e| die(e));
+            if root.is_none() {
+                sys.run("systemctl", &["restart", "taro-relay"])
+                    .unwrap_or_else(|e| die(e));
+                println!("  relay restarted");
+            }
+            println!("  next: open {}/console/", taro_relay::portal::site(&r));
         }
         Some("status") | None => match &r.portal {
             Some(p) if p.enabled => {
