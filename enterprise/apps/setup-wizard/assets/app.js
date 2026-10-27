@@ -672,8 +672,8 @@ const views = {
           h("summary", {}, "Use an existing key"),
           field(st, { name: "relay.key.entry", id: "key-entry", label: "Existing key", value: "", mono: true, placeholder: "16-128 letters, digits, - or _", spellcheck: "false", hint: "For a rebuild: the key your relay and earlier clients use." }))),
       container({ title: "Sign-in and machine management", desc: "Optional. Written as account.portal in provider.json." },
-        field(st, { name: "account.portal", label: "Portal address", opt: true, value: r.portal || "", placeholder: "https://portal.acme.example", mono: true, spellcheck: "false", inputmode: "url",
-          desc: "Your Taro Enterprise portal. Your users sign in there from the client and see the Macs they rented or were given; the client connects to them through your relay.",
+        field(st, { name: "account.portal", label: "Portal address", opt: true, value: r.portal || (r.host ? `https://${r.host}` : ""), placeholder: "https://relay.acme.example", mono: true, spellcheck: "false", inputmode: "url",
+          desc: "Your Taro Enterprise portal: since 0.2 your relay server serves it, at https://<relay host>/ (the console at /console/). Your users sign in there from the client and see the Macs assigned to them; the client connects to them through your relay.",
           hint: "Without it the client works as standard Taro does: the user enters a Mac's ID and password." })),
       container({ title: "Client updates", desc: "Written as updates.clients in provider.json." },
         tiles("client_updates", "Client updates", draft("client_updates", r.client_updates), [
