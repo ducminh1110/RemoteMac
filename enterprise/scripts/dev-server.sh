@@ -2,6 +2,9 @@
 # Run Taro Enterprise locally for development and the web apps' browser checks.
 #
 #   scripts/dev-server.sh <name> [portal-port]       (the Provider Console is on portal-port + 1)
+#   SINGLE=1 scripts/dev-server.sh <name> [port]     one site, as the relay serves it: the portal
+#                                                    at /, the console at /console
+#   FLEET=1 …                                        Macs that enroll themselves (no pretend Macs)
 #
 # Needs a Postgres server (PG_URL, default postgres://postgres@127.0.0.1:5432) and a built
 # target/debug/taro-enterprise. Makes the database taro_dev_<name> if missing, adds the example
@@ -22,6 +25,10 @@ export TARO_ENV=development
 export TARO_DATABASE_URL="$pg/$db"
 export TARO_LISTEN="127.0.0.1:$port" TARO_OPS_LISTEN="127.0.0.1:$((port + 1))"
 export TARO_PUBLIC_URL="http://127.0.0.1:$port" TARO_OPS_URL="http://127.0.0.1:$((port + 1))"
+if [[ -n "${SINGLE:-}" ]]; then export TARO_OPS_URL="http://127.0.0.1:$port/console"; fi
+if [[ -n "${FLEET:-}" ]]; then export TARO_PROVIDER=fleet TARO_RELAY_ADDRESS=${TARO_RELAY_ADDRESS:-relay.example.test:7470}; fi
+# the first-run form (when no administrator exists yet): this code
+export TARO_SETUP_CODE=${TARO_SETUP_CODE:-ABCD-EFGH-JKLM}
 export TARO_BOOTSTRAP_ADMIN_EMAIL=${TARO_BOOTSTRAP_ADMIN_EMAIL:-ops@example.test}
 export TARO_MOCK_MACS=${TARO_MOCK_MACS:-6} TARO_MOCK_DELAY_SECS=${TARO_MOCK_DELAY_SECS:-2}
 export TARO_WEB_DIR=${TARO_WEB_DIR:-$here}

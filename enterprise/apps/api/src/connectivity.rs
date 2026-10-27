@@ -68,11 +68,16 @@ pub async fn issue(
     ) {
         return Err(ApiError::RateLimited);
     }
-    let (resource,): (Uuid,) =
-        sqlx::query_as("SELECT resource_id FROM rentals WHERE id = $1 AND resource_id IS NOT NULL")
+    let (resource, held): (Uuid, bool) =
+        sqlx::query_as("SELECT r.resource_id, m.control_by IS NOT NULL FROM rentals r JOIN mac_resources m ON m.id = r.resource_id WHERE r.id = $1")
             .bind(rental)
             .fetch_one(&state.db)
             .await?;
+    if held {
+        return Err(ApiError::conflict(
+            "An administrator is working on this Mac. You can connect again when they hand it back.",
+        ));
+    }
     let id = Uuid::new_v4();
     let secret = crypto::token(32);
     let expires = Utc::now() + Duration::seconds(GRANT_SECONDS);
@@ -152,11 +157,52 @@ pub async fn redeem_grant(
     let (id, secret) = grant.split_once('.').ok_or_else(bad)?;
     let id: Uuid = id.parse().map_err(|_| bad())?;
     let mut tx = state.db.begin().await?;
+    // an administrator's grant: no rental, and only while they still have the Mac
+    let admin: Option<(Uuid, Uuid)> = sqlx::query_as(
+        "UPDATE connection_grants g SET redeemed_at = now() FROM mac_resources m
+         WHERE g.id = $1 AND g.secret_hash = $2 AND g.rental_id IS NULL AND g.redeemed_at IS NULL AND g.revoked_at IS NULL AND g.expires_at > now()
+           AND m.id = g.resource_id AND m.control_by = g.user_id
+         RETURNING g.user_id, g.resource_id",
+    )
+    .bind(id)
+    .bind(crypto::hash(secret))
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some((user, resource)) = admin {
+        let (ext, name): (String, String) =
+            sqlx::query_as("SELECT external_id, display_name FROM mac_resources WHERE id = $1")
+                .bind(resource)
+                .fetch_one(&mut *tx)
+                .await?;
+        let conn = provider::bounded("connection", state.provider.connection(&ext))
+            .await
+            .map_err(|e| {
+                ApiError::Unavailable(format!(
+                    "The Mac cannot be reached right now ({}). Try again in a minute.",
+                    e.message
+                ))
+            })?;
+        sqlx::query("INSERT INTO remote_sessions (id, grant_id, rental_id, user_id, client) VALUES ($1, $2, NULL, $3, $4)").bind(Uuid::new_v4()).bind(id).bind(user).bind(client.map(|c| c.chars().take(80).collect::<String>())).execute(&mut *tx).await?;
+        audit::record(
+            &mut *tx,
+            Event::new(Actor::Operator(user), "connect.redeemed", "mac_resource")
+                .resource(resource)
+                .ip(ip)
+                .details(json!({ "grant": id, "administrator": true })),
+        )
+        .await?;
+        tx.commit().await?;
+        state.metrics.inc("taro_connections_total", &[]);
+        return Ok(
+            json!({ "taro_id": conn.taro_id, "relay": conn.relay, "password": conn.password, "mac_name": name, "rental_ends_at": null }),
+        );
+    }
     let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
-        "UPDATE connection_grants g SET redeemed_at = now() FROM rentals r, rental_assignments a
+        "UPDATE connection_grants g SET redeemed_at = now() FROM rentals r, rental_assignments a, mac_resources m
          WHERE g.id = $1 AND g.secret_hash = $2 AND g.redeemed_at IS NULL AND g.revoked_at IS NULL AND g.expires_at > now()
            AND r.id = g.rental_id AND r.status = 'ready' AND r.resource_id = g.resource_id
            AND a.rental_id = r.id AND a.user_id = g.user_id AND a.revoked_at IS NULL
+           AND m.id = g.resource_id AND m.control_by IS NULL
          RETURNING g.rental_id, g.user_id, g.resource_id",
     )
     .bind(id)

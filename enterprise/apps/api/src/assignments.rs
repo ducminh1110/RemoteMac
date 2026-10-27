@@ -142,6 +142,9 @@ async fn plans(
 struct NewAssignment {
     email: String,
     plan_id: Uuid,
+    /// a particular Mac (Macs in the console); otherwise the worker picks a free one of the plan
+    #[serde(default)]
+    mac_id: Option<Uuid>,
 }
 
 async fn create(
@@ -241,6 +244,44 @@ async fn create(
         &actor,
     )
     .await?;
+    if let Some(mac) = b.mac_id {
+        let m: Option<(String, Option<String>, bool)> = sqlx::query_as(
+            "SELECT state, hold_reason, control_by IS NOT NULL FROM mac_resources WHERE id = $1 AND provider_id = $2 FOR UPDATE",
+        )
+        .bind(mac)
+        .bind(state.provider_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        match m {
+            Some((st, None, false)) if st == "available" => {}
+            Some((_, _, true)) => {
+                return Err(ApiError::conflict(
+                    "An administrator is working on this Mac. Release it first.",
+                ))
+            }
+            Some(_) => return Err(ApiError::conflict("This Mac is not free.")),
+            None => return Err(ApiError::invalid("Choose a Mac of this server.")),
+        }
+        sqlx::query(
+            "UPDATE mac_resources SET state = 'reserved', updated_at = now() WHERE id = $1",
+        )
+        .bind(mac)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE rentals SET resource_id = $2, updated_at = now() WHERE id = $1")
+            .bind(id)
+            .bind(mac)
+            .execute(&mut *tx)
+            .await?;
+        rentals::transition(
+            &mut tx,
+            id,
+            Status::Provisioning,
+            "the operator chose the Mac",
+            &actor,
+        )
+        .await?;
+    }
     sqlx::query("INSERT INTO rental_assignments (id, rental_id, user_id, assigned_by) VALUES ($1, $2, $3, $4)")
         .bind(Uuid::new_v4())
         .bind(id)

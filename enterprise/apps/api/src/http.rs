@@ -85,7 +85,7 @@ async fn security_headers(State(state): State<AppState>, req: Request, next: Nex
     let set = |h: &mut axum::http::HeaderMap, k: header::HeaderName, v: &'static str| {
         h.entry(k).or_insert(HeaderValue::from_static(v));
     };
-    set(h, header::CONTENT_SECURITY_POLICY, "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    set(h, header::CONTENT_SECURITY_POLICY, "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
     set(h, header::X_CONTENT_TYPE_OPTIONS, "nosniff");
     set(
         h,
@@ -136,6 +136,7 @@ async fn origin_check(
     if path.starts_with("/webhooks/")
         || path == "/api/v1/connect/redeem"
         || crate::devices::is_app_path(path)
+        || crate::fleet::is_agent_path(path)
         || crate::assignments::is_key_request(&req)
     {
         return next.run(req).await;
@@ -287,6 +288,27 @@ fn web(state: &AppState, app: &str) -> ServeDir<ServeFile> {
     ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")))
 }
 
+/// The console's page, told where it is with `<base>`: at `/` on its own origin, or under
+/// `/console` when it shares the portal's (one server). Its links and calls are relative to it.
+async fn console_index(State(state): State<AppState>) -> Response {
+    let path = state
+        .config
+        .web_dir
+        .join("apps/provider-console/index.html");
+    let base = format!("{}/", state.config.ops_url.path().trim_end_matches('/'));
+    match tokio::fs::read_to_string(&path).await {
+        Ok(html) => (
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            html.replacen("<head>", &format!("<head>\n<base href=\"{base}\">"), 1),
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 fn common(state: &AppState, router: Router<AppState>, audience: Audience) -> Router {
     router
         .route("/healthz", get(healthz))
@@ -328,6 +350,7 @@ pub fn customer(state: &AppState) -> Router {
         .merge(crate::connectivity::redeem_routes())
         .merge(crate::devices::routes())
         .merge(crate::devices::app_routes())
+        .merge(crate::fleet::agent_routes())
         .merge(crate::billing::routes())
         .merge(crate::billing::webhook_routes())
         .merge(crate::notifications::routes())
@@ -346,13 +369,28 @@ pub fn customer(state: &AppState) -> Router {
 pub fn ops(state: &AppState) -> Router {
     let api = Router::new()
         .merge(crate::identity::routes())
+        .merge(crate::first_run::routes())
         .merge(crate::ops::routes())
         .merge(crate::assignments::routes())
+        .merge(crate::fleet::routes())
         .merge(crate::branding::ops_routes())
         .route("/metrics", get(metrics))
         .route("/internal/tls/ask", get(crate::domains::tls_ask))
-        .fallback_service(web(state, "provider-console"));
+        .route("/", get(console_index))
+        .fallback_service(
+            ServeDir::new(state.config.web_dir.join("apps/provider-console"))
+                .append_index_html_on_directories(false)
+                .fallback(get(console_index).with_state(state.clone())),
+        );
     common(state, api, Audience::Ops)
+}
+
+/// One server (the relay runs everything): the portal at `/`, the console under `/console`, on
+/// one origin. The console keeps its own sessions, cookies and permissions.
+pub fn single(state: &AppState) -> Router {
+    Router::new()
+        .nest_service("/console", ops(state))
+        .fallback_service(customer(state))
 }
 
 /// A request body type that both routers accept (re-exported for tests).

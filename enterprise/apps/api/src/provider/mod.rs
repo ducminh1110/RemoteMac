@@ -3,6 +3,7 @@
 //! timeout, every error says whether a retry can help, and nothing an adapter returns is shown to
 //! a customer without going through `safe_diagnostics`.
 
+pub mod fleet;
 pub mod mock;
 
 use async_trait::async_trait;

@@ -268,7 +268,7 @@ impl Auth {
 
 // ------------------------------------------------------------------ users and sessions
 
-async fn find_or_create_user(
+pub(crate) async fn find_or_create_user(
     tx: &mut sqlx::PgConnection,
     email: &str,
     name: &str,
@@ -345,7 +345,7 @@ async fn bootstrap_admin(
 }
 
 /// Start a session; the Set-Cookie header for it.
-async fn new_session(
+pub(crate) async fn new_session(
     state: &AppState,
     tx: &mut sqlx::PgConnection,
     user: Uuid,
@@ -376,7 +376,7 @@ async fn new_session(
 
 /// Finish a sign-in for a known address: the user (created on the portal, never on the
 /// console), the operator check, and a fresh session (the old one, if any, ends).
-async fn sign_in(
+pub(crate) async fn sign_in(
     state: &AppState,
     parts: &SignInFrom,
     email: &str,
@@ -634,7 +634,7 @@ pub async fn send_code(
         .bind(&from.ip)
         .execute(&state.db)
         .await?;
-    let origin = from.audience.origin(&state.config);
+    let origin = from.audience.base(&state.config);
     let product = if from.audience == Audience::Ops {
         "Taro Operations"
     } else {
@@ -777,7 +777,7 @@ fn safe_return(p: Option<&str>) -> String {
 }
 
 fn redirect_uri(state: &AppState, a: Audience) -> String {
-    format!("{}/api/v1/auth/google/callback", a.origin(&state.config))
+    format!("{}/api/v1/auth/google/callback", a.base(&state.config))
 }
 
 fn pkce_challenge(verifier: &str) -> String {
@@ -920,7 +920,7 @@ async fn google_callback(
         .as_ref()
         .ok_or(ApiError::NotFound)?
         .clone();
-    let origin = from.audience.origin(&state.config);
+    let origin = from.audience.base(&state.config);
     let back = |why: &str| Redirect::to(&format!("{origin}/sign-in?error={why}")).into_response();
     if q.error.is_some() {
         return Ok(back("cancelled"));

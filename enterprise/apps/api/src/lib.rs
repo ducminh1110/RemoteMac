@@ -16,6 +16,8 @@ pub mod db;
 pub mod devices;
 pub mod domains;
 pub mod error;
+pub mod first_run;
+pub mod fleet;
 pub mod http;
 pub mod identity;
 pub mod incidents;

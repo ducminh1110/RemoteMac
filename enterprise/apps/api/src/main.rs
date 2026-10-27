@@ -118,7 +118,16 @@ async fn serve(cfg: config::Config, pool: sqlx::PgPool) -> anyhow::Result<()> {
         ),
     );
     let (listen, ops_listen, env) = (cfg.listen, cfg.ops_listen, cfg.env);
-    let state = taro_enterprise::build_state(cfg, pool, Arc::new(mock), None, None).await?;
+    let provider: Arc<dyn provider::Provider> = if cfg.provider == "fleet" {
+        Arc::new(provider::fleet::Fleet::new(
+            pool.clone(),
+            cfg.secret_key.expose(),
+            cfg.relay_address.clone(),
+        ))
+    } else {
+        Arc::new(mock)
+    };
+    let state = taro_enterprise::build_state(cfg, pool, provider, None, None).await?;
     tracing::info!(
         environment = env.as_str(),
         provider = state.provider.kind(),
@@ -142,9 +151,10 @@ async fn serve(cfg: config::Config, pool: sqlx::PgPool) -> anyhow::Result<()> {
         tracing::warn!(error = %e, "first inventory sync");
     }
     taro_enterprise::spawn_workers(&state);
+    // one web site: the console under /console of the portal (TARO_OPS_URL has that path)
+    let single = state.config.ops_url.origin() == state.config.public_url.origin()
+        && state.config.ops_url.path().trim_end_matches('/') == "/console";
     let customer = tokio::net::TcpListener::bind(listen).await?;
-    let ops = tokio::net::TcpListener::bind(ops_listen).await?;
-    tracing::info!(portal = %listen, console = %ops_listen, "listening");
     let shutdown = || async {
         let ctrl_c = tokio::signal::ctrl_c();
         #[cfg(unix)]
@@ -157,6 +167,19 @@ async fn serve(cfg: config::Config, pool: sqlx::PgPool) -> anyhow::Result<()> {
         #[cfg(not(unix))]
         let _ = ctrl_c.await;
     };
+    if single {
+        tracing::info!(site = %listen, "listening (portal at /, console at /console)");
+        axum::serve(
+            customer,
+            http::single(&state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown())
+        .await?;
+        tracing::info!("stopped");
+        return Ok(());
+    }
+    let ops = tokio::net::TcpListener::bind(ops_listen).await?;
+    tracing::info!(portal = %listen, console = %ops_listen, "listening");
     let a = axum::serve(
         customer,
         http::customer(&state).into_make_service_with_connect_info::<std::net::SocketAddr>(),

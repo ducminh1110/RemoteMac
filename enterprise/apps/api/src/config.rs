@@ -95,8 +95,16 @@ pub struct Config {
     pub smtp_url: Option<Secret>,
     pub mail_from: String,
     pub stripe: Option<Stripe>,
-    /// the provider adapter in use; only "mock" exists today
+    /// the provider adapter in use: "fleet" (Macs that enroll themselves) or "mock" (pretend
+    /// Macs for development and demos)
     pub provider: String,
+    /// the provider's relay (`host:port`), handed to enrolled Macs and to the viewers that
+    /// connect to them
+    pub relay_address: Option<String>,
+    /// the first-run setup code (the first administrator proves with it that they run this
+    /// server): given directly, or read from a file (the relay writes one and prints it)
+    pub setup_code: Option<Secret>,
+    pub setup_code_file: Option<std::path::PathBuf>,
     /// the first platform administrator (granted at start, if that user exists or signs in)
     pub bootstrap_admin_email: Option<String>,
     /// the enterprise/ directory: the web apps are in apps/customer-portal and
@@ -206,9 +214,9 @@ impl Config {
             );
         }
         let provider = var("TARO_PROVIDER").unwrap_or_else(|| "mock".into());
-        if provider != "mock" {
+        if provider != "mock" && provider != "fleet" {
             return Err(format!(
-                "TARO_PROVIDER {provider:?}: only the mock provider is implemented"
+                "TARO_PROVIDER {provider:?}: fleet (Macs that enroll themselves) or mock"
             ));
         }
         Ok(Config {
@@ -233,6 +241,9 @@ impl Config {
                 .unwrap_or_else(|| "Taro Enterprise <no-reply@localhost>".into()),
             stripe,
             provider,
+            relay_address: var("TARO_RELAY_ADDRESS"),
+            setup_code: var("TARO_SETUP_CODE").map(Secret::new),
+            setup_code_file: var("TARO_SETUP_CODE_FILE").map(Into::into),
             bootstrap_admin_email: var("TARO_BOOTSTRAP_ADMIN_EMAIL").map(|e| e.to_lowercase()),
             web_dir: var("TARO_WEB_DIR")
                 .map(Into::into)
@@ -272,6 +283,9 @@ impl Config {
             mail_from: "Taro Enterprise <no-reply@localhost>".into(),
             stripe: None,
             provider: "mock".into(),
+            relay_address: None,
+            setup_code: None,
+            setup_code_file: None,
             bootstrap_admin_email: None,
             web_dir: concat!(env!("CARGO_MANIFEST_DIR"), "/../..").into(),
             trusted_proxies: false,

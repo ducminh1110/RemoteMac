@@ -247,9 +247,12 @@ async fn provision(state: &AppState, job: &Job) -> anyhow::Result<Outcome2> {
         None => {
             let p = rentals::plan(&state.db, r.plan_id).await?;
             let mut tx = state.db.begin().await?;
-            let pick: Option<(Uuid, String)> = sqlx::query_as("SELECT id, external_id FROM mac_resources WHERE state = 'available' AND hold_reason IS NULL AND chip = $1 AND region = $2 ORDER BY last_synced_at DESC NULLS LAST LIMIT 1 FOR UPDATE SKIP LOCKED")
+            // the provider's own Macs (fleet) are one pool: any of them fits a plan
+            let pick: Option<(Uuid, String)> = sqlx::query_as("SELECT id, external_id FROM mac_resources WHERE state = 'available' AND hold_reason IS NULL AND control_by IS NULL AND provider_id = $4 AND ($3 OR (chip = $1 AND region = $2)) ORDER BY last_synced_at DESC NULLS LAST LIMIT 1 FOR UPDATE SKIP LOCKED")
                 .bind(&p.chip)
                 .bind(&p.region)
+                .bind(state.provider.kind() == "fleet")
+                .bind(state.provider_id)
                 .fetch_optional(&mut *tx)
                 .await?;
             let Some((id, ext)) = pick else {

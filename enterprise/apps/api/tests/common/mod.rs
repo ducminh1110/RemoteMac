@@ -140,6 +140,15 @@ pub async fn world() -> Option<World> {
 }
 
 pub async fn world_with(tweak: impl FnOnce(&mut Config)) -> Option<World> {
+    world_inner(tweak, false).await
+}
+
+/// The provider's own Macs (fleet): Macs enroll themselves; none at first.
+pub async fn world_fleet(tweak: impl FnOnce(&mut Config)) -> Option<World> {
+    world_inner(tweak, true).await
+}
+
+async fn world_inner(tweak: impl FnOnce(&mut Config), fleet: bool) -> Option<World> {
     let Ok(base) = std::env::var("TARO_TEST_DATABASE_URL") else {
         if std::env::var("TARO_REQUIRE_DB_TESTS").as_deref() == Ok("1") {
             panic!("TARO_TEST_DATABASE_URL is required");
@@ -180,15 +189,20 @@ pub async fn world_with(tweak: impl FnOnce(&mut Config)) -> Option<World> {
     mock.add("mock-flaky-1", "M1 Flaky", "eu-west");
     let mail = Arc::new(Mailbox::default());
     let stripe = Arc::new(FakeStripe::default());
-    let state = taro_enterprise::build_state(
-        cfg,
-        db,
-        mock.clone(),
-        Some(stripe.clone()),
-        Some(mail.clone()),
-    )
-    .await
-    .unwrap();
+    let provider: Arc<dyn taro_enterprise::provider::Provider> = if fleet {
+        cfg.provider = "fleet".into();
+        Arc::new(taro_enterprise::provider::fleet::Fleet::new(
+            db.clone(),
+            cfg.secret_key.expose(),
+            cfg.relay_address.clone(),
+        ))
+    } else {
+        mock.clone()
+    };
+    let state =
+        taro_enterprise::build_state(cfg, db, provider, Some(stripe.clone()), Some(mail.clone()))
+            .await
+            .unwrap();
     taro_enterprise::reconcile::sync_inventory(&state)
         .await
         .unwrap();

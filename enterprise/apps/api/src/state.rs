@@ -67,4 +67,18 @@ impl Audience {
         };
         u.origin().ascii_serialization()
     }
+
+    /// Where this app's pages are: its origin and, when it shares an origin with the other app
+    /// (one server: the console at `https://host/console`), its path. Links and redirects use it.
+    pub fn base(&self, c: &Config) -> String {
+        let u = match self {
+            Audience::Customer => &c.public_url,
+            Audience::Ops => &c.ops_url,
+        };
+        format!(
+            "{}{}",
+            u.origin().ascii_serialization(),
+            u.path().trim_end_matches('/')
+        )
+    }
 }
