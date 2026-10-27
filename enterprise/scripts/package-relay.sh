@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Builds the generic Taro relay package (no provider folder yet; Wizard 1 adds it):
 #   scripts/package-relay.sh VERSION ARCH TARO-RELAY-BINARY OUT-DIR
+#   PG_DIR=DIR: the PostgreSQL for the portal (scripts/fetch-postgres.sh ARCH DIR) goes into
+#   core/share/pg; the portal and the console go into core/web/enterprise
 # -> OUT-DIR/taro-relay-VERSION-linux-ARCH.tar.gz (and the unpacked folder, whose core/ is what
 #    enterprise-update.zip is packed from). Run from enterprise/.
 set -euo pipefail
@@ -11,6 +13,17 @@ install -m 0755 "$B" "$d/core/bin/taro-relay"
 cp -r apps/relay/web/setup apps/relay/web/status "$d/core/web/relay/"
 mkdir -p "$d/core/web/relay/common"
 cp packages/console/console.css packages/console/console.js "$d/core/web/relay/common/"
+# the portal, the console and their shared look (the relay serves them: one web site)
+D="$(cd "$d" && pwd)"
+for a in customer-portal provider-console; do
+  mkdir -p "$D/core/web/enterprise/apps/$a"
+  (cd "apps/$a" && find . -type f ! -path './tests/*' ! -name '*.md' -exec cp --parents {} "$D/core/web/enterprise/apps/$a/" \;)
+done
+mkdir -p "$d/core/web/enterprise/packages"
+cp -r packages/console packages/design-tokens "$d/core/web/enterprise/packages/"
+if [[ -n "${PG_DIR:-}" ]]; then
+  cp -a "$PG_DIR" "$d/core/share/pg"
+fi
 cp ../LICENSE "$d/core/share/LICENSE"
 cp ../NOTICE.md "$d/core/share/NOTICE.md"
 install -m 0755 apps/relay/package/install.sh "$d/install.sh"

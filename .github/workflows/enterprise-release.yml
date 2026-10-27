@@ -94,14 +94,21 @@ jobs:
           B=target/${{ matrix.arch }}-unknown-linux-musl/release/taro-relay
           file $B
           $B version
+      - name: The portal's PostgreSQL (pinned, checked)
+        run: scripts/fetch-postgres.sh ${{ matrix.arch }} pg
       - name: Package, and test the package (install, refuse a second install, recover)
         env:
           SOURCE_DATE_EPOCH: "0"
         run: |
           set -euo pipefail
           B=target/${{ matrix.arch }}-unknown-linux-musl/release/taro-relay
-          scripts/package-relay.sh "${{ inputs.version }}" ${{ matrix.arch }} $B dist
+          PG_DIR=pg scripts/package-relay.sh "${{ inputs.version }}" ${{ matrix.arch }} $B dist
           scripts/test-relay-package.sh $B
+          d=dist/taro-relay-${{ inputs.version }}-linux-${{ matrix.arch }}
+          test -x $d/core/share/pg/bin/postgres && test -f $d/core/web/enterprise/apps/provider-console/index.html
+          ! find $d -type l | grep .
+      - name: The packaged PostgreSQL runs the portal (update from 0.1, first administrator)
+        run: TARO_PG_TEST_BIN=$PWD/dist/taro-relay-${{ inputs.version }}-linux-${{ matrix.arch }}/core/share/pg/bin cargo test --locked -p taro-relay --test one_site
       - uses: actions/upload-artifact@v4
         with:
           name: relay-${{ matrix.arch }}

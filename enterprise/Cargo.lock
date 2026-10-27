@@ -4149,7 +4149,7 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "taro-enterprise"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4186,7 +4186,7 @@ dependencies = [
 
 [[package]]
 name = "taro-enterprise-setup"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -4218,7 +4218,7 @@ dependencies = [
 
 [[package]]
 name = "taro-relay"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -4253,7 +4253,7 @@ dependencies = [
 
 [[package]]
 name = "taro-update"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
