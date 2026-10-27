@@ -45,7 +45,7 @@ for n in targets:
         os.unlink(p)
 # client-side libraries and development files: not used by the server
 for n in os.listdir(lib):
-    if re.match(r"lib(ecpg|ecpg_compat|pgtypes|pq)\.", n) or n.endswith(".a"):
+    if re.match(r"lib(ecpg|ecpg_compat|pgtypes)\.", n) or n.endswith(".a"):
         os.unlink(os.path.join(lib, n))
 for d in ("include",):
     shutil.rmtree(os.path.join(root, d), ignore_errors=True)
@@ -53,6 +53,16 @@ for dp, dn, fn in os.walk(root):
     for n in dn + fn:
         assert not os.path.islink(os.path.join(dp, n)), os.path.join(dp, n)
 PY
+# every library the programs need is in lib/ or is part of every Linux (C and C++ runtime): a server without
+# PostgreSQL's own packages (libpq5, ICU, OpenSSL 1.1) runs them as they are
+missing=0
+for f in "$W"/pg/bin/* "$W"/pg/lib/*.so*; do
+  for n in $(readelf -d "$f" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+    case "$n" in libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*|librt.so.*|ld-linux*|libstdc++.so.6|libgcc_s.so.1) continue ;; esac
+    [[ -e "$W/pg/lib/$n" ]] || { echo "$(basename "$f") needs $n, which is not in lib/" >&2; missing=1; }
+  done
+done
+[[ $missing -eq 0 ]] || exit 1
 rm -rf "$OUT" && mkdir -p "$OUT"
 cp -a "$W/pg/." "$OUT/"
 echo "PostgreSQL $V for $A in $OUT ($(du -sh "$OUT" | cut -f1), $(find "$OUT" -type f | wc -l) files)"
