@@ -148,7 +148,7 @@ jobs:
           base=(); [ -f base/enterprise-core-files.json ] && base=(--base base/enterprise-core-files.json)
           scripts/build-enterprise-update.sh "${{ inputs.version }}" out pkgs/taro-relay-*.tar.gz "${base[@]}"
           # it verifies with the official public key built into the updater
-          target/release/taro-update inspect out/enterprise-update.zip | head -20
+          target/release/taro-update inspect out/enterprise-update.zip > out/inspect.txt; head -20 out/inspect.txt; echo "($(grep -c "\"op\"" out/inspect.txt) files)"
       - name: Components manifest (signed)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
