@@ -184,6 +184,81 @@ pub async fn current(db: &sqlx::PgPool, org: Option<Uuid>) -> anyhow::Result<Con
     Ok(Config::default())
 }
 
+/// A server with no published look of its own takes the one it was installed with (the relay's
+/// provider folder: name, colour, logo, icon) as version 1 of the platform's branding, so the
+/// portal and the console look like the provider's apps from the first visit. Never replaces
+/// a look an administrator made; images that do not pass the upload checks are left out.
+pub async fn seed_platform(
+    db: &sqlx::PgPool,
+    name: &str,
+    color: &str,
+    logo: Option<Vec<u8>>,
+    icon: Option<Vec<u8>>,
+) -> anyhow::Result<bool> {
+    let mut tx = db.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(4208)")
+        .execute(&mut *tx)
+        .await?;
+    let any: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM branding_configs WHERE organization_id IS NULL LIMIT 1")
+            .fetch_optional(&mut *tx)
+            .await?;
+    if any.is_some() {
+        return Ok(false);
+    }
+    let mut c = Config {
+        display_name: name.trim().chars().take(60).collect(),
+        primary_color: color.to_uppercase(),
+        ..Config::default()
+    };
+    for (kind, bytes) in [("logo", logo), ("favicon", icon)] {
+        let Some(b) = bytes else { continue };
+        let Some((ct, w, h)) = sniff(&b) else {
+            continue;
+        };
+        let fits = b.len() <= MAX_IMAGE && (1..=1024).contains(&w) && (1..=1024).contains(&h);
+        if !fits || (kind == "favicon" && (w != h || w < 16)) {
+            continue;
+        }
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO assets (id, organization_id, kind, content_type, bytes, sha256, width, height) VALUES ($1, NULL, $2, $3, $4, $5, $6, $7)")
+            .bind(id)
+            .bind(kind)
+            .bind(ct)
+            .bind(&b)
+            .bind(crate::crypto::sha256_hex(&b))
+            .bind(w as i32)
+            .bind(h as i32)
+            .execute(&mut *tx)
+            .await?;
+        if kind == "logo" {
+            c.logo_asset_id = Some(id);
+        } else {
+            c.favicon_asset_id = Some(id);
+        }
+    }
+    // a name or colour the console would refuse: the default one in its place
+    let d = Config::default();
+    if validate(&Config {
+        primary_color: d.primary_color.clone(),
+        ..c.clone()
+    })
+    .is_err()
+    {
+        c.display_name = d.display_name;
+    }
+    if validate(&c).is_err() {
+        c.primary_color = d.primary_color;
+    }
+    sqlx::query("INSERT INTO branding_configs (id, organization_id, version, config, published_at) VALUES ($1, NULL, 1, $2, now())")
+        .bind(Uuid::new_v4())
+        .bind(serde_json::to_value(&c)?)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
 /// `GET /api/v1/branding`: the look for this hostname (a custom domain's organization, or the
 /// platform's), for the portal to theme itself before sign-in.
 async fn public(

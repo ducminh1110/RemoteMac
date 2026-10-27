@@ -391,6 +391,29 @@ pub async fn start_site(
     let state = taro_enterprise::build_state(cfg, db, fleet, None, None)
         .await
         .map_err(|e| format!("portal: {e}"))?;
+    // the provider's look (provider folder) for the portal and the console, until an
+    // administrator publishes another
+    let read = |n: &Option<String>| {
+        provider
+            .asset(&layout.provider, n)
+            .and_then(|p| std::fs::read(p).ok())
+    };
+    match taro_enterprise::branding::seed_platform(
+        &state.db,
+        &provider.product.name,
+        &provider.primary().hex(),
+        read(&provider.branding.logo),
+        read(&provider.branding.icon),
+    )
+    .await
+    {
+        Ok(true) => eprintln!(
+            "taro-relay: the portal and the console take {}'s look (Branding in the console changes it)",
+            provider.product.name
+        ),
+        Ok(false) => {}
+        Err(e) => eprintln!("taro-relay: branding from the provider folder: {e}"),
+    }
     if let Err(e) = taro_enterprise::reconcile::sync_inventory(&state).await {
         eprintln!("taro-relay: first inventory sync: {e}");
     }

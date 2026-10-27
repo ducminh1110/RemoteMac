@@ -31,8 +31,8 @@ fn provider() -> rm_brand::Provider {
             primary_color: "#0F766E".into(),
             tokens: None,
             theme: rm_brand::Theme::System,
-            logo: None,
-            icon: None,
+            logo: Some("logo.png".into()),
+            icon: Some("icon.png".into()),
         },
         relay: rm_brand::Relay {
             host: "relay.acme.example".into(),
@@ -44,6 +44,15 @@ fn provider() -> rm_brand::Provider {
         generated: None,
     }
     .normalized()
+}
+
+/// A PNG of that size, as far as the upload checks read it (signature and IHDR).
+fn png(w: u32, h: u32) -> Vec<u8> {
+    let mut b = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    b.extend(w.to_be_bytes());
+    b.extend(h.to_be_bytes());
+    b.extend([8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    b
 }
 
 fn pg_bin() -> Option<PathBuf> {
@@ -128,6 +137,9 @@ async fn updating_an_old_relay_brings_the_portal_and_the_console() {
     let l = Layout::under(&base);
     std::fs::create_dir_all(&l.provider).unwrap();
     std::fs::write(l.provider.join("provider.json"), provider().to_json()).unwrap();
+    for (f, w, h) in [("logo.png", 64, 32), ("icon.png", 32, 32)] {
+        std::fs::write(l.provider.join(f), png(w, h)).unwrap();
+    }
     // a relay set up with 0.1: no [portal] in its settings, its units without the portal's folders
     let mut old = Runtime::defaults(&l, "relay.acme.example", 7470);
     old.portal = None;
@@ -184,6 +196,17 @@ async fn updating_an_old_relay_brings_the_portal_and_the_console() {
     let (s, v, t) = call(&site, "GET", "/console/api/v1/setup/status", None).await;
     assert_eq!(s, StatusCode::OK, "{t}");
     assert_eq!(v["needs_admin"], true);
+    // the provider's look, from its folder, until an administrator publishes another
+    let (_, v, t) = call(&site, "GET", "/api/v1/branding", None).await;
+    assert_eq!(v["branding"]["displayName"], "Acme Connect", "{t}");
+    assert_eq!(v["branding"]["primaryColor"], "#0F766E", "{t}");
+    for k in ["logoAssetId", "faviconAssetId"] {
+        let id = v["branding"][k]
+            .as_str()
+            .unwrap_or_else(|| panic!("{k}: {t}"));
+        let (s, _, _) = call(&site, "GET", &format!("/api/v1/assets/{id}"), None).await;
+        assert_eq!(s, StatusCode::OK, "{k}");
+    }
     let (s, _, html) = call(&site, "GET", "/console/", None).await;
     assert_eq!(s, StatusCode::OK);
     assert!(html.contains("<base href=\"/console/\">"), "{html}");
