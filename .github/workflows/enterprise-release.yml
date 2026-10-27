@@ -262,8 +262,34 @@ jobs:
           name: setup
           path: enterprise/TaroEnterpriseSetup.exe
 
+  mac-app:
+    needs: check
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Taro.app (the Enterprise Mac app), universal, built from this commit
+        run: |
+          set -euo pipefail
+          # no built-in relay: the Mac gets its relay from the server it enrolls with (FLEET.md)
+          for arch in arm64 x86_64; do
+            RM_SWIFT_TARGET=$arch-apple-macos14.0 ./scripts/build-agent-macos.sh
+            mv out/remote-agent-mac out/taro-$arch
+          done
+          lipo -create out/taro-arm64 out/taro-x86_64 -output out/taro
+          ./scripts/build-enterprise-app-macos.sh out/taro "" dist
+          plutil -lint dist/Taro.app/Contents/Info.plist
+          codesign --verify --deep --strict --verbose=2 dist/Taro.app
+          lipo -info dist/Taro.app/Contents/MacOS/taro
+          dist/Taro.app/Contents/MacOS/taro --version
+          ditto -c -k --keepParent dist/Taro.app dist/Taro-Enterprise-macos.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-app
+          path: dist/Taro-Enterprise-macos.zip
+
   publish:
-    needs: [check, update, server, image, setup-wizard]
+    needs: [check, update, server, image, setup-wizard, mac-app]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -278,10 +304,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p rel
-          cp art/relay-*/taro-relay-*.tar.gz art/update/* art/server/*.tar.gz art/setup/TaroEnterpriseSetup.exe rel/
+          cp art/relay-*/taro-relay-*.tar.gz art/update/* art/server/*.tar.gz art/setup/TaroEnterpriseSetup.exe art/mac-app/Taro-Enterprise-macos.zip rel/
           b=taro-enterprise-$V-full
           mkdir -p $b
-          cp rel/taro-relay-*.tar.gz rel/taro-enterprise-*-server-*.tar.gz rel/TaroEnterpriseSetup.exe rel/taro-enterprise-components.json* $b/
+          cp rel/taro-relay-*.tar.gz rel/taro-enterprise-*-server-*.tar.gz rel/TaroEnterpriseSetup.exe rel/Taro-Enterprise-macos.zip rel/taro-enterprise-components.json* $b/
           cat > $b/README.md <<EOF
           # Taro Enterprise $V: full installation bundle
 
@@ -292,6 +318,8 @@ jobs:
           - \`TaroEnterpriseSetup.exe\`: the package builder (Windows): builds your branded Windows and
             Mac clients and your relay package from the files listed in taro-enterprise-components.json.
           - \`taro-relay-$V-linux-*.tar.gz\`: the generic relay packages (the builder adds your provider folder).
+          - \`Taro-Enterprise-macos.zip\`: Taro.app for the Macs you rent out (macOS 14+): it asks for
+            the permissions, then enrolls the Mac with a code from the console (Macs > Add a Mac).
           - \`taro-enterprise-$V-server-linux-x86_64.tar.gz\`: the control plane (optional).
           EOF
           sed -i 's/^          //' $b/README.md
@@ -312,6 +340,7 @@ jobs:
           | File | For |
           |---|---|
           | \`TaroEnterpriseSetup.exe\` | Wizard 1, the package builder (Windows): your branded Windows and Mac clients and relay package |
+          | \`Taro-Enterprise-macos.zip\` | Taro.app for your Macs (macOS 14+): permissions, then enroll the Mac with a code from the console (Macs > Add a Mac) |
           | \`taro-relay-$V-linux-x86_64.tar.gz\`, \`-aarch64\` | the relay package; \`sudo ./install.sh\` installs it and starts Wizard 2 |
           | \`enterprise-update.zip\` | the update of existing relays' shared core (signed; keeps branding, settings, data) |
           | \`taro-enterprise-components.json\` (+ \`.sig\`) | the signed list of files provider packages are built from |
@@ -331,7 +360,7 @@ jobs:
           set -euo pipefail
           names=$(gh release view "enterprise-v$V" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
           echo "$names"
-          for f in enterprise-update.zip enterprise-core-files.json taro-enterprise-components.json taro-enterprise-components.json.sig TaroEnterpriseSetup.exe SHA256SUMS "taro-enterprise-$V-full.tar.gz" "taro-relay-$V-linux-x86_64.tar.gz" "taro-relay-$V-linux-aarch64.tar.gz"; do
+          for f in Taro-Enterprise-macos.zip enterprise-update.zip enterprise-core-files.json taro-enterprise-components.json taro-enterprise-components.json.sig TaroEnterpriseSetup.exe SHA256SUMS "taro-enterprise-$V-full.tar.gz" "taro-relay-$V-linux-x86_64.tar.gz" "taro-relay-$V-linux-aarch64.tar.gz"; do
             echo "$names" | grep -qx "$f" || { echo "missing $f"; exit 1; }
           done
           # a provider's copy may have no "latest" release at all
