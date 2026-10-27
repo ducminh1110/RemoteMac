@@ -1,8 +1,8 @@
 // Branding (provider-wide): the look of the customer portal and this console for every
 // organization without its own. Versioned: a new version is a draft until published; publishing
 // an older version is the rollback.
-import { h, icon, container, pageHeader, kv, button, confirmDialog, alert, flash } from "/_console/console.js";
-import { api, when, table, act, field, checkbox, humanize } from "/lib.js";
+import { h, icon, container, pageHeader, kv, button, confirmDialog, alert, flash } from "../_console/console.js";
+import { api, when, table, act, field, checkbox, humanize } from "../lib.js";
 
 const MODULE_LABELS = { my_macs: "My Macs", rentals: "Rentals", billing: "Billing", team: "Team" };
 
@@ -30,13 +30,13 @@ function swatch(hex) {
 }
 
 function thumb(id, label) {
-  return id ? h("img", { class: "thumb", src: "/api/v1/assets/" + id, alt: label }) : h("span", { class: "muted" }, "None");
+  return id ? h("img", { class: "thumb", src: "api/v1/assets/" + id, alt: label }) : h("span", { class: "muted" }, "None");
 }
 
 /** A small picture of the portal in a colour: top bar, a selected nav item, a button, a link. */
 function preview(c) {
   const p = h("div", { class: "brand-preview", "aria-label": "Preview", role: "img" },
-    h("div", { class: "bp-top" }, c.logoAssetId ? h("img", { src: "/api/v1/assets/" + c.logoAssetId, alt: "" }) : h("span", { class: "bp-mark" }, (c.displayName || "T").charAt(0).toUpperCase()),
+    h("div", { class: "bp-top" }, c.logoAssetId ? h("img", { src: "api/v1/assets/" + c.logoAssetId, alt: "" }) : h("span", { class: "bp-mark" }, (c.displayName || "T").charAt(0).toUpperCase()),
       h("span", { class: "bp-name" }, c.displayName || "Taro Enterprise"), h("span", { class: "bp-sp" }), h("span", { class: "bp-user" }, "alex@customer.com")),
     h("div", { class: "bp-body" },
       h("div", { class: "bp-side" }, ["My Macs", "Rentals", "Billing", "Team"].map((t, i) => h("span", { class: "bp-item" + (i === 0 ? " sel" : "") }, t))),
@@ -47,19 +47,19 @@ function preview(c) {
 }
 
 export async function page(ctx) {
-  const r = await api("GET", "/api/v1/ops/branding");
+  const r = await api("GET", "api/v1/ops/branding");
   const c = r.current;
   const live = r.published_version;
   const publish = async (btn, v) => {
     const older = live != null && v.version < live;
     if (!await confirmDialog({ title: older ? `Roll back to version ${v.version}?` : `Publish version ${v.version}?`, confirm: older ? "Roll back" : "Publish",
       body: [h("p", {}, "The customer portal and this console use it at once, for every organization without its own branding."), preview(v.config)] })) return;
-    await act(btn, "Publishing…", () => api("POST", `/api/v1/ops/branding/${v.version}/publish`), { ok: `Version ${v.version} is live.`, after: async () => { reloadTokens(); await ctx.refreshBranding(); ctx.refresh(); } });
+    await act(btn, "Publishing…", () => api("POST", `api/v1/ops/branding/${v.version}/publish`), { ok: `Version ${v.version} is live.`, after: async () => { reloadTokens(); await ctx.refreshBranding(); ctx.refresh(); } });
   };
   return h("div", {},
     ctx.crumbs([["Taro Operations", "/"], ["Catalog"], ["Branding"]]),
     pageHeader({ title: "Branding", desc: "The provider's look in the customer portal and this console. Organizations with their own branding (if entitled) override it.",
-      actions: [button("Refresh", { icon: "refresh", onclick: () => ctx.refresh() }), h("a", { class: "btn primary", href: "/branding/new", id: "new-branding" }, icon("plus"), "New version")] }),
+      actions: [button("Refresh", { icon: "refresh", onclick: () => ctx.refresh() }), h("a", { class: "btn primary", href: "branding/new", id: "new-branding" }, icon("plus"), "New version")] }),
     live == null ? alert("info", "Nothing published yet", "The built-in Taro Enterprise look is in use.") : null,
     h("div", { class: "cols" },
       container({ title: "Live", desc: live != null ? `Version ${live}` : "Built-in default" }, kv([
@@ -83,25 +83,25 @@ export async function page(ctx) {
         { label: "Status", cell: (v) => v.version === live ? h("span", { class: "badge green" }, "Live") : v.published_at ? h("span", { class: "badge" }, "Published before") : h("span", { class: "badge blue" }, "Draft") },
         { label: "Actions", class: "actions", cell: (v) => [
           v.version !== live ? button(live != null && v.version < live ? "Roll back" : "Publish", { kind: "sm" + (v.published_at ? "" : " primary"), onclick: (e) => publish(e.currentTarget, v) }) : null,
-          h("a", { class: "btn sm link", href: "/branding/new?from=" + v.version }, "Copy"),
+          h("a", { class: "btn sm link", href: "branding/new?from=" + v.version }, "Copy"),
         ] },
       ], r.versions, { caption: "Branding versions", rowClass: (v) => v.version === live ? "current" : null,
-        empty: { title: "No versions yet", text: "Create the first version with your name, colour and logo.", action: h("a", { class: "btn primary", href: "/branding/new" }, "New version") } })));
+        empty: { title: "No versions yet", text: "Create the first version with your name, colour and logo.", action: h("a", { class: "btn primary", href: "branding/new" }, "New version") } })));
 }
 
 function reloadTokens() {
-  const l = document.querySelector('link[href^="/brand/tokens.css"]');
-  if (l) l.setAttribute("href", "/brand/tokens.css?v=" + Date.now());
+  const l = document.querySelector('link[href^="brand/tokens.css"]');
+  if (l) l.setAttribute("href", "brand/tokens.css?v=" + Date.now());
 }
 
 async function upload(kind, file) {
   if (file.size > 1024 * 1024) throw new Error("Images are at most 1 MB.");
   if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) throw new Error("Upload a PNG, JPEG or WebP image.");
-  return api("POST", "/api/v1/ops/assets?kind=" + kind, undefined, { raw: await file.arrayBuffer(), contentType: file.type });
+  return api("POST", "api/v1/ops/assets?kind=" + kind, undefined, { raw: await file.arrayBuffer(), contentType: file.type });
 }
 
 export async function create(ctx) {
-  const r = await api("GET", "/api/v1/ops/branding");
+  const r = await api("GET", "api/v1/ops/branding");
   const fromV = ctx.query.get("from");
   const base = (fromV && (r.versions.find((v) => String(v.version) === fromV) || {}).config) || r.current;
   const state = { ...base, enabledModules: [...base.enabledModules] };
@@ -141,7 +141,7 @@ export async function create(ctx) {
   const imageField = (kind, label, hint) => {
     const key = kind === "logo" ? "logoAssetId" : "faviconAssetId";
     const thumbBox = h("span", { class: "img-slot" });
-    const show = () => thumbBox.replaceChildren(state[key] ? h("img", { class: "thumb lg", src: "/api/v1/assets/" + state[key], alt: label }) : h("span", { class: "muted" }, "None"),
+    const show = () => thumbBox.replaceChildren(state[key] ? h("img", { class: "thumb lg", src: "api/v1/assets/" + state[key], alt: label }) : h("span", { class: "muted" }, "None"),
       state[key] ? button("Remove", { kind: "sm link", onclick: () => { state[key] = null; show(); redraw(); } }) : null);
     const input = h("input", { type: "file", accept: "image/png,image/jpeg,image/webp", id: "file-" + kind, "aria-describedby": "file-" + kind + "-hint" });
     const msg = h("p", { class: "error", hidden: true });
@@ -177,9 +177,9 @@ export async function create(ctx) {
     state.primaryColor = hex;
     await act(save, "Saving…", async () => {
       let res;
-      try { res = await api("POST", "/api/v1/ops/branding", state); }
+      try { res = await api("POST", "api/v1/ops/branding", state); }
       catch (x) { errBox.replaceChildren(alert("err", "Not saved", x.message)); throw x; }
-      if (publishNow.control.checked) { await api("POST", `/api/v1/ops/branding/${res.version}/publish`); reloadTokens(); await ctx.refreshBranding(); }
+      if (publishNow.control.checked) { await api("POST", `api/v1/ops/branding/${res.version}/publish`); reloadTokens(); await ctx.refreshBranding(); }
       for (const w of res.warnings || []) flash("warn", w);
       flash("ok", publishNow.control.checked ? `Version ${res.version} saved and published.` : `Version ${res.version} saved as a draft.`);
       ctx.navigate("/branding");
@@ -195,7 +195,7 @@ export async function create(ctx) {
         imageField("favicon", "Favicon", "The browser tab icon. Square, 16×16 pixels or more.")),
       container({ title: "Portal" }, mods)),
     h("div", { class: "sticky" }, container({ title: "Preview", desc: "Approximate: the server derives the final tints." }, prevBox),
-      container({}, publishNow, h("div", { class: "form-actions" }, h("a", { class: "btn link", href: "/branding" }, "Cancel"), save)))));
+      container({}, publishNow, h("div", { class: "form-actions" }, h("a", { class: "btn link", href: "branding" }, "Cancel"), save)))));
   setColor(parseHex(state.primaryColor) || "#6D5AE6", null);
 
   return h("div", {},

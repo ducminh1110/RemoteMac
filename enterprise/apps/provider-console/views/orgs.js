@@ -1,7 +1,7 @@
 // Organizations: the customers. A searchable list, and a detail page with members, rentals,
 // billing state, entitlements (granted or revoked by platform admins), domains and audit.
-import { h, icon, container, pageHeader, kv, button, confirmDialog, alert } from "/_console/console.js";
-import { api, can, st, when, money, table, shortId, toolbar, searchBox, selectBox, act, humanize, stats, copyButton } from "/lib.js";
+import { h, icon, container, pageHeader, kv, button, confirmDialog, alert } from "../_console/console.js";
+import { api, can, st, when, money, table, shortId, toolbar, searchBox, selectBox, act, humanize, stats, copyButton } from "../lib.js";
 
 const MODULES = [
   ["my_macs", "My Macs", "Members see and connect to the Macs assigned to them"],
@@ -13,7 +13,7 @@ const MODULES = [
 export async function list(ctx) {
   const q = ctx.query.get("q") || "";
   const filter = ctx.query.get("status") || "";
-  const r = await api("GET", "/api/v1/ops/organizations" + (q ? "?q=" + encodeURIComponent(q) : ""));
+  const r = await api("GET", "api/v1/ops/organizations" + (q ? "?q=" + encodeURIComponent(q) : ""));
   let rows = r.organizations;
   if (filter === "active") rows = rows.filter((o) => !o.suspended_at);
   if (filter === "suspended") rows = rows.filter((o) => o.suspended_at);
@@ -30,7 +30,7 @@ export async function list(ctx) {
       searchBox({ label: "Search by name or slug", value: q, id: "org-search", oninput: (v) => { ctx.setQuery({ q: v }); ctx.refresh(); } }),
       selectBox({ label: "Status", value: filter, id: "org-status", options: [["", "All"], ["active", "Active"], ["suspended", "Suspended"]], onchange: (v) => { ctx.setQuery({ status: v }); ctx.refresh(); } })),
     table([
-      { label: "Name", cell: (o) => h("a", { href: "/organizations/" + o.id, class: "strong" }, o.name) },
+      { label: "Name", cell: (o) => h("a", { href: "organizations/" + o.id, class: "strong" }, o.name) },
       { label: "Slug", cell: (o) => h("span", { class: "mono" }, o.slug) },
       { label: "Status", cell: (o) => o.suspended_at ? st("suspended") : st("active", "Active") },
       { label: "Members", cell: (o) => o.members, class: "num" },
@@ -42,9 +42,9 @@ export async function list(ctx) {
 export async function detail(ctx) {
   const id = ctx.params[0];
   const [d, domains, audit] = await Promise.all([
-    api("GET", "/api/v1/ops/organizations/" + id),
-    can("ops.overview.read") ? api("GET", "/api/v1/ops/domains").catch(() => null) : null,
-    can("ops.audit.read") ? api("GET", "/api/v1/ops/audit-events?limit=15&organization_id=" + id).catch(() => null) : null,
+    api("GET", "api/v1/ops/organizations/" + id),
+    can("ops.overview.read") ? api("GET", "api/v1/ops/domains").catch(() => null) : null,
+    can("ops.audit.read") ? api("GET", "api/v1/ops/audit-events?limit=15&organization_id=" + id).catch(() => null) : null,
   ]);
   const o = d.organization;
   const rentals = d.rentals;
@@ -91,9 +91,9 @@ export async function detail(ctx) {
             ? button("Revoke", { kind: "sm danger", onclick: async (ev) => {
               const b = ev.currentTarget;
               if (!await confirmDialog({ title: `Revoke ${e.label}?`, body: h("p", {}, `${o.name} loses the ${e.label} module now. Its members stop seeing it in the portal.`), confirm: "Revoke", danger: true })) return;
-              await act(b, "Revoking…", () => api("DELETE", `/api/v1/ops/organizations/${id}/entitlements/${e.key}`), { ok: `${e.label} revoked.`, after: ctx.refresh });
+              await act(b, "Revoking…", () => api("DELETE", `api/v1/ops/organizations/${id}/entitlements/${e.key}`), { ok: `${e.label} revoked.`, after: ctx.refresh });
             } })
-            : button("Grant", { kind: "sm", onclick: (ev) => act(ev.currentTarget, "Granting…", () => api("POST", `/api/v1/ops/organizations/${id}/entitlements/${e.key}`), { ok: `${e.label} granted.`, after: ctx.refresh }) }) } : null,
+            : button("Grant", { kind: "sm", onclick: (ev) => act(ev.currentTarget, "Granting…", () => api("POST", `api/v1/ops/organizations/${id}/entitlements/${e.key}`), { ok: `${e.label} granted.`, after: ctx.refresh }) }) } : null,
         ].filter(Boolean), entRows, { caption: "Entitlements" }))),
     container({ title: "Members", count: d.members.length, flush: true },
       table([
@@ -112,7 +112,7 @@ export async function detail(ctx) {
         { label: "Job", cell: (r) => r.job_state ? st(r.job_state) : h("span", { class: "muted" }, "–") },
         { label: "Created", cell: (r) => when(r.created_at), class: "nowrap" },
       ], rentals, { caption: "Rentals", empty: { title: "No rentals", text: "This organization has not rented a Mac yet." } })),
-    myDomains ? container({ title: "Domains", count: myDomains.length, flush: true, actions: h("a", { class: "btn sm", href: "/domains" }, "All domains") },
+    myDomains ? container({ title: "Domains", count: myDomains.length, flush: true, actions: h("a", { class: "btn sm", href: "domains" }, "All domains") },
       table([
         { label: "Hostname", cell: (x) => h("span", { class: "mono" }, x.hostname) },
         { label: "Kind", cell: (x) => humanize(x.kind) },
@@ -120,7 +120,7 @@ export async function detail(ctx) {
         { label: "Last error", cell: (x) => x.last_error ? h("span", { class: "err-text" }, x.last_error) : h("span", { class: "muted" }, "–") },
         { label: "Added", cell: (x) => when(x.created_at, { dateOnly: true }), class: "nowrap" },
       ], myDomains, { caption: "Domains", empty: { title: "No custom domains" } })) : null,
-    audit ? container({ title: "Recent activity", flush: true, actions: h("a", { class: "btn sm", href: "/audit?organization_id=" + id }, "Full audit log") },
+    audit ? container({ title: "Recent activity", flush: true, actions: h("a", { class: "btn sm", href: "audit?organization_id=" + id }, "Full audit log") },
       table([
         { label: "Time", cell: (e) => when(e.at), class: "nowrap" },
         { label: "Actor", cell: (e) => e.actor_email || humanize(e.actor_kind) },

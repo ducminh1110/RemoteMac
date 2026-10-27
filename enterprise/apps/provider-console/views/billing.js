@@ -1,7 +1,7 @@
 // Billing operations: rentals that need a person (past due, refunded, paid but failed) and the
 // Stripe webhook inbox (state, attempts, errors; replay a failed or dead event).
-import { h, container, pageHeader, button, confirmDialog, alert } from "/_console/console.js";
-import { S, api, can, st, when, money, table, shortId, toolbar, searchBox, selectBox, act, readOnlyNote, stats, orgNames, orgLink, copyButton } from "/lib.js";
+import { h, container, pageHeader, button, confirmDialog, alert } from "../_console/console.js";
+import { S, api, can, st, when, money, table, shortId, toolbar, searchBox, selectBox, act, readOnlyNote, stats, orgNames, orgLink, copyButton } from "../lib.js";
 
 function why(r) {
   if (r.billing_state === "past_due") return ["Past due", "The last payment failed. Stripe retries; the customer may need to update their card."];
@@ -16,7 +16,7 @@ function simBadge() {
 }
 
 export async function attention(ctx) {
-  const [r, names] = await Promise.all([api("GET", "/api/v1/ops/billing/attention"), orgNames()]);
+  const [r, names] = await Promise.all([api("GET", "api/v1/ops/billing/attention"), orgNames()]);
   const rows = r.needs_attention;
   const n = (f) => rows.filter(f).length;
   return h("div", {},
@@ -42,7 +42,7 @@ const EVENT_STATES = ["pending", "processed", "ignored", "failed", "dead"];
 export async function events(ctx) {
   const state = ctx.query.get("state") || "";
   const q = (ctx.query.get("q") || "").toLowerCase();
-  const r = await api("GET", "/api/v1/ops/billing/webhook-events" + (state ? "?state=" + state : ""));
+  const r = await api("GET", "api/v1/ops/billing/webhook-events" + (state ? "?state=" + state : ""));
   let rows = r.events;
   if (q) rows = rows.filter((e) => (e.id + " " + e.type + " " + (e.last_error || "")).toLowerCase().includes(q));
   const manage = can("ops.billing.manage");
@@ -50,7 +50,7 @@ export async function events(ctx) {
   const replay = async (btn, e) => {
     if (!await confirmDialog({ title: "Replay this event?", confirm: "Replay event",
       body: [h("p", {}, "The event ", h("code", {}, e.id), ` (${e.type}) is processed again from its stored payload. Processing is idempotent.`), e.last_error ? h("p", { class: "muted" }, "Last error: " + e.last_error) : null] })) return;
-    await act(btn, "Replaying…", () => api("POST", `/api/v1/ops/billing/webhook-events/${encodeURIComponent(e.id)}/replay`), { ok: "The event is queued for processing.", after: ctx.refresh });
+    await act(btn, "Replaying…", () => api("POST", `api/v1/ops/billing/webhook-events/${encodeURIComponent(e.id)}/replay`), { ok: "The event is queued for processing.", after: ctx.refresh });
   };
   return h("div", {},
     ctx.crumbs([["Taro Operations", "/"], ["Billing"], ["Stripe events"]]),

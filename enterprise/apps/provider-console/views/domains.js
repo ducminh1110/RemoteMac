@@ -1,14 +1,14 @@
 // Domains: every custom domain of every organization, with its verification and HTTPS state.
 // Customers add and verify their domains in the portal; operators see which ones fail.
-import { h, container, pageHeader, button, alert } from "/_console/console.js";
-import { api, st, when, table, toolbar, searchBox, selectBox, humanize, stats, orgNames, orgLink } from "/lib.js";
+import { h, container, pageHeader, button, alert } from "../_console/console.js";
+import { api, st, when, table, toolbar, searchBox, selectBox, humanize, stats, orgNames, orgLink } from "../lib.js";
 
 const STATES = ["pending_verification", "verified", "provisioning_tls", "active", "error", "disabled"];
 
 export async function page(ctx) {
   const state = ctx.query.get("state") || "";
   const q = (ctx.query.get("q") || "").toLowerCase();
-  const [r, names] = await Promise.all([api("GET", "/api/v1/ops/domains"), orgNames()]);
+  const [r, names] = await Promise.all([api("GET", "api/v1/ops/domains"), orgNames()]);
   let rows = r.domains;
   if (state) rows = rows.filter((d) => d.state === state);
   if (q) rows = rows.filter((d) => (d.hostname + " " + (names.get(d.organization_id) || "") + " " + (d.last_error || "")).toLowerCase().includes(q));

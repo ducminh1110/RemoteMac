@@ -1,7 +1,7 @@
 // Feature flags: the platform's kill switches. On by default; an operator turns one off in an
 // incident (new rentals, checkout, connection grants, the provisioning worker).
-import { h, container, pageHeader, button, confirmDialog, alert } from "/_console/console.js";
-import { api, can, when, table, act, readOnlyNote, stats } from "/lib.js";
+import { h, container, pageHeader, button, confirmDialog, alert } from "../_console/console.js";
+import { api, can, when, table, act, readOnlyNote, stats } from "../lib.js";
 
 const IMPACT = {
   "rentals.new": "Customers cannot create rentals; the catalog shows rentals as paused.",
@@ -11,7 +11,7 @@ const IMPACT = {
 };
 
 export async function page(ctx) {
-  const r = await api("GET", "/api/v1/ops/feature-flags");
+  const r = await api("GET", "api/v1/ops/feature-flags");
   const manage = can("ops.flags.manage");
   const off = r.flags.filter((f) => !f.enabled);
 
@@ -25,7 +25,7 @@ export async function page(ctx) {
         : h("p", {}, "The feature works again for everyone at once.")],
     });
     if (!ok) return;
-    await act(btn, turnOff ? "Turning off…" : "Turning on…", () => api("PATCH", "/api/v1/ops/feature-flags/" + encodeURIComponent(f.key), { enabled: !f.enabled }),
+    await act(btn, turnOff ? "Turning off…" : "Turning on…", () => api("PATCH", "api/v1/ops/feature-flags/" + encodeURIComponent(f.key), { enabled: !f.enabled }),
       { ok: `${f.key} is ${turnOff ? "off" : "on"}.`, after: ctx.refresh });
   };
 

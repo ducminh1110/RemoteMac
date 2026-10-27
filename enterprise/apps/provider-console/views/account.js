@@ -1,7 +1,8 @@
-// Account: the signed-in operator, their roles and permissions, their console sessions (end one,
-// end all others) and sign-out. Console sessions last 12 hours and end after 2 idle hours.
-import { h, container, pageHeader, kv, button, confirmDialog } from "/_console/console.js";
-import { S, api, when, table, act, field, roleLabel } from "/lib.js";
+// Account: the signed-in operator, their roles and permissions, their password, their console
+// sessions (end one, end all others) and sign-out. Console sessions last 12 hours and end after
+// 2 idle hours; changing the password ends the other sessions.
+import { h, container, pageHeader, kv, button, confirmDialog, busy, flash } from "../_console/console.js";
+import { S, api, when, table, act, field, roleLabel, announce, errorText } from "../lib.js";
 
 function device(ua) {
   if (!ua) return "Unknown device";
@@ -11,20 +12,45 @@ function device(ua) {
 }
 
 export async function page(ctx) {
-  const [me, s] = await Promise.all([api("GET", "/api/v1/me"), api("GET", "/api/v1/auth/sessions")]);
+  const [me, s] = await Promise.all([api("GET", "api/v1/me"), api("GET", "api/v1/auth/sessions")]);
   S.me = me;
   const others = s.sessions.filter((x) => x.id !== s.current).length;
   const name = field({ label: "Display name", name: "display_name", value: me.display_name, maxlength: 80, placeholder: "Your name", desc: "Shown in the top bar and to other operators." });
   const saveName = button("Save", { kind: "sm", type: "submit", id: "save-name" });
 
+  // the password the console signs in with (other sessions end when it changes)
+  const pwCur = field({ label: "Current password", name: "current", type: "password", autocomplete: "current-password", id: "pw-current",
+    desc: "Leave it empty if this account has no password yet." });
+  const pwNew = field({ label: "New password", name: "new", type: "password", autocomplete: "new-password", id: "pw-new", desc: "At least 12 characters." });
+  const pwNew2 = field({ label: "Confirm new password", name: "new2", type: "password", autocomplete: "new-password", id: "pw-new2" });
+  const savePw = button("Change password", { kind: "sm", type: "submit", id: "change-password" });
+  const pwForm = h("form", { class: "pw-form", id: "password-change-form", novalidate: true, onsubmit: async (e) => {
+    e.preventDefault();
+    [pwCur, pwNew, pwNew2].forEach((f) => f.setError(null));
+    const next = pwNew.control.value;
+    if ([...next].length < 12) { pwNew.setError("Choose a password of at least 12 characters."); pwNew.control.focus(); return; }
+    if (pwNew2.control.value !== next) { pwNew2.setError("The two passwords are not the same."); pwNew2.control.focus(); return; }
+    await busy(savePw, "Changing…", async () => {
+      try {
+        await api("POST", "api/v1/auth/password/change", { current: pwCur.control.value, new: next });
+        flash("ok", "Password changed. Your other console sessions are signed out.");
+        announce("Password changed.");
+        await ctx.refresh();
+      } catch (err) {
+        const at = err.status === 422 ? (/current/i.test(err.message) ? pwCur : pwNew) : null;
+        if (at) { at.setError(err.message); at.control.focus(); } else flash("err", errorText(err));
+      }
+    });
+  } }, pwCur, pwNew, pwNew2, h("div", { class: "form-actions" }, savePw));
+
   const revoke = async (btn, x) => {
     if (!await confirmDialog({ title: "End this session?", confirm: "End session", danger: true, body: h("p", {}, `${device(x.user_agent)} from ${x.ip || "an unknown address"} is signed out.`) })) return;
-    await act(btn, "Ending…", () => api("POST", `/api/v1/auth/sessions/${x.id}/revoke`), { ok: "Session ended.", after: ctx.refresh });
+    await act(btn, "Ending…", () => api("POST", `api/v1/auth/sessions/${x.id}/revoke`), { ok: "Session ended.", after: ctx.refresh });
   };
   const revokeOthers = async (e) => {
     const btn = e.currentTarget;
     if (!await confirmDialog({ title: "Sign out everywhere else?", confirm: "End other sessions", danger: true, body: h("p", {}, `${others} other session${others === 1 ? "" : "s"} end now. This one stays.`) })) return;
-    await act(btn, "Ending…", () => api("POST", "/api/v1/auth/sessions/revoke-others"), { ok: (r) => `${r.revoked} session${r.revoked === 1 ? "" : "s"} ended.`, after: ctx.refresh });
+    await act(btn, "Ending…", () => api("POST", "api/v1/auth/sessions/revoke-others"), { ok: (r) => `${r.revoked} session${r.revoked === 1 ? "" : "s"} ended.`, after: ctx.refresh });
   };
 
   return h("div", {},
@@ -36,8 +62,9 @@ export async function page(ctx) {
         kv([["Email", me.email], ["Roles", (me.operator_roles || []).map(roleLabel).join(", ") || "None"], ["User ID", h("span", { class: "mono" }, me.id)]], 1),
         h("form", { class: "name-form", novalidate: true, onsubmit: async (e) => {
           e.preventDefault();
-          await act(saveName, "Saving…", () => api("PATCH", "/api/v1/me", { display_name: name.control.value.trim() }), { ok: "Name saved.", after: async () => { await ctx.reloadMe(); } });
-        } }, name, h("div", { class: "form-actions" }, saveName))),
+          await act(saveName, "Saving…", () => api("PATCH", "api/v1/me", { display_name: name.control.value.trim() }), { ok: "Name saved.", after: async () => { await ctx.reloadMe(); } });
+        } }, name, h("div", { class: "form-actions" }, saveName)),
+        h("h3", { class: "sub-head" }, "Change password"), pwForm),
       container({ title: "Permissions", desc: "From your roles; the API checks them on every request." },
         h("ul", { class: "perm-list cols2" }, (me.operator_permissions || []).map((p) => h("li", {}, h("code", {}, p)))))),
     container({ title: "Console sessions", count: s.sessions.length, flush: true, desc: "Sessions last 12 hours and end after 2 hours without use. The customer portal has its own sessions.",

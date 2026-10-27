@@ -1,8 +1,8 @@
 // Access: who holds which operator role. Platform admins grant a role to someone who has signed
 // in to the customer portal once, and revoke it (their console sessions end with their last
 // role). Both need a sign-in in the last 15 minutes.
-import { h, container, pageHeader, button, confirmDialog, alert, flash } from "/_console/console.js";
-import { S, api, can, when, table, act, field, formDialog, readOnlyNote, roleLabel, toolbar, searchBox } from "/lib.js";
+import { h, container, pageHeader, button, confirmDialog, alert, flash } from "../_console/console.js";
+import { S, api, can, when, table, act, field, formDialog, readOnlyNote, roleLabel, toolbar, searchBox } from "../lib.js";
 
 function roleBadge(r) {
   const c = { platform_admin: "red", operations_operator: "blue", support_operator: "", billing_operator: "green", security_auditor: "amber" }[r] || "";
@@ -18,7 +18,7 @@ function recentHint(e, ctx) {
 }
 
 export async function page(ctx) {
-  const r = await api("GET", "/api/v1/ops/access");
+  const r = await api("GET", "api/v1/ops/access");
   const manage = can("ops.access.manage");
   const q = (ctx.query.get("q") || "").toLowerCase();
   let rows = r.grants;
@@ -34,7 +34,7 @@ export async function page(ctx) {
       h("p", { class: "muted small" }, "The role takes effect at their next request. They sign in to this console with the same email.")], submit: async () => {
       const v = email.control.value.trim();
       if (!v.includes("@")) { email.setError("Type their email address."); throw new Error("Type their email address."); }
-      try { await api("POST", "/api/v1/ops/access", { email: v, role: role.control.value }); }
+      try { await api("POST", "api/v1/ops/access", { email: v, role: role.control.value }); }
       catch (e) { if (recentHint(e, ctx)) throw new Error("Sign in again (a sign-in in the last 15 minutes is needed), then repeat this."); throw e; }
       return { email: v, role: role.control.value };
     } });
@@ -47,7 +47,7 @@ export async function page(ctx) {
       body: [h("p", {}, last ? "This is their last operator role: their console sessions end now." : "They keep their other operator roles."),
         self ? alert("warn", "This is you", "You lose this role's access immediately.") : null] })) return;
     await act(btn, "Revoking…", async () => {
-      try { await api("DELETE", `/api/v1/ops/access/${g.user_id}/${g.role}`); }
+      try { await api("DELETE", `api/v1/ops/access/${g.user_id}/${g.role}`); }
       catch (e) { if (recentHint(e, ctx)) return; throw e; }
     }, { ok: `${roleLabel(g.role)} revoked from ${g.email}.`, after: async () => { if (self) await ctx.reloadMe(); ctx.refresh(); } });
   };

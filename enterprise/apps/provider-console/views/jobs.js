@@ -1,7 +1,7 @@
 // Provisioning jobs (provision and release, worked by the provisioning worker), retry and
 // cancel, and reconciliation on demand with what it found (its incidents).
-import { h, container, pageHeader, button, confirmDialog } from "/_console/console.js";
-import { api, can, st, when, table, shortId, toolbar, searchBox, selectBox, act, readOnlyNote, stats, sevBadge } from "/lib.js";
+import { h, container, pageHeader, button, confirmDialog } from "../_console/console.js";
+import { api, can, st, when, table, shortId, toolbar, searchBox, selectBox, act, readOnlyNote, stats, sevBadge } from "../lib.js";
 
 const STATES = ["queued", "running", "waiting_provider", "retryable_failed", "permanent_failed", "succeeded", "cancelled"];
 const LABELS = { queued: "Queued", running: "Running", waiting_provider: "Waiting on provider", retryable_failed: "Waiting to retry", permanent_failed: "Failed", succeeded: "Succeeded", cancelled: "Cancelled" };
@@ -14,8 +14,8 @@ export async function page(ctx) {
   const q = (ctx.query.get("q") || "").toLowerCase();
   const manage = can("ops.jobs.manage");
   const [r, inc] = await Promise.all([
-    api("GET", `/api/v1/ops/provisioning-jobs?limit=${encodeURIComponent(limit)}${state ? "&state=" + encodeURIComponent(state) : ""}`),
-    can("ops.incidents.read") ? api("GET", "/api/v1/ops/incidents?state=open").catch(() => null) : null,
+    api("GET", `api/v1/ops/provisioning-jobs?limit=${encodeURIComponent(limit)}${state ? "&state=" + encodeURIComponent(state) : ""}`),
+    can("ops.incidents.read") ? api("GET", "api/v1/ops/incidents?state=open").catch(() => null) : null,
   ]);
   let rows = r.jobs;
   if (q) rows = rows.filter((j) => [j.id, j.rental_id, j.organization, j.last_error || "", j.correlation_id].join(" ").toLowerCase().includes(q));
@@ -25,15 +25,15 @@ export async function page(ctx) {
   const retry = async (btn, j) => {
     if (!await confirmDialog({ title: "Retry this job?", confirm: "Retry job",
       body: [h("p", {}, `The ${j.operation} job for ${j.organization} is queued again with its attempts reset.`), j.last_error ? h("p", { class: "muted" }, "Last error: " + j.last_error) : null] })) return;
-    await act(btn, "Retrying…", () => api("POST", `/api/v1/ops/provisioning-jobs/${j.id}/retry`), { ok: "The job is queued again.", after: ctx.refresh });
+    await act(btn, "Retrying…", () => api("POST", `api/v1/ops/provisioning-jobs/${j.id}/retry`), { ok: "The job is queued again.", after: ctx.refresh });
   };
   const cancel = async (btn, j) => {
     if (!await confirmDialog({ title: "Cancel this job?", confirm: "Cancel job", danger: true,
       body: h("p", {}, `The ${j.operation} job for ${j.organization} will not run. Its rental stays as it is; resolving it is then up to an operator.`) })) return;
-    await act(btn, "Cancelling…", () => api("POST", `/api/v1/ops/provisioning-jobs/${j.id}/cancel`), { ok: "The job is cancelled.", after: ctx.refresh });
+    await act(btn, "Cancelling…", () => api("POST", `api/v1/ops/provisioning-jobs/${j.id}/cancel`), { ok: "The job is cancelled.", after: ctx.refresh });
   };
   const reconcile = async (e) => {
-    await act(e.currentTarget, "Reconciling…", () => api("POST", "/api/v1/ops/reconcile"), {
+    await act(e.currentTarget, "Reconciling…", () => api("POST", "api/v1/ops/reconcile"), {
       ok: (x) => "Reconciled at " + new Date(x.reconciled_at).toLocaleTimeString("en-GB"),
       after: (x) => { lastReconcile = x.reconciled_at; return ctx.refresh(); },
     });
@@ -50,7 +50,7 @@ export async function page(ctx) {
       desc: (lastReconcile ? "Last run from here: " + new Date(lastReconcile).toLocaleString("en-GB") + ". " : "") + "Open incidents where Taro and the provider disagree about a Mac. Reconciliation runs every minute; nothing is released on a guess.", flush: true },
     table([
       { label: "Severity", cell: (i) => sevBadge(i.severity), class: "st" },
-      { label: "Finding", cell: (i) => h("a", { href: "/incidents/" + i.id }, i.title) },
+      { label: "Finding", cell: (i) => h("a", { href: "incidents/" + i.id }, i.title) },
       { label: "Seen", cell: (i) => `${i.occurrences}×`, class: "num" },
       { label: "Last seen", cell: (i) => when(i.last_seen, { rel: true }), class: "nowrap" },
     ], drift, { caption: "Reconciliation findings", empty: { title: "No drift", text: "Taro and the provider agree about every Mac." } })) : null,

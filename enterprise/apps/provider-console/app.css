@@ -294,3 +294,33 @@ input[type=color] { width: 48px; height: 34px; padding: 2px; border: 1px solid v
 .form-actions.start { justify-content: flex-start; }
 .container-foot code, .foot code { overflow-wrap: anywhere; }
 .form-grid.assign { align-items: start; }
+
+/* sign in: the other ways */
+.auth-alt { margin: 14px 0 0; font-size: 13.5px; color: var(--text-2); }
+.auth-alt + .or { margin-top: 14px; }
+.linkbtn { all: unset; cursor: pointer; color: var(--link); font-weight: 600; }
+.linkbtn:hover { text-decoration: underline; }
+.linkbtn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 2px; }
+.auth-form .hint code { font-size: 12px; overflow-wrap: anywhere; }
+.sub-head { font-size: 15px; margin: 22px 0 10px; padding-top: 16px; border-top: 1px solid var(--divider); }
+.pw-form .field { max-width: 420px; }
+.pw-form .form-actions { justify-content: flex-start; }
+
+/* the provider's own Macs */
+.online { display: flex; flex-wrap: wrap; align-items: center; gap: 0 6px; }
+.online > .muted { flex-basis: 100%; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-3); flex: none; }
+.online.on .dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+.online.on .o-text { color: var(--ok); font-weight: 600; }
+.control-badge { display: inline-flex; gap: 5px; align-items: flex-start; margin-top: 4px; padding: 2px 8px; border-radius: 10px; font-size: 12px; line-height: 1.5;
+  color: var(--warn); background: var(--warn-bg); border: 1px solid color-mix(in srgb, var(--warn-icon) 40%, transparent); max-width: 34ch; }
+.control-badge .i { width: 12px; height: 12px; margin-top: 3px; flex: none; color: var(--warn-icon); }
+.enroll-code { display: flex; align-items: center; justify-content: center; gap: 8px; margin: 14px 0 16px; padding: 14px 12px; border: 1px dashed var(--field-border); border-radius: var(--r-s); background: var(--surface-2); }
+.enroll-code > .mono { font-size: 28px; font-weight: 700; letter-spacing: .08em; overflow-wrap: anywhere; text-align: center; }
+ol.steps { margin: 14px 0 8px; padding-left: 22px; }
+ol.steps li { margin: 4px 0; }
+#control-note .alert p { margin: 4px 0 0; }
+@media (max-width: 700px) { .enroll-code > .mono { font-size: 22px; } }
+.form-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); max-width: 1080px; }
+@media (max-width: 980px) { .form-grid.three { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 700px) { .form-grid.three { grid-template-columns: minmax(0, 1fr); } }

@@ -1,10 +1,10 @@
 // Relay nodes: the relays customers' connections go through. Add, delete, and check them
 // (a TCP connect from the API: reachability and connect time are all the telemetry there is).
-import { h, container, pageHeader, button, confirmDialog, alert, flash } from "/_console/console.js";
-import { api, can, st, when, table, act, field, formDialog, readOnlyNote, stats } from "/lib.js";
+import { h, container, pageHeader, button, confirmDialog, alert, flash } from "../_console/console.js";
+import { api, can, st, when, table, act, field, formDialog, readOnlyNote, stats } from "../lib.js";
 
 export async function page(ctx) {
-  const r = await api("GET", "/api/v1/ops/relay-nodes");
+  const r = await api("GET", "api/v1/ops/relay-nodes");
   const manage = can("ops.relays.manage");
   const reachable = r.relays.filter((x) => x.reachable === true).length;
   const down = r.relays.filter((x) => x.reachable === false).length;
@@ -19,16 +19,16 @@ export async function page(ctx) {
       const a = address.control.value.trim();
       if (a && !/^.+:\d{1,5}$/.test(a)) { address.setError("Write it as host:port."); bad = true; }
       if (bad) throw new Error("Fill in the name, the address (host:port) and the region.");
-      await api("POST", "/api/v1/ops/relay-nodes", { name: name.control.value.trim(), address: a, region: region.control.value.trim() });
+      await api("POST", "api/v1/ops/relay-nodes", { name: name.control.value.trim(), address: a, region: region.control.value.trim() });
     } });
     if (ok) { flash("ok", "Relay node added. Check it to see whether it can be reached."); ctx.refresh(); }
   };
   const del = async (btn, x) => {
     if (!await confirmDialog({ title: `Delete ${x.name}?`, confirm: "Delete relay", danger: true,
       body: [h("p", {}, "The relay node is removed from Taro. Clients that use ", h("code", {}, x.address), " are not changed by this."), h("p", { class: "muted" }, "This cannot be undone.")] })) return;
-    await act(btn, "Deleting…", () => api("DELETE", "/api/v1/ops/relay-nodes/" + x.id), { ok: `${x.name} deleted.`, after: ctx.refresh });
+    await act(btn, "Deleting…", () => api("DELETE", "api/v1/ops/relay-nodes/" + x.id), { ok: `${x.name} deleted.`, after: ctx.refresh });
   };
-  const check = (e) => act(e.currentTarget, "Checking…", () => api("POST", "/api/v1/ops/relay-nodes/check"), { ok: "Relay nodes checked.", after: ctx.refresh });
+  const check = (e) => act(e.currentTarget, "Checking…", () => api("POST", "api/v1/ops/relay-nodes/check"), { ok: "Relay nodes checked.", after: ctx.refresh });
 
   return h("div", {},
     ctx.crumbs([["Taro Operations", "/"], ["Infrastructure"], ["Relay nodes"]]),

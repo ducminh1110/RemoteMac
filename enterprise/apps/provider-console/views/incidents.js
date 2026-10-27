@@ -1,8 +1,8 @@
 // Incidents: what operators must look at, opened by the platform (a failed paid rental, a
 // provider or relay down, drift between Taro and the provider). Operators take ownership,
 // write the mitigation, and resolve with what fixed it.
-import { h, container, pageHeader, kv, button, alert } from "/_console/console.js";
-import { S, api, can, st, when, table, toolbar, searchBox, selectBox, act, field, readOnlyNote, stats, sevBadge, humanize, checkbox, shortId } from "/lib.js";
+import { h, container, pageHeader, kv, button, alert } from "../_console/console.js";
+import { S, api, can, st, when, table, toolbar, searchBox, selectBox, act, field, readOnlyNote, stats, sevBadge, humanize, checkbox, shortId } from "../lib.js";
 
 const SEV = { sev1: "Critical", sev2: "Major", sev3: "Minor", sev4: "Low" };
 
@@ -10,7 +10,7 @@ export async function list(ctx) {
   const status = ctx.query.has("status") ? ctx.query.get("status") : "unresolved";
   const sev = ctx.query.get("sev") || "";
   const q = (ctx.query.get("q") || "").toLowerCase();
-  const r = await api("GET", "/api/v1/ops/incidents" + (status && status !== "unresolved" ? "?state=" + status : ""));
+  const r = await api("GET", "api/v1/ops/incidents" + (status && status !== "unresolved" ? "?state=" + status : ""));
   let rows = r.incidents;
   if (status === "unresolved") rows = rows.filter((i) => i.status !== "resolved");
   if (sev) rows = rows.filter((i) => i.severity === sev);
@@ -33,7 +33,7 @@ export async function list(ctx) {
         selectBox({ label: "Severity", value: sev, id: "inc-sev", options: [["", "All"], ...Object.entries(SEV).map(([k, v]) => [k, `${k.toUpperCase()} · ${v}`])], onchange: (v) => { ctx.setQuery({ sev: v }); ctx.refresh(); } })),
       table([
         { label: "Severity", cell: (i) => sevBadge(i.severity), class: "st" },
-        { label: "Incident", cell: (i) => h("div", {}, h("a", { href: "/incidents/" + i.id, class: "strong" }, i.title), i.impact ? h("div", { class: "muted small" }, i.impact) : null) },
+        { label: "Incident", cell: (i) => h("div", {}, h("a", { href: "incidents/" + i.id, class: "strong" }, i.title), i.impact ? h("div", { class: "muted small" }, i.impact) : null) },
         { label: "Component", cell: (i) => humanize(i.component) },
         { label: "Status", cell: (i) => st(i.status) },
         { label: "Seen", cell: (i) => `${i.occurrences}×`, class: "num" },
@@ -50,11 +50,11 @@ function linked(l) {
   for (const [k, v] of Object.entries(l)) {
     if (v == null) continue;
     let val = h("span", { class: "mono" }, String(v));
-    if (k === "organization_id" && can("ops.orgs.read")) val = h("a", { href: "/organizations/" + v, class: "mono" }, String(v));
-    if (k === "resource_id" && can("ops.inventory.read")) val = h("a", { href: "/macs/" + v, class: "mono" }, String(v));
-    if (k === "job_id" && can("ops.jobs.read")) val = h("a", { href: "/provisioning-jobs?q=" + v, class: "mono" }, String(v));
-    if (k === "relay_id" && can("ops.relays.read")) val = h("a", { href: "/relay-nodes", class: "mono" }, String(v));
-    if (k === "provider_id" && can("ops.providers.read")) val = h("a", { href: "/providers", class: "mono" }, String(v));
+    if (k === "organization_id" && can("ops.orgs.read")) val = h("a", { href: "organizations/" + v, class: "mono" }, String(v));
+    if (k === "resource_id" && can("ops.inventory.read")) val = h("a", { href: "macs/" + v, class: "mono" }, String(v));
+    if (k === "job_id" && can("ops.jobs.read")) val = h("a", { href: "provisioning-jobs?q=" + v, class: "mono" }, String(v));
+    if (k === "relay_id" && can("ops.relays.read")) val = h("a", { href: "relay-nodes", class: "mono" }, String(v));
+    if (k === "provider_id" && can("ops.providers.read")) val = h("a", { href: "providers", class: "mono" }, String(v));
     out.push([humanize(k.replace(/_id$/, "")), val]);
   }
   return out;
@@ -62,9 +62,9 @@ function linked(l) {
 
 export async function detail(ctx) {
   const id = ctx.params[0];
-  const r = await api("GET", "/api/v1/ops/incidents?limit=200");
+  const r = await api("GET", "api/v1/ops/incidents?limit=200");
   let i = r.incidents.find((x) => x.id === id);
-  if (!i) i = (await api("GET", "/api/v1/ops/incidents?state=resolved")).incidents.find((x) => x.id === id);
+  if (!i) i = (await api("GET", "api/v1/ops/incidents?state=resolved")).incidents.find((x) => x.id === id);
   if (!i) return h("div", {}, ctx.crumbs([["Taro Operations", "/"], ["Incidents", "/incidents"], ["Not found"]]), alert("err", "No such incident", "It may be older than the 200 incidents listed."));
   const manage = can("ops.incidents.manage");
   const mine = S.me && i.owner_email === S.me.email;
@@ -84,7 +84,7 @@ export async function detail(ctx) {
       if (status === "resolved" && !fRes.control.value.trim()) { fRes.setError("Write what resolved it."); fRes.control.focus(); return; }
       const body = { status, mitigation: fMit.control.value, resolution: fRes.control.value };
       if (own && own.control.checked) body.take_ownership = true;
-      await act(save, "Saving…", () => api("PATCH", "/api/v1/ops/incidents/" + i.id, body), { ok: status === "resolved" ? "Incident resolved." : "Incident updated.", after: ctx.refresh });
+      await act(save, "Saving…", () => api("PATCH", "api/v1/ops/incidents/" + i.id, body), { ok: status === "resolved" ? "Incident resolved." : "Incident updated.", after: ctx.refresh });
     } }, h("div", { class: "form-grid" }, fStatus), fMit, fRes, own, h("div", { class: "form-actions" }, save));
   }
 

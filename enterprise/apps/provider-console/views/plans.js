@@ -1,7 +1,7 @@
 // Plans: the catalog customers rent from. Plans are never edited in place (a rental keeps the
 // price it was made with): a change is a new plan, usually with the old one retired.
-import { h, icon, container, pageHeader, button, confirmDialog, alert, flash } from "/_console/console.js";
-import { api, can, st, money, minorUnits, table, toolbar, searchBox, selectBox, act, field, readOnlyNote, stats, checkbox } from "/lib.js";
+import { h, icon, container, pageHeader, button, confirmDialog, alert, flash } from "../_console/console.js";
+import { api, can, st, money, minorUnits, table, toolbar, searchBox, selectBox, act, field, readOnlyNote, stats, checkbox } from "../lib.js";
 
 function billingText(p) {
   return p.billing === "monthly" ? "Monthly" : `One-time · ${p.duration_hours} h`;
@@ -10,7 +10,7 @@ function billingText(p) {
 export async function list(ctx) {
   const show = ctx.query.get("show") || "";
   const q = (ctx.query.get("q") || "").toLowerCase();
-  const r = await api("GET", "/api/v1/ops/plans");
+  const r = await api("GET", "api/v1/ops/plans");
   const manage = can("ops.config.manage");
   let rows = r.plans;
   if (show === "active") rows = rows.filter((p) => p.active);
@@ -21,13 +21,13 @@ export async function list(ctx) {
     const retire = p.active;
     if (!await confirmDialog({ title: retire ? `Retire ${p.name}?` : `Offer ${p.name} again?`, confirm: retire ? "Retire plan" : "Reactivate plan", danger: retire,
       body: h("p", {}, retire ? "New rentals can no longer choose it. Rentals made with it keep their price and go on." : "Customers can rent it again from the catalog.") })) return;
-    await act(btn, retire ? "Retiring…" : "Reactivating…", () => api("PATCH", "/api/v1/ops/plans/" + p.id, { active: !retire }), { ok: retire ? `${p.name} is retired.` : `${p.name} is offered again.`, after: ctx.refresh });
+    await act(btn, retire ? "Retiring…" : "Reactivating…", () => api("PATCH", "api/v1/ops/plans/" + p.id, { active: !retire }), { ok: retire ? `${p.name} is retired.` : `${p.name} is offered again.`, after: ctx.refresh });
   };
 
   return h("div", {},
     ctx.crumbs([["Taro Operations", "/"], ["Catalog"], ["Plans"]]),
     pageHeader({ title: "Plans", desc: "What customers can rent. A plan is not changed in place: to change a price or specs, create a new version and retire the old plan.",
-      actions: [button("Refresh", { icon: "refresh", onclick: () => ctx.refresh() }), manage ? h("a", { class: "btn primary", href: "/plans/new", id: "new-plan" }, icon("plus"), "Create plan") : null] }),
+      actions: [button("Refresh", { icon: "refresh", onclick: () => ctx.refresh() }), manage ? h("a", { class: "btn primary", href: "plans/new", id: "new-plan" }, icon("plus"), "Create plan") : null] }),
     manage ? null : readOnlyNote("plans"),
     stats([["Plans", r.plans.length], ["Offered", r.plans.filter((p) => p.active).length, "ok"], ["Retired", r.plans.filter((p) => !p.active).length]]),
     container({ title: "Plans", count: rows.length, flush: true },
@@ -42,7 +42,7 @@ export async function list(ctx) {
         { label: "Price", cell: (p) => h("strong", {}, money(p.price_minor, p.currency)), class: "num nowrap" },
         { label: "Status", cell: (p) => p.active ? st("active", "Offered") : st("disabled", "Retired") },
         manage ? { label: "Actions", class: "actions", cell: (p) => [
-          h("a", { class: "btn sm", href: "/plans/new?from=" + p.id, title: "Create a changed copy of this plan" }, "New version"),
+          h("a", { class: "btn sm", href: "plans/new?from=" + p.id, title: "Create a changed copy of this plan" }, "New version"),
           button(p.active ? "Retire" : "Reactivate", { kind: p.active ? "sm danger" : "sm", onclick: (e) => toggle(e.currentTarget, p) }),
         ] } : null,
       ].filter(Boolean), rows, { caption: "Plans", rowClass: (p) => p.active ? null : "retired",
@@ -54,8 +54,8 @@ const slugify = (s) => s.toLowerCase().normalize("NFKD").replace(/[^\w\s-]/g, ""
 export async function create(ctx) {
   const fromId = ctx.query.get("from");
   const [plans, fleet] = await Promise.all([
-    api("GET", "/api/v1/ops/plans"),
-    can("ops.inventory.read") ? api("GET", "/api/v1/ops/mac-resources").catch(() => null) : null,
+    api("GET", "api/v1/ops/plans"),
+    can("ops.inventory.read") ? api("GET", "api/v1/ops/mac-resources").catch(() => null) : null,
   ]);
   const from = fromId ? plans.plans.find((p) => p.id === fromId) : null;
   const caps = fleet && fleet.capabilities;
@@ -119,8 +119,8 @@ export async function create(ctx) {
       region: fRegion.control.value.trim(), billing, duration_hours: billing === "one_time" ? dur : null, price_minor, currency: cur };
     await act(submit, "Creating…", async () => {
       try {
-        await api("POST", "/api/v1/ops/plans", body);
-        if (retire && retire.control.checked) await api("PATCH", "/api/v1/ops/plans/" + from.id, { active: false });
+        await api("POST", "api/v1/ops/plans", body);
+        if (retire && retire.control.checked) await api("PATCH", "api/v1/ops/plans/" + from.id, { active: false });
       } catch (x) { errBox.replaceChildren(alert("err", "The plan was not created", x.message)); throw x; }
       flash("ok", retire && retire.control.checked ? `${name} created and ${from.name} retired.` : `${name} created.`);
       ctx.navigate("/plans");
@@ -130,7 +130,7 @@ export async function create(ctx) {
   container({ title: "Plan" }, h("div", { class: "form-grid" }, fName, fSlug), fDesc),
   container({ title: "Mac" }, h("div", { class: "form-grid four" }, fChip, fCpu, fMem, fSto), h("div", { class: "form-grid" }, fRegion), dl("chip-list", chips), dl("region-list", regions)),
   container({ title: "Billing and price" }, tiles, durWrap, h("div", { class: "form-grid" }, fPrice, fCur), retire),
-  h("div", { class: "form-actions" }, h("a", { class: "btn link", href: "/plans" }, "Cancel"), submit));
+  h("div", { class: "form-actions" }, h("a", { class: "btn link", href: "plans" }, "Cancel"), submit));
 
   return h("div", {},
     ctx.crumbs([["Taro Operations", "/"], ["Plans", "/plans"], [from ? "New version" : "Create plan"]]),

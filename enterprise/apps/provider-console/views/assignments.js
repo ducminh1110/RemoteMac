@@ -1,7 +1,7 @@
 // Assignments: the console's main job. Give a customer (by email) a Mac of a plan, with no
 // checkout, and end it again. The provider's own systems can do the same with the ops API key.
-import { h, container, pageHeader, button, confirmDialog, alert } from "/_console/console.js";
-import { api, can, st, when, table, field, act, readOnlyNote, stats, stateLabel } from "/lib.js";
+import { h, container, pageHeader, button, confirmDialog, alert } from "../_console/console.js";
+import { api, can, st, when, table, field, act, readOnlyNote, stats, stateLabel } from "../lib.js";
 
 const BUSY = ["paid", "provisioning", "cancel_pending"];
 const ENDED = ["cancelled", "expired", "failed"];
@@ -9,10 +9,16 @@ const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export async function page(ctx) {
   const manage = can("ops.inventory.manage");
-  const [list, plansRes] = await Promise.all([
-    api("GET", "/api/v1/ops/assignments"),
-    manage ? api("GET", "/api/v1/ops/plans").catch(() => ({ plans: [] })) : { plans: [] },
+  const [list, plansRes, fleet] = await Promise.all([
+    api("GET", "api/v1/ops/assignments"),
+    manage ? api("GET", "api/v1/ops/plans").catch(() => ({ plans: [] })) : { plans: [] },
+    manage ? api("GET", "api/v1/ops/fleet").catch(() => null) : null,
   ]);
+  // the provider's own Macs (fleet): the operator may choose the Mac
+  const chooseMac = !!(fleet && fleet.provider === "fleet");
+  const freeMacs = (f) => f.macs.filter((m) => m.state === "available" && !m.control && !m.hold_reason);
+  const macOptions = (f) => [["", "Any free Mac of the plan"],
+    ...freeMacs(f).map((m) => [m.id, [m.display_name, m.chip].filter(Boolean).join(" · ") + (m.online ? "" : " (offline)")])];
   let rows = list.assignments;
   const plans = plansRes.plans.filter((p) => p.active);
   const holder = h("div", { id: "assignments-table" });
@@ -21,7 +27,7 @@ export async function page(ctx) {
   const end = async (btn, a) => {
     if (!await confirmDialog({ title: "End this assignment?", confirm: "End assignment", danger: true,
       body: h("p", {}, `${a.email || a.organization}'s ${a.plan} Mac is released and the customer loses access to it.`) })) return;
-    await act(btn, "Ending…", () => api("POST", `/api/v1/ops/assignments/${a.rental_id}/end`), { ok: "The assignment is ending.", after: reload });
+    await act(btn, "Ending…", () => api("POST", `api/v1/ops/assignments/${a.rental_id}/end`), { ok: "The assignment is ending.", after: reload });
   };
 
   function draw() {
@@ -48,7 +54,7 @@ export async function page(ctx) {
   }
   async function reload() {
     if (ctx.stale()) return;
-    try { rows = (await api("GET", "/api/v1/ops/assignments")).assignments; draw(); } catch (_) { /* try again next time */ }
+    try { rows = (await api("GET", "api/v1/ops/assignments")).assignments; draw(); } catch (_) { /* try again next time */ }
     poll();
   }
 
@@ -58,6 +64,17 @@ export async function page(ctx) {
       desc: "The account is made if there is none." });
     const fPlan = field({ label: "Plan", name: "plan_id", type: "select", required: true, id: "assign-plan", desc: "Active plans only.",
       options: plans.map((p) => [p.id, `${p.name} · ${p.chip} · ${p.region}`]) });
+    const fMac = chooseMac ? field({ label: "Mac", name: "mac_id", type: "select", opt: true, id: "assign-mac", desc: "Free Macs that no administrator controls.",
+      options: macOptions(fleet) }) : null;
+    const refreshMacs = async () => {
+      if (!fMac) return;
+      try {
+        const f = await api("GET", "api/v1/ops/fleet");
+        const keep = fMac.control.value;
+        fMac.control.replaceChildren(...macOptions(f).map(([v, l]) => h("option", { value: v }, l)));
+        fMac.control.value = [...fMac.control.options].some((o) => o.value === keep) ? keep : "";
+      } catch (_) { /* the list stays as it was */ }
+    };
     const errBox = h("div", { role: "alert" });
     const submit = button("Assign Mac", { kind: "primary", type: "submit", id: "assign-submit" });
     form = container({ title: "Assign a Mac" }, h("form", { novalidate: true, id: "assign-form", onsubmit: async (e) => {
@@ -67,13 +84,15 @@ export async function page(ctx) {
       if (!EMAIL.test(email)) { fEmail.setError("Type the customer's email address."); fEmail.control.focus(); return; }
       if (!fPlan.control.value) { fPlan.setError("Choose a plan."); return; }
       await act(submit, "Assigning…", async () => {
-        try { await api("POST", "/api/v1/ops/assignments", { email, plan_id: fPlan.control.value }); }
+        const body = { email, plan_id: fPlan.control.value };
+        if (fMac && fMac.control.value) body.mac_id = fMac.control.value;
+        try { await api("POST", "api/v1/ops/assignments", body); }
         catch (x) { errBox.replaceChildren(alert("err", "The Mac was not assigned", x.message)); throw x; }
-      }, { ok: `A ${plans.find((p) => p.id === fPlan.control.value).name} Mac is being prepared for ${email}.`, after: () => { fEmail.control.value = ""; return reload(); } });
+      }, { ok: `A ${plans.find((p) => p.id === fPlan.control.value).name} Mac is being prepared for ${email}.`, after: () => { fEmail.control.value = ""; return Promise.all([reload(), refreshMacs()]); } });
     } },
     errBox,
     plans.length ? null : alert("warn", "No active plan", "Create a plan first (Catalog, Plans)."),
-    h("div", { class: "form-grid assign" }, fEmail, fPlan),
+    h("div", { class: "form-grid assign" + (fMac ? " three" : "") }, fEmail, fPlan, fMac),
     h("div", { class: "form-actions start" }, submit)));
   }
 

@@ -1,7 +1,7 @@
 // The audit log: who did what to which resource, when, and how it ended. Newest first, paged by
 // id; filtered by organization on the server and by action, actor and result on the page.
-import { h, container, pageHeader, button } from "/_console/console.js";
-import { api, can, st, when, table, toolbar, searchBox, selectBox, humanize, orgNames, orgLink } from "/lib.js";
+import { h, container, pageHeader, button } from "../_console/console.js";
+import { api, can, st, when, table, toolbar, searchBox, selectBox, humanize, orgNames, orgLink } from "../lib.js";
 
 function resultState(r) {
   return r === "success" ? st("succeeded", "Success") : r === "denied" ? st("error", "Denied") : st("failed", "Failure");
@@ -24,7 +24,7 @@ export async function page(ctx) {
   const qs = new URLSearchParams({ limit });
   if (org) qs.set("organization_id", org);
   if (before) qs.set("before", before);
-  const [r, names] = await Promise.all([api("GET", "/api/v1/ops/audit-events?" + qs), orgNames()]);
+  const [r, names] = await Promise.all([api("GET", "api/v1/ops/audit-events?" + qs), orgNames()]);
   let rows = r.events;
   if (q) rows = rows.filter((e) => [e.action, e.resource_type, e.resource_id || "", e.actor_email || "", e.request_id || "", JSON.stringify(e.details)].join(" ").toLowerCase().includes(q));
   if (result) rows = rows.filter((e) => e.result === result);

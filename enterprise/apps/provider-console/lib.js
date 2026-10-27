@@ -1,9 +1,26 @@
 // Taro Operations (the Provider Console): what every page shares. The API client (session
 // cookie + X-CSRF-Token), the signed-in operator and their permissions, formatting, and small
 // components on top of the shared console helpers. All DOM through createElement/textContent.
-import { h, icon, status, container, alert, button, busy, flash } from "/_console/console.js";
+import { h, icon, status, container, alert, button, busy, flash } from "./_console/console.js";
 
-export const S = { me: null, providers: null, branding: null, orgNames: null };
+export const S = { me: null, providers: null, branding: null, orgNames: null, setup: null };
+
+// Where the console is mounted: "/" on its own origin, "/console/" on the portal's (one server).
+// The server says so with <base href>; every URL the console uses is relative to it: links are
+// written without a leading slash, API paths as "api/v1/…". Routes inside the app ("/macs") are
+// paths below the base.
+export const BASE = new URL(document.querySelector("base[href]") ? document.baseURI : "/", location.href).pathname.replace(/\/?$/, "/");
+/** A route ("/macs?x=1") as a link from the page, relative to the base ("./macs?x=1"). */
+export const rel = (route) => { const s = String(route); return s.startsWith("/") ? "./" + s.slice(1) : s; };
+/** The route of a path of this site ("/console/macs" -> "/macs"), or null when it is not the console's. */
+export function routeOf(pathname) {
+  const root = BASE.slice(0, -1); // "" or "/console"
+  if (pathname === root) return "/";
+  if (!pathname.startsWith(BASE)) return null;
+  return "/" + pathname.slice(BASE.length);
+}
+/** The product's name (the provider's branding). */
+export const product = () => (S.branding && S.branding.displayName) || "Taro Enterprise";
 
 export class ApiError extends Error {
   constructor(httpStatus, code, message, requestId) {
@@ -23,7 +40,7 @@ export async function api(method, path, body, { raw, contentType, quiet401 } = {
   else if (body !== undefined) { opts.body = JSON.stringify(body); headers["Content-Type"] = "application/json"; }
   if (method !== "GET" && S.me && S.me.csrf_token) headers["X-CSRF-Token"] = S.me.csrf_token;
   let res;
-  try { res = await fetch(path, opts); }
+  try { res = await fetch(new URL(String(path).replace(/^\//, ""), location.origin + BASE), opts); }
   catch (_) { throw new ApiError(0, "network", "The console cannot reach the API. Check your connection and try again."); }
   const text = await res.text();
   let data = null;
@@ -228,6 +245,28 @@ export function formDialog({ title, body, confirm = "Save", danger = false, subm
   });
 }
 
+/** A dialog that only shows something (a code to copy, steps to follow); resolves when closed. */
+export function infoDialog({ title, body, close: closeLabel = "Done", id }) {
+  return new Promise((resolve) => {
+    const prev = document.activeElement;
+    const close = () => { back.remove(); removeEventListener("keydown", onKey, true); if (prev && prev.focus) prev.focus(); resolve(true); };
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.preventDefault(); close(); }
+      if (e.key === "Tab") trapFocus(e, back);
+    };
+    const ok = button(closeLabel, { kind: "primary", onclick: close });
+    const back = h("div", { class: "modal-back", onclick: (e) => e.target === back && close() },
+      h("div", { class: "modal", role: "dialog", "aria-modal": "true", "aria-labelledby": "info-title", id },
+        h("div", { class: "m-head" }, h("h2", { id: "info-title" }, title),
+          h("button", { class: "btn link sm", type: "button", "aria-label": "Close", onclick: close }, icon("close"))),
+        h("div", { class: "m-body" }, body),
+        h("div", { class: "m-foot" }, ok)));
+    document.body.append(back);
+    addEventListener("keydown", onKey, true);
+    ok.focus();
+  });
+}
+
 function trapFocus(e, root) {
   const f = [...root.querySelectorAll("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])")].filter((x) => !x.disabled && x.offsetParent !== null);
   if (!f.length) return;
@@ -304,7 +343,7 @@ export async function orgNames(force) {
   if (S.orgNames && !force) return S.orgNames;
   const m = new Map();
   if (can("ops.orgs.read")) {
-    try { const r = await api("GET", "/api/v1/ops/organizations"); for (const o of r.organizations) m.set(o.id, o.name); }
+    try { const r = await api("GET", "api/v1/ops/organizations"); for (const o of r.organizations) m.set(o.id, o.name); }
     catch (_) { /* names are a convenience: ids still show */ }
   }
   S.orgNames = m;
@@ -315,15 +354,16 @@ export function orgLink(id, names) {
   if (!id) return h("span", { class: "muted" }, "Platform");
   const name = names && names.get(id);
   if (!can("ops.orgs.read")) return name || shortId(id);
-  return h("a", { href: "/organizations/" + id }, name || String(id).slice(0, 8));
+  return h("a", { href: "organizations/" + id }, name || String(id).slice(0, 8));
 }
 
 export function copyButton(text, label = "Copy") {
   return h("button", { type: "button", class: "btn link sm copy", title: "Copy " + text, "aria-label": label + " " + text,
     onclick: async (e) => {
+      const btn = e.currentTarget; // (gone from the event after the await)
       try { await navigator.clipboard.writeText(text); flash("ok", "Copied."); }
       catch (_) { flash("warn", "Copy is not available here."); }
-      e.currentTarget.blur();
+      btn.blur();
     } }, icon("copy"));
 }
 

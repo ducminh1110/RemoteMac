@@ -1,23 +1,25 @@
 // Taro Operations (the Provider Console): the shell (top bar, side navigation by area), the
 // router (History API; the API serves index.html for every unknown path) and sign-in state.
-import { h, icon, breadcrumbs, button, flash } from "/_console/console.js";
-import { S, api, can, roleLabel, setUnauthenticatedHandler, announce, loadError } from "/lib.js";
+// The console may live under a path (/console/ on the portal's origin): routes are paths below
+// the base the server puts in <base href>, links are relative to it (see BASE in lib.js).
+import { h, icon, breadcrumbs, button, flash } from "./_console/console.js";
+import { S, api, can, roleLabel, setUnauthenticatedHandler, announce, loadError, BASE, rel, routeOf } from "./lib.js";
 
-import * as auth from "/views/auth.js";
-import * as overview from "/views/overview.js";
-import * as orgs from "/views/orgs.js";
-import * as fleet from "/views/fleet.js";
-import * as jobs from "/views/jobs.js";
-import * as relays from "/views/relays.js";
-import * as assignments from "/views/assignments.js";
-import * as plans from "/views/plans.js";
-import * as incidents from "/views/incidents.js";
-import * as audit from "/views/audit.js";
-import * as access from "/views/access.js";
-import * as flags from "/views/flags.js";
-import * as domains from "/views/domains.js";
-import * as branding from "/views/branding.js";
-import * as account from "/views/account.js";
+import * as auth from "./views/auth.js";
+import * as overview from "./views/overview.js";
+import * as orgs from "./views/orgs.js";
+import * as fleet from "./views/fleet.js";
+import * as jobs from "./views/jobs.js";
+import * as relays from "./views/relays.js";
+import * as assignments from "./views/assignments.js";
+import * as plans from "./views/plans.js";
+import * as incidents from "./views/incidents.js";
+import * as audit from "./views/audit.js";
+import * as access from "./views/access.js";
+import * as flags from "./views/flags.js";
+import * as domains from "./views/domains.js";
+import * as branding from "./views/branding.js";
+import * as account from "./views/account.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -80,8 +82,15 @@ let renderSeq = 0;
 
 // ---------------------------------------------------------------- navigation
 
+/** The current route: the path below the base, without a trailing slash ("/" at the base). */
+export function currentRoute() {
+  return (routeOf(location.pathname) || "/").replace(/(.)\/+$/, "$1");
+}
+
+/** Go to a route ("/macs?x=1"; below the base). */
 export function navigate(path, { replace = false } = {}) {
-  if (replace) history.replaceState(null, "", path); else history.pushState(null, "", path);
+  const url = BASE + String(path).replace(/^\//, "");
+  if (replace) history.replaceState(null, "", url); else history.pushState(null, "", url);
   closeNav();
   render();
 }
@@ -97,11 +106,20 @@ document.addEventListener("click", (e) => {
   if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
   const a = e.target.closest("a[href]");
   if (!a || a.target || a.hasAttribute("download")) return;
+  const raw = a.getAttribute("href");
+  if (raw.startsWith("#")) {
+    // with <base>, "#main" would be the base page's: go to the element on this page instead
+    e.preventDefault();
+    const t = document.getElementById(raw.slice(1));
+    if (t) { t.focus(); t.scrollIntoView(); }
+    return;
+  }
   const u = new URL(a.href, location.href);
-  if (u.origin !== location.origin || u.pathname.startsWith("/api/") || u.pathname.startsWith("/_")) return;
+  const route = u.origin === location.origin ? routeOf(u.pathname) : null;
+  if (route == null || route.startsWith("/api/") || route.startsWith("/_") || route.startsWith("/brand/")) return;
   e.preventDefault();
   if (u.pathname + u.search === location.pathname + location.search && !u.hash) { render(); return; }
-  navigate(u.pathname + u.search);
+  navigate(route + u.search);
 });
 addEventListener("popstate", () => render());
 
@@ -127,13 +145,13 @@ function shell(signedIn) {
   const brandEl = $("brand");
   const mark = brandEl.querySelector(".mark, img");
   if (brand.logoAssetId) {
-    if (!mark || mark.tagName !== "IMG" || !mark.src.endsWith(brand.logoAssetId)) mark.replaceWith(h("img", { src: "/api/v1/assets/" + brand.logoAssetId, alt: "" }));
+    if (!mark || mark.tagName !== "IMG" || !mark.src.endsWith(brand.logoAssetId)) mark.replaceWith(h("img", { src: "api/v1/assets/" + brand.logoAssetId, alt: "" }));
   } else if (mark && mark.tagName === "IMG") {
     mark.replaceWith(h("span", { class: "mark", "aria-hidden": "true" }, (brand.displayName || "T").trim().charAt(0).toUpperCase()));
   } else if (mark) {
     mark.textContent = (brand.displayName || "T").trim().charAt(0).toUpperCase();
   }
-  if (brand.faviconAssetId) $("favicon").setAttribute("href", "/api/v1/assets/" + brand.faviconAssetId);
+  if (brand.faviconAssetId) $("favicon").setAttribute("href", "api/v1/assets/" + brand.faviconAssetId);
   badges();
   $("layout").classList.toggle("no-nav", !signedIn);
   $("sidenav").hidden = !signedIn;
@@ -142,7 +160,7 @@ function shell(signedIn) {
   const me = S.me;
   const roles = me.operator_roles || [];
   $("top-user").replaceChildren(
-    h("a", { class: "item user", href: "/account", title: "Your account and sessions" }, icon("user"),
+    h("a", { class: "item user", href: "account", title: "Your account and sessions" }, icon("user"),
       h("span", { class: "u-text" }, h("strong", {}, me.display_name || me.email), h("span", { class: "u-role" }, roles.map(roleLabel).join(", ")))),
     h("span", { class: "divider hide-sm" }),
     h("button", { type: "button", class: "item linkish hide-sm", id: "sign-out", onclick: signOut }, "Sign out"));
@@ -153,10 +171,10 @@ function shell(signedIn) {
       const items = g.items.filter((i) => can(i.perm));
       if (!items.length) return null;
       return [g.section ? h("div", { class: "section" }, g.section) : null,
-        h("ul", { class: "links" }, items.map((i) => h("li", {}, h("a", { href: i.href, "data-nav": i.href }, i.label))))].filter(Boolean);
+        h("ul", { class: "links" }, items.map((i) => h("li", {}, h("a", { href: rel(i.href), "data-nav": i.href }, i.label))))].filter(Boolean);
     }),
     h("div", { class: "section" }, "Account"),
-    h("ul", { class: "links" }, h("li", {}, h("a", { href: "/account", "data-nav": "/account" }, "Account and sessions")),
+    h("ul", { class: "links" }, h("li", {}, h("a", { href: "account", "data-nav": "/account" }, "Account and sessions")),
       h("li", { class: "show-sm" }, h("button", { type: "button", class: "nav-btn", onclick: signOut }, "Sign out"))),
     h("div", { class: "foot" }, h("dl", {},
       h("dt", {}, "Signed in"), h("dd", {}, me.email),
@@ -170,8 +188,9 @@ function markNav(navHref) {
 }
 
 export async function signOut() {
-  try { await api("POST", "/api/v1/auth/sign-out"); } catch (_) { /* the session may be gone already */ }
+  try { await api("POST", "api/v1/auth/sign-out"); } catch (_) { /* the session may be gone already */ }
   S.me = null;
+  S.setup = await api("GET", "api/v1/setup/status").catch(() => S.setup);
   flash("ok", "You are signed out.");
   navigate("/sign-in", { replace: true });
 }
@@ -180,7 +199,7 @@ export async function signOut() {
 
 async function loadMe() {
   try {
-    S.me = await api("GET", "/api/v1/me", undefined, { quiet401: true });
+    S.me = await api("GET", "api/v1/me", undefined, { quiet401: true });
   } catch (e) {
     if (e.status === 401) S.me = null; else throw e;
   }
@@ -190,7 +209,7 @@ export async function reloadMe() { await loadMe(); shell(!!S.me && hasAnyRole())
 const hasAnyRole = () => S.me && (S.me.operator_roles || []).length > 0;
 
 export async function refreshBranding() {
-  try { S.branding = (await api("GET", "/api/v1/branding")).branding; } catch (_) { S.branding = null; }
+  try { S.branding = (await api("GET", "api/v1/branding")).branding; } catch (_) { S.branding = null; }
   shell(!!S.me && hasAnyRole());
 }
 
@@ -198,7 +217,7 @@ setUnauthenticatedHandler(() => {
   if (!S.me) return;
   S.me = null;
   flash("warn", "Your session has ended. Sign in again.");
-  const back = location.pathname + location.search;
+  const back = currentRoute() + location.search;
   navigate("/sign-in?return=" + encodeURIComponent(back), { replace: true });
 });
 
@@ -211,7 +230,7 @@ function ctx(params, seq) {
     params, query: q, navigate, setQuery, signOut, reloadMe, refreshBranding,
     refresh: () => render({ keepScroll: true }),
     stale: () => seq !== renderSeq,
-    crumbs: (items) => breadcrumbs(items.map(([label, href]) => href ? h("a", { href }, label) : label)),
+    crumbs: (items) => breadcrumbs(items.map(([label, href]) => href ? h("a", { href: rel(href) }, label) : label)),
   };
 }
 
@@ -219,7 +238,7 @@ function pageEl() { return $("page"); }
 
 export async function render({ keepScroll = false } = {}) {
   const seq = ++renderSeq;
-  const path = location.pathname.replace(/\/+$/, "") || "/";
+  const path = currentRoute();
   const scroll = keepScroll ? scrollY : 0;
   const page = pageEl();
 
@@ -284,12 +303,14 @@ function notFound(title, text) {
 }
 
 async function boot() {
-  const [p] = await Promise.all([
-    api("GET", "/api/v1/auth/providers").catch(() => ({})),
+  const [p, setup] = await Promise.all([
+    api("GET", "api/v1/auth/providers").catch(() => ({})),
+    api("GET", "api/v1/setup/status").catch(() => null),
     loadMe().catch(() => null),
   ]);
   S.providers = p;
-  try { S.branding = (await api("GET", "/api/v1/branding")).branding; } catch (_) { S.branding = null; }
+  S.setup = setup;
+  try { S.branding = (await api("GET", "api/v1/branding")).branding; } catch (_) { S.branding = null; }
 }
 
 await boot();
