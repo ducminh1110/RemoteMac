@@ -20,6 +20,11 @@ func fail(_ s: String) -> Never { FileHandle.standardError.write(Data("taro: \(s
 // anything else; a wrong one ends the program here
 _ = provider
 
+// Taro.app, the Enterprise edition (EnterpriseApp.swift): opened from Finder or at login (no
+// arguments) or with --enterprise-app, it is an app with a setup window and a menu bar item that
+// runs the session as its own child (this program again, with --foreground); never returns
+if isEnterpriseAppLaunch() { runEnterpriseApp() }
+
 let usage = named("""
 usage: taro [--password SECRET] [--id 123456789] [--relay HOST:PORT] [--port N] [--foreground] [--logs-enabled]
        taro --stop
@@ -32,6 +37,7 @@ usage: taro [--password SECRET] [--id 123456789] [--relay HOST:PORT] [--port N] 
   --check-permissions  say which macOS permissions are missing (exit 3 when one is)
   --print-provider   show the product, the relay and whether a provider key is set
   --version          show the version
+  --enterprise-app   the Enterprise app (Taro.app opened from Finder): setup window, menu bar item
 """)
 var relayArg: String?, sessionArg: String?, passwordArg: String?, idArg: String?, foreground = false, printProviderAsked = false
 var argv = CommandLine.arguments.dropFirst().makeIterator()

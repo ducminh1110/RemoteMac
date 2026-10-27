@@ -1,0 +1,57 @@
+name: Mac Enterprise app
+
+# Taro.app (the Enterprise edition of Taro for Mac): compiles the agent for the runner's
+# architecture, builds the app bundle around it and checks it (Info.plist, signature, the CLI
+# still answering from inside the bundle). Release builds make the universal one (release.yml).
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - agent/macos/**
+      - scripts/build-agent-macos.sh
+      - scripts/build-enterprise-app-macos.sh
+      - .github/workflows/mac-enterprise-app.yml
+
+permissions:
+  contents: read
+
+jobs:
+  app:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the agent
+        run: ./scripts/build-agent-macos.sh
+      - name: Build Taro.app
+        run: |
+          set -euo pipefail
+          ./scripts/build-enterprise-app-macos.sh out/remote-agent-mac "" out
+          plutil -lint out/Taro.app/Contents/Info.plist
+          plutil -p out/Taro.app/Contents/Info.plist
+          codesign --verify --deep --strict --verbose=2 out/Taro.app
+          # the CLI still works from inside the bundle (arguments: not the app mode)
+          out/Taro.app/Contents/MacOS/taro --help
+          out/Taro.app/Contents/MacOS/taro --version
+          out/Taro.app/Contents/MacOS/taro --print-provider
+          ditto -c -k --keepParent out/Taro.app out/Taro-Enterprise-macos.zip
+      - name: The provider folder in the bundle is read
+        run: |
+          set -euo pipefail
+          p="$RUNNER_TEMP/provider"; mkdir -p "$p"
+          cat > "$p/provider.json" <<'JSON'
+          {"schema": "taro.provider/v1",
+           "product": {"name": "Acme Remote", "short_name": "Acme", "vendor": "Acme Inc."},
+           "relay": {"host": "relay.acme.example", "port": 7470, "key": "0123456789abcdef0123"},
+           "branding": {"primary_color": "#0A7CFF"},
+           "account": {"portal": "https://acme.example"}}
+          JSON
+          ./scripts/build-enterprise-app-macos.sh out/remote-agent-mac "$p" "$RUNNER_TEMP/branded"
+          codesign --verify --deep --strict "$RUNNER_TEMP/branded/Taro.app"
+          out="$("$RUNNER_TEMP/branded/Taro.app/Contents/MacOS/taro" --print-provider)"
+          echo "$out"
+          echo "$out" | grep -q "^product: Acme Remote$" && echo "$out" | grep -q "^relay: relay.acme.example:7470$" || { echo "the bundle's provider/ was not read"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Taro-Enterprise-macos
+          path: out/Taro-Enterprise-macos.zip

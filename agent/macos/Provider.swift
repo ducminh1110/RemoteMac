@@ -80,12 +80,25 @@ func parseProvider(_ data: Data) -> Result<ProviderInfo, ProviderProblem> {
     return .success(ProviderInfo(name: name, shortName: short, vendor: vendor, relayHost: host, relayPort: n.intValue, relayKey: key, updatesOff: clients == "off"))
 }
 
+/// The provider/ folder: next to this program; in Taro.app (the Enterprise edition,
+/// EnterpriseApp.swift) also in the app's Resources, else next to the app. nil: none.
+let providerDirectory: URL? = { () -> URL? in
+    var dirs = [URL(fileURLWithPath: realExecutablePath()).deletingLastPathComponent().appendingPathComponent("provider", isDirectory: true)]
+    let bundle = Bundle.main.bundleURL
+    if bundle.pathExtension == "app" {
+        if let res = Bundle.main.resourceURL { dirs.append(res.appendingPathComponent("provider", isDirectory: true)) }
+        dirs.append(bundle.deletingLastPathComponent().appendingPathComponent("provider", isDirectory: true))
+    }
+    return dirs.first { d in
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: d.path, isDirectory: &isDir) && isDir.boolValue
+    }
+}()
+
 /// The provider next to this program: nil without a provider/ folder; the program ends with a
 /// clear message when the folder is there but its provider.json is missing or wrong.
 let provider: ProviderInfo? = { () -> ProviderInfo? in
-    let dir = URL(fileURLWithPath: realExecutablePath()).deletingLastPathComponent().appendingPathComponent("provider", isDirectory: true)
-    var isDir: ObjCBool = false
-    guard FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { return nil }
+    guard let dir = providerDirectory else { return nil }
     let file = dir.appendingPathComponent("provider.json")
     let why: String
     if let data = FileManager.default.contents(atPath: file.path) {

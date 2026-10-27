@@ -5,6 +5,7 @@ name: Release builds
 #   Taro-windows.zip    the same Taro.exe without installing
 #   Taro-macos.tar.gz   the Mac app (universal: Apple silicon + Intel):  ./taro --password PASS,
 #                       updated in place with ./taro-update.sh
+#   Taro-Enterprise-macos.zip  Taro.app, the Enterprise edition (enrolls in a Taro Enterprise server)
 #   taro-relay.tar.gz   the relay server + remotemac-relay-setup.sh (installs it from A to Z)
 # The source has no relay in it. These builds get one built in: the repository variable
 # RM_DEFAULT_RELAY (host:port), and on the official repository remotemac.mooo.com:7470; the
@@ -21,7 +22,7 @@ on:
   push:
     branches: [claude/inspiring-einstein-er2d37]
     tags: ['v*', '[0-9]*']
-    paths: [agent/**, crates/**, deploy/**, installer/**, scripts/build-agent-macos.sh, .github/workflows/release.yml, Cargo.*]
+    paths: [agent/**, crates/**, deploy/**, installer/**, scripts/build-agent-macos.sh, scripts/build-enterprise-app-macos.sh, .github/workflows/release.yml, Cargo.*]
 
 env:
   DEFAULT_RELAY: ${{ vars.RM_DEFAULT_RELAY || (github.repository == 'ducminh1110/RemoteMac' && 'remotemac.mooo.com:7470' || '') }}
@@ -84,6 +85,19 @@ jobs:
           TXT
           sed -i '' 's/^          //' dist/Taro/README.txt
           tar -C dist -czf dist/Taro-macos.tar.gz Taro
+      - name: Build Taro.app (Enterprise edition)
+        run: |
+          set -euo pipefail
+          # the same universal taro in an app bundle (scripts/build-enterprise-app-macos.sh)
+          ./scripts/build-enterprise-app-macos.sh dist/Taro/taro "" dist
+          plutil -lint dist/Taro.app/Contents/Info.plist
+          codesign --verify --deep --strict --verbose=2 dist/Taro.app
+          lipo -info dist/Taro.app/Contents/MacOS/taro
+          # the CLI still works from inside the bundle (arguments: not the app mode)
+          dist/Taro.app/Contents/MacOS/taro --help
+          dist/Taro.app/Contents/MacOS/taro --version
+          dist/Taro.app/Contents/MacOS/taro --print-provider
+          ditto -c -k --keepParent dist/Taro.app dist/Taro-Enterprise-macos.zip
       - name: taro-update.sh fetches, checks and puts a release in place
         run: |
           set -uo pipefail
@@ -107,7 +121,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Taro-macos
-          path: dist/Taro-macos.tar.gz
+          path: |
+            dist/Taro-macos.tar.gz
+            dist/Taro-Enterprise-macos.zip
 
   windows:
     runs-on: windows-latest
@@ -293,6 +309,7 @@ jobs:
           | `Taro-Setup.exe` | Windows 10/11 x64: installs Taro for you (no administrator); it updates itself after that |
           | `Taro-windows.zip` | the same `Taro.exe`, without installing |
           | `Taro-macos.tar.gz` | macOS 14+, Apple silicon and Intel: `taro`, `taro.sh`, `taro-update.sh` |
+          | `Taro-Enterprise-macos.zip` | macOS 14+: `Taro.app`, the Enterprise edition (setup window, enrolls the Mac in a Taro Enterprise server) |
           | `taro-relay.tar.gz` | your own relay server (Linux x86_64 / ARM64), one-command installer |
 
           **Mac:** `./taro.sh --password YOUR-PASSWORD` shows the ID and the password, then runs in the background
@@ -323,4 +340,4 @@ jobs:
           # a version with a suffix (1.2.0-beta.1) is a pre-release; a plain one the latest release
           if [[ "$V" == *-* ]]; then KIND=--prerelease; else KIND=--latest; fi
           gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Taro $V" --notes-file notes.md $KIND \
-            dist/Taro-Setup.exe dist/Taro-macos.tar.gz dist/Taro-windows.zip dist/taro-relay.tar.gz dist/Taro/Taro.exe
+            dist/Taro-Setup.exe dist/Taro-macos.tar.gz dist/Taro-Enterprise-macos.zip dist/Taro-windows.zip dist/taro-relay.tar.gz dist/Taro/Taro.exe
