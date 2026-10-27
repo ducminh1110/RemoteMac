@@ -6,6 +6,7 @@
 //!   taro-relay status | health | version
 //!   taro-relay update check | apply [FILE | --latest] [--yes] [--overwrite-modified]
 //!                     | rollback | status | auto
+//!   taro-relay portal status | setup-code   the portal and the console on this server
 //!   taro-relay install-core --version V --arch A   (install.sh: record a fresh installation)
 //!
 //! TARO_ROOT=DIR puts the whole installation under DIR (tests, portable installs).
@@ -189,9 +190,65 @@ fn main() {
             }
         }
         Some("update") => update_cmd(&args[1..], has("--yes"), has("--overwrite-modified")),
+        Some("portal") => portal_cmd(&args[1..]),
         Some(other) => die(format!(
             "unknown command {other}; see the top of `taro-relay --help`"
         )),
+    }
+}
+
+fn portal_cmd(args: &[String]) {
+    let (layout, root) = layout();
+    let sys = Real;
+    let r = Runtime::load(&layout)
+        .unwrap_or_else(|e| die(e))
+        .unwrap_or_else(|| die("this server is not set up yet: sudo taro-relay setup"));
+    match args.first().map(String::as_str) {
+        Some("setup-code") => {
+            if !sys.is_root() && root.is_none() {
+                die("the setup code is readable by root only: sudo taro-relay portal setup-code");
+            }
+            let c = taro_relay::portal::setup_code(&layout, &sys).unwrap_or_else(|e| die(e));
+            println!("{c}");
+            eprintln!(
+                "Open {}/console/ and enter it to make the first administrator (it works only while there is none).",
+                taro_relay::portal::site(&r)
+            );
+        }
+        Some("status") | None => match &r.portal {
+            Some(p) if p.enabled => {
+                let site = taro_relay::portal::site(&r);
+                println!("portal:   {site}/");
+                println!("console:  {site}/console/");
+                println!(
+                    "relay:    {site}/relay/  (apps connect to port {})",
+                    r.relay_port()
+                );
+                println!(
+                    "database: {}",
+                    if p.database == "embedded" {
+                        format!(
+                            "built in, {}",
+                            taro_relay::portal::pg_dir(&layout).display()
+                        )
+                    } else {
+                        "external".into()
+                    }
+                );
+                println!(
+                    "mail:     {}",
+                    if p.smtp_url.is_some() {
+                        "set"
+                    } else {
+                        "none (administrators sign in with a password)"
+                    }
+                );
+            }
+            _ => println!(
+                "portal and console: off (sudo taro-relay setup turns them on; they need HTTPS)"
+            ),
+        },
+        Some(other) => die(format!("portal {other}: setup-code | status")),
     }
 }
 
@@ -254,7 +311,7 @@ fn update_cmd(args: &[String], yes: bool, overwrite: bool) {
                 die("run with sudo");
             }
             let port = Runtime::load(&layout).ok().flatten().map(|r| r.relay_port()).unwrap_or(7470);
-            let mut hooks = update::SystemdHooks { sys: &sys, relay_port: port, probe: &probe };
+            let mut hooks = update::SystemdHooks { layout: &layout, sys: &sys, relay_port: port, probe: &probe };
             match taro_update::apply::rollback_last(&layout, &mut hooks, &setup::stamp()) {
                 Ok(s) => println!("{s}"),
                 Err(e) => die(e),

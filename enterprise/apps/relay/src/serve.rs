@@ -151,10 +151,36 @@ fn public_router(r: R) -> Router {
         .with_state(r)
 }
 
+async fn to_relay_page() -> Response<Body> {
+    web::secure(
+        Response::builder()
+            .status(StatusCode::MOVED_PERMANENTLY)
+            .header(header::LOCATION, "/relay/")
+            .body(Body::empty())
+            .unwrap(),
+    )
+}
+
+/// One web site: the relay's page at `/relay/` (its health and public facts stay at the root,
+/// where the apps and monitoring ask), everything else the portal (`/`) and the console
+/// (`/console/`).
+fn site_router(r: R, site: Router) -> Router {
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/.well-known/taro/relay.json", get(relay_json))
+        .route("/relay", get(to_relay_page))
+        .route("/relay/", get(status_page))
+        .route("/relay/assets/{file}", get(status_asset))
+        .route("/relay/common/{file}", get(common))
+        .route("/relay/brand/{file}", get(brand))
+        .with_state(r)
+        .fallback_service(site)
+}
+
 async fn serve_tls(listener: tokio::net::TcpListener, cfg: Arc<rustls::ServerConfig>, app: Router) {
     let acceptor = tokio_rustls::TlsAcceptor::from(cfg);
     loop {
-        let Ok((tcp, _)) = listener.accept().await else {
+        let Ok((tcp, peer)) = listener.accept().await else {
             continue;
         };
         let acceptor = acceptor.clone();
@@ -168,6 +194,10 @@ async fn serve_tls(listener: tokio::net::TcpListener, cfg: Arc<rustls::ServerCon
             let svc =
                 hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                     let app = app.clone();
+                    let mut req = req;
+                    // who is asking (the portal's rate limits and audit, loopback-only endpoints)
+                    req.extensions_mut()
+                        .insert(axum::extract::ConnectInfo(peer));
                     async move {
                         Ok::<_, std::convert::Infallible>(
                             tower::ServiceExt::oneshot(app, req.map(Body::new))
@@ -299,6 +329,35 @@ pub fn run(layout: Layout) -> ! {
     let rt = tokio::runtime::Runtime::new().expect("tokio");
     rt.block_on(async move {
         let cert = tls::check_pair(&runtime.tls.cert, &runtime.tls.key, &runtime.relay.public_host).ok();
+        // the portal and the console (one web site with the relay's page); the relay runs on if
+        // they cannot start (the journal says why)
+        let mut pg: Option<crate::portal::Embedded> = None;
+        let site = match runtime.portal.clone().filter(|p| p.enabled && runtime.tls.mode != TlsMode::Off) {
+            Some(p) => match crate::portal::start_site(&layout, &runtime, &provider, &p, &mut pg).await {
+                Ok(s) => {
+                    eprintln!("taro-relay: portal at {0}/ and console at {0}/console/", crate::portal::site(&runtime));
+                    Some(s)
+                }
+                Err(e) => {
+                    eprintln!("taro-relay: the portal and the console could not start: {e}");
+                    None
+                }
+            },
+            None => None,
+        };
+        let pg = pg.map(|p| Arc::new(std::sync::Mutex::new(p)));
+        if let Some(p) = pg.clone() {
+            // the database stopped on its own: the relay ends too, systemd starts both again
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    if let Some(st) = p.lock().unwrap().exited() {
+                        eprintln!("taro-relay: the portal's database stopped ({st}); restarting");
+                        std::process::exit(1);
+                    }
+                }
+            });
+        }
         let r: R = Arc::new(Run { layout, runtime: runtime.clone(), provider, challenges: tls::Challenges::default(), cert: std::sync::RwLock::new(cert) });
         let health = Router::new().route("/healthz", get(healthz)).with_state(r.clone());
         match tokio::net::TcpListener::bind(HEALTH_LISTEN).await {
@@ -330,7 +389,10 @@ pub fn run(layout: Layout) -> ! {
                 match tokio::net::TcpListener::bind(&runtime.tls.https_listen).await {
                     Ok(l) => {
                         let cfg = rl.server_config();
-                        let app = public_router(r.clone());
+                        let app = match &site {
+                            Some(s) => site_router(r.clone(), s.clone()),
+                            None => public_router(r.clone()),
+                        };
                         tokio::spawn(serve_tls(l, cfg, app));
                     }
                     Err(e) => eprintln!("taro-relay: {}: {e}", runtime.tls.https_listen),
@@ -344,6 +406,8 @@ pub fn run(layout: Layout) -> ! {
             _ = term.recv() => {}
         }
         eprintln!("taro-relay: stopping");
+        // the database stops last (fast shutdown)
+        drop(pg);
     });
     std::process::exit(0)
 }

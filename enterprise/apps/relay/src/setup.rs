@@ -290,6 +290,8 @@ async fn state(State(s): State<S>) -> Response<Body> {
         "firewall": d.firewall,
         "applied": d.applied,
         "service_running": service_running(s.sys.as_ref()),
+        // the first-run code for the console, while no administrator has used it
+        "setup_code": std::fs::read_to_string(crate::portal::code_file(&s.layout)).ok().map(|c| c.trim().to_string()),
         "paths": {
             "provider": s.layout.provider, "runtime": Runtime::path(&s.layout), "state": s.layout.state, "core": s.layout.core(),
         },
@@ -307,6 +309,12 @@ fn settings_json(r: &Runtime) -> Value {
         "cert": r.tls.cert, "key": r.tls.key,
         "update_mode": r.updates.mode,
         "window": r.updates.window,
+        "portal_enabled": r.portal.as_ref().is_some_and(|p| p.enabled),
+        // (the mail server's password is not sent back to the page)
+        "smtp_set": r.portal.as_ref().and_then(|p| p.smtp_url.as_ref()).is_some(),
+        "mail_from": r.portal.as_ref().and_then(|p| p.mail_from.clone()),
+        "app_download_url": r.portal.as_ref().and_then(|p| p.app_download_url.clone()),
+        "site": crate::portal::site(r),
     })
 }
 
@@ -361,6 +369,15 @@ struct SettingsIn {
     update_mode: UpdateMode,
     #[serde(default)]
     window: Option<String>,
+    /// the portal and the console on this server (absent: as they are)
+    #[serde(default)]
+    portal_enabled: Option<bool>,
+    #[serde(default)]
+    smtp_url: Option<String>,
+    #[serde(default)]
+    mail_from: Option<String>,
+    #[serde(default)]
+    app_download_url: Option<String>,
 }
 
 /// Validate and keep the settings (nothing is written until Apply).
@@ -442,6 +459,42 @@ async fn settings(State(s): State<S>, Json(i): Json<SettingsIn>) -> Response<Bod
             "Automatic updates restart the relay: give them a maintenance window.".into(),
         ));
     }
+    let mut portal = r.portal.clone().unwrap_or_else(crate::config::Portal::on);
+    match i.portal_enabled {
+        Some(on) => portal.enabled = on,
+        // no HTTPS and no word from the page: the portal is off (it needs HTTPS)
+        None if r.tls.mode == TlsMode::Off => portal.enabled = false,
+        None => {}
+    }
+    let opt = |v: Option<String>| v.map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
+    // the page never gets the mail server's address back: empty keeps it, `-` removes it
+    match opt(i.smtp_url) {
+        Some(u) if u == "-" => portal.smtp_url = None,
+        Some(u) => portal.smtp_url = Some(u),
+        None => {}
+    }
+    portal.mail_from = opt(i.mail_from);
+    portal.app_download_url = opt(i.app_download_url);
+    if portal.enabled && r.tls.mode == TlsMode::Off {
+        errs.push((
+            "portal_enabled".into(),
+            "The portal and the console need HTTPS: choose a certificate, or turn them off.".into(),
+        ));
+    }
+    if let Some(u) = &portal.smtp_url {
+        if !u.starts_with("smtp://") && !u.starts_with("smtps://") {
+            errs.push((
+                "smtp_url".into(),
+                "Write it as smtps://user:password@smtp.example.com:465".into(),
+            ));
+        }
+    }
+    if let Some(u) = &portal.app_download_url {
+        if !u.starts_with("https://") {
+            errs.push(("app_download_url".into(), "An https:// address.".into()));
+        }
+    }
+    r.portal = Some(portal);
     if !errs.is_empty() {
         return field_errors(errs);
     }
@@ -590,7 +643,7 @@ pub fn units(layout: &Layout, root_override: Option<&Path>) -> Vec<(&'static str
         .map(|r| format!("Environment=TARO_ROOT={}\n", r.display()))
         .unwrap_or_default();
     let relay = format!(
-        "[Unit]\nDescription=Taro relay ({{product}})\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\n{env}ExecStart={bin} run\nUser={USER}\nGroup={USER}\nRestart=always\nRestartSec=2\n# not configured: no restart loop\nRestartPreventExitStatus=78\nAmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE\nNoNewPrivileges=yes\nProtectSystem=strict\nProtectHome=yes\nPrivateTmp=yes\nReadWritePaths={state}/relay {state}/tls\nLimitNOFILE=65536\n\n[Install]\nWantedBy=multi-user.target\n",
+        "[Unit]\nDescription=Taro relay ({{product}})\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\n{env}ExecStart={bin} run\nUser={USER}\nGroup={USER}\nRestart=always\nRestartSec=2\n# not configured: no restart loop\nRestartPreventExitStatus=78\nAmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE\nNoNewPrivileges=yes\nProtectSystem=strict\nProtectHome=yes\nPrivateTmp=yes\nReadWritePaths={state}/relay {state}/tls {state}/portal {state}/pg\nLimitNOFILE=65536\n\n[Install]\nWantedBy=multi-user.target\n",
         bin = bin.display(),
         state = layout.state.display()
     );
@@ -670,6 +723,8 @@ pub fn apply_settings(s: &Setup, r: &Runtime) -> Result<Vec<String>, (Vec<String
             mkdir(sys, &l.state.join("relay"), 0o700, (USER, USER))?;
             mkdir(sys, &l.state.join("tls"), 0o700, (USER, USER))?;
             mkdir(sys, &l.update_state(), 0o700, ("root", "root"))?;
+            mkdir(sys, &crate::portal::dir(l), 0o700, (USER, USER))?;
+            mkdir(sys, &crate::portal::pg_dir(l), 0o700, (USER, USER))?;
             // the admission key is in provider.json: readable by the relay, not by everyone
             let pj = l.provider.join(rm_brand::FILE);
             crate::config::set_mode(&pj, 0o640)?;
@@ -684,6 +739,11 @@ pub fn apply_settings(s: &Setup, r: &Runtime) -> Result<Vec<String>, (Vec<String
                     sys.chown(f, USER, USER)
                 );
             }
+        }
+    }
+    if r.portal.as_ref().is_some_and(|p| p.enabled) {
+        for d in step!("portal and console", crate::portal::prepare(l, sys)) {
+            steps.push(d);
         }
     }
     let mut r = r.clone();

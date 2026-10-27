@@ -3,6 +3,7 @@
 
 pub mod checks;
 pub mod config;
+pub mod portal;
 pub mod serve;
 pub mod setup;
 pub mod system;

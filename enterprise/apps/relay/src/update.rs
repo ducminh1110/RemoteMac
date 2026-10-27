@@ -30,13 +30,55 @@ pub fn keys() -> TrustedKeys {
 }
 
 pub struct SystemdHooks<'a> {
+    pub layout: &'a Layout,
     pub sys: &'a dyn System,
     pub relay_port: u16,
     pub probe: &'a dyn crate::setup::Probe,
 }
 
+/// Before the new core starts: a relay set up before 0.2 gets the portal and the console (turned
+/// on, folders and secrets made), and the systemd units this core expects (their writable
+/// folders) are written again.
+pub fn before_restart(layout: &Layout, sys: &dyn System) -> Result<(), String> {
+    for line in crate::portal::ensure(layout, sys)? {
+        println!("  {line}");
+    }
+    if let Ok(Some(r)) = Runtime::load(layout) {
+        if r.portal.as_ref().is_some_and(|p| p.enabled) {
+            crate::portal::prepare(layout, sys)?;
+            if let Ok(c) = std::fs::read_to_string(crate::portal::code_file(layout)) {
+                println!(
+                    "  the console's first visit makes its administrator: {}/console/ with the setup code {}",
+                    crate::portal::site(&r),
+                    c.trim()
+                );
+            }
+        }
+    }
+    if !sys.systemd() {
+        return Ok(());
+    }
+    let product = crate::web::provider(layout)
+        .ok()
+        .flatten()
+        .map(|p| p.product.name)
+        .unwrap_or_else(|| "Taro".into());
+    let root = std::env::var_os("TARO_ROOT").map(std::path::PathBuf::from);
+    let dir = sys.units_dir();
+    for (name, text) in crate::setup::units(layout, root.as_deref()) {
+        let path = dir.join(name);
+        // only units that exist (a relay never set up has none)
+        if path.exists() {
+            std::fs::write(&path, text.replace("{product}", &product))
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+    }
+    sys.run("systemctl", &["daemon-reload"]).map(|_| ())
+}
+
 impl Hooks for SystemdHooks<'_> {
     fn restart(&mut self, services: &[String]) -> Result<(), String> {
+        before_restart(self.layout, self.sys)?;
         for s in services {
             self.sys.run("systemctl", &["restart", s])?;
         }
@@ -332,6 +374,7 @@ pub fn apply_file(
     relay_port: u16,
 ) -> Result<apply::Report, String> {
     let mut hooks = SystemdHooks {
+        layout,
         sys,
         relay_port,
         probe,

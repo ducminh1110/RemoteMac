@@ -67,6 +67,43 @@ pub struct Updates {
     pub source: String,
 }
 
+/// The Customer Portal, the Provider Console and their API, served by the relay on its own
+/// HTTPS (Taro Enterprise 0.2: one server, one web site): the portal at `/`, the console at
+/// `/console/`, the relay's page at `/relay/`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Portal {
+    pub enabled: bool,
+    /// `embedded`: the relay's own PostgreSQL (in the core, data in /var/lib/taro/pg); or a
+    /// `postgres://` URL of a database run elsewhere
+    #[serde(default = "embedded")]
+    pub database: String,
+    /// `smtps://user:password@host:465`: customers' sign-in codes by mail (without it, they
+    /// cannot sign in by email; administrators use their password)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smtp_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail_from: Option<String>,
+    /// where customers download the provider's Taro app (the portal's Download button)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_download_url: Option<String>,
+}
+
+pub fn embedded() -> String {
+    "embedded".into()
+}
+
+impl Portal {
+    pub fn on() -> Portal {
+        Portal {
+            enabled: true,
+            database: embedded(),
+            smtp_url: None,
+            mail_from: None,
+            app_download_url: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Runtime {
     pub schema: String,
@@ -74,6 +111,9 @@ pub struct Runtime {
     pub relay: Relay,
     pub tls: Tls,
     pub updates: Updates,
+    /// none: a relay set up before 0.2 (the first start after the update turns it on)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portal: Option<Portal>,
 }
 
 pub const LETS_ENCRYPT: &str = "https://acme-v02.api.letsencrypt.org/directory";
@@ -104,6 +144,7 @@ impl Runtime {
                 window: None,
                 source: RELEASES.into(),
             },
+            portal: Some(Portal::on()),
         }
     }
 
@@ -161,6 +202,24 @@ impl Runtime {
         if !self.updates.source.starts_with("https://") {
             return Err("updates.source: must be https".into());
         }
+        if let Some(p) = &self.portal {
+            if p.database != "embedded"
+                && !p.database.starts_with("postgres://")
+                && !p.database.starts_with("postgresql://")
+            {
+                return Err("portal.database: `embedded` or a postgres:// URL".into());
+            }
+            if let Some(u) = &p.smtp_url {
+                if !u.starts_with("smtp://") && !u.starts_with("smtps://") {
+                    return Err("portal.smtp_url: smtps://user:password@host:465".into());
+                }
+            }
+            if let Some(u) = &p.app_download_url {
+                if !u.starts_with("https://") {
+                    return Err("portal.app_download_url: an https:// address".into());
+                }
+            }
+        }
         Ok(())
     }
 
@@ -197,6 +256,19 @@ impl Runtime {
         if self.updates.window.is_none() {
             if let Some(t) = doc.get_mut("updates").and_then(|t| t.as_table_like_mut()) {
                 t.remove("window");
+            }
+        }
+        if let Some(p) = &self.portal {
+            if let Some(t) = doc.get_mut("portal").and_then(|t| t.as_table_like_mut()) {
+                for (k, set) in [
+                    ("smtp_url", p.smtp_url.is_some()),
+                    ("mail_from", p.mail_from.is_some()),
+                    ("app_download_url", p.app_download_url.is_some()),
+                ] {
+                    if !set {
+                        t.remove(k);
+                    }
+                }
             }
         }
         let backup = match &old {

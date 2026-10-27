@@ -18,7 +18,8 @@ const STEPS = [
 
 let st = null;
 let current = "provider";
-const form = { tls_mode: "acme", email: "", agree_tos: false, staging: false, cert: "", key: "", update_mode: "manual", window: "" };
+const form = { tls_mode: "acme", email: "", agree_tos: false, staging: false, cert: "", key: "", update_mode: "manual", window: "",
+  portal_enabled: true, smtp_url: "", mail_from: "", app_download_url: "" };
 
 async function api(path, body) {
   const opt = { method: body === undefined ? "GET" : "POST", headers: { "X-Setup-Token": token } };
@@ -108,6 +109,7 @@ async function refresh() {
     Object.assign(form, {
       tls_mode: st.settings.tls_mode, email: st.settings.email || form.email, staging: st.settings.staging,
       update_mode: st.settings.update_mode, window: st.settings.window || "",
+      portal_enabled: st.settings.portal_enabled, mail_from: st.settings.mail_from || "", app_download_url: st.settings.app_download_url || "",
       cert: st.settings.tls_mode === "files" ? st.settings.cert : form.cert, key: st.settings.tls_mode === "files" ? st.settings.key : form.key,
     });
   }
@@ -324,6 +326,19 @@ const views = {
       ]),
       form.update_mode === "auto" ? field({ id: "f-window", label: "Maintenance window (UTC)", hint: "For example Sun 03:00-05:00 or daily 02:00-04:00." },
         h("input", { id: "f-window", type: "text", class: "mono", placeholder: "Sun 03:00-05:00", value: form.window, oninput: (e) => { form.window = e.target.value; } })) : null),
+    container({ title: "Portal and console", desc: "One web site on this server's HTTPS: customers use the portal, administrators the console. The relay port for the apps stays as it is." },
+      h("label", { class: "check" }, h("input", { type: "checkbox", id: "f-portal_enabled", checked: form.portal_enabled, onchange: (e) => { form.portal_enabled = e.target.checked; render(); } }),
+        h("span", {}, "Serve the Customer Portal and the Provider Console",
+          h("span", { class: "d" }, `${siteOf()}/ (customers) and ${siteOf()}/console/ (administrators). Needs a certificate (step 4).`))),
+      form.portal_enabled ? [
+        field({ id: "f-smtp_url", label: "Mail server", opt: true, desc: "Customers sign in with a code sent by mail. Administrators sign in with a password and need no mail.",
+          hint: (st.settings && st.settings.smtp_set ? "A mail server is set (leave empty to keep it, type - to remove it). " : "") + "smtps://user:password@smtp.example.com:465" },
+          h("input", { id: "f-smtp_url", type: "password", class: "mono", autocomplete: "off", placeholder: "smtps://user:password@smtp.example.com:465", value: form.smtp_url, oninput: (e) => { form.smtp_url = e.target.value; } })),
+        field({ id: "f-mail_from", label: "Sender", opt: true, hint: "For example Acme Cloud <no-reply@acme.example>." },
+          h("input", { id: "f-mail_from", type: "text", value: form.mail_from, oninput: (e) => { form.mail_from = e.target.value; } })),
+        field({ id: "f-app_download_url", label: "App download address", opt: true, desc: "Where the portal's Download button sends customers: your Windows package from the package builder." },
+          h("input", { id: "f-app_download_url", type: "url", class: "mono", placeholder: "https://…", value: form.app_download_url, oninput: (e) => { form.app_download_url = e.target.value; } })),
+      ] : null),
     container({ title: "How updates are installed" },
       h("ol", { class: "steps-list" },
         h("li", {}, "The signed manifest is verified against the release key; unsigned or altered packages are refused."),
@@ -364,11 +379,15 @@ const views = {
         ["Status", st.tls ? status(st.tls.status) : status("pending", "Not requested")]])),
     container({ title: "Updates", actions: button("Edit", { kind: "link", onclick: () => go("updates") }) },
       kv([["Policy", { manual: "Manual", notify: "Check and notify", auto: "Maintenance window" }[s.update_mode] || s.update_mode], ["Window", s.update_mode === "auto" ? s.window : "–"], ["Settings file", h("span", { class: "path" }, st.paths.runtime)]])),
+    container({ title: "Portal and console", actions: button("Edit", { kind: "link", onclick: () => go("updates") }) },
+      kv([["Portal", s.portal_enabled ? h("code", {}, `${siteOf()}/`) : "Off"], ["Console", s.portal_enabled ? h("code", {}, `${siteOf()}/console/`) : "Off"],
+        ["Database", s.portal_enabled ? "Built in (PostgreSQL in /var/lib/taro/pg)" : "–"], ["Mail", s.smtp_set ? "Set" : "None (administrators use their password)"]])),
     container({ title: "Actions to be performed" },
       h("ol", { class: "steps-list" },
         h("li", {}, "Create the service account taro-relay (if missing)."),
         h("li", {}, "Set folder owners and permissions; the admission key stays readable by the relay only."),
         h("li", {}, "Write the settings; the previous file is kept as a backup."),
+        s.portal_enabled ? h("li", {}, "Prepare the portal: its database, the server key and the console's setup code.") : null,
         h("li", {}, "Install the systemd units taro-relay.service and taro-update.timer."),
         h("li", {}, st.service_running ? "Restart the relay (sessions reconnect)." : "Start the relay and enable it at boot."),
         h("li", {}, "Verify that the relay answers its health check.")),
@@ -391,15 +410,25 @@ const views = {
     ok ? alert("ok", "Setup complete", "The relay is installed as a service and passed its health check.") : null,
     container({ title: "Relay" },
       kv([["Endpoint", h("code", {}, `${s.public_host}:${s.port}`)], ["Service", st.service_running ? status("running") : status("stopped")],
-        ["Status page", s.tls_mode !== "off" && ok ? h("a", { href: `https://${s.public_host}/`, target: "_blank", rel: "noreferrer" }, `https://${s.public_host}/ `, icon("ext")) : "–"]])),
+        ["Status page", s.tls_mode !== "off" && ok ? (() => { const u = s.portal_enabled ? `${siteOf()}/relay/` : `${siteOf()}/`; return h("a", { href: u, target: "_blank", rel: "noreferrer" }, `${u} `, icon("ext")); })() : "–"]])),
+    ok && s.portal_enabled ? container({ title: "Create the administrator", desc: "The first visit to the console makes its administrator. It asks for this setup code, so nobody else can." },
+      kv([["Console", h("a", { href: `${siteOf()}/console/`, target: "_blank", rel: "noreferrer" }, `${siteOf()}/console/ `, icon("ext"))],
+        ["Setup code", st.setup_code ? h("code", { class: "mono" }, st.setup_code) : "Used (an administrator exists)"],
+        ["Portal", h("a", { href: `${siteOf()}/`, target: "_blank", rel: "noreferrer" }, `${siteOf()}/ `, icon("ext"))],
+        ["Relay page", h("a", { href: `${siteOf()}/relay/`, target: "_blank", rel: "noreferrer" }, `${siteOf()}/relay/ `, icon("ext"))]])) : null,
     container({ title: "Useful commands" },
-      h("pre", {}, ["taro-relay status", "journalctl -u taro-relay -f", "sudo taro-relay update check", "sudo taro-relay setup        # change settings later"].join("\n"))));
+      h("pre", {}, ["taro-relay status", "journalctl -u taro-relay -f", "sudo taro-relay portal setup-code   # the console's first-run code", "sudo taro-relay update check", "sudo taro-relay setup        # change settings later"].join("\n"))));
   },
 };
 
+function siteOf() {
+  const s = (st && st.settings) || {};
+  return s.site || `https://${s.public_host || "this-server"}`;
+}
+
 function purpose(p) {
   if (p.startsWith("80/")) return "Certificate validation (HTTP-01)";
-  if (p.startsWith("443/")) return "Status page (HTTPS)";
+  if (p.startsWith("443/")) return "Portal, console and status page (HTTPS)";
   if (p.endsWith("/udp")) return "Relay media (video, audio)";
   return "Relay sessions";
 }

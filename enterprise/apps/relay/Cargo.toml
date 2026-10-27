@@ -17,6 +17,9 @@ path = "src/main.rs"
 rm-relay = { path = "../../../crates/rm-relay" }
 rm-brand = { path = "../../../crates/rm-brand" }
 taro-update = { path = "../../crates/taro-update" }
+taro-enterprise = { path = "../api" }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres"] }
+url = "2.5"
 axum = "0.8"
 base64 = "0.22"
 hex = "0.4"
@@ -42,3 +45,4 @@ x509-parser = "0.16"
 
 [dev-dependencies]
 http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
