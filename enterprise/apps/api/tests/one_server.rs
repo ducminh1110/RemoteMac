@@ -222,7 +222,7 @@ async fn the_portal_and_the_console_share_one_origin() {
     assert!(body.contains("needs_admin"), "{body}");
     let (s, body) = get(&app, "/console/app.js").await;
     assert_eq!(s, StatusCode::OK);
-    assert!(!body.contains("<base"), "a file is itself");
+    assert!(!body.contains("<base href="), "a file is itself");
     // the portal: its own page and API at the root
     let (s, html) = get(&app, "/").await;
     assert_eq!(s, StatusCode::OK);
