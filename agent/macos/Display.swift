@@ -47,9 +47,10 @@ final class DisplayManager {
             usleep(100_000)
         }
         if hidpi { selectRetina(id, width: Int(w), height: Int(h + (forDesktop ? 0 : headroom))) }
+        select120(id)
         lock.lock(); displayID = id; target = CGSize(width: Int(w), height: Int(h)); lock.unlock()
         let b = CGDisplayBounds(id)
-        let px = CGDisplayCopyDisplayMode(id).map { "\($0.pixelWidth)x\($0.pixelHeight) px" } ?? "?"
+        let px = CGDisplayCopyDisplayMode(id).map { "\($0.pixelWidth)x\($0.pixelHeight) px at \(Int($0.refreshRate)) Hz" } ?? "?"
         log("virtual display \(id): \(Int(b.width))x\(Int(b.height)) points, \(px), at \(Int(b.minX)),\(Int(b.minY)) hidpi=\(hidpi)")
         return ["type": "display_status", "available": true, "display_id": Int(id), "width": Int(w), "height": Int(h), "reason": NSNull()]
     }
@@ -77,6 +78,28 @@ final class DisplayManager {
         usleep(200_000)
     }
 
+    /// The display's own 120 Hz mode: macOS can land it on the Mac screen's 60 Hz, mirroring
+    /// included, and a local auto-clicker then sees half the frames.
+    private func select120(_ id: CGDirectDisplayID) {
+        guard let cur = CGDisplayCopyDisplayMode(id), cur.refreshRate < 119 else { return }
+        let opts = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue] as CFDictionary
+        let modes = CGDisplayCopyAllDisplayModes(id, opts) as? [CGDisplayMode] ?? []
+        guard let m = modes.first(where: {
+            $0.width == cur.width && $0.height == cur.height && $0.pixelWidth == cur.pixelWidth && $0.refreshRate >= 119
+        }) else {
+            log("virtual display \(id): no 120 Hz mode among \(modes.map { "\($0.width)x\($0.height)@\($0.pixelWidth)/\(Int($0.refreshRate))" })")
+            return
+        }
+        var cfg: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&cfg) == .success else { return }
+        guard CGConfigureDisplayWithDisplayMode(cfg, id, m, nil) == .success else {
+            CGCancelDisplayConfiguration(cfg)
+            return
+        }
+        if CGCompleteDisplayConfiguration(cfg, .forSession) != .success { log("virtual display \(id): 120 Hz refused") }
+        usleep(200_000)
+    }
+
     /// The Mac's own screen(s) mirror the virtual display (what BetterDummy does): the whole
     /// desktop is laid out at the client's resolution, and streaming that display shows it 1:1.
     private var mirrored: [CGDirectDisplayID] = []
@@ -91,15 +114,19 @@ final class DisplayManager {
     func ensureMirrored(width: Int, height: Int, scale: Int) -> CGDirectDisplayID? {
         op.lock(); defer { op.unlock() }
         lock.lock(); let same = mirrorSpec.map { $0 == (width, height, scale) } ?? false; let id0 = displayID; lock.unlock()
-        if same && id0 != 0 && (isMirroredOnto(id0) || CGMainDisplayID() == id0) { return id0 }
+        if same && id0 != 0 && (isMirroredOnto(id0) || CGMainDisplayID() == id0) {
+            select120(id0)
+            return id0
+        }
         unmirrorDesktop()
         let st = configure(width: width, height: height, scale: scale, forDesktop: true)
         guard st["available"] as? Bool == true else { log("virtual display unavailable: \(st["reason"] ?? "?")"); return nil }
         let id = displayID
         for attempt in 0..<3 {
             if mirrorDesktop(onto: id) && isMirroredOnto(id) {
+                select120(id)
                 lock.lock(); mirrorSpec = (width, height, scale); lock.unlock()
-                let mode = CGDisplayCopyDisplayMode(id).map { "\($0.width)x\($0.height) points, \($0.pixelWidth)x\($0.pixelHeight) px" } ?? "mode unknown"
+                let mode = CGDisplayCopyDisplayMode(id).map { "\($0.width)x\($0.height) points, \($0.pixelWidth)x\($0.pixelHeight) px at \(Int($0.refreshRate)) Hz" } ?? "mode unknown"
                 log("virtual display \(id) mirrored: \(mode)")
                 return id
             }

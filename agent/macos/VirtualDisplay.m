@@ -56,8 +56,8 @@ uint32_t rm_virtual_display_create(uint32_t width, uint32_t height, int hidpi, c
         s.hiDPI = hidpi ? 1 : 0;
         // HiDPI: the full-pixel mode too, which macOS offers as width x height at 2x (some
         // systems, VMs among them, only list the Retina mode when it is there)
-        s.modes = hidpi ? @[[[M alloc] initWithWidth:width height:height refreshRate:60], [[M alloc] initWithWidth:width * 2 height:height * 2 refreshRate:60]]
-                        : @[[[M alloc] initWithWidth:width height:height refreshRate:60]];
+        s.modes = hidpi ? @[[[M alloc] initWithWidth:width height:height refreshRate:120], [[M alloc] initWithWidth:width * 2 height:height * 2 refreshRate:120]]
+                        : @[[[M alloc] initWithWidth:width height:height refreshRate:120]];
         if (![v applySettings:s]) { fail(err, errlen, @"display mode was refused"); return 0; }
         current = v;
         return v.displayID;
