@@ -7,6 +7,14 @@ import ApplicationServices
 /// Room left above the content on the virtual display: its menu bar plus the window's title bar.
 private let headroom: UInt32 = 64
 
+/// A virtual display costs its pixels times its refresh rate in WindowServer work. An M2
+/// drives about 1.1 Gpx/s (6K at 60), so 1080p and 1440p get 240 Hz, 4K gets 120.
+private let maxPixelRate = 1.1e9
+
+private func displayRefresh(pixels: Int) -> Double {
+    [240.0, 120.0, 60.0].first { Double(max(1, pixels)) * $0 <= maxPixelRate } ?? 60
+}
+
 final class DisplayManager {
     private(set) var displayID: CGDirectDisplayID = 0
     /// Content size the client asked for (its monitor), in points.
@@ -34,8 +42,11 @@ final class DisplayManager {
     private func makeDisplay(width: Int, height: Int, scale: Int, forDesktop: Bool) -> [String: Any] {
         let hidpi = scale >= 2
         let w = UInt32(max(320, hidpi ? width / 2 : width)), h = UInt32(max(240, hidpi ? height / 2 : height))
+        let modeH = h + (forDesktop ? 0 : headroom)
+        let pixels = Int(w) * Int(modeH) * (hidpi ? 4 : 1)
+        let hz = displayRefresh(pixels: pixels)
         var err = [CChar](repeating: 0, count: 256)
-        let id = rm_virtual_display_create(w, h + (forDesktop ? 0 : headroom), hidpi ? 1 : 0, &err, Int32(err.count))
+        let id = rm_virtual_display_create(w, modeH, hidpi ? 1 : 0, hz, &err, Int32(err.count))
         guard id != 0 else {
             return ["type": "display_status", "available": false, "display_id": 0, "width": 0, "height": 0, "reason": String(cString: err)]
         }
@@ -46,35 +57,58 @@ final class DisplayManager {
             if ids.prefix(Int(n)).contains(id) && CGDisplayBounds(id).width > 0 { break }
             usleep(100_000)
         }
-        if hidpi { selectRetina(id, width: Int(w), height: Int(h + (forDesktop ? 0 : headroom))) }
+        selectMode(id, width: Int(w), height: Int(modeH), scale: hidpi ? 2 : 1, maxHz: hz)
         lock.lock(); displayID = id; target = CGSize(width: Int(w), height: Int(h)); lock.unlock()
         let b = CGDisplayBounds(id)
-        let px = CGDisplayCopyDisplayMode(id).map { "\($0.pixelWidth)x\($0.pixelHeight) px" } ?? "?"
-        log("virtual display \(id): \(Int(b.width))x\(Int(b.height)) points, \(px), at \(Int(b.minX)),\(Int(b.minY)) hidpi=\(hidpi)")
+        let px = CGDisplayCopyDisplayMode(id).map { "\($0.pixelWidth)x\($0.pixelHeight) px at \(Int($0.refreshRate)) Hz" } ?? "?"
+        log("virtual display \(id): \(Int(b.width))x\(Int(b.height)) points, \(px), at \(Int(b.minX)),\(Int(b.minY)) hidpi=\(hidpi) (asked \(Int(hz)) Hz)")
         return ["type": "display_status", "available": true, "display_id": Int(id), "width": Int(w), "height": Int(h), "reason": NSNull()]
     }
 
-    /// Make sure the display runs its Retina mode (`width`x`height` points at 2x): macOS may pick
-    /// the 1x mode of the same size, and everything is then drawn at 1x however it is captured.
-    private func selectRetina(_ id: CGDirectDisplayID, width: Int, height: Int) {
+    /// Put the display on the fastest mode of the size we asked for: macOS may bring it up
+    /// at 60 Hz, and at 1x when Retina was asked for. Everything is then captured at the
+    /// wrong density or rate however the stream is configured.
+    private func selectMode(_ id: CGDirectDisplayID, width: Int, height: Int, scale: Int, maxHz: Double) {
+        func fits(_ m: CGDisplayMode) -> Bool {
+            m.width == width && m.height == height && (scale >= 2 ? m.pixelWidth >= width * 2 : m.pixelWidth == width)
+        }
         // a new display lists its modes only after a moment
         let opts = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue] as CFDictionary
         var modes: [CGDisplayMode] = []
         for _ in 0..<25 {
-            if let cur = CGDisplayCopyDisplayMode(id), cur.width == width, cur.pixelWidth >= width * 2 { return }
+            if let cur = CGDisplayCopyDisplayMode(id), fits(cur), cur.refreshRate >= maxHz - 0.5 { return }
             modes = CGDisplayCopyAllDisplayModes(id, opts) as? [CGDisplayMode] ?? []
-            if modes.contains(where: { $0.width == width && $0.pixelWidth >= width * 2 }) { break }
+            if modes.contains(where: { fits($0) }) { break }
             usleep(200_000)
         }
-        guard let m = modes.first(where: { $0.width == width && $0.height == height && $0.pixelWidth >= width * 2 }) else {
-            log("virtual display \(id): no Retina mode of \(width)x\(height) among \(modes.map { "\($0.width)x\($0.height)@\($0.pixelWidth)" })")
+        // a mode with no rate reported is still usable; try the known rates first
+        let candidates = modes.filter { fits($0) }.sorted {
+            let a = $0.refreshRate, b = $1.refreshRate
+            if a == 0 { return false }
+            if b == 0 { return true }
+            return a > b
+        }
+        guard !candidates.isEmpty else {
+            let listed = modes.map { "\($0.width)x\($0.height)@\($0.pixelWidth)/\(Int($0.refreshRate))" }
+            log("virtual display \(id): no \(width)x\(height) mode at \(scale)x among \(listed)")
             return
         }
-        var cfg: CGDisplayConfigRef?
-        guard CGBeginDisplayConfiguration(&cfg) == .success else { return }
-        CGConfigureDisplayWithDisplayMode(cfg, id, m, nil)
-        if CGCompleteDisplayConfiguration(cfg, .forSession) != .success { log("virtual display \(id): Retina mode refused") }
-        usleep(200_000)
+        for m in candidates where m.refreshRate <= maxHz + 0.5 {
+            var cfg: CGDisplayConfigRef?
+            guard CGBeginDisplayConfiguration(&cfg) == .success else { return }
+            guard CGConfigureDisplayWithDisplayMode(cfg, id, m, nil) == .success else {
+                CGCancelDisplayConfiguration(cfg)
+                continue
+            }
+            if CGCompleteDisplayConfiguration(cfg, .forSession) == .success {
+                let got = CGDisplayCopyDisplayMode(id).map { "\($0.width)x\($0.height) at \(Int($0.refreshRate)) Hz" } ?? "?"
+                log("virtual display \(id): \(got)")
+                usleep(200_000)
+                return
+            }
+            log("virtual display \(id): \(Int(m.refreshRate)) Hz refused")
+        }
+        log("virtual display \(id): no mode at or below \(Int(maxHz)) Hz")
     }
 
     /// The Mac's own screen(s) mirror the virtual display (what BetterDummy does): the whole
@@ -99,7 +133,7 @@ final class DisplayManager {
         for attempt in 0..<3 {
             if mirrorDesktop(onto: id) && isMirroredOnto(id) {
                 lock.lock(); mirrorSpec = (width, height, scale); lock.unlock()
-                let mode = CGDisplayCopyDisplayMode(id).map { "\($0.width)x\($0.height) points, \($0.pixelWidth)x\($0.pixelHeight) px" } ?? "mode unknown"
+                let mode = CGDisplayCopyDisplayMode(id).map { "\($0.width)x\($0.height) points, \($0.pixelWidth)x\($0.pixelHeight) px at \(Int($0.refreshRate)) Hz" } ?? "mode unknown"
                 log("virtual display \(id) mirrored: \(mode)")
                 return id
             }
