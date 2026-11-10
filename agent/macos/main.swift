@@ -1047,7 +1047,7 @@ func handle(_ m: [String: Any]) {
         log("client decoder: high_profile=\(useHighProfile) hardware=\(m["hardware"] as? Bool ?? false) scale=\(captureScale)")
     case "stream_settings":
         // the viewer's settings (as Moonlight's): frame rate, bitrate (nil: Auto), sharpness
-        let fps = Int32(max(10, min(144, int(m["fps"]))))
+        let fps = Int32(max(10, min(120, int(m["fps"]))))
         let sc = num(m["scale"])
         // the app windows' layout ("" none): Ultra sharpness lays them out at 2x
         let screen = m["screen"] as? String

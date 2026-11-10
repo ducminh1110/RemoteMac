@@ -288,7 +288,7 @@ fn parse_announce(body: &str) -> StreamParams {
     StreamParams {
         width: n("x-nv-video[0].clientViewportWd", 1280) as u32,
         height: n("x-nv-video[0].clientViewportHt", 720) as u32,
-        fps: n("x-nv-video[0].maxFPS", 60) as u32,
+        fps: n("x-nv-video[0].maxFPS", 60).min(120) as u32,
         bitrate_kbps: if configured > 0 { configured as u32 } else { n("x-nv-vqos[0].bw.maximumBitrateKbps", 20000) as u32 },
         packet_size: n("x-nv-video[0].packetSize", 1024) as usize,
         min_fec_packets: n("x-nv-vqos[0].fec.minRequiredFecPackets", 0) as usize,
@@ -480,5 +480,11 @@ mod tests {
     fn announce_parameters() {
         let p = parse_announce("v=0\r\na=x-nv-video[0].clientViewportWd:2560 \r\na=x-nv-video[0].clientViewportHt:1600 \r\na=x-nv-video[0].maxFPS:60 \r\na=x-nv-video[0].packetSize:1392 \r\na=x-ml-video.configuredBitrateKbps:30000 \r\na=x-nv-general.useReliableUdp:13 \r\n");
         assert_eq!((p.width, p.height, p.fps, p.packet_size, p.bitrate_kbps, p.control_protocol), (2560, 1600, 60, 1392, 30000, 13));
+    }
+
+    #[test]
+    fn announce_fps_capped_at_120() {
+        let p = parse_announce("v=0\r\na=x-nv-video[0].maxFPS:144 \r\n");
+        assert_eq!(p.fps, 120);
     }
 }
