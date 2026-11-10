@@ -65,6 +65,14 @@ final class DisplayManager {
         return ["type": "display_status", "available": true, "display_id": Int(id), "width": Int(w), "height": Int(h), "reason": NSNull()]
     }
 
+    /// The fastest rate for the client's screen, on the display as it is now. Mirroring and
+    /// the window server can leave a new display at the Mac screen's 60 Hz: ask again.
+    private func selectFastest(_ id: CGDirectDisplayID, width: Int, height: Int, scale: Int) {
+        let b = CGDisplayBounds(id)
+        guard b.width >= 320, b.height >= 240 else { return }
+        selectMode(id, width: Int(b.width), height: Int(b.height), scale: scale, maxHz: displayRefresh(pixels: max(1, width * height)))
+    }
+
     /// Put the display on the fastest mode of the size we asked for: macOS may bring it up
     /// at 60 Hz, and at 1x when Retina was asked for. Everything is then captured at the
     /// wrong density or rate however the stream is configured.
@@ -125,13 +133,17 @@ final class DisplayManager {
     func ensureMirrored(width: Int, height: Int, scale: Int) -> CGDirectDisplayID? {
         op.lock(); defer { op.unlock() }
         lock.lock(); let same = mirrorSpec.map { $0 == (width, height, scale) } ?? false; let id0 = displayID; lock.unlock()
-        if same && id0 != 0 && (isMirroredOnto(id0) || CGMainDisplayID() == id0) { return id0 }
+        if same && id0 != 0 && (isMirroredOnto(id0) || CGMainDisplayID() == id0) {
+            selectFastest(id0, width: width, height: height, scale: scale)
+            return id0
+        }
         unmirrorDesktop()
         let st = configure(width: width, height: height, scale: scale, forDesktop: true)
         guard st["available"] as? Bool == true else { log("virtual display unavailable: \(st["reason"] ?? "?")"); return nil }
         let id = displayID
         for attempt in 0..<3 {
             if mirrorDesktop(onto: id) && isMirroredOnto(id) {
+                selectFastest(id, width: width, height: height, scale: scale)
                 lock.lock(); mirrorSpec = (width, height, scale); lock.unlock()
                 let mode = CGDisplayCopyDisplayMode(id).map { "\($0.width)x\($0.height) points, \($0.pixelWidth)x\($0.pixelHeight) px at \(Int($0.refreshRate)) Hz" } ?? "mode unknown"
                 log("virtual display \(id) mirrored: \(mode)")
