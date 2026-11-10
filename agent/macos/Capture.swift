@@ -45,7 +45,7 @@ func even(_ v: Int) -> Int { max(2, v + (v & 1)) }
 /// density so the client draws them 1:1, as sharp as its own windows. Capped near 4K.
 var captureScale: CGFloat = 1
 /// frames per second (the viewer's settings; Moonlight's FPS choice)
-var targetFPS: Int32 = 60
+var targetFPS: Int32 = 120
 /// Pixels per point the display showing `rect` draws at (1 or 2: the window's real pixels).
 func backingScale(of rect: CGRect) -> CGFloat {
     var ids = [CGDirectDisplayID](repeating: 0, count: 8), n: UInt32 = 0

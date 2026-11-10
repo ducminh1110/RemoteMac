@@ -55,7 +55,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { fps: 60, bitrate_mbps: 0, quality: 0, decoder: 0, pacing: false, local_cursor: false, desktop_2x: true, workspace: 1, audio: true, volume: 100, keyboard: 0, glass: 0, motion: 0, dock: 1, frame: 0, auto_update: true, stage_manager: false, tour_seen: 0, tour_demo: 0 }
+        Self { fps: 120, bitrate_mbps: 0, quality: 0, decoder: 0, pacing: false, local_cursor: false, desktop_2x: true, workspace: 1, audio: true, volume: 100, keyboard: 0, glass: 0, motion: 0, dock: 1, frame: 0, auto_update: true, stage_manager: false, tour_seen: 0, tour_demo: 0 }
     }
 }
 
@@ -219,7 +219,7 @@ mod tests {
     fn message_and_scale() {
         let s = Settings { fps: 120, bitrate_mbps: 30, quality: 2, ..Default::default() };
         assert_eq!(s.message(1.5, (1920, 1080)), Message::StreamSettings { fps: 120, bitrate_kbps: Some(30_000), scale: Some(1.0), screen: Some(String::new()), mac_cursor: Some(true) });
-        assert_eq!(Settings { workspace: 0, ..Default::default() }.message(2.0, (2560, 1600)), Message::StreamSettings { fps: 60, bitrate_kbps: None, scale: Some(2.0), screen: Some("2560,1600,2".into()), mac_cursor: Some(true) });
+        assert_eq!(Settings { workspace: 0, ..Default::default() }.message(2.0, (2560, 1600)), Message::StreamSettings { fps: 120, bitrate_kbps: None, scale: Some(2.0), screen: Some("2560,1600,2".into()), mac_cursor: Some(true) });
     }
 
     #[test]
